@@ -1,0 +1,19 @@
+[submodule "tests/artifacts/flasgger"]
+	path = tests/artifacts/flasgger
+	url = https://github.com/flasgger/flasgger.git
+	branch = master
+
+[submodule "tests/artifacts/pyfolio"]
+	path = tests/artifacts/pyfolio
+	url = git@github.com:quantopian/pyfolio.git
+	branch = master
+
+[submodule "tests/artifacts/blaze"]
+	path = tests/artifacts/blaze
+	url = git@github.com:blaze/blaze.git
+	branch = master 
+
+[submodule "tests/artifacts/odo"]
+	path = tests/artifacts/odo
+	url = git@github.com:blaze/odo.git
+	branch = master

@@ -1,0 +1,75 @@
+[project]
+name = "pymolt"
+version = "0.1.0"
+description = "Python migration CLI tool with semantic changelog analysis"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "griffe[pypi]>=1.0.0",
+    "libcst>=1.0.0",
+    "packaging>=25.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+    # Test fixture only: a representative third-party "user app dependency" that the
+    # contract tests trace at the code→dependency boundary (not a pymolt runtime dep).
+    "requests>=2.0",
+    # Not a pymolt dependency: the Axiom Graph service (.research/axiom_graph) is a
+    # FastAPI app, and the cross-service contract test routes the real client through
+    # it in-process. Without this the test silently skips — which is how it rotted.
+    "fastapi>=0.110",
+]
+mcp = [
+    "mcp>=1.2",
+]
+
+[project.scripts]
+pymolt = "pymolt.interfaces.cli.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pymolt"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Sample test artifacts are real third-party repos (git submodules), not our code; not linted.
+extend-exclude = ["tests/artifacts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# verify/ injected runtime is loaded inside the target app's interpreter (down to Python 3.6),
+# so its 3.6-compatible style is intentional: no PEP 585/604 generics, no f-strings as the only
+# option, explicit object bases. Exempt these (and the runtime-layer tests that run under the
+# 3.6-3.11 tox matrix) from pyupgrade (UP).
+"pymolt/verify/_normalize.py" = ["UP"]
+"pymolt/verify/_backend.py" = ["UP"]
+"pymolt/verify/_sinks.py" = ["UP"]
+"pymolt/verify/_wrap.py" = ["UP"]
+"pymolt/verify/boundary_tracer.py" = ["UP"]
+"pymolt/verify/sitecustomize.py" = ["UP"]
+"pymolt/verify/_install_hook.py" = ["UP"]
+"pymolt/verify/__init__.py" = ["UP"]
+"tests/verify/test_normalize.py" = ["UP"]
+"tests/verify/test_sinks.py" = ["UP"]
+"tests/verify/test_backend.py" = ["UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/artifacts"]
+markers = [
+    "integration: heavy end-to-end tests (e.g. flasgger watcher in the devcontainer); skipped by default",
+]
