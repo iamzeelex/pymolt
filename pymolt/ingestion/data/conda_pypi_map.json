@@ -1,0 +1,29 @@
+{
+  "_comment": "Curated conda -> PyPI name/import map bundled for offline use. Keyed by lower-cased conda(-forge) package name. Covers the well-known cases where the conda name, the PyPI distribution name, and/or the importable module name diverge. Extend conservatively; network refresh (grayskull) overlays on top of this base.",
+  "conda_to_pypi": {
+    "pyyaml": {"pypi_name": "PyYAML", "import_name": "yaml"},
+    "pytorch": {"pypi_name": "torch", "import_name": "torch"},
+    "pytorch-cpu": {"pypi_name": "torch", "import_name": "torch"},
+    "pytables": {"pypi_name": "tables", "import_name": "tables"},
+    "pillow": {"pypi_name": "Pillow", "import_name": "PIL"},
+    "beautifulsoup4": {"pypi_name": "beautifulsoup4", "import_name": "bs4"},
+    "opencv": {"pypi_name": "opencv-python", "import_name": "cv2"},
+    "py-opencv": {"pypi_name": "opencv-python", "import_name": "cv2"},
+    "libopencv": {"pypi_name": "opencv-python", "import_name": "cv2"},
+    "python-dateutil": {"pypi_name": "python-dateutil", "import_name": "dateutil"},
+    "scikit-image": {"pypi_name": "scikit-image", "import_name": "skimage"},
+    "msgpack-python": {"pypi_name": "msgpack", "import_name": "msgpack"},
+    "protobuf": {"pypi_name": "protobuf", "import_name": "google.protobuf"},
+    "python-graphviz": {"pypi_name": "graphviz", "import_name": "graphviz"},
+    "graphviz": {"pypi_name": "graphviz", "import_name": "graphviz"},
+    "pyqt": {"pypi_name": "PyQt5", "import_name": "PyQt5"},
+    "pint": {"pypi_name": "Pint", "import_name": "pint"},
+    "python-lmdb": {"pypi_name": "lmdb", "import_name": "lmdb"},
+    "python-levenshtein": {"pypi_name": "python-Levenshtein", "import_name": "Levenshtein"},
+    "ruamel.yaml": {"pypi_name": "ruamel.yaml", "import_name": "ruamel.yaml"},
+    "matplotlib-base": {"pypi_name": "matplotlib", "import_name": "matplotlib"},
+    "faiss-cpu": {"pypi_name": "faiss-cpu", "import_name": "faiss"},
+    "prompt_toolkit": {"pypi_name": "prompt-toolkit", "import_name": "prompt_toolkit"},
+    "prompt-toolkit": {"pypi_name": "prompt-toolkit", "import_name": "prompt_toolkit"}
+  }
+}
