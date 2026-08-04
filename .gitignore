@@ -1,0 +1,90 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Ruff cache
+.ruff_cache/
+
+# local pymolt cache
+.pymolt_cache/
+.pymolt/
+
+# exported watcher bundle (regenerable: pymolt contract export-watcher)
+/bundle/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Migration Test Projects
+tests/artifacts/*
+tests/artifacts/flasgger/
+tests/artifacts/blaze/
+tests/artifacts/pyfolio/
+.old
+.research
+.agent.md
+.out
+out
+.pymolt/env_config.json
+.codegraph
+.claude
+CLAUDE.md
+EDITIONS.md
