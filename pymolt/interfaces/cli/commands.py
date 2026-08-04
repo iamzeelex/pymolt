@@ -1390,7 +1390,7 @@ def codemods(
         if not token:
             _render_codemod_auth_prompt()
             fail(
-                "Требуется авторизация в сервисе Axiom Graph.",
+                "Axiom Graph unavailable: требуется авторизация в сервисе.",
                 hint="Зарегистрируйтесь на https://pymolt.zeelex.me и выполните 'pymolt login'",
                 code=EXIT_ENVIRONMENT,
             )
