@@ -1271,7 +1271,33 @@ def _render_surface_map(smap) -> None:
     for note in smap.notes:
         console.print(f"[dim]Note: {note}[/dim]")
 
+def _render_codemod_auth_prompt():
+    from rich.panel import Panel
 
+    msg = (
+        "[bold cyan]✨ Что такое PyMolt Codemods?[/bold cyan]\n"
+        "Codemods — это автоматические AST-трансформации вашего кода (с помощью LibCST) при обновлении библиотек.\n"
+        "Они автоматически переписывают устаревший синтаксис, вызовы API, импорты и методы ([dim]pandas 1.x → 2.x, pydantic v1 → v2 и др.[/dim]).\n\n"
+        "[bold cyan]🔑 Авторизация в сервисе Axiom Graph[/bold cyan]\n"
+        "Правила и рецепты миграций запрашиваются из сервиса **Axiom Graph**.\n"
+        "• [bold green]Конфиденциальность:[/bold green] Ваш исходный код [bold]никогда не передается на сервер[/bold]. На сервер отправляются только названия и версии обновляемых пакетов.\n"
+        "• [bold green]Первая рецептура 100% бесплатна[/bold green] для любого класса пакетов.\n\n"
+        "[bold yellow]Как начать работу:[/bold yellow]\n"
+        "1. Зарегистрируйтесь и получите токен: [bold underline blue]https://pymolt.zeelex.me[/bold underline blue] (Account → API tokens)\n"
+        "2. Выполните авторизацию в CLI:\n"
+        "   [bold green]pymolt login[/bold green]\n"
+        "   [dim](или задайте переменную окружения: export PYMOLT_API_TOKEN=\"your_token\")[/dim]\n"
+        "3. Запустите команду повторно:\n"
+        "   [bold green]pymolt codemods .[/bold green]"
+    )
+    console.print(
+        Panel(
+            msg,
+            title="[bold]PyMolt Codemods & Axiom Graph Service[/bold]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
 
 
 @app.command(rich_help_panel="The migration funnel")
@@ -1286,7 +1312,7 @@ def codemods(
         help="Target dependency file to compare against the current config",
     ),
     axiom_url: str = typer.Option(
-        "http://localhost:8000", "--axiom-url", help="Axiom Graph service base URL"
+        "https://api.pymolt.zeelex.me", "--axiom-url", help="Axiom Graph service base URL"
     ),
     write: bool = typer.Option(
         False, "--write", help="Apply changes to disk (default: dry-run preview)"
@@ -1302,7 +1328,9 @@ def codemods(
     from pymolt.codemods.client import AxiomGraphError, DependencyMigration
     from pymolt.codemods.models import CodemodPattern
     from pymolt.codemods.service import resolve_codemod_migrations, run_codemods
+    from pymolt.config import load_token
 
+    token = load_token()
     require_project_dir(project_dir)
     config = None
     # No flags at all: fall back to the manifest assess already wrote.
@@ -1358,11 +1386,32 @@ def codemods(
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
             )
     except AxiomGraphError as exc:
-        fail(
-            f"Axiom Graph unavailable: {exc}",
-            hint="Is the service running?  docker run -p 8000:8000 axiom-graph",
-            code=EXIT_ENVIRONMENT,
-        )
+        exc_str = str(exc)
+        if not token:
+            _render_codemod_auth_prompt()
+            fail(
+                "Требуется авторизация в сервисе Axiom Graph.",
+                hint="Зарегистрируйтесь на https://pymolt.zeelex.me и выполните 'pymolt login'",
+                code=EXIT_ENVIRONMENT,
+            )
+        elif any(k in exc_str for k in ("401", "403", "Unauthorized", "Forbidden")):
+            fail(
+                "Ошибка авторизации Axiom Graph: ваш API токен недействителен или отменен.",
+                hint="Обновите токен на https://pymolt.zeelex.me (Account → API tokens) и выполните 'pymolt login'.",
+                code=EXIT_ENVIRONMENT,
+            )
+        elif "localhost" in axiom_url or "127.0.0.1" in axiom_url:
+            fail(
+                f"Axiom Graph unavailable: {exc}",
+                hint="Is the service running?  docker run -p 8000:8000 axiom-graph",
+                code=EXIT_ENVIRONMENT,
+            )
+        else:
+            fail(
+                f"Не удалось подключиться к сервису Axiom Graph ({axiom_url}).",
+                hint="Проверьте сетевое подключение. Если у вас нет токена, выполните 'pymolt login'.",
+                code=EXIT_ENVIRONMENT,
+            )
 
     total_patterns = sum(len(items) for items in by_pkg.values())
     if total_patterns == 0:

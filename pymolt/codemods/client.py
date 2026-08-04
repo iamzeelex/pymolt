@@ -26,7 +26,7 @@ from pymolt.codemods.rules import CodemodRule, verify_rule
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://localhost:8000"
+DEFAULT_BASE_URL = "https://api.pymolt.zeelex.me"
 
 
 class AxiomGraphError(RuntimeError):
