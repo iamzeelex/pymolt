@@ -3,7 +3,7 @@
 Keeps the opt-in ``--online`` fork-network triage from re-hitting the GitHub
 API on every run and honours the project's offline-first posture (a cached
 report is returned without a network call). Stored under
-``<project>/.pymolt_cache/forknet/<namespace>/``.
+``<project>/.pymolt/cache/forknet/<namespace>/``.
 """
 
 import hashlib
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def _path(cache_root: Path, namespace: str, key: str) -> Path:
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
-    return Path(cache_root) / ".pymolt_cache" / "forknet" / namespace / f"{digest}.json"
+    return Path(cache_root) / ".pymolt" / "cache" / "forknet" / namespace / f"{digest}.json"
 
 
 def read(cache_root: Path, namespace: str, key: str, ttl: float) -> Any | None:

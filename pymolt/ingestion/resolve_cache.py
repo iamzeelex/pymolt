@@ -57,7 +57,7 @@ def compute_key(
 
 
 def _cache_path(cache_root: Path, key: str) -> Path:
-    return Path(cache_root) / ".pymolt_cache" / "resolve" / f"{key}.json"
+    return Path(cache_root) / ".pymolt" / "cache" / "resolve" / f"{key}.json"
 
 
 def load(cache_root: Path, key: str) -> DependencyGraph | None:

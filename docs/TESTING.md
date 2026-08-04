@@ -17,7 +17,7 @@ source .venv/bin/activate        # `pymolt` lives in this venv
 ```
 
 Every report command accepts `--json` (pipe to `jq`). Caches live under
-`<project>/.pymolt_cache/` — delete to reset.
+`<project>/.pymolt/cache/` — delete to reset.
 
 ---
 

@@ -71,7 +71,7 @@ class NameMapper:
         self.grayskull_mapping: dict[str, dict[str, str]] = {}
         self.reverse_mapping: dict[str, dict[str, Any]] = {}
         base = Path(project_dir) if project_dir else Path.cwd()
-        self.cache_dir = (base / ".pymolt_cache").resolve()
+        self.cache_dir = (base / ".pymolt" / "cache").resolve()
         self.cache_file = self.cache_dir / "grayskull_mapping.json"
         self._load_bundled()
         self._load_cache()
