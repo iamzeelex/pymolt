@@ -1275,19 +1275,19 @@ def _render_codemod_auth_prompt():
     from rich.panel import Panel
 
     msg = (
-        "[bold cyan]✨ Что такое PyMolt Codemods?[/bold cyan]\n"
-        "Codemods — это автоматические AST-трансформации вашего кода (с помощью LibCST) при обновлении библиотек.\n"
-        "Они автоматически переписывают устаревший синтаксис, вызовы API, импорты и методы ([dim]pandas 1.x → 2.x, pydantic v1 → v2 и др.[/dim]).\n\n"
-        "[bold cyan]🔑 Авторизация в сервисе Axiom Graph[/bold cyan]\n"
-        "Правила и рецепты миграций запрашиваются из сервиса **Axiom Graph**.\n"
-        "• [bold green]Конфиденциальность:[/bold green] Ваш исходный код [bold]никогда не передается на сервер[/bold]. На сервер отправляются только названия и версии обновляемых пакетов.\n"
-        "• [bold green]Первая рецептура 100% бесплатна[/bold green] для любого класса пакетов.\n\n"
-        "[bold yellow]Как начать работу:[/bold yellow]\n"
-        "1. Зарегистрируйтесь и получите токен: [bold underline blue]https://pymolt.zeelex.me[/bold underline blue] (Account → API tokens)\n"
-        "2. Выполните авторизацию в CLI:\n"
+        "[bold cyan]✨ What are PyMolt Codemods?[/bold cyan]\n"
+        "Codemods are automatic AST transformations (using LibCST) applied during library upgrades.\n"
+        "They rewrite deprecated syntax, API calls, imports, and methods ([dim]pandas 1.x → 2.x, pydantic v1 → v2, etc.[/dim]).\n\n"
+        "[bold cyan]🔑 Axiom Graph Authentication[/bold cyan]\n"
+        "Codemod rules and recipes are fetched on-demand from the **Axiom Graph** service.\n"
+        "• [bold green]Privacy-first:[/bold green] Your source code [bold]never leaves your machine[/bold]. Only package names and version jumps are sent to Axiom Graph.\n"
+        "• [bold green]First recipe is 100% free[/bold green] for any package tier.\n\n"
+        "[bold yellow]Getting Started:[/bold yellow]\n"
+        "1. Create a free account & get an API token: [bold underline blue]https://pymolt.zeelex.me[/bold underline blue] (Account → API tokens)\n"
+        "2. Save your token locally:\n"
         "   [bold green]pymolt login[/bold green]\n"
-        "   [dim](или задайте переменную окружения: export PYMOLT_API_TOKEN=\"your_token\")[/dim]\n"
-        "3. Запустите команду повторно:\n"
+        "   [dim](or set env variable: export PYMOLT_API_TOKEN=\"your_token\")[/dim]\n"
+        "3. Re-run your command:\n"
         "   [bold green]pymolt codemods .[/bold green]"
     )
     console.print(
@@ -1390,14 +1390,14 @@ def codemods(
         if not token:
             _render_codemod_auth_prompt()
             fail(
-                "Axiom Graph unavailable: требуется авторизация в сервисе.",
-                hint="Зарегистрируйтесь на https://pymolt.zeelex.me и выполните 'pymolt login'",
+                f"Axiom Graph unavailable: {exc}",
+                hint="Register at https://pymolt.zeelex.me and run 'pymolt login'",
                 code=EXIT_ENVIRONMENT,
             )
         elif any(k in exc_str for k in ("401", "403", "Unauthorized", "Forbidden")):
             fail(
-                "Ошибка авторизации Axiom Graph: ваш API токен недействителен или отменен.",
-                hint="Обновите токен на https://pymolt.zeelex.me (Account → API tokens) и выполните 'pymolt login'.",
+                "Axiom Graph authentication error: invalid or expired API token.",
+                hint="Update your token at https://pymolt.zeelex.me (Account → API tokens) and run 'pymolt login'.",
                 code=EXIT_ENVIRONMENT,
             )
         elif "localhost" in axiom_url or "127.0.0.1" in axiom_url:
@@ -1408,8 +1408,8 @@ def codemods(
             )
         else:
             fail(
-                f"Не удалось подключиться к сервису Axiom Graph ({axiom_url}).",
-                hint="Проверьте сетевое подключение. Если у вас нет токена, выполните 'pymolt login'.",
+                f"Failed to connect to Axiom Graph service ({axiom_url}).",
+                hint="Check your network connection or verify your API token with 'pymolt login'.",
                 code=EXIT_ENVIRONMENT,
             )
 
