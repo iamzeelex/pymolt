@@ -1,0 +1,24 @@
+{
+  "name": "Flasgger Python 3.6",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "options": ["--platform=linux/arm64"]
+  },
+  "workspaceFolder": "/workspace/tests/artifacts/flasgger",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/tests,type=bind",
+  "overrideCommand": true,
+  "runArgs": ["--init", "--platform=linux/arm64"],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.terminal.activateEnvInTriggeredTerminal": true
+      },
+      "extensions": [
+        "ms-python.python"
+      ]
+    }
+  },
+  "postCreateCommand": "echo 'Dev container is ready!'"
+}
