@@ -19,7 +19,7 @@ planned addition for cheap, isolated pure functions.
 Caveat: ``fork()`` in a *multi-threaded* parent can deadlock (the child inherits
 mutex state held by threads that no longer exist). The production-grade path is a
 single-threaded **fork-server** that does the forking on behalf of a threaded host
-(e.g. the TUI with worker threads); this core is the building block for it.
+(e.g. a UI with worker threads); this core is the building block for it.
 """
 
 import json

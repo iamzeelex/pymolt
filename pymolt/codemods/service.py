@@ -1,7 +1,7 @@
 """
 pymolt/codemods/service.py
 
-UI-agnostic codemod orchestration shared by the CLI and TUI: turn an upgrade set
+UI-agnostic codemod orchestration: turn an upgrade set
 into codemod patterns/rules (via the Axiom Graph service) and apply them
 locally.
 
@@ -292,7 +292,7 @@ def _split_bundles(
 
     Returns (by_pkg, rules_flat, patterns_flat, downgraded) — the two flat
     lists are each ready for one repo-wide apply/preview call, and `by_pkg`
-    is what CLI/TUI render (patterns or rules, per package).
+    is what callers render (patterns or rules, per package).
     """
     by_pkg: dict[str, list[CodemodPattern] | list[CodemodRule]] = {}
     rules_flat: list[CodemodRule] = []
@@ -358,7 +358,7 @@ def run_codemods(
     Raises AxiomGraphError if the service is unreachable (caller decides UX).
 
     `progress`, if given, is called with human-readable status lines as each
-    phase (fetch → local verify → apply) starts, so a CLI/TUI can show that work
+    phase (fetch → local verify → apply) starts, so an interface can show that work
     is happening instead of appearing to hang on a long server-side analysis.
     """
     client = client or AxiomGraphClient(base_url)
@@ -396,17 +396,17 @@ def preview_codemods(
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], list[FilePreview]]:
     """
     Fetch patterns/rules for `migrations` and compute per-file before/after
-    previews — nothing is written. The TUI renders these as reviewable diff
+    previews — nothing is written. Callers render these as reviewable diff
     cards; the engineer accepts each one before it lands on disk.
 
     Signature intentionally unchanged: still a 2-tuple, with no separate
     "downgraded" list. A rule the client downgraded already carries
     confidence=="heuristic" on the returned `FilePreview.rules`, which is what
-    the TUI card renders (see `panels._CodemodCard`) — so the downgrade is
+    the review card renders — so the downgrade is
     visible without widening this return type. `run_codemods` has room to
     carry the fuller `CodemodRunResult.downgraded` list because it returns a
-    model, not a bare tuple; `preview_codemods` does not, and callers (the TUI
-    worker, tests) already destructure exactly two values.
+    model, not a bare tuple; `preview_codemods` does not, and callers (interfaces,
+    tests) already destructure exactly two values.
 
     `progress` reports phase transitions (fetch → preview), `on_recipes` hands
     over the fetched recipe set the moment it is known (before the walk starts,

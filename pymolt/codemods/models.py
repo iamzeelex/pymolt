@@ -6,7 +6,7 @@ Tier-1 response unit (flat old → new); CodemodRule (pymolt.codemods.rules,
 imported here) is the Tier-2 declarative successor — a metavariable match/
 rewrite template with its own honest advisory channel. FileChange /
 CodemodRunResult describe what was rewritten on disk; FilePreview is the
-reviewable before/after unit the TUI renders.
+reviewable before/after unit the interface renders.
 
 `rules.py` only imports this module LAZILY (inside a function, for its LEGACY
 delegation), so importing CodemodRule/RuleAdvisory here at module level is safe

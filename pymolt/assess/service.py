@@ -26,7 +26,7 @@ from pymolt.risk.models import RiskReport
 
 
 class AssessResult(BaseModel):
-    """Everything the assess phase produces — rendered by the CLI/TUI directly."""
+    """Everything the assess phase produces — rendered by interfaces directly."""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -124,7 +124,7 @@ def extract_constraint(declared: str | None) -> str | None:
 def build_comparison_rows(baseline_graph, target_graph, target_python, target_error) -> list[dict]:
     """Compute the baseline/target comparison as plain dicts (no rich markup).
 
-    Shared by the CLI table renderer, ``--json``, and the TUI. One row per package
+    Shared by the CLI table renderer and ``--json``. One row per package
     in the union; visibility filtering is the renderer's concern.
     """
     rows = []

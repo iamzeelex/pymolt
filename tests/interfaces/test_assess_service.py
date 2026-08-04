@@ -1,4 +1,4 @@
-"""The assess service is the shared compute core for the CLI and TUI:
+"""The assess service is the shared compute core for interfaces:
 graphs in, comparison rows + result out — no prompts, no printing."""
 
 from unittest.mock import patch

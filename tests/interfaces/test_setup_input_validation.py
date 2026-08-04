@@ -85,7 +85,7 @@ class TestGarbageIsRejected:
 
 
 class TestConfigModelIsTheLastLineOfDefence:
-    """Even if an interface (TUI, a hand-edited file, a future command) tries,
+    """Even if an interface (a hand-edited file, a future command) tries,
     the persisted schema refuses a version that isn't one."""
 
     def test_rejects_a_non_version(self):

@@ -1,4 +1,4 @@
-"""The setup service is the shared core for the CLI and TUI: detection in,
+"""The setup service is the shared core for interfaces: detection in,
 choices in, EnvConfig out — no prompts, no printing."""
 
 from pymolt.ingestion.config import ToolChoice

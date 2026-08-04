@@ -12,7 +12,7 @@ Commands:
   pymolt contract boundary                     interactive orchestrator (both ends + diff)
   pymolt contract report DIR                   unified report (auto-sources the named slots)
 
-Capture/injection itself lives in ``pymolt.verify.service`` (so the TUI can drive the same
+Capture/injection itself lives in ``pymolt.verify.service`` (so callers can drive the same
 mechanism) — this file is CLI rendering + interactive prompting only.
 """
 import json
