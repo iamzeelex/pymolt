@@ -1482,7 +1482,7 @@ def mcp(
     run_mcp()
 
 
-@app.command(rich_help_panel="Strategic (dead projects)")
+@app.command(rich_help_panel="Strategic Migrations")
 def succession(
     project_dir: str = typer.Argument(".", help="The project directory to migrate"),
     axiom_url: str = typer.Option(
@@ -1708,7 +1708,7 @@ def env_hint(
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
 
 
-@app.command(rich_help_panel="Strategic (dead projects)")
+@app.command(rich_help_panel="Strategic Migrations")
 def forks(
     repo: str = typer.Argument(..., help="Base repo to triage, as owner/name"),
     project_dir: str = typer.Option(
