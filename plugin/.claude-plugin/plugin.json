@@ -1,0 +1,15 @@
+{
+  "name": "pymolt",
+  "version": "0.1.0",
+  "description": "Python migration funnel (scan → assess → contract → codemods) as agent tools + slash commands. Auto-registers the pymolt stdio MCP server.",
+  "author": { "name": "zeelex", "url": "https://pymolt.zeelex.me" },
+  "homepage": "https://pymolt.zeelex.me",
+  "license": "MIT",
+  "keywords": ["python", "migration", "dependencies", "codemod", "tensorflow", "mcp"],
+  "mcpServers": {
+    "pymolt": {
+      "command": "pymolt",
+      "args": ["mcp"]
+    }
+  }
+}
