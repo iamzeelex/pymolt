@@ -341,13 +341,13 @@ def build_target_options(base_python: str) -> list[PythonTargetOption]:
 def apply_setup(project_dir: str | Path, choices: SetupChoices) -> EnvConfig:
     """Persist the chosen config to ``.pymolt/env_config.json`` and return it.
 
-    Also creates the ``.pymolt``/``.pymolt_cache`` folders and adds the config to
+    Also creates the ``.pymolt`` folder and adds the config to
     ``.gitignore`` (best-effort), matching what the CLI setup used to do inline.
     """
     project_path = Path(project_dir)
     pymolt_dir = project_path / ".pymolt"
     pymolt_dir.mkdir(parents=True, exist_ok=True)
-    (project_path / ".pymolt_cache").mkdir(exist_ok=True)
+    (pymolt_dir / "cache").mkdir(exist_ok=True)
     _ensure_gitignore(project_path)
 
     config = EnvConfig(

@@ -84,7 +84,7 @@ def get_or_create_legacy_env(
 ) -> Path:
     """Create or reuse a pip-tools virtual environment for the given Python version.
 
-    The environment is cached under ``<cache_root>/.pymolt_cache`` so it lands
+    The environment is cached under ``<cache_root>/.pymolt/cache`` so it lands
     next to the project rather than wherever the process happens to be running.
     ``cache_root`` defaults to the current working directory for compatibility.
     ``pip_tools_spec``/``env_prefix`` let callers request a modern pip-tools for
@@ -96,7 +96,7 @@ def get_or_create_legacy_env(
     major, minor = match.group(1), match.group(2)
 
     base = Path(cache_root) if cache_root else Path.cwd()
-    env_dir = (base / ".pymolt_cache" / f"{env_prefix}_{major}_{minor}").resolve()
+    env_dir = (base / ".pymolt" / "cache" / f"{env_prefix}_{major}_{minor}").resolve()
 
     is_windows = os.name == "nt"
     bin_dir = env_dir / ("Scripts" if is_windows else "bin")
@@ -111,7 +111,7 @@ def get_or_create_legacy_env(
     if env_dir.exists():
         shutil.rmtree(env_dir)
 
-    env_dir.parent.mkdir(exist_ok=True)
+    env_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. Create virtualenv
     try:
@@ -324,7 +324,7 @@ def compile_legacy_in_container(manifest_path: Path, container_info: dict, versi
         raise ValueError(f"Invalid Python version: {version}")
     major, minor = match.group(1), match.group(2)
     
-    env_rel_path = f".pymolt_cache/legacy_env_container_{major}_{minor}"
+    env_rel_path = f".pymolt/cache/legacy_env_container_{major}_{minor}"
     
     # Check if pip-compile exists inside the container's virtual environment
     test_cmd = ["docker", "exec", container_id, "[", "-f", f"{container_cwd}/{env_rel_path}/bin/pip-compile", "]"]
@@ -344,8 +344,8 @@ def compile_legacy_in_container(manifest_path: Path, container_info: dict, versi
         run_command(install_cmd, check=True, timeout=LEGACY_TIMEOUT)
 
     # Setup temporary output file within the bind-mounted directory
-    pymolt_cache_dir = manifest_path.parent / ".pymolt_cache"
-    pymolt_cache_dir.mkdir(exist_ok=True)
+    pymolt_cache_dir = manifest_path.parent / ".pymolt" / "cache"
+    pymolt_cache_dir.mkdir(parents=True, exist_ok=True)
     
     import tempfile
     fd, temp_file_path = tempfile.mkstemp(dir=str(pymolt_cache_dir), suffix=".txt", prefix="pymolt_resolved_")

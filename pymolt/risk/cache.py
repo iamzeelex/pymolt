@@ -2,7 +2,7 @@
 
 Keeps the opt-in ``--risk`` step from re-hitting OSV/PyPI on every run and
 honours the project's offline-first posture (cached answers work without a
-network). Stored under ``<project>/.pymolt_cache/risk/<namespace>/``.
+network). Stored under ``<project>/.pymolt/cache/risk/<namespace>/``.
 """
 
 import hashlib
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _path(cache_root: Path, namespace: str, key: str) -> Path:
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
-    return Path(cache_root) / ".pymolt_cache" / "risk" / namespace / f"{digest}.json"
+    return Path(cache_root) / ".pymolt" / "cache" / "risk" / namespace / f"{digest}.json"
 
 
 def read(cache_root: Path, namespace: str, key: str, ttl: float) -> Any | None:

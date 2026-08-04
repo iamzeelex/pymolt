@@ -86,7 +86,7 @@ pymolt contract boundary
 ```
 
 **Risk Assessment (`assess --risk`)** is opt-in and network-backed (cached under
-`.pymolt_cache/`): it pulls **CVEs** (OSV.dev, as a before/after-migration delta),
+`.pymolt/cache/`): it pulls **CVEs** (OSV.dev, as a before/after-migration delta),
 **wheel/compilation** status (PyPI — `sdist-only` means a C build) and **abandonment**
 (last-release recency), scoring each package into a HIGH/MEDIUM/LOW `RiskTier`.
 

@@ -124,7 +124,7 @@ def test_legacy_env_created_once_then_reused(monkeypatch, tmp_path):
 
     env_dir = get_or_create_legacy_env(Path("/fake/python3.6"), "3.6.1",
                                        cache_root=tmp_path)
-    assert env_dir == (tmp_path / ".pymolt_cache" / "legacy_env_3_6").resolve()
+    assert env_dir == (tmp_path / ".pymolt" / "cache" / "legacy_env_3_6").resolve()
     assert (env_dir / "bin" / "pip-compile").is_file()
     # venv creation + pip upgrade + pip-tools install crossed the boundary
     assert len(b.subprocess_calls) == 3
@@ -151,7 +151,7 @@ def test_compile_legacy_local_end_to_end(monkeypatch, tmp_path):
     (call,) = b.run_command_calls
     pip_compile = Path(call["cmd"][0])
     assert pip_compile.name == "pip-compile"
-    assert (tmp_path / ".pymolt_cache" / "legacy_env_3_6") in pip_compile.parents
+    assert (tmp_path / ".pymolt" / "cache" / "legacy_env_3_6") in pip_compile.parents
     assert call["cwd"] == str(tmp_path)      # runs relative to the manifest dir
     # the temp --output-file is cleaned up after being read
     out_arg = call["cmd"][call["cmd"].index("--output-file") + 1]
@@ -233,7 +233,7 @@ def test_compile_legacy_in_container_end_to_end(monkeypatch, tmp_path):
     assert output == "flask==2.2.5\n"
     (compile_cmd,) = calls["run_command"]
     assert compile_cmd[:4] == ["docker", "exec", "-w", "/workspace"]
-    assert any(a.endswith(".pymolt_cache/legacy_env_container_3_6/bin/pip-compile")
+    assert any(a.endswith(".pymolt/cache/legacy_env_container_3_6/bin/pip-compile")
                for a in compile_cmd)
 
 

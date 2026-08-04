@@ -97,8 +97,8 @@ def write_constraints_file(project_path: Path, upgrade_constraint, overrides) ->
     if not temp_constraints:
         return None
 
-    cache_dir = project_path / ".pymolt_cache"
-    cache_dir.mkdir(exist_ok=True)
+    cache_dir = project_path / ".pymolt" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
     fd, path_str = tempfile.mkstemp(dir=str(cache_dir), suffix=".txt", prefix="pymolt_constraints_")
     os.close(fd)
     with open(path_str, "w", encoding="utf-8") as f:
