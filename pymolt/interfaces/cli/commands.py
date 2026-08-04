@@ -112,8 +112,8 @@ def _select_target_python_interactive(
 ) -> str:
     """List available target Pythons (>= floor) with EOL hints and prompt for one.
 
-    The default comes from :func:`pymolt.setup.build_target_options` (shared with
-    the TUI): the lowest non-EOL version — never a dead Python. Shared by
+    The default comes from :func:`pymolt.setup.build_target_options` (shared
+    across interfaces): the lowest non-EOL version — never a dead Python. Shared by
     ``setup`` and ``assess`` so the picker stays consistent.
     """
     versions = [
@@ -1305,8 +1305,8 @@ def codemods(
 
     require_project_dir(project_dir)
     config = None
-    # No flags at all: fall back to the manifest assess already wrote, the way the
-    # TUI does. `pymolt codemods .` is the documented flow, and it used to exit 2.
+    # No flags at all: fall back to the manifest assess already wrote.
+    # `pymolt codemods .` is the documented flow, and it used to exit 2.
     if not target_file and not (package or from_version or to_version):
         for candidate in ("requirements-target.txt", "environment-target.yml"):
             if (Path(project_dir) / candidate).is_file():

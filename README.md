@@ -7,7 +7,7 @@
 🐍 **PyMolt** is a Python migration CLI tool designed to make dependency upgrades and codebase migrations predictable, visible, and controllable.
 
 The migration funnel is **scan → setup → assess → contract** (plus **codemods**), each runnable
-from both a Typer CLI and a Textual TUI, locally and offline-first (the only network steps —
+from a Typer CLI or Claude Agent Plugin, locally and offline-first (the only network steps —
 `assess --risk` and codemods — are opt-in and cached).
 
 ## Installation
@@ -32,7 +32,7 @@ Then:
 
 ```bash
 pymolt --version
-pymolt scan .               # or just `pymolt` to open the TUI cockpit
+pymolt scan .
 ```
 
 ## Project Structure
@@ -50,7 +50,7 @@ pymolt/
 ├── risk/            # Migration risk: CVEs (OSV), wheels/compilation, abandonment
 ├── codemods/        # Fetch patterns/rules from Axiom Graph, apply with LibCST
 ├── verify/          # Behavioral contract: static contact map × dynamic trace, diff
-└── interfaces/      # CLI (Typer) and TUI (Textual) entry points
+└── interfaces/      # CLI (Typer) and MCP server entry points
 ```
 
 ## Commands
@@ -63,7 +63,6 @@ pymolt/
 | `pymolt assess [dir]` | Resolve the dependency graph **lock-first**, compare baseline vs target Python, flag conflicts/manual-zone, rank risk, and write a pinned target manifest (with hashes). Flags: `--target-python`, `--risk`, `--json`, `--no-cache`, `--no-hashes`. |
 | `pymolt codemods [dir]` | Fetch codemod patterns/rules for the upgraded dependencies from Axiom Graph and apply them with LibCST (binding-aware, dry-run by default; review each change). Requires an account ([pymolt.zeelex.me](https://pymolt.zeelex.me)) — a **recipe** permanently unlocks one package jump (canonical pair, e.g. `pandas 1.x → 2.x`). Priced by delivered weight (public formula: renames ×1, behavioral rewrites ×3): S ≤5 wt = $5, M 6–25 wt = $10, L >25 wt = $25. The metadata quote is a hard cap; billing follows what survives local re-verification, and an empty bundle costs nothing. First recipe free — any class. Re-fetches are free forever; the CLI shows class & price and asks before spending. Only dependency names/versions cross the wire — never your code. |
 | `pymolt contract …` | Behavioral contract: static contact map × dynamic trace, with a guided baseline → post-migration diff (see below). |
-| `pymolt` / `pymolt ui [dir]` | Open the interactive TUI cockpit — every phase, same engine, with review cards and guided capture. |
 | `pymolt forks OWNER/REPO` | **Strategic**: rank the live/ported successor forks of a dead repo (recency, stars, divergence, an "already ported?" signal). Offline by default; `--online` hits the GitHub API and caches. |
 | `pymolt succession [dir]` | **Strategic**: find where a dead framework went (e.g. `keras → tensorflow.keras`). In-place shims are applied via LibCST (dry-run by default); a transplant (`keras → torch`) is shown as a plan, never auto-applied. |
 | `pymolt env hint [dir]` | Print a recipe for the target environment — a derived `Dockerfile.pymolt-target` and the `uv` commands — plus the post-migration capture command. Builds nothing. |
@@ -249,8 +248,7 @@ Three capture modes: `--mode tests` (pymolt runs your test command and waits), `
 (pymolt runs your app; Ctrl+C keeps whatever was captured), and `--mode attach` (for a process
 YOU run — a server you want to click around in: it prints a ready `PYTHONPATH=… PYMOLT_TRACE_*=…`
 line to prepend to your own command, then `--collect` finalizes whatever it wrote). Re-capturing
-an already-filled slot asks before overwriting (`--force` for scripts/CI). The TUI's Contract
-panel drives this same flow with slot cards and a guided modal — same state file, interchangeable.
+an already-filled slot asks before overwriting (`--force` for scripts/CI).
 
 ### The contract report
 

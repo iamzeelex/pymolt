@@ -1,6 +1,6 @@
 """Pure helpers for Python-version discovery and end-of-life classification.
 
-Shared by the setup service, the CLI and (through the service) the TUI. No
+Shared by the setup service and the CLI. No
 prompting or rich markup lives here — callers format the returned data
 themselves.
 """

@@ -510,7 +510,7 @@ def preview_repo(
 ) -> list[FilePreview]:
     """
     Compute per-file before/after for every file the patterns would change —
-    without writing anything. This is what the TUI renders as diff cards so the
+    without writing anything. This allows caller interfaces to render diff cards so the
     engineer can accept/reject each application individually.
 
     `on_file`, if given, is called once per file *scanned* — including files
@@ -676,7 +676,7 @@ def preview_rules_repo(
     advise on — without writing anything (confidence never gates a preview).
 
     A file with only advisories and no text change still yields a preview
-    (old_source == new_source, sites=0, advisories set) so the TUI can render
+    (old_source == new_source, sites=0, advisories set) so caller interfaces can render
     the manual-review card instead of silently dropping it.
     """
     root = Path(root)

@@ -3,7 +3,7 @@
 ``gather_setup_options`` performs all the detection (manifests, tools, containers,
 local envs, candidate target Pythons) and returns it as a model. ``apply_setup``
 takes the user's selections and writes the persisted ``EnvConfig``. Neither
-prompts nor prints — both the CLI and the TUI call these and own their own I/O.
+prompts nor prints — callers drive these and own their own I/O.
 """
 
 from __future__ import annotations
@@ -301,7 +301,7 @@ def _build_tool_options(sources, system_tools, containers) -> list[ToolOption]:
 def build_target_options(base_python: str) -> list[PythonTargetOption]:
     """Candidate target Pythons (>= the base's resolver floor), with EOL + default.
 
-    Exposed so the TUI can recompute the list when the user changes the base
+    Exposed so caller interfaces can recompute the list when the user changes the base
     Python, matching what the CLI's interactive picker does.
     """
     floor = version_floor(base_python)

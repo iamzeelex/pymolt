@@ -2,7 +2,7 @@
 
 Everything that touches subprocesses/PYTHONPATH/env-var injection to capture a
 dynamic boundary trace lives here — not in ``interfaces/cli/verify_cmd.py`` —
-so the TUI can drive the exact same capture the CLI does (the "interfaces are
+so callers can drive the exact same capture the CLI does (the "interfaces are
 thin, each phase is a service module" rule this repo follows everywhere else).
 
 Two concerns:
@@ -12,7 +12,7 @@ Two concerns:
   per-process JSONL it produces into one artifact. This already covers "run
   alongside your test suite" (the command is just ``pytest ...``) and "run my
   app for a while" (the command is ``python app.py``, optionally cancelled
-  early via ``cancel_event`` — the guided TUI's "Stop & Collect"). For a
+  early via ``cancel_event``). For a
   process the ENGINEER runs themselves (can't/won't hand control to pymolt —
   a server they want to click around in a browser), ``start_attached_capture``/
   ``poll_attached_capture``/``finalize_attached_capture`` hand back a ready
@@ -25,7 +25,7 @@ Two concerns:
   never makes the engineer retype raw file paths, and a report can name what
   fed it.
 
-Nothing here prompts or prints — that's the CLI/TUI's job. Bad input raises
+Nothing here prompts or prints — that's the callers' job. Bad input raises
 ``ValueError`` with a message worth surfacing verbatim.
 """
 
@@ -75,7 +75,7 @@ class TraceCaptureResult(BaseModel):
     processes: int
     where: str  # "local" | "container:<name>"
     # Merged stdout+stderr of the traced command, captured to a file next to the
-    # trace artifacts (never inherited onto the parent tty — that garbles the TUI).
+    # trace artifacts (never inherited onto the parent tty).
     command_log: str | None = None
     # Exit code of the traced command (None for the container path / attach).
     returncode: int | None = None
@@ -121,8 +121,7 @@ def capture_trace_local(
 
     ``cwd`` runs the command in the target project (default: the parent's cwd).
     The child's stdout+stderr are ALWAYS redirected (merged) to ``log_path`` —
-    never inherited onto the parent tty, which under ``pymolt ui`` would write
-    raw pytest output straight into the Textual screen and garble it. Returns
+    never inherited onto the parent tty. Returns
     the produced per-process JSONL paths and the command's exit code.
     """
     env = dict(os.environ)
@@ -256,7 +255,7 @@ def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
 
     Returns ``{"container": str|None, "workdir": str|None,
     "command_prefix": list[str]|None, "note": str}``. ``command_prefix`` is a
-    SUGGESTION for callers (e.g. the TUI) to prefill a command with — this
+    SUGGESTION for callers to prefill a command with — this
     function never rewrites anyone's command.
     """
     config = EnvConfig.load(Path(project_dir) / ENV_CONFIG_PATH)
