@@ -154,7 +154,7 @@ def _select_target_python_interactive(
     )
 
 # Phase 4: the behavioral contract — static contact map + dynamic capture + diff, all outside the target.
-app.add_typer(verify_app, name="contract", rich_help_panel="The migration funnel")
+app.add_typer(verify_app, name="contract", rich_help_panel="Migration Workflow")
 
 # Target-env provisioner: turns an assess result into a runnable migration environment.
 env_app = typer.Typer(
@@ -173,7 +173,7 @@ _STATE_MARK = {
 }
 
 
-@app.command(rich_help_panel="The migration funnel")
+@app.command(rich_help_panel="Migration Workflow")
 def status(
     project_dir: str = typer.Argument(".", help="The project directory to report on"),
     json_output: bool = typer.Option(False, "--json", help="Emit the funnel status as JSON"),
@@ -215,12 +215,12 @@ def status(
         console.print(f"[yellow]{report.next_reason}[/yellow]")
 
 
-@app.command(rich_help_panel="The migration funnel")
+@app.command(rich_help_panel="Migration Workflow")
 def scan(
     project_dir: str = typer.Argument(".", help="The repo/project directory to scan"),
     json_output: bool = typer.Option(False, "--json", help="Emit the full scan as JSON on stdout"),
 ):
-    """Phase 1 — the primary as-is scan: surfaces, version divergence, and dependency edges (offline, no resolution)."""
+    """Primary as-is scan: surfaces, version divergence, and dependency edges (offline, no resolution)."""
     from pymolt.scan import run_scan
 
     project_path = require_project_dir(project_dir, json_output=json_output)
@@ -303,7 +303,7 @@ def fetch_pypi_versions(package_name: str) -> list[str]:
         return []
 
 
-@app.command(rich_help_panel="The migration funnel")
+@app.command(rich_help_panel="Migration Workflow")
 def setup(
     project_dir: str = typer.Argument(".", help="The target project directory"),
 ):
@@ -797,7 +797,7 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             EnvConfig.model_validate(config).save(config_file)
 
 
-@app.command(rich_help_panel="The migration funnel")
+@app.command(rich_help_panel="Migration Workflow")
 def assess(
     project_dir: str = typer.Argument(".", help="The target project directory"),
     target_python: str | None = typer.Option(None, help="Target Python version (e.g. 3.13)"),
@@ -1300,7 +1300,7 @@ def _render_codemod_auth_prompt():
     )
 
 
-@app.command(rich_help_panel="The migration funnel")
+@app.command(rich_help_panel="Migration Workflow")
 def codemods(
     project_dir: str = typer.Argument(".", help="The repo/project directory to rewrite"),
     package: str = typer.Option(None, "--package", "-p", help="Dependency name (e.g. flask)"),
@@ -1531,7 +1531,7 @@ def mcp(
     run_mcp()
 
 
-@app.command(rich_help_panel="Strategic Migrations")
+@app.command(rich_help_panel="Experimental Features")
 def succession(
     project_dir: str = typer.Argument(".", help="The project directory to migrate"),
     axiom_url: str = typer.Option(
@@ -1542,7 +1542,7 @@ def succession(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit the result as JSON on stdout"),
 ):
-    """Find framework-succession paths for a dead-framework project (e.g. TF1/Keras).
+    """[Experimental] Find framework-succession paths for deprecated framework projects (e.g. TF1/Keras).
 
     Detects the project's frameworks, asks Axiom Graph where they should go, and for
     IN_PLACE paths (e.g. keras → tensorflow.keras) applies the shims via LibCST —
@@ -1757,7 +1757,7 @@ def env_hint(
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
 
 
-@app.command(rich_help_panel="Strategic Migrations")
+@app.command(rich_help_panel="Experimental Features")
 def forks(
     repo: str = typer.Argument(..., help="Base repo to triage, as owner/name"),
     project_dir: str = typer.Option(
