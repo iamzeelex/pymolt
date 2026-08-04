@@ -166,7 +166,7 @@ class TestRendering:
 
     def test_help_lists_the_funnel_in_funnel_order(self):
         result = runner.invoke(app, ["--help"])
-        funnel = result.output.split("The migration funnel")[1].split("╰")[0]
+        funnel = result.output.split("Migration Workflow")[1].split("╰")[0]
         order = [name for name in ("scan", "setup", "assess", "codemods", "contract")
                  if name in funnel]
         positions = [funnel.index(name) for name in order]
