@@ -54,7 +54,7 @@ class Verdict(str, Enum):
     it states whether behavior is empirically stable, changed, or undecidable."""
     BEHAVIOR_STABLE = "behavior-stable"
     BEHAVIOR_CHANGED = "behavior-changed"
-    NEEDS_HUMAN = "needs-human"
+    NEEDS_ACTION = "needs-action"
 
 
 class EvidenceLevel(str, Enum):

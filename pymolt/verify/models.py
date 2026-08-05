@@ -59,7 +59,7 @@ class BoundaryDiff(BaseModel):
     """
 
     # All three "changed" categories -> BEHAVIOR_CHANGED; appeared is INFO;
-    # skipped_opaque is a NEEDS_HUMAN honesty marker (not clean-blocking).
+    # skipped_opaque is a NEEDS_ACTION honesty marker (not clean-blocking).
     disappeared: list[dict[str, Any]] = Field(default_factory=list)     # in old, absent in new
     result_changed: list[dict[str, Any]] = Field(default_factory=list)  # same inputs, diff return
     raise_changed: list[dict[str, Any]] = Field(default_factory=list)   # value <-> exception flip

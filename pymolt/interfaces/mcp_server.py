@@ -686,7 +686,7 @@ def contract_report(project_dir: str = ".") -> dict:
             "trust_pct": trust_pct,
         }
 
-        # Behavioral verdicts + NEEDS_HUMAN come from the baseline->post BoundaryDiff.
+        # Behavioral verdicts + NEEDS_ACTION come from the baseline->post BoundaryDiff.
         # rep.diff carries only counts; rebuild the diff for the symbol lists,
         # mirroring how the CLI report auto-sources the two named slots.
         state = service.load_contract_state(str(path))
@@ -706,11 +706,11 @@ def contract_report(project_dir: str = ".") -> dict:
                 "result_changed": rc,
                 "raise_changed": rk,
                 "disappeared": dp,
-                "needs_human": nh,
+                "needs_action": nh,
                 "clean": bdiff.is_clean(),
             }
             for key, trunc in (("result_changed", rc_t), ("raise_changed", rk_t),
-                               ("disappeared", dp_t), ("needs_human", nh_t)):
+                               ("disappeared", dp_t), ("needs_action", nh_t)):
                 if trunc:
                     data["behavioral"][f"{key}_truncated"] = trunc
 
