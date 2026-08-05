@@ -62,7 +62,7 @@ def _verdict_from_boundary(diff: BoundaryDiff) -> Verdict:
         return Verdict.BEHAVIOR_CHANGED
     if diff.skipped_opaque:
         # comparable contacts are stable, but some could not be compared at all
-        return Verdict.NEEDS_HUMAN
+        return Verdict.NEEDS_ACTION
     return Verdict.BEHAVIOR_STABLE
 
 

@@ -48,7 +48,7 @@ app = typer.Typer(help="Behavioral boundary tracing & diff (runs entirely outsid
 _VERDICT_STYLE = {
     Verdict.BEHAVIOR_STABLE: "bold green",
     Verdict.BEHAVIOR_CHANGED: "bold red",
-    Verdict.NEEDS_HUMAN: "bold yellow",
+    Verdict.NEEDS_ACTION: "bold yellow",
 }
 
 
@@ -109,7 +109,7 @@ def render_boundary_diff(diff: BoundaryDiff, full: bool = False) -> None:
            ["qualname", "where", "old", "new"], "red")
     _table("BREAKING — raise_changed", diff.raise_changed,
            ["qualname", "where", "old_raised", "new_raised"], "red")
-    _table("NEEDS-HUMAN — skipped_opaque", diff.skipped_opaque, ["qualname", "where", "reason"],
+    _table("NEEDS-ACTION — skipped_opaque", diff.skipped_opaque, ["qualname", "where", "reason"],
            "yellow")
     _table("INFO — appeared", diff.appeared, ["qualname", "where"], "cyan")
 

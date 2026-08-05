@@ -76,11 +76,11 @@ def test_l3_trace_terminal_when_no_golden_points(flask_node):
     assert "no-golden-points" in res.honesty
 
 
-def test_skipped_opaque_only_yields_needs_human(flask_node):
+def test_skipped_opaque_only_yields_needs_action(flask_node):
     deps = FakeDeps(tests=TestStatus.INCONCLUSIVE, golden=None,
                     boundary=BoundaryDiff(skipped_opaque=[{"qualname": "flask.x"}]))
     res = verify_node(flask_node, TraceScope.BLIND_SPOTS, deps)
-    assert res.verdict is Verdict.NEEDS_HUMAN
+    assert res.verdict is Verdict.NEEDS_ACTION
     assert any(h.startswith("opaque-comparisons") for h in res.honesty)
 
 
