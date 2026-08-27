@@ -1,0 +1,22 @@
+[
+  {"name": "flask",          "from": "1.1.4",   "to": "2.0.0",  "note": "safe_join → werkzeug, json module"},
+  {"name": "werkzeug",       "from": "1.0.1",   "to": "2.0.0",  "note": "large API reshuffle"},
+  {"name": "jinja2",         "from": "2.11.3",  "to": "3.0.0",  "note": "contextfunction etc."},
+  {"name": "itsdangerous",   "from": "1.1.0",   "to": "2.0.0"},
+  {"name": "markupsafe",     "from": "1.1.1",   "to": "2.0.0"},
+  {"name": "click",          "from": "7.1.2",   "to": "8.0.0",  "note": "full_process_value → process_value"},
+  {"name": "pandas",         "from": "1.3.5",   "to": "2.0.0",  "note": "append removed → concat"},
+  {"name": "pydantic",       "from": "1.10.13", "to": "2.0.0",  "note": "v2 rewrite"},
+  {"name": "sqlalchemy",     "from": "1.3.24",  "to": "1.4.0",  "note": "2.0-style API"},
+  {"name": "urllib3",        "from": "1.26.18", "to": "2.0.0"},
+  {"name": "attrs",          "from": "20.3.0",  "to": "21.1.0", "note": "next-gen API"},
+  {"name": "numpy",          "from": "1.21.6",  "to": "1.24.0", "note": "np.int/np.float removed"},
+  {"name": "requests",       "from": "2.25.1",  "to": "2.31.0"},
+  {"name": "setuptools",     "from": "59.8.0",  "to": "65.0.0"},
+  {"name": "importlib-metadata", "from": "4.13.0", "to": "6.0.0"},
+  {"name": "redis",          "from": "3.5.3",   "to": "4.0.0",  "note": "client API changes"},
+  {"name": "celery",         "from": "4.4.7",   "to": "5.0.0"},
+  {"name": "aiohttp",        "from": "3.7.4",   "to": "3.8.0"},
+  {"name": "httpx",          "from": "0.23.3",  "to": "0.27.0"},
+  {"name": "starlette",      "from": "0.20.4",  "to": "0.27.0"}
+]

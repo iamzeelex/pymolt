@@ -1,0 +1,789 @@
+{
+  "project_dir": "tests/artifacts/flasgger",
+  "source_manifest": "requirements-dev.txt",
+  "source_fixation": "pinned",
+  "resolution_quality": "resolved",
+  "detected_python": "3.9",
+  "target_python": "3.12",
+  "target_resolved": true,
+  "target_error": null,
+  "baseline_unresolved": false,
+  "baseline_tier": "bronze",
+  "target_manifest_path": null,
+  "warnings": [
+    "Source manifest requirements-dev.txt is not fully pinned. The generated resolution map represents a reconstruction, not an exact snapshot of the production state."
+  ],
+  "manual_zone": [],
+  "packages": [
+    {
+      "name": "aniso8601",
+      "declared_constraint": null,
+      "baseline_version": "10.0.1",
+      "target_version": "10.0.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "annotated-doc",
+      "declared_constraint": null,
+      "baseline_version": null,
+      "target_version": "0.0.5",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "added"
+    },
+    {
+      "name": "apispec",
+      "declared_constraint": ">=1.0.0b5",
+      "baseline_version": "6.8.4",
+      "target_version": "6.10.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "apispec-webframeworks",
+      "declared_constraint": "any",
+      "baseline_version": "1.2.0",
+      "target_version": "1.2.0",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "attrs",
+      "declared_constraint": null,
+      "baseline_version": "26.1.0",
+      "target_version": "26.1.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "backports-datetime-fromisoformat",
+      "declared_constraint": null,
+      "baseline_version": "2.0.3",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "backports-tarfile",
+      "declared_constraint": null,
+      "baseline_version": "1.2.0",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "blinker",
+      "declared_constraint": null,
+      "baseline_version": "1.9.0",
+      "target_version": "1.9.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "certifi",
+      "declared_constraint": null,
+      "baseline_version": "2026.7.22",
+      "target_version": "2026.7.22",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "charset-normalizer",
+      "declared_constraint": null,
+      "baseline_version": "3.5.1",
+      "target_version": "3.5.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "click",
+      "declared_constraint": null,
+      "baseline_version": "8.1.8",
+      "target_version": "8.4.2",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "coverage",
+      "declared_constraint": null,
+      "baseline_version": "7.10.7",
+      "target_version": "7.15.4",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "coveralls",
+      "declared_constraint": "any",
+      "baseline_version": "4.0.1",
+      "target_version": "4.1.0",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "decorator",
+      "declared_constraint": "any",
+      "baseline_version": "5.3.1",
+      "target_version": "5.3.1",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "docopt",
+      "declared_constraint": null,
+      "baseline_version": "0.6.2",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "docutils",
+      "declared_constraint": null,
+      "baseline_version": "0.23",
+      "target_version": "0.23",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "exceptiongroup",
+      "declared_constraint": null,
+      "baseline_version": "1.3.1",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "flake8",
+      "declared_constraint": "==3.8.4",
+      "baseline_version": "3.8.4",
+      "target_version": "3.8.4",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "flask",
+      "declared_constraint": null,
+      "baseline_version": "3.1.3",
+      "target_version": "3.1.3",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "flask-jwt",
+      "declared_constraint": "any",
+      "baseline_version": "0.3.2",
+      "target_version": "0.3.2",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "flask-restful",
+      "declared_constraint": "any",
+      "baseline_version": "0.3.10",
+      "target_version": "0.3.10",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "flex",
+      "declared_constraint": "any",
+      "baseline_version": "6.14.1",
+      "target_version": "6.14.1",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "id",
+      "declared_constraint": null,
+      "baseline_version": "1.5.0",
+      "target_version": "1.5.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "idna",
+      "declared_constraint": null,
+      "baseline_version": "3.19",
+      "target_version": "3.19",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "importlib-metadata",
+      "declared_constraint": null,
+      "baseline_version": "8.7.1",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "iniconfig",
+      "declared_constraint": null,
+      "baseline_version": "2.1.0",
+      "target_version": "2.3.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "itsdangerous",
+      "declared_constraint": null,
+      "baseline_version": "2.2.0",
+      "target_version": "2.2.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "jaraco-classes",
+      "declared_constraint": null,
+      "baseline_version": "3.4.0",
+      "target_version": "3.4.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "jaraco-context",
+      "declared_constraint": null,
+      "baseline_version": "6.1.1",
+      "target_version": "6.1.2",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "jaraco-functools",
+      "declared_constraint": null,
+      "baseline_version": "4.4.0",
+      "target_version": "4.6.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "jinja2",
+      "declared_constraint": null,
+      "baseline_version": "3.1.6",
+      "target_version": "3.1.6",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "jsonpointer",
+      "declared_constraint": null,
+      "baseline_version": "3.0.0",
+      "target_version": "3.1.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "jsonschema",
+      "declared_constraint": null,
+      "baseline_version": "4.25.1",
+      "target_version": "4.26.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "jsonschema-specifications",
+      "declared_constraint": null,
+      "baseline_version": "2025.9.1",
+      "target_version": "2025.9.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "keyring",
+      "declared_constraint": null,
+      "baseline_version": "25.7.0",
+      "target_version": "25.7.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "markdown-it-py",
+      "declared_constraint": null,
+      "baseline_version": "3.0.0",
+      "target_version": "4.2.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "markupsafe",
+      "declared_constraint": null,
+      "baseline_version": "3.0.3",
+      "target_version": "3.0.3",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "marshmallow",
+      "declared_constraint": "any",
+      "baseline_version": "4.0.1",
+      "target_version": "4.3.1",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "mccabe",
+      "declared_constraint": null,
+      "baseline_version": "0.6.1",
+      "target_version": "0.6.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "mdurl",
+      "declared_constraint": null,
+      "baseline_version": "0.1.2",
+      "target_version": "0.1.2",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "mistune",
+      "declared_constraint": null,
+      "baseline_version": "3.3.4",
+      "target_version": "3.3.4",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "more-itertools",
+      "declared_constraint": null,
+      "baseline_version": "10.8.0",
+      "target_version": "11.1.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "nh3",
+      "declared_constraint": null,
+      "baseline_version": "0.3.7",
+      "target_version": "0.3.7",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "packaging",
+      "declared_constraint": null,
+      "baseline_version": "26.3",
+      "target_version": "26.3",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pep8",
+      "declared_constraint": "==1.7.1",
+      "baseline_version": "1.7.1",
+      "target_version": "1.7.1",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pip",
+      "declared_constraint": null,
+      "baseline_version": "26.0.1",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "pipdeptree",
+      "declared_constraint": "any",
+      "baseline_version": "2.28.0",
+      "target_version": "3.1.1",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "pluggy",
+      "declared_constraint": null,
+      "baseline_version": "1.6.0",
+      "target_version": "1.6.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pycodestyle",
+      "declared_constraint": null,
+      "baseline_version": "2.6.0",
+      "target_version": "2.6.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pyflakes",
+      "declared_constraint": null,
+      "baseline_version": "2.2.0",
+      "target_version": "2.2.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pygments",
+      "declared_constraint": null,
+      "baseline_version": "2.21.0",
+      "target_version": "2.21.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pyjwt",
+      "declared_constraint": null,
+      "baseline_version": "1.4.2",
+      "target_version": "1.4.2",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pytest",
+      "declared_constraint": ">=4.6",
+      "baseline_version": "8.4.2",
+      "target_version": "9.1.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "pytest-cov",
+      "declared_constraint": "any",
+      "baseline_version": "7.1.0",
+      "target_version": "7.1.0",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pytz",
+      "declared_constraint": null,
+      "baseline_version": "2026.3.post1",
+      "target_version": "2026.3.post1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "pyyaml",
+      "declared_constraint": null,
+      "baseline_version": "6.0.3",
+      "target_version": "6.0.3",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "readme-renderer",
+      "declared_constraint": "any",
+      "baseline_version": "44.0",
+      "target_version": "45.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "referencing",
+      "declared_constraint": null,
+      "baseline_version": "0.36.2",
+      "target_version": "0.37.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "requests",
+      "declared_constraint": null,
+      "baseline_version": "2.32.5",
+      "target_version": "2.34.2",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "requests-toolbelt",
+      "declared_constraint": null,
+      "baseline_version": "1.0.0",
+      "target_version": "1.0.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "rfc3986",
+      "declared_constraint": null,
+      "baseline_version": "2.0.0",
+      "target_version": "2.0.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "rfc3987",
+      "declared_constraint": null,
+      "baseline_version": "1.3.8",
+      "target_version": "1.3.8",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "rich",
+      "declared_constraint": null,
+      "baseline_version": "15.0.0",
+      "target_version": "15.0.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "rpds-py",
+      "declared_constraint": null,
+      "baseline_version": "0.27.1",
+      "target_version": "2026.6.3",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "setuptools",
+      "declared_constraint": ">=40.4.2",
+      "baseline_version": "82.0.1",
+      "target_version": "84.0.0",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "shellingham",
+      "declared_constraint": null,
+      "baseline_version": null,
+      "target_version": "1.5.4",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "added"
+    },
+    {
+      "name": "six",
+      "declared_constraint": null,
+      "baseline_version": "1.17.0",
+      "target_version": "1.17.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "strict-rfc3339",
+      "declared_constraint": null,
+      "baseline_version": "0.7",
+      "target_version": "0.7",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "tomli",
+      "declared_constraint": null,
+      "baseline_version": "2.4.1",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    },
+    {
+      "name": "twine",
+      "declared_constraint": ">=1.11.0",
+      "baseline_version": "6.2.0",
+      "target_version": "7.0.0",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "upgrade"
+    },
+    {
+      "name": "typer",
+      "declared_constraint": null,
+      "baseline_version": null,
+      "target_version": "0.27.1",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "added"
+    },
+    {
+      "name": "typing-extensions",
+      "declared_constraint": null,
+      "baseline_version": "4.16.0",
+      "target_version": "4.16.0",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "urllib3",
+      "declared_constraint": "<2.0.0",
+      "baseline_version": "1.26.20",
+      "target_version": "1.26.20",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "validate-email",
+      "declared_constraint": null,
+      "baseline_version": "1.3",
+      "target_version": "1.3",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "werkzeug",
+      "declared_constraint": null,
+      "baseline_version": "3.1.8",
+      "target_version": "3.1.8",
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "wheel",
+      "declared_constraint": "any",
+      "baseline_version": "0.48.0",
+      "target_version": "0.48.0",
+      "origin": "pypi",
+      "direct": true,
+      "manual_bridge": false,
+      "status": "unchanged"
+    },
+    {
+      "name": "zipp",
+      "declared_constraint": null,
+      "baseline_version": "3.23.1",
+      "target_version": null,
+      "origin": "pypi",
+      "direct": false,
+      "manual_bridge": false,
+      "status": "removed"
+    }
+  ]
+}
