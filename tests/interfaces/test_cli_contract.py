@@ -34,6 +34,37 @@ def project(tmp_path):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _mock_assess_resolution(monkeypatch):
+    from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixation
+    from pymolt.core.graph import DependencyGraph, Node
+    from pymolt.core.layers import IngestionReport
+
+    node = Node(
+        name="flask", version="2.0.3", mode=Mode.PYPI, provenance=Provenance.PYPI, direct=True,
+    )
+    fake_graph = DependencyGraph(
+        nodes={"flask": node},
+        resolution_quality=ResolutionQuality.RESOLVED,
+        source_fixation=SourceFixation.PINNED,
+    )
+    fake_report = IngestionReport(
+        resolution_quality="resolved",
+        source_fixation="pinned",
+        manual_zone=[],
+        warnings=[],
+        detected_python="3.12",
+    )
+    monkeypatch.setattr(
+        "pymolt.interfaces.cli.commands._resolve_baseline_graph",
+        lambda **k: (fake_graph, fake_report, None),
+    )
+    monkeypatch.setattr(
+        "pymolt.interfaces.cli.commands._resolve_target_graph",
+        lambda *a, **k: (fake_graph, None),
+    )
+
+
 # ── stdout purity ─────────────────────────────────────────────────────────────
 
 class TestStdoutCarriesOnlyTheAnswer:
@@ -221,3 +252,4 @@ class TestNoWrite:
         # The write is a documented artifact — and the JSON says where it went.
         assert payload["target_manifest_path"] is not None
         assert (project / "requirements-target.txt").is_file()
+

@@ -16,8 +16,9 @@ pytest.importorskip("mcp")
 
 from pymolt.interfaces import mcp_server  # noqa: E402
 
-# The 8 tools this server must expose.
+# The tools this server exposes.
 _EXPECTED_TOOLS = {
+    "status",
     "scan",
     "setup_options",
     "setup_apply",
@@ -25,7 +26,10 @@ _EXPECTED_TOOLS = {
     "contract_map",
     "contract_capture",
     "contract_report",
+    "codemods",
     "codemods_preview",
+    "migrate",
+    "env_hint",
 }
 
 
@@ -243,3 +247,51 @@ def test_scan_not_gated_by_exec_check(tmp_path):
     """Read-only tools must work with no PYMOLT_MCP_ALLOW_EXEC set at all."""
     result = mcp_server.scan(project_dir=str(_make_project(tmp_path)))
     assert result["ok"] is True
+
+
+def test_status_tool_returns_funnel_projection(tmp_path):
+    project = _make_project(tmp_path)
+    result = mcp_server.status(project_dir=str(project))
+    assert result["ok"] is True
+    assert "Funnel status" in result["summary"]
+    assert "phases" in result["data"]
+    assert "next_command" in result["data"]
+
+
+def test_codemods_tool_dry_run_and_write(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+    project = _make_project(tmp_path)
+    fake_pattern = MagicMock()
+    fake_pattern.old_qualname = "flask.json.JSONEncoder"
+    fake_pattern.new_qualname = "json.JSONEncoder"
+    fake_pattern.confidence = "high"
+
+    with patch("pymolt.codemods.service.resolve_codemod_migrations", return_value=([MagicMock()], "flask 2.0.3 -> 3.0.0")), \
+         patch("pymolt.codemods.service.preview_codemods", return_value=({"flask": [fake_pattern]}, [])):
+        res = mcp_server.codemods(project_dir=str(project), write=False)
+        assert res["ok"] is True
+        assert res["data"]["write"] is False
+        assert "DRY-RUN preview" in res["summary"]
+
+
+def test_migrate_tool_executes_pipeline(tmp_path):
+    from unittest.mock import MagicMock, patch
+    from pymolt.assess.service import AssessResult
+    project = _make_project(tmp_path)
+
+    fake_assess = AssessResult(
+        project_dir=str(project),
+        source_manifest="requirements.txt",
+        target_python="3.12",
+        target_resolved=True,
+        target_manifest_path=str(project / "requirements-target.txt"),
+        rows=[{"name": "requests", "baseline_version": "2.31.0", "target_version": "2.32.0", "status": "upgrade"}],
+    )
+
+    with patch("pymolt.assess.service.run_assess", return_value=fake_assess), \
+         patch("pymolt.codemods.service.run_codemods", return_value=({"requests": []}, MagicMock(changes=[]))):
+        res = mcp_server.migrate(project_dir=str(project), target_python="3.12", write=False)
+        assert res["ok"] is True
+        assert "Migrate (PREVIEW)" in res["summary"]
+        assert res["data"]["packages_assessed"] == 1
+

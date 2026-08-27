@@ -134,6 +134,47 @@ def _fail(error: str, hint: str | None = None) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 0. status
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def status(project_dir: str = ".") -> dict:
+    """Report where the project stands in the migration funnel and what single
+    command to run next. Call this anytime to orient your agent workflow.
+
+    Args:
+        project_dir: Project directory (default: current directory).
+    """
+    try:
+        path = _resolve_dir(project_dir)
+        from pymolt.status import build_status
+
+        funnel = build_status(str(path))
+        full = funnel.model_dump(mode="json")
+        full_path = _write_full_report(path, "status", full)
+
+        phases_out = [
+            {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker}
+            for p in funnel.phases
+        ]
+        data = {
+            "phases": phases_out,
+            "next_command": funnel.next_command,
+            "next_reason": funnel.next_reason,
+            "notes": funnel.notes,
+        }
+        done_count = sum(1 for p in funnel.phases if p.state == "done")
+        summary = (
+            f"Funnel status for {path.name}: {done_count}/{len(funnel.phases)} phases complete.\n"
+            f"Next step: {funnel.next_command or 'migration complete'}"
+        )
+        return _ok(summary, data, full_report_path=full_path, hint=funnel.next_reason)
+    except Exception as e:  # noqa: BLE001
+        return _fail(f"status failed: {e}", hint="Ensure project_dir is a readable directory.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. scan
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -745,28 +786,44 @@ def contract_report(project_dir: str = ".") -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. codemods_preview
+# 8. codemods & codemods_preview
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def codemods_preview(project_dir: str = ".", axiom_url: str = "http://localhost:8000") -> dict:
-    """DRY-RUN preview of the codemods that would rewrite your call sites for the
-    upgrades assess found. This NEVER writes files and NEVER spends slots/money —
-    applying requires the human-driven CLI. Call this to see the blast radius.
+def codemods_preview(project_dir: str = ".", endpoint: str | None = None) -> dict:
+    """Preview the LibCST codemods that would rewrite call sites for the upgrades
+    found by assess (dry-run). Returns modified file diffs and affected packages.
 
     Args:
         project_dir: Project directory (default: current directory).
-        axiom_url: Axiom Graph service base URL (default: http://localhost:8000).
+        endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
+    """
+    return codemods(project_dir=project_dir, write=False, endpoint=endpoint)
 
-    Requires a prior assess (its cached comparison feeds the migration set).
+
+@mcp.tool()
+def codemods(
+    project_dir: str = ".",
+    write: bool = False,
+    endpoint: str | None = None,
+) -> dict:
+    """Fetch AST transformation rules from Axiom Cloud Hub and apply them under project_dir.
+
+    Args:
+        project_dir: Project directory (default: current directory).
+        write: When True, applies AST transformations to disk. When False, performs a dry-run preview.
+        endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
     """
     try:
+        import difflib
         path = _resolve_dir(project_dir)
         from pymolt.codemods.models import CodemodPattern
-        from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations
+        from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations, run_codemods
+        from pymolt.config import load_endpoint
         from pymolt.ingestion.config import EnvConfig
 
+        effective_endpoint = load_endpoint(endpoint)
         cfg = EnvConfig.load(path / ".pymolt" / "env_config.json")
         config = cfg.model_dump(mode="json") if cfg else None
         try:
@@ -777,11 +834,26 @@ def codemods_preview(project_dir: str = ".", axiom_url: str = "http://localhost:
                 hint="Run assess first so codemods can derive the changed packages.",
             )
 
-        by_pkg, previews = preview_codemods(str(path), migrations, base_url=axiom_url)
+        if not write:
+            by_pkg, previews = preview_codemods(str(path), migrations, base_url=effective_endpoint)
+            changed_files = sorted({p.path for p in previews if p.old_source != p.new_source})
+            diffs = []
+            for p in previews:
+                if p.old_source != p.new_source:
+                    diff_lines = list(difflib.unified_diff(
+                        p.old_source.splitlines(keepends=True),
+                        p.new_source.splitlines(keepends=True),
+                        fromfile=f"a/{p.path}",
+                        tofile=f"b/{p.path}",
+                    ))
+                    diffs.append({"path": p.path, "diff": "".join(diff_lines)})
+        else:
+            by_pkg, run_result = run_codemods(str(path), migrations, base_url=effective_endpoint, write=True)
+            changed_files = sorted({c.path for c in run_result.changes})
+            diffs = []
 
-        # Files that would change, unique across previews.
-        changed_files = sorted({p.path for p in previews})
         files_capped, files_trunc = _cap_list(changed_files)
+        diffs_capped, diffs_trunc = _cap_list(diffs)
 
         per_package = []
         for pkg, items in by_pkg.items():
@@ -803,40 +875,155 @@ def codemods_preview(project_dir: str = ".", axiom_url: str = "http://localhost:
         per_package_capped, pkg_trunc = _cap_list(per_package)
 
         full = {
+            "write": write,
             "source": source_desc,
             "per_package": per_package,
-            "files_that_would_change": changed_files,
+            "files_changed": changed_files,
+            "diffs": diffs,
         }
-        full_path = _write_full_report(path, "codemods_preview", full)
+        full_path = _write_full_report(path, "codemods", full)
 
         data: dict[str, Any] = {
-            "dry_run": True,
+            "write": write,
             "source": source_desc,
             "per_package": per_package_capped,
-            "files_that_would_change": files_capped,
+            "files_changed": files_capped,
+            "diffs": diffs_capped,
         }
         if pkg_trunc:
             data["per_package_truncated"] = pkg_trunc
         if files_trunc:
             data["files_truncated"] = files_trunc
+        if diffs_trunc:
+            data["diffs_truncated"] = diffs_trunc
 
+        action_desc = "WRITTEN TO DISK" if write else "DRY-RUN preview"
         summary = (
-            "DRY-RUN preview only — no files written, no money/slots spent.\n"
+            f"Codemods ({action_desc}):\n"
             f"{len(per_package)} package(s) from {source_desc}; "
-            f"{len(changed_files)} file(s) would change."
+            f"{len(changed_files)} file(s) {'rewritten' if write else 'would change'}."
         )
         return _ok(
             summary,
             data,
             full_report_path=full_path,
-            hint="Applying is human-only: review, then run "
-                 "`pymolt codemods ... --write` in the CLI.",
+            hint="Run contract_capture (when='post-migration') to verify behavior." if write else "Set write=True to apply these AST rewrites to disk.",
         )
     except Exception as e:  # noqa: BLE001
         return _fail(
-            f"codemods_preview failed: {e}",
-            hint="Is the Axiom Graph service reachable at axiom_url? Run assess first.",
+            f"codemods failed: {e}",
+            hint="Check that Axiom Cloud Hub is reachable and API token is configured.",
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. migrate (end-to-end macro tool)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def migrate(
+    project_dir: str = ".",
+    target_python: str | None = None,
+    manifest: str | None = None,
+    write: bool = False,
+    endpoint: str | None = None,
+) -> dict:
+    """Run the complete end-to-end Python migration workflow for an agent in one call.
+
+    Orchestrates: Setup/Discovery -> Assess (dependency resolution) -> LibCST Codemods.
+
+    Args:
+        project_dir: Project directory (default: current directory).
+        target_python: Target Python version (e.g. '3.12' or '3.13'). Defaults to 3.12.
+        manifest: Manifest path (e.g. 'requirements.txt'). Defaults to detected manifest.
+        write: Whether to write AST transformations to disk (default: False for dry-run preview).
+        endpoint: Custom Axiom Cloud Hub URL.
+    """
+    try:
+        path = _resolve_dir(project_dir)
+        from pymolt.assess.service import run_assess
+        from pymolt.codemods.service import resolve_codemod_migrations, run_codemods
+        from pymolt.config import load_endpoint
+        from pymolt.ingestion.config import EnvConfig
+        from pymolt.ingestion.detect import detect_sources
+
+        sources = detect_sources(path)
+        if not sources:
+            return _fail(
+                f"No Python dependency sources detected in {path}",
+                hint="Add a requirements.txt, pyproject.toml, Pipfile, environment.yml or setup.py.",
+            )
+
+        config_file = path / ".pymolt" / "env_config.json"
+        cfg = EnvConfig.load(config_file) if config_file.is_file() else None
+        config = cfg.model_dump(mode="json") if cfg else {}
+
+        target_py = target_python or config.get("target_python", "3.12")
+        selected_manifest = manifest or config.get("selected_manifest")
+        if not selected_manifest:
+            lock_sources = [s for s in sources if s.is_lock]
+            selected_manifest = lock_sources[0].path.name if lock_sources else sources[0].path.name
+
+        tool = config.get("selected_tool", "uv")
+        if hasattr(tool, "value"):
+            tool = tool.value
+
+        assess_res = run_assess(
+            str(path),
+            target_python=target_py,
+            source_manifest=selected_manifest,
+            config=config,
+            tool=tool,
+        )
+
+        if not assess_res.target_resolved:
+            return _fail(
+                f"Target dependency resolution failed: {assess_res.target_error or 'Dependency conflict'}",
+                hint="Check that packages support the target Python version.",
+            )
+
+        target_manifest = assess_res.target_manifest_path or "requirements-target.txt"
+        degrade_warnings: list[str] = []
+        try:
+            migrations, source_desc = resolve_codemod_migrations(
+                str(path),
+                target_dependency_file=target_manifest,
+                config=config,
+                warnings=degrade_warnings,
+            )
+        except Exception:
+            migrations, source_desc = [], "target manifest"
+
+        effective_endpoint = load_endpoint(endpoint)
+        by_pkg, codemod_res = run_codemods(
+            str(path),
+            migrations,
+            base_url=effective_endpoint,
+            write=write,
+        )
+
+        total_patterns = sum(len(items) for items in by_pkg.values())
+        changed_files = [c.path for c in codemod_res.changes]
+        full_data = {
+            "target_python": target_py,
+            "target_manifest": target_manifest,
+            "packages_assessed": len(assess_res.rows),
+            "upgrades": len(migrations),
+            "codemods_count": total_patterns,
+            "files_changed": changed_files,
+            "write": write,
+        }
+        full_path = _write_full_report(path, "migrate", full_data)
+
+        summary = (
+            f"Migrate ({'APPLIED' if write else 'PREVIEW'}):\n"
+            f"Target Python: {target_py} | Assessed: {len(assess_res.rows)} packages | "
+            f"Upgrades: {len(migrations)} | Codemods: {total_patterns} across {len(changed_files)} file(s)."
+        )
+        return _ok(summary, full_data, full_report_path=full_path, hint="Run contract_capture (when='baseline') to verify behavior.")
+    except Exception as e:  # noqa: BLE001
+        return _fail(f"migrate failed: {e}", hint="Ensure project directory and dependencies are accessible.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
