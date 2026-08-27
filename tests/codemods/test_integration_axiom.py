@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-_RESEARCH = Path(__file__).resolve().parents[2] / ".research"
-if str(_RESEARCH) not in sys.path:
-    sys.path.insert(0, str(_RESEARCH))
+_AXIOM_SERVICE = Path(__file__).resolve().parents[2] / "services" / "axiom_graph"
+if str(_AXIOM_SERVICE) not in sys.path:
+    sys.path.insert(0, str(_AXIOM_SERVICE))
 
 pytest.importorskip(
     "fastapi",
@@ -27,7 +27,7 @@ pytest.importorskip(
 )
 axiom_api = pytest.importorskip(
     "axiom_graph.service.api",
-    reason="axiom_graph checkout not importable from .research/",
+    reason="axiom_graph checkout not importable from services/axiom_graph/",
 )
 
 from axiom_graph.core.models import CodemodPattern as AxiomPattern  # noqa: E402

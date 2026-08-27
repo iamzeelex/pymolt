@@ -12,11 +12,10 @@ from collections.abc import Callable, Iterable
 
 import httpx
 
+from pymolt.config import load_endpoint, load_token
 from pymolt.strategic.succession.models import SuccessionEdge
 
 log = logging.getLogger(__name__)
-
-DEFAULT_BASE_URL = "https://api.pymolt.zeelex.me"
 
 
 class SuccessionError(RuntimeError):
@@ -28,15 +27,13 @@ class SuccessionClient:
 
     def __init__(
         self,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: str | None = None,
         *,
         timeout: float = 120.0,
         token: str | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or load_endpoint()).rstrip("/")
         self.timeout = timeout
-        from pymolt.config import load_token
-
         self.token = token or load_token()
 
     def _auth_headers(self) -> dict[str, str]:

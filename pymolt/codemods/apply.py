@@ -451,8 +451,13 @@ def _emit(sink: ProgressSink, path: Path, hits: list[tuple] | None = None) -> No
 
 def _iter_py_files(root: Path):
     for path in sorted(root.rglob("*.py")):
-        if any(part in _SKIP_DIRS or part.startswith(".") for part in path.parts):
-            continue
+        try:
+            rel = path.relative_to(root)
+            if any(part in _SKIP_DIRS or (part.startswith(".") and part != ".") for part in rel.parts):
+                continue
+        except Exception:
+            if any(part in _SKIP_DIRS or (part.startswith(".") and part != ".") for part in path.parts):
+                continue
         yield path
 
 

@@ -124,12 +124,17 @@ def _resolve_graph_for_source(
         if root in tried:
             continue
         tried.append(root)
-        # codemods explicitly consumes the assess-generated target manifest, so it
-        # must be visible here (assess auto-discovery excludes it — see detect_sources).
-        sources = detect_sources(root, include_generated=True)
+        # If source_path is specifically a generated target manifest (e.g. requirements-target.txt),
+        # include generated files; otherwise only scan real project source manifests.
+        include_gen = source_path.is_file() and (
+            source_path.name.endswith("-target.txt") or source_path.name.endswith("-target.yml")
+        )
+        sources = detect_sources(root, include_generated=include_gen)
         chosen = _match_source(sources, source_path)
         if chosen is None and source_path.is_dir() and root.resolve() == source_path.resolve():
-            chosen = resolve_chosen_source(sources, None) if sources else None
+            # For project root, pick genuine non-generated project source
+            non_gen_sources = detect_sources(root, include_generated=False)
+            chosen = resolve_chosen_source(non_gen_sources, None) if non_gen_sources else None
         if chosen is None:
             continue
         try:
