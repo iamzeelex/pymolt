@@ -65,6 +65,36 @@ def _resolve_with_poetry(manifest_path: Path) -> DependencyGraph | None:
             logger.info("could not parse poetry lock: %s", e)
             return None
 
+def graph_from_declared_requirements(
+    manifest_name: str,
+    declared_reqs: dict[str, str]
+) -> DependencyGraph:
+    """Build a baseline DependencyGraph directly from declared requirements when no legacy interpreter is available."""
+    nodes = {}
+    roots = []
+    for norm_name, spec_line in declared_reqs.items():
+        version_match = re.search(r"==\s*([^\s,;]+)|>=\s*([^\s,;]+)|~=\s*([^\s,;]+)", spec_line)
+        version = version_match.group(1) or version_match.group(2) or version_match.group(3) if version_match else "0.0.0"
+        node = Node(
+            name=norm_name,
+            version=version,
+            mode=Mode.PYPI,
+            provenance=Provenance.PYPI,
+            direct=True,
+            declared_requirement=spec_line,
+            raw={"line": spec_line}
+        )
+        nodes[norm_name] = node
+        roots.append(norm_name)
+    return DependencyGraph(
+        nodes=nodes,
+        edges=[],
+        roots=roots,
+        resolution_quality=ResolutionQuality.DECLARED_ONLY,
+        source_fixation=SourceFixation.INTENT,
+    )
+
+
 def parse_uv_compile_output(
     output_text: str,
     manifest_name: str,
@@ -211,13 +241,18 @@ def ingest(source: DiscoveredSource, current_python: str | None = None, containe
             if major < 3 or (major == 3 and minor < 7):
                 is_legacy = True
                  
+    declared_reqs = extract_declared_requirements(manifest_path)
+
     if is_legacy or container_id:
         from pymolt.ingestion import fallback_compiler
-        compiled_output = fallback_compiler.compile_legacy(manifest_path, python_ver or "3.6", container_id=container_id, constraint_file=constraint_file)
-        declared_reqs = extract_declared_requirements(manifest_path)
-        return parse_uv_compile_output(compiled_output, manifest_name, declared_reqs)
-
-    declared_reqs = extract_declared_requirements(manifest_path)
+        try:
+            compiled_output = fallback_compiler.compile_legacy(manifest_path, python_ver or "3.6", container_id=container_id, constraint_file=constraint_file)
+            return parse_uv_compile_output(compiled_output, manifest_name, declared_reqs)
+        except Exception as exc:
+            logger.info("Legacy resolution failed for %s (%s); building graph from declared requirements.", manifest_name, exc)
+            if declared_reqs:
+                return graph_from_declared_requirements(manifest_name, declared_reqs)
+            raise
 
     # Honour the engineer's configured toolset for a fresh manifest resolve.
     if tool == "poetry":

@@ -45,10 +45,10 @@ def test_start_interactive(tmp_path, monkeypatch):
     # 1. "2" for requirements.txt (as environment.yml is 1)
     # 2. "5" for system tool
     # 3. "3.8" for base Python version
-    # 4. "5" for target Python version (which maps to 3.12)
+    # 4. "3.12" for target Python version
     # 5. "y" for target env created
     # 6. ".venv_target" for target env path
-    inputs = "2\n5\n3.8\n5\ny\n.venv_target\n"
+    inputs = "2\n5\n3.8\n3.12\ny\n.venv_target\n"
     
     result = runner.invoke(app, ["setup", str(tmp_path)], input=inputs)
     print("INTERACTIVE OUT:")
