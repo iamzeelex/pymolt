@@ -1,0 +1,1464 @@
+{
+  "root": "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+  "files_scanned": 67,
+  "contacts": [
+    {
+      "caller": "examples.apispec_example",
+      "target": "apispec.ext.marshmallow.MarshmallowPlugin",
+      "dep": "apispec",
+      "file": "examples/apispec_example.py"
+    },
+    {
+      "caller": "examples.apispec_example_uiversion3",
+      "target": "apispec.ext.marshmallow.MarshmallowPlugin",
+      "dep": "apispec",
+      "file": "examples/apispec_example_uiversion3.py"
+    },
+    {
+      "caller": "flasgger.marshmallow_apispec",
+      "target": "apispec.ext.marshmallow.openapi.OpenAPIConverter",
+      "dep": "apispec",
+      "file": "flasgger/marshmallow_apispec.py"
+    },
+    {
+      "caller": "examples.apispec_example",
+      "target": "apispec_webframeworks.flask.FlaskPlugin",
+      "dep": "apispec_webframeworks",
+      "file": "examples/apispec_example.py"
+    },
+    {
+      "caller": "examples.apispec_example_uiversion3",
+      "target": "apispec_webframeworks.flask.FlaskPlugin",
+      "dep": "apispec_webframeworks",
+      "file": "examples/apispec_example_uiversion3.py"
+    },
+    {
+      "caller": "flasgger.commands.generate_api_schema",
+      "target": "click.File",
+      "dep": "click",
+      "file": "flasgger/commands.py"
+    },
+    {
+      "caller": "flasgger.commands.generate_api_schema",
+      "target": "click.command",
+      "dep": "click",
+      "file": "flasgger/commands.py"
+    },
+    {
+      "caller": "flasgger.commands.generate_api_schema",
+      "target": "click.echo",
+      "dep": "click",
+      "file": "flasgger/commands.py"
+    },
+    {
+      "caller": "flasgger.commands.generate_api_schema",
+      "target": "click.option",
+      "dep": "click",
+      "file": "flasgger/commands.py"
+    },
+    {
+      "caller": "etc.flasgger_package.setup",
+      "target": "distutils.core.find_packages",
+      "dep": "distutils",
+      "file": "etc/flasgger_package/setup.py"
+    },
+    {
+      "caller": "etc.flasgger_package.setup",
+      "target": "distutils.core.setup",
+      "dep": "distutils",
+      "file": "etc/flasgger_package/setup.py"
+    },
+    {
+      "caller": "examples.example_blueprint",
+      "target": "flask.Blueprint",
+      "dep": "flask",
+      "file": "examples/example_blueprint.py"
+    },
+    {
+      "caller": "examples.test_refs",
+      "target": "flask.Blueprint",
+      "dep": "flask",
+      "file": "examples/test_refs.py"
+    },
+    {
+      "caller": "examples.validation",
+      "target": "flask.Blueprint",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.register_views",
+      "target": "flask.Blueprint",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "demo_app.app",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "demo_app/app.py"
+    },
+    {
+      "caller": "examples.apispec_example",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/apispec_example.py"
+    },
+    {
+      "caller": "examples.apispec_example_uiversion3",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/apispec_example_uiversion3.py"
+    },
+    {
+      "caller": "examples.base_model_view",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/base_model_view.py"
+    },
+    {
+      "caller": "examples.basic_auth",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/basic_auth.py"
+    },
+    {
+      "caller": "examples.callbacks",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/callbacks.py"
+    },
+    {
+      "caller": "examples.changelog_090",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/changelog_090.py"
+    },
+    {
+      "caller": "examples.colors",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors.py"
+    },
+    {
+      "caller": "examples.colors_external_js",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors_external_js.py"
+    },
+    {
+      "caller": "examples.colors_from_specdict",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors_from_specdict.py"
+    },
+    {
+      "caller": "examples.colors_template_json",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors_template_json.py"
+    },
+    {
+      "caller": "examples.colors_template_yaml",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors_template_yaml.py"
+    },
+    {
+      "caller": "examples.colors_uiversion2",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors_uiversion2.py"
+    },
+    {
+      "caller": "examples.colors_with_schema",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/colors_with_schema.py"
+    },
+    {
+      "caller": "examples.compat",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/compat.py"
+    },
+    {
+      "caller": "examples.custom_validation_function",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.decorator_package",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/decorator_package.py"
+    },
+    {
+      "caller": "examples.decorators_in_init_app",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/decorators_in_init_app.py"
+    },
+    {
+      "caller": "examples.definition_object_test",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/definition_object_test.py"
+    },
+    {
+      "caller": "examples.disable_swagger_ui",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/disable_swagger_ui.py"
+    },
+    {
+      "caller": "examples.example_app",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_blueprint",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/example_blueprint.py"
+    },
+    {
+      "caller": "examples.get_schema",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/get_schema.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.marshmallow_apispec",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/marshmallow_apispec.py"
+    },
+    {
+      "caller": "examples.multiple_specs_dropdown_example",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/multiple_specs_dropdown_example.py"
+    },
+    {
+      "caller": "examples.no_routes",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/no_routes.py"
+    },
+    {
+      "caller": "examples.openapi3_examples",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/openapi3_examples.py"
+    },
+    {
+      "caller": "examples.package_example",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/package_example.py"
+    },
+    {
+      "caller": "examples.parse_openapi3",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/parse_openapi3.py"
+    },
+    {
+      "caller": "examples.parse_openapi3_json",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/parse_openapi3_json.py"
+    },
+    {
+      "caller": "examples.parsed_view_func",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.request_body",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/request_body.py"
+    },
+    {
+      "caller": "examples.restful",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/restful.py"
+    },
+    {
+      "caller": "examples.specs_route_example",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/specs_route_example.py"
+    },
+    {
+      "caller": "examples.swag_annotation",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swag_annotation.py"
+    },
+    {
+      "caller": "examples.swag_from_merging",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swag_from_merging.py"
+    },
+    {
+      "caller": "examples.swag_from_overriding",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swag_from_overriding.py"
+    },
+    {
+      "caller": "examples.swagger_config_2",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swagger_config_2.py"
+    },
+    {
+      "caller": "examples.swagger_config_3",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swagger_config_3.py"
+    },
+    {
+      "caller": "examples.swagger_config_3_with_components_schemas",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swagger_config_3_with_components_schemas.py"
+    },
+    {
+      "caller": "examples.swagger_config_merge",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/swagger_config_merge.py"
+    },
+    {
+      "caller": "examples.test_refs",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/test_refs.py"
+    },
+    {
+      "caller": "examples.top_level_vendor_extension",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/top_level_vendor_extension.py"
+    },
+    {
+      "caller": "examples.use_openapi",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/use_openapi.py"
+    },
+    {
+      "caller": "examples.validation",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation_error_handler",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "tests.conftest.app",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "tests/conftest.py"
+    },
+    {
+      "caller": "tests.test_apispecs.test_client",
+      "target": "flask.Flask",
+      "dep": "flask",
+      "file": "tests/test_apispecs.py"
+    },
+    {
+      "caller": "flasgger.base.MK_SANITIZER",
+      "target": "flask.Markup",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.basic_auth.requires_basic_auth.authenticate",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/basic_auth.py"
+    },
+    {
+      "caller": "examples.decorators_in_init_app.requires_basic_auth.authenticate",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/decorators_in_init_app.py"
+    },
+    {
+      "caller": "examples.openapi3_examples.Animals.get",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/openapi3_examples.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.EmptyView.get",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_404",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_inform_error",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_try_to_accept",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "flasgger.base.APISpecsView.get",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.utils.validate",
+      "target": "flask.Response",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "examples.swag_annotation.Body.swag_validation_error_handler",
+      "target": "flask.abort",
+      "dep": "flask",
+      "file": "examples/swag_annotation.py"
+    },
+    {
+      "caller": "examples.swag_annotation.Query.swag_validation_error_handler",
+      "target": "flask.abort",
+      "dep": "flask",
+      "file": "examples/swag_annotation.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.__init__.default_error_handler",
+      "target": "flask.abort",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.utils.validate",
+      "target": "flask.abort",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.commands.generate_api_schema",
+      "target": "flask.current_app.swag.get_apispecs",
+      "dep": "flask",
+      "file": "flasgger/commands.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.get_url_mappings",
+      "target": "flask.current_app.url_map.iter_rules",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.utils.get_schema_specs",
+      "target": "flask.current_app.url_map.iter_rules",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "etc.flasgger_package.flasgger_package.package_view",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "etc/flasgger_package/flasgger_package/__init__.py"
+    },
+    {
+      "caller": "examples.apispec_example.create_pet",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/apispec_example.py"
+    },
+    {
+      "caller": "examples.apispec_example.random_pet",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/apispec_example.py"
+    },
+    {
+      "caller": "examples.apispec_example_uiversion3.random_pet",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/apispec_example_uiversion3.py"
+    },
+    {
+      "caller": "examples.base_model_view.PostAPIView.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/base_model_view.py"
+    },
+    {
+      "caller": "examples.basic_auth.echo",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/basic_auth.py"
+    },
+    {
+      "caller": "examples.callbacks.run_callback",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/callbacks.py"
+    },
+    {
+      "caller": "examples.colors.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors.py"
+    },
+    {
+      "caller": "examples.colors_external_js.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors_external_js.py"
+    },
+    {
+      "caller": "examples.colors_from_specdict.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors_from_specdict.py"
+    },
+    {
+      "caller": "examples.colors_template_json.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors_template_json.py"
+    },
+    {
+      "caller": "examples.colors_template_yaml.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors_template_yaml.py"
+    },
+    {
+      "caller": "examples.colors_uiversion2.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors_uiversion2.py"
+    },
+    {
+      "caller": "examples.colors_with_schema.PaletteView.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/colors_with_schema.py"
+    },
+    {
+      "caller": "examples.compat.index",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/compat.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.create_cat",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.create_regular_cat",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.create_special_cat",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.create_timestamped_cat",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.decorator_package.index",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/decorator_package.py"
+    },
+    {
+      "caller": "examples.decorators_in_init_app.echo",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/decorators_in_init_app.py"
+    },
+    {
+      "caller": "examples.definition_object_test.Foo.dispatch_request",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/definition_object_test.py"
+    },
+    {
+      "caller": "examples.definition_object_test.recs",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/definition_object_test.py"
+    },
+    {
+      "caller": "examples.example_app.UserAPI.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.UserAPI.post",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.bla",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_decorated",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_decorated_bom",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_decorated_no_descr",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_decorated_no_sep",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_decorated_utf16",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_decorated_utf32",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_indocstring",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_indocstring_no_descr",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.fromfile_indocstring_no_sep",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_app.recommend",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_app.py"
+    },
+    {
+      "caller": "examples.example_blueprint.usernames",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_blueprint.py"
+    },
+    {
+      "caller": "examples.example_blueprint.usernames2",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/example_blueprint.py"
+    },
+    {
+      "caller": "examples.get_schema.get_schema",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/get_schema.py"
+    },
+    {
+      "caller": "examples.lazy_string.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/lazy_string.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth.login",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth.protected",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.marshmallow_apispec.UserPostView.post",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/marshmallow_apispec.py"
+    },
+    {
+      "caller": "examples.multiple_specs_dropdown_example.v1_hello",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/multiple_specs_dropdown_example.py"
+    },
+    {
+      "caller": "examples.multiple_specs_dropdown_example.v2_hello",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/multiple_specs_dropdown_example.py"
+    },
+    {
+      "caller": "examples.package_example.package_view_2",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/package_example.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.ItemMethodView.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.ItemMethodView.put",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.ItemsView.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.ItemsView.post",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.user",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.parsed_view_func.users",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/parsed_view_func.py"
+    },
+    {
+      "caller": "examples.request_body.request_body_endpoint",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/request_body.py"
+    },
+    {
+      "caller": "examples.swag_from_merging.view",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/swag_from_merging.py"
+    },
+    {
+      "caller": "examples.swag_from_overriding.view",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/swag_from_overriding.py"
+    },
+    {
+      "caller": "examples.swagger_config_2.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/swagger_config_2.py"
+    },
+    {
+      "caller": "examples.swagger_config_merge.colors",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/swagger_config_merge.py"
+    },
+    {
+      "caller": "examples.test_refs.get_cost",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/test_refs.py"
+    },
+    {
+      "caller": "examples.validation.BPUserPostView.post",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.UserPostView.post",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.autovalidation",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.autovalidation_bp",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.autovalidation_from_docstring",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.autovalidation_from_spec_dict",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.autovalidation_from_spec_dict_bp",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.manualvalidation",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.manualvalidation_bp",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation.validateannotation",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.create_film",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.create_film_2",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.create_film_3",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "flasgger.base.APIDocsView.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.base.APISpecsView.get",
+      "target": "flask.jsonify",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.basic_auth.index",
+      "target": "flask.redirect",
+      "dep": "flask",
+      "file": "examples/basic_auth.py"
+    },
+    {
+      "caller": "examples.decorators_in_init_app.index",
+      "target": "flask.redirect",
+      "dep": "flask",
+      "file": "examples/decorators_in_init_app.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.register_views",
+      "target": "flask.redirect",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "demo_app.app.index",
+      "target": "flask.render_template",
+      "dep": "flask",
+      "file": "demo_app/app.py"
+    },
+    {
+      "caller": "flasgger.base.APIDocsView.get",
+      "target": "flask.render_template",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.base.OAuthRedirect.get",
+      "target": "flask.render_template",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.definition_object_test.Foo.dispatch_request",
+      "target": "flask.request.args.get",
+      "dep": "flask",
+      "file": "examples/definition_object_test.py"
+    },
+    {
+      "caller": "examples.definition_object_test.recs",
+      "target": "flask.request.args.get",
+      "dep": "flask",
+      "file": "examples/definition_object_test.py"
+    },
+    {
+      "caller": "examples.openapi3_examples.Animals.get",
+      "target": "flask.request.args.get",
+      "dep": "flask",
+      "file": "examples/openapi3_examples.py"
+    },
+    {
+      "caller": "flasgger.base.APIDocsView.get",
+      "target": "flask.request.args.get",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.utils.extract_definitions",
+      "target": "flask.request.endpoint.lower",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.utils.validate",
+      "target": "flask.request.endpoint.lower",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.utils.validate",
+      "target": "flask.request.endpoint.lower.replace",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth.login",
+      "target": "flask.request.form.get",
+      "dep": "flask",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.changelog_090.main_route",
+      "target": "flask.request.form.keys",
+      "dep": "flask",
+      "file": "examples/changelog_090.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth.jwt_request_handler",
+      "target": "flask.request.headers.get",
+      "dep": "flask",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.compat.index",
+      "target": "flask.request.json.get",
+      "dep": "flask",
+      "file": "examples/compat.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.parse_request.before_request",
+      "target": "flask.request.method.lower",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.utils.extract_definitions",
+      "target": "flask.request.method.lower",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.utils.validate",
+      "target": "flask.request.method.lower",
+      "dep": "flask",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.base.APIDocsView.get",
+      "target": "flask.url_for",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.register_views",
+      "target": "flask.url_for",
+      "dep": "flask",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth",
+      "target": "flask_jwt.JWT",
+      "dep": "flask_jwt",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth.jwt_request_handler",
+      "target": "flask_jwt.JWTError",
+      "dep": "flask_jwt",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.legacy.jwt_auth.protected",
+      "target": "flask_jwt.jwt_required",
+      "dep": "flask_jwt",
+      "file": "examples/legacy/jwt_auth.py"
+    },
+    {
+      "caller": "examples.parse_openapi3",
+      "target": "flask_restful.Api",
+      "dep": "flask_restful",
+      "file": "examples/parse_openapi3.py"
+    },
+    {
+      "caller": "examples.parse_openapi3_json",
+      "target": "flask_restful.Api",
+      "dep": "flask_restful",
+      "file": "examples/parse_openapi3_json.py"
+    },
+    {
+      "caller": "examples.restful",
+      "target": "flask_restful.Api",
+      "dep": "flask_restful",
+      "file": "examples/restful.py"
+    },
+    {
+      "caller": "examples.restful.abort_if_todo_doesnt_exist",
+      "target": "flask_restful.abort",
+      "dep": "flask_restful",
+      "file": "examples/restful.py"
+    },
+    {
+      "caller": "examples.restful",
+      "target": "flask_restful.reqparse.RequestParser",
+      "dep": "flask_restful",
+      "file": "examples/restful.py"
+    },
+    {
+      "caller": "tests.test_examples.test_validate_example_specs",
+      "target": "flex.core.validate",
+      "dep": "flex",
+      "file": "tests/test_examples.py"
+    },
+    {
+      "caller": "tests.test_examples.test_validate_example_specs",
+      "target": "flex.load",
+      "dep": "flex",
+      "file": "tests/test_examples.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.__init__",
+      "target": "jsonschema.FormatChecker",
+      "dep": "jsonschema",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.drop_id_validate",
+      "target": "jsonschema.validate",
+      "dep": "jsonschema",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.regular_validate",
+      "target": "jsonschema.validate",
+      "dep": "jsonschema",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.special_validate",
+      "target": "jsonschema.validate",
+      "dep": "jsonschema",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.timestamping_validate",
+      "target": "jsonschema.validate",
+      "dep": "jsonschema",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_try_to_accept",
+      "target": "jsonschema.validate",
+      "dep": "jsonschema",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.__init__.default_validation_function",
+      "target": "jsonschema.validate",
+      "dep": "jsonschema",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.base.MK_SANITIZER",
+      "target": "markupsafe.Markup",
+      "dep": "markupsafe",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.swag_annotation.Body",
+      "target": "marshmallow.validate.Length",
+      "dep": "marshmallow",
+      "file": "examples/swag_annotation.py"
+    },
+    {
+      "caller": "examples.swag_annotation.Query",
+      "target": "marshmallow.validate.OneOf",
+      "dep": "marshmallow",
+      "file": "examples/swag_annotation.py"
+    },
+    {
+      "caller": "flasgger.base.MK_SANITIZER",
+      "target": "mistune.markdown",
+      "dep": "mistune",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.compatible.get_flask_version",
+      "target": "packaging.version.parse",
+      "dep": "packaging",
+      "file": "flasgger/compatible.py"
+    },
+    {
+      "caller": "flasgger.compatible.get_python_version",
+      "target": "packaging.version.parse",
+      "dep": "packaging",
+      "file": "flasgger/compatible.py"
+    },
+    {
+      "caller": "flasgger.compatible.get_flask_version",
+      "target": "pkg_resources.get_distribution",
+      "dep": "pkg_resources",
+      "file": "flasgger/compatible.py"
+    },
+    {
+      "caller": "tests.conftest.app",
+      "target": "pytest.fixture",
+      "dep": "pytest",
+      "file": "tests/conftest.py"
+    },
+    {
+      "caller": "tests.conftest.cli_runner",
+      "target": "pytest.fixture",
+      "dep": "pytest",
+      "file": "tests/conftest.py"
+    },
+    {
+      "caller": "tests.test_base.test_get_apispecs_with_invalid_endpoint",
+      "target": "pytest.raises",
+      "dep": "pytest",
+      "file": "tests/test_base.py"
+    },
+    {
+      "caller": "etc.flasgger_package.setup",
+      "target": "setuptools.find_packages",
+      "dep": "setuptools",
+      "file": "etc/flasgger_package/setup.py"
+    },
+    {
+      "caller": "setup",
+      "target": "setuptools.find_packages",
+      "dep": "setuptools",
+      "file": "setup.py"
+    },
+    {
+      "caller": "etc.flasgger_package.setup",
+      "target": "setuptools.setup",
+      "dep": "setuptools",
+      "file": "etc/flasgger_package/setup.py"
+    },
+    {
+      "caller": "setup",
+      "target": "setuptools.setup",
+      "dep": "setuptools",
+      "file": "setup.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.test_swag",
+      "target": "simplejson.dumps",
+      "dep": "simplejson",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.test_refs.test_swag",
+      "target": "simplejson.dumps",
+      "dep": "simplejson",
+      "file": "examples/test_refs.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.test_swag",
+      "target": "simplejson.dumps",
+      "dep": "simplejson",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_inform_error",
+      "target": "simplejson.dumps",
+      "dep": "simplejson",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "flasgger.base.APISpecsView.get",
+      "target": "simplejson.dumps",
+      "dep": "simplejson",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "examples.custom_validation_function.test_swag",
+      "target": "simplejson.loads",
+      "dep": "simplejson",
+      "file": "examples/custom_validation_function.py"
+    },
+    {
+      "caller": "examples.get_schema.test_swag",
+      "target": "simplejson.loads",
+      "dep": "simplejson",
+      "file": "examples/get_schema.py"
+    },
+    {
+      "caller": "examples.test_refs.test_swag",
+      "target": "simplejson.loads",
+      "dep": "simplejson",
+      "file": "examples/test_refs.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.test_swag",
+      "target": "simplejson.loads",
+      "dep": "simplejson",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_404",
+      "target": "werkzeug.exceptions.abort",
+      "dep": "werkzeug",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_inform_error",
+      "target": "werkzeug.exceptions.abort",
+      "dep": "werkzeug",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "examples.validation_error_handler.validation_error_try_to_accept",
+      "target": "werkzeug.exceptions.abort",
+      "dep": "werkzeug",
+      "file": "examples/validation_error_handler.py"
+    },
+    {
+      "caller": "demo_app.app",
+      "target": "werkzeug.middleware.dispatcher.DispatcherMiddleware",
+      "dep": "werkzeug",
+      "file": "demo_app/app.py"
+    },
+    {
+      "caller": "demo_app.app",
+      "target": "werkzeug.serving.run_simple",
+      "dep": "werkzeug",
+      "file": "demo_app/app.py"
+    },
+    {
+      "caller": "demo_app.app",
+      "target": "werkzeug.wsgi.DispatcherMiddleware",
+      "dep": "werkzeug",
+      "file": "demo_app/app.py"
+    },
+    {
+      "caller": "flasgger.base.Swagger.load_swagger_file.loader",
+      "target": "yaml.safe_load",
+      "dep": "yaml",
+      "file": "flasgger/base.py"
+    },
+    {
+      "caller": "flasgger.utils.__replace_ref",
+      "target": "yaml.safe_load",
+      "dep": "yaml",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.utils.parse_definition_docstring",
+      "target": "yaml.safe_load",
+      "dep": "yaml",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.utils.parse_docstring",
+      "target": "yaml.safe_load",
+      "dep": "yaml",
+      "file": "flasgger/utils.py"
+    },
+    {
+      "caller": "flasgger.utils.validate",
+      "target": "yaml.safe_load",
+      "dep": "yaml",
+      "file": "flasgger/utils.py"
+    }
+  ],
+  "by_dep": {
+    "apispec": [
+      "apispec.ext.marshmallow.MarshmallowPlugin",
+      "apispec.ext.marshmallow.openapi.OpenAPIConverter"
+    ],
+    "apispec_webframeworks": [
+      "apispec_webframeworks.flask.FlaskPlugin"
+    ],
+    "click": [
+      "click.File",
+      "click.command",
+      "click.echo",
+      "click.option"
+    ],
+    "distutils": [
+      "distutils.core.find_packages",
+      "distutils.core.setup"
+    ],
+    "flask": [
+      "flask.Blueprint",
+      "flask.Flask",
+      "flask.Markup",
+      "flask.Response",
+      "flask.abort",
+      "flask.current_app.swag.get_apispecs",
+      "flask.current_app.url_map.iter_rules",
+      "flask.jsonify",
+      "flask.redirect",
+      "flask.render_template",
+      "flask.request.args.get",
+      "flask.request.endpoint.lower",
+      "flask.request.endpoint.lower.replace",
+      "flask.request.form.get",
+      "flask.request.form.keys",
+      "flask.request.headers.get",
+      "flask.request.json.get",
+      "flask.request.method.lower",
+      "flask.url_for"
+    ],
+    "flask_jwt": [
+      "flask_jwt.JWT",
+      "flask_jwt.JWTError",
+      "flask_jwt.jwt_required"
+    ],
+    "flask_restful": [
+      "flask_restful.Api",
+      "flask_restful.abort",
+      "flask_restful.reqparse.RequestParser"
+    ],
+    "flex": [
+      "flex.core.validate",
+      "flex.load"
+    ],
+    "jsonschema": [
+      "jsonschema.FormatChecker",
+      "jsonschema.validate"
+    ],
+    "markupsafe": [
+      "markupsafe.Markup"
+    ],
+    "marshmallow": [
+      "marshmallow.validate.Length",
+      "marshmallow.validate.OneOf"
+    ],
+    "mistune": [
+      "mistune.markdown"
+    ],
+    "packaging": [
+      "packaging.version.parse"
+    ],
+    "pkg_resources": [
+      "pkg_resources.get_distribution"
+    ],
+    "pytest": [
+      "pytest.fixture",
+      "pytest.raises"
+    ],
+    "setuptools": [
+      "setuptools.find_packages",
+      "setuptools.setup"
+    ],
+    "simplejson": [
+      "simplejson.dumps",
+      "simplejson.loads"
+    ],
+    "werkzeug": [
+      "werkzeug.exceptions.abort",
+      "werkzeug.middleware.dispatcher.DispatcherMiddleware",
+      "werkzeug.serving.run_simple",
+      "werkzeug.wsgi.DispatcherMiddleware"
+    ],
+    "yaml": [
+      "yaml.safe_load"
+    ]
+  },
+  "notes": []
+}

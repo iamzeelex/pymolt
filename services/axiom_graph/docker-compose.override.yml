@@ -1,0 +1,5 @@
+# Local-only (e2e): open the auth gate so pymolt can hit the service without a token.
+services:
+  axiom:
+    environment:
+      AXIOM_ALLOW_ANONYMOUS: "1"

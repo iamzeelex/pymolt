@@ -1,0 +1,538 @@
+{
+  "root_dir": "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+  "surfaces": {
+    "root_dir": "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+    "project_roots": [
+      {
+        "path": ".",
+        "manifests": [
+          "requirements-dev.txt",
+          "requirements.txt",
+          "setup.cfg",
+          "setup.py"
+        ],
+        "dockerfiles": [
+          {
+            "path": "Dockerfile",
+            "stages": [
+              {
+                "index": 0,
+                "name": null,
+                "base_image": "python:3.6",
+                "python_version": "3.6",
+                "confidence": "pinned",
+                "os_hint": null,
+                "is_runtime": true,
+                "copies_venv_from": [],
+                "note": null
+              }
+            ],
+            "runtime_python": "3.6",
+            "runtime_confidence": "pinned",
+            "os_hint": null,
+            "install_tools": [
+              "pip"
+            ],
+            "notes": []
+          }
+        ],
+        "tox_nox": [
+          {
+            "path": "tox.ini",
+            "kind": "tox",
+            "declared_versions": [
+              "3.6",
+              "3.7",
+              "3.8",
+              "3.9",
+              "3.11"
+            ],
+            "extra_deps": [
+              "flask==0.10",
+              "click<=8.1.3",
+              "itsdangerous<=1.1.0",
+              "Jinja2<=2.10.3",
+              "MarkupSafe<=1.1.1",
+              "Werkzeug<=2.0.3",
+              "flake8<=3.9.2",
+              "importlib_metadata<4.3",
+              "flask==0.12",
+              "flask==1.0",
+              "flask==1.0.4",
+              "flask",
+              "marshmallow",
+              "apispec"
+            ],
+            "notes": []
+          }
+        ],
+        "version_evidence": [
+          {
+            "source": ".python-version",
+            "source_file": ".python-version",
+            "version": "3.6.1",
+            "confidence": "pinned",
+            "note": null,
+            "kind": "runtime",
+            "constraint": null
+          },
+          {
+            "source": "Dockerfile:FROM",
+            "source_file": "Dockerfile",
+            "version": "3.6",
+            "confidence": "pinned",
+            "note": null,
+            "kind": "runtime",
+            "constraint": null
+          }
+        ],
+        "is_workspace_member": false
+      },
+      {
+        "path": "demo_app",
+        "manifests": [
+          "requirements.txt"
+        ],
+        "dockerfiles": [],
+        "tox_nox": [],
+        "version_evidence": [],
+        "is_workspace_member": false
+      },
+      {
+        "path": "etc/flasgger_package",
+        "manifests": [
+          "setup.py"
+        ],
+        "dockerfiles": [],
+        "tox_nox": [],
+        "version_evidence": [],
+        "is_workspace_member": false
+      }
+    ],
+    "excluded_roots": [],
+    "notes": [
+      "3 project roots (monorepo)"
+    ]
+  },
+  "inventory_by_root": {
+    ".": {
+      "edges": [
+        {
+          "raw": "marshmallow",
+          "name": "marshmallow",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "apispec>=1.0.0b5",
+          "name": "apispec",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "apispec-webframeworks",
+          "name": "apispec-webframeworks",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "flask-restful",
+          "name": "flask-restful",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "pep8==1.7.1",
+          "name": "pep8",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "flake8==3.8.4",
+          "name": "flake8",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "pytest>=4.6",
+          "name": "pytest",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "flex",
+          "name": "flex",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "urllib3<2.0.0",
+          "name": "urllib3",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "coveralls",
+          "name": "coveralls",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "pytest-cov",
+          "name": "pytest-cov",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "decorator",
+          "name": "decorator",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "wheel",
+          "name": "wheel",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "flask-jwt",
+          "name": "flask-jwt",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "twine>=1.11.0",
+          "name": "twine",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "readme_renderer",
+          "name": "readme-renderer",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "setuptools>=40.4.2",
+          "name": "setuptools",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": ".",
+          "name": null,
+          "kind": "local",
+          "extras": [],
+          "marker": null,
+          "editable": true,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "etc/flasgger_package",
+          "name": null,
+          "kind": "unknown",
+          "extras": [],
+          "marker": null,
+          "editable": true,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "pipdeptree",
+          "name": "pipdeptree",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "dev",
+          "source_file": "requirements-dev.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "Flask>=0.10",
+          "name": "flask",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "PyYAML>=3.0",
+          "name": "pyyaml",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "jsonschema>=3.0.1",
+          "name": "jsonschema",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "six>=1.10.0",
+          "name": "six",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "mistune",
+          "name": "mistune",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "werkzeug",
+          "name": "werkzeug",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "packaging",
+          "name": "packaging",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        }
+      ],
+      "includes": [],
+      "constraints": [],
+      "indexes": [],
+      "manifests": [
+        "requirements-dev.txt",
+        "requirements.txt"
+      ],
+      "notes": [
+        "setup.py/setup.cfg present \u2014 its install_requires/extras_require are not yet edge-classified (follow-up)."
+      ]
+    },
+    "demo_app": {
+      "edges": [
+        {
+          "raw": "flasgger",
+          "name": "flasgger",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "marshmallow",
+          "name": "marshmallow",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "apispec",
+          "name": "apispec",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "flask-restful",
+          "name": "flask-restful",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        },
+        {
+          "raw": "decorator",
+          "name": "decorator",
+          "kind": "pypi",
+          "extras": [],
+          "marker": null,
+          "editable": false,
+          "group": "main",
+          "source_file": "requirements.txt",
+          "name_inferred": false,
+          "blocker": null
+        }
+      ],
+      "includes": [],
+      "constraints": [],
+      "indexes": [],
+      "manifests": [
+        "requirements.txt"
+      ],
+      "notes": []
+    },
+    "etc/flasgger_package": {
+      "edges": [],
+      "includes": [],
+      "constraints": [],
+      "indexes": [],
+      "manifests": [],
+      "notes": [
+        "setup.py/setup.cfg present \u2014 its install_requires/extras_require are not yet edge-classified (follow-up)."
+      ]
+    }
+  }
+}
