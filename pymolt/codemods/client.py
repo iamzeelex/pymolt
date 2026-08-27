@@ -23,10 +23,17 @@ import httpx
 
 from pymolt.codemods.models import CodemodBundle, CodemodPattern
 from pymolt.codemods.rules import CodemodRule, verify_rule
+from pymolt.config import (
+    DEFAULT_ENDPOINT,
+    get_cached_delta,
+    load_endpoint,
+    load_token,
+    save_cached_delta,
+)
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://api.pymolt.zeelex.me"
+DEFAULT_BASE_URL = DEFAULT_ENDPOINT
 
 
 class AxiomGraphError(RuntimeError):
@@ -66,7 +73,7 @@ def _rule_label(rule: CodemodRule) -> str:
 
 
 class AxiomGraphClient:
-    """Thin HTTP client over the Axiom Graph API."""
+    """Thin HTTP client over the Axiom Graph API with local offline cache."""
 
     #: Dependencies per request. The server's cost is per release chain, so a
     #: large batch is a single long request that either lands or times out
@@ -75,19 +82,17 @@ class AxiomGraphClient:
 
     def __init__(
         self,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: str | None = None,
         *,
         timeout: float = 120.0,
         token: str | None = None,
+        use_cache: bool = True,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        import os
+        self.base_url = (base_url or load_endpoint()).rstrip("/")
         self.timeout = timeout
-        # The service authenticates the caller against the billing backend; send
-        # the user's API token when present. Resolution: explicit arg, else the
-        # PYMOLT_API_TOKEN env var, else the saved config (`pymolt login`).
-        from pymolt.config import load_token
-
         self.token = token or load_token()
+        self.use_cache = use_cache and not os.environ.get("PYMOLT_NO_CACHE")
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
@@ -106,41 +111,63 @@ class AxiomGraphClient:
         migrations: list[DependencyMigration],
         *,
         progress: Callable[[str], None] | None = None,
+        use_cache: bool | None = None,
     ) -> dict[str, CodemodBundle]:
         """
         Fetch codemods for `migrations`; return a CodemodBundle (patterns AND
         rules) keyed by package.
 
-        Sent in chunks of ``CHUNK_SIZE`` rather than one request. The server
-        diffs whole release chains per dependency, so cost grows with the batch
-        — an eleven-package upgrade set timed out as a single POST while the
-        same work split into chunks completes and, unlike the all-or-nothing
-        request, reports progress as it goes.
-
-        LOCAL RE-VERIFY: every rule is independently re-run against its own
-        golden pair (`verify_rule`) here, at the trust boundary — pymolt is the
-        sole verification authority. A rule that verifies locally is trusted as
-        `verified` regardless of what the server claimed; a rule the server
-        claimed `verified` that fails locally is downgraded to `heuristic` (a
-        warning is logged and its identity recorded in `bundle.downgraded`).
-
-        Raises AxiomGraphError on connection/HTTP failure.
+        Checks local offline cache first. Uncached migrations are sent to the
+        Axiom Cloud Hub in chunks, and results are cached locally.
         """
         if not migrations:
             return {}
+
+        should_cache = self.use_cache if use_cache is None else use_cache
         out: dict[str, CodemodBundle] = {}
+        uncached: list[DependencyMigration] = []
+
+        # 1. Check local cache
+        if should_cache:
+            for m in migrations:
+                cached_raw = get_cached_delta(m.name, m.from_version, m.to_version)
+                if cached_raw:
+                    try:
+                        bundle = CodemodBundle.model_validate(cached_raw)
+                        out[m.name] = bundle
+                        log.debug("Local delta cache hit for %s %s->%s", m.name, m.from_version, m.to_version)
+                    except Exception as c_exc:
+                        log.debug("Cache validation failed for %s: %s", m.name, c_exc)
+                        uncached.append(m)
+                else:
+                    uncached.append(m)
+        else:
+            uncached = list(migrations)
+
+        if not uncached:
+            if progress:
+                progress(f"Loaded {len(out)} package delta(s) from local cache.")
+            return out
+
+        # 2. Fetch uncached chunks from remote Hub
         chunks = [
-            migrations[i : i + self.CHUNK_SIZE]
-            for i in range(0, len(migrations), self.CHUNK_SIZE)
+            uncached[i : i + self.CHUNK_SIZE]
+            for i in range(0, len(uncached), self.CHUNK_SIZE)
         ]
         for index, chunk in enumerate(chunks, start=1):
             if progress:
                 names = ", ".join(m.name for m in chunk)
                 progress(
-                    f"Analyzing batch {index}/{len(chunks)} on Axiom Graph — {names}. "
-                    "Diffing release chains server-side can take a while…"
+                    f"Fetching batch {index}/{len(chunks)} from Axiom Cloud Hub ({self.base_url}) — {names}…"
                 )
-            out.update(self._fetch_chunk(chunk, progress=progress))
+            fetched = self._fetch_chunk(chunk, progress=progress)
+            for m in chunk:
+                if m.name in fetched:
+                    bundle = fetched[m.name]
+                    out[m.name] = bundle
+                    if should_cache:
+                        save_cached_delta(m.name, m.from_version, m.to_version, bundle.model_dump())
+
         return out
 
     def _fetch_chunk(
