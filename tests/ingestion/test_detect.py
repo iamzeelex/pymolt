@@ -144,9 +144,19 @@ def test_detect_project_python_version(tmp_path):
     setup_py.write_text("setup(\n    python_requires='>=3.9',\n)\n", encoding="utf-8")
     assert detect_project_python_version(tmp_path) == "3.9"
 
-    # Test setup.py (classifiers fallback)
+    # Test setup.py (classifiers fallback picks highest/best version)
     setup_py.write_text("setup(\n    classifiers=[\n        'Programming Language :: Python :: 3.10',\n        'Programming Language :: Python :: 3.11',\n    ]\n)\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.10"
+    assert detect_project_python_version(tmp_path) == "3.11"
+    setup_py.unlink()
+
+    # Test local .venv precedence
+    venv_dir = tmp_path / ".venv"
+    venv_dir.mkdir()
+    (venv_dir / "pyvenv.cfg").write_text("version = 3.12.3\n", encoding="utf-8")
+    setup_py.write_text("setup(classifiers=['Programming Language :: Python :: 3.8'])\n", encoding="utf-8")
+    assert detect_project_python_version(tmp_path) == "3.12"
+    import shutil
+    shutil.rmtree(venv_dir)
     setup_py.unlink()
 
     # Test setup.cfg
@@ -157,6 +167,15 @@ def test_detect_project_python_version(tmp_path):
 
     # Non-existent/empty
     assert detect_project_python_version(tmp_path) is None
+
+
+def test_discover_python_environments(tmp_path):
+    from pymolt.ingestion.detect import discover_python_environments
+    venv_dir = tmp_path / ".venv"
+    venv_dir.mkdir()
+    (venv_dir / "pyvenv.cfg").write_text("version = 3.11.4\n", encoding="utf-8")
+    envs = discover_python_environments(tmp_path)
+    assert any(e.name.startswith(".venv") for e in envs)
 
 
 def test_extract_declared_requirements(tmp_path):

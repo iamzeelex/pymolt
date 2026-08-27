@@ -1,5 +1,8 @@
 import logging
+import os
 import re
+import shutil
+import subprocess
 import tomllib
 from collections.abc import Iterable
 from pathlib import Path
@@ -105,118 +108,141 @@ def _classify_pyproject_fixation(path: Path) -> SourceFixation:
 # file). The predicate lives in pymolt.core.generated, shared with discovery.
 
 
-def detect_sources(
-    project_dir: str | Path, *, include_generated: bool = False
-) -> list[DiscoveredSource]:
-    """Scan top level for known manifests:
-    requirements*.txt/.in, pyproject.toml, poetry.lock, Pipfile(.lock),
-    setup.py/.cfg, environment.yml/.yaml, conda-lock.yml.
+def _classify_manifest(path: Path) -> DiscoveredSource | None:
+    name = path.name.lower()
+    if name == "conda-lock.yml":
+        return DiscoveredSource(path=path, mode=Mode.CONDA, is_lock=True, fixation=SourceFixation.PINNED)
+    if name in ("environment.yml", "environment.yaml"):
+        return DiscoveredSource(path=path, mode=Mode.CONDA, is_lock=False, fixation=SourceFixation.INTENT)
+    if name in ("poetry.lock", "pipfile.lock", "uv.lock"):
+        return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=True, fixation=SourceFixation.PINNED)
+    if name == "pyproject.toml":
+        return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=_classify_pyproject_fixation(path))
+    if name == "pipfile":
+        return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=SourceFixation.INTENT)
+    if name in ("setup.py", "setup.cfg"):
+        return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=SourceFixation.INTENT)
+    if (name.startswith("requirements") and (name.endswith(".txt") or name.endswith(".in"))) or name == "pip-packages.txt":
+        return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=_classify_requirements_fixation(path))
+    return None
 
-    Classify mode, is_lock, and fixation. pymolt-generated target manifests
-    (``requirements-target.txt`` etc.) are skipped by default so assess auto-discovery
-    never re-ingests its own output as input; pass ``include_generated=True`` when a
-    caller explicitly consumes such a file (e.g. codemods reading the target manifest).
+
+def _source_priority(s: DiscoveredSource) -> tuple[int, int, str]:
+    name = s.path.name.lower()
+    if s.is_lock:
+        return (0, 0, name)
+    if "requirement" in name or name in ("pyproject.toml", "pipfile", "environment.yml", "environment.yaml"):
+        return (1, 0, name)
+    if name == "setup.py":
+        return (1, 1, name)
+    if name == "setup.cfg":
+        return (1, 2, name)
+    return (1, 3, name)
+
+
+def detect_sources(project_dir: str | Path, *, include_generated: bool = False) -> list[DiscoveredSource]:
+    """Scan the project directory for supported dependency manifests and lockfiles.
+    
+    Searches the immediate project directory (and standard locations like requirements/)
+    for lock files and raw manifests across PyPI and Conda ecosystems.
     """
-    path = Path(project_dir)
-    if not path.is_dir():
-        return []
-
+    project_path = Path(project_dir)
     sources = []
     
-    # We scan the top level directory
-    for item in path.iterdir():
-        if not item.is_file():
-            continue
+    if not project_path.is_dir():
+        return sources
 
-        # Never re-ingest pymolt's own generated target manifest as an input,
-        # unless a caller explicitly asked for it.
-        if not include_generated and is_pymolt_generated(item):
-            continue
+    # 1. Search immediate directory
+    for item in project_path.iterdir():
+        if item.is_file():
+            if not include_generated and is_pymolt_generated(item):
+                continue
+            classified = _classify_manifest(item)
+            if classified:
+                sources.append(classified)
 
-        name = item.name.lower()
+    # 2. Search requirements/ subdirectory if it exists
+    req_dir = project_path / "requirements"
+    if req_dir.is_dir():
+        for item in req_dir.iterdir():
+            if item.is_file() and item.suffix in [".txt", ".in", ".pip"]:
+                if not include_generated and is_pymolt_generated(item):
+                    continue
+                fixation = _classify_requirements_fixation(item)
+                sources.append(DiscoveredSource(
+                    path=item,
+                    mode=Mode.PYPI,
+                    is_lock=False,
+                    fixation=fixation
+                ))
 
-        # 1. Conda sources
-        if name == "conda-lock.yml":
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.CONDA,
-                is_lock=True,
-                fixation=SourceFixation.PINNED
-            ))
-        elif name in ("environment.yml", "environment.yaml"):
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.CONDA,
-                is_lock=False,
-                fixation=SourceFixation.INTENT
-            ))
-            
-        # 2. PyPI Lock files
-        elif name == "poetry.lock":
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=True,
-                fixation=SourceFixation.PINNED
-            ))
-        elif name == "pipfile.lock":
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=True,
-                fixation=SourceFixation.PINNED
-            ))
-        elif name == "uv.lock":
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=True,
-                fixation=SourceFixation.PINNED
-            ))
-            
-        # 3. PyPI Manifests
-        elif name == "pyproject.toml":
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=False,
-                fixation=_classify_pyproject_fixation(item)
-            ))
-        elif name == "pipfile":
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=False,
-                fixation=SourceFixation.INTENT
-            ))
-        elif name in ("setup.py", "setup.cfg"):
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=False,
-                fixation=SourceFixation.INTENT
-            ))
-        elif (name.startswith("requirements") and (name.endswith(".txt") or name.endswith(".in"))) or name == "pip-packages.txt":
-            fixation = _classify_requirements_fixation(item)
-            sources.append(DiscoveredSource(
-                path=item,
-                mode=Mode.PYPI,
-                is_lock=False,
-                fixation=fixation
-            ))
-
-    # Sort sources: lock files first (is_lock=True), then by path name for deterministic output
-    sources.sort(key=lambda s: (not s.is_lock, s.path.name))
+    # Sort sources: lock files first (is_lock=True), then standard manifests (requirements, pyproject, setup.py > setup.cfg)
+    sources.sort(key=_source_priority)
     return sources
 
 
+def _extract_pyvenv_version(venv_dir: Path) -> str | None:
+    """Read python version from pyvenv.cfg or binary."""
+    cfg_file = venv_dir / "pyvenv.cfg"
+    if cfg_file.is_file():
+        try:
+            for line in cfg_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k, v = k.strip().lower(), v.strip()
+                    if k in ("version_info", "version"):
+                        match = re.match(r"^(\d+\.\d+)", v)
+                        if match:
+                            return match.group(1)
+        except Exception:
+            pass
+    return None
+
+
+def _pick_best_classifier_version(classifiers: list[str], project_path: Path) -> str | None:
+    """Select the best Python version from classifiers:
+    1. Highest installed version matching classifiers
+    2. Otherwise, highest declared version (not the lowest!)
+    """
+    py3_versions = [v for v in classifiers if v.startswith("3.")]
+    if py3_versions:
+        sorted_versions = sorted(list(set(py3_versions)), key=lambda x: [int(p) for p in x.split(".")])
+    else:
+        sorted_versions = sorted(list(set(classifiers)), key=lambda x: [int(p) for p in x.split(".")])
+    
+    if not sorted_versions:
+        return None
+
+    try:
+        from pymolt.ingestion.fallback_compiler import find_python_interpreter
+        for v in reversed(sorted_versions):
+            if find_python_interpreter(v, project_path):
+                return v
+    except Exception:
+        pass
+
+    # Fallback to the latest/highest declared version
+    return sorted_versions[-1]
+
+
 def detect_project_python_version(project_dir: str | Path) -> str | None:
-    """Search for the project's own Python version configuration using standard project files:
-    .python-version, pyproject.toml requires-python, or setup.py/setup.cfg classifiers/python_requires.
+    """Search for the project Python version configuration.
+    
+    Checks active/local virtualenvs, .python-version, pyproject.toml, Pipfile, setup.py, setup.cfg.
     """
     project_path = Path(project_dir)
-    
-    # 1. Check .python-version
+
+    # 1. Check project-local virtualenvs
+    common_env_names = (".venv", "venv", "env", ".conda", "conda-env", "virtualenv")
+    if project_path.is_dir():
+        for name in common_env_names:
+            env_dir = project_path / name
+            if env_dir.is_dir():
+                v = _extract_pyvenv_version(env_dir)
+                if v:
+                    return v
+
+    # 2. Check .python-version
     python_version_file = project_path / ".python-version"
     if python_version_file.is_file():
         try:
@@ -226,13 +252,15 @@ def detect_project_python_version(project_dir: str | Path) -> str | None:
         except Exception:
             pass
 
-    # 2. Check pyproject.toml
+    # 3. Check pyproject.toml
     pyproject_file = project_path / "pyproject.toml"
     if pyproject_file.is_file():
         try:
             with open(pyproject_file, "rb") as f:
                 data = tomllib.load(f)
             requires_python = data.get("project", {}).get("requires-python")
+            if not requires_python:
+                requires_python = data.get("tool", {}).get("poetry", {}).get("dependencies", {}).get("python")
             if requires_python:
                 match = re.search(r"(\d+\.\d+(?:\.\d+)?)", requires_python)
                 if match:
@@ -240,7 +268,7 @@ def detect_project_python_version(project_dir: str | Path) -> str | None:
         except Exception:
             pass
 
-    # 3. Check Pipfile
+    # 4. Check Pipfile
     pipfile_file = project_path / "Pipfile"
     if pipfile_file.is_file():
         try:
@@ -255,7 +283,7 @@ def detect_project_python_version(project_dir: str | Path) -> str | None:
         except Exception:
             pass
 
-    # 4. Check setup.py
+    # 5. Check setup.py
     setup_py_file = project_path / "setup.py"
     if setup_py_file.is_file():
         try:
@@ -265,19 +293,16 @@ def detect_project_python_version(project_dir: str | Path) -> str | None:
                 match_ver = re.search(r"(\d+\.\d+(?:\.\d+)?)", match_req.group(1))
                 if match_ver:
                     return match_ver.group(1)
-            
+
             classifiers = re.findall(r"Programming Language :: Python :: (\d+\.\d+(?:\.\d+)?)", content)
             if classifiers:
-                py3_versions = [v for v in classifiers if v.startswith("3.")]
-                if py3_versions:
-                    sorted_versions = sorted(list(set(py3_versions)), key=lambda x: [int(p) for p in x.split(".")])
-                else:
-                    sorted_versions = sorted(list(set(classifiers)), key=lambda x: [int(p) for p in x.split(".")])
-                return sorted_versions[0]
+                picked = _pick_best_classifier_version(classifiers, project_path)
+                if picked:
+                    return picked
         except Exception:
             pass
 
-    # 5. Check setup.cfg
+    # 6. Check setup.cfg
     setup_cfg_file = project_path / "setup.cfg"
     if setup_cfg_file.is_file():
         try:
@@ -288,6 +313,12 @@ def detect_project_python_version(project_dir: str | Path) -> str | None:
                 match_ver = re.search(r"(\d+\.\d+(?:\.\d+)?)", val)
                 if match_ver:
                     return match_ver.group(1)
+
+            classifiers = re.findall(r"Programming Language :: Python :: (\d+\.\d+(?:\.\d+)?)", content)
+            if classifiers:
+                picked = _pick_best_classifier_version(classifiers, project_path)
+                if picked:
+                    return picked
         except Exception:
             pass
 
@@ -351,9 +382,8 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
     elif name == "setup.py":
         try:
             content = manifest_path.read_text(encoding="utf-8")
-            match = re.search(r"install_requires\s*=\s*\[(.*?)\]", content, re.DOTALL)
-            if match:
-                block = match.group(1)
+            blocks = re.findall(r"(?:install_requires|install_reqs|requirements|requires|deps)\s*=\s*\[(.*?)\]", content, re.DOTALL)
+            for block in blocks:
                 items = re.findall(r"['\"]([^'\"]+)['\"]", block)
                 for item in items:
                     item = item.strip()
@@ -395,35 +425,174 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
         except Exception:
             pass
 
+    if not requirements and name == "setup.cfg" and (manifest_path.parent / "setup.py").is_file():
+        return extract_declared_requirements(manifest_path.parent / "setup.py")
+
     return requirements
+
+
+class DiscoveredEnvironment(BaseModel):
+    name: str
+    path: Path
+    executable: Path
+    version: str | None = None
+    kind: str  # "project_venv", "active_venv", "conda", "pyenv", "poetry", "pipenv", "uv", "system"
+
+
+def discover_python_environments(project_dir: str | Path = ".") -> list[DiscoveredEnvironment]:
+    """Scan the project and host system for all available Python environments and interpreters,
+    similar to IDE interpreter discovery in PyCharm and VS Code.
+    """
+    project_path = Path(project_dir).expanduser().resolve()
+    is_windows = os.name == "nt"
+    sub_dir = "Scripts" if is_windows else "bin"
+    exe_name = "python.exe" if is_windows else "python"
+    exe_name_3 = "python3.exe" if is_windows else "python3"
+
+    envs: list[DiscoveredEnvironment] = []
+    seen_executables: set[Path] = set()
+
+    def add_env(name: str, path: Path, exe: Path, kind: str, ver: str | None = None):
+        try:
+            exe_resolved = exe.resolve()
+            if exe_resolved in seen_executables:
+                return
+            if not exe.is_file() and not (path / "pyvenv.cfg").is_file():
+                return
+            seen_executables.add(exe_resolved)
+            if not ver:
+                ver = _extract_pyvenv_version(path)
+            if not ver and exe.is_file():
+                try:
+                    res = subprocess.run(
+                        [str(exe), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                        capture_output=True, text=True, timeout=2
+                    )
+                    if res.returncode == 0:
+                        ver = res.stdout.strip()
+                except Exception:
+                    pass
+            envs.append(DiscoveredEnvironment(
+                name=name,
+                path=path,
+                executable=exe,
+                version=ver,
+                kind=kind,
+            ))
+        except Exception:
+            pass
+
+    # 1. Project-local virtual environments
+    ignored_names = {".git", ".pymolt", ".pymolt_cache", ".pytest_cache", "__pycache__", "tests", "pymolt"}
+    if project_path.is_dir():
+        try:
+            for item in project_path.iterdir():
+                if item.is_dir() and item.name not in ignored_names:
+                    bin_path = item / sub_dir / exe_name
+                    bin_path3 = item / sub_dir / exe_name_3
+                    target_exe = bin_path if bin_path.is_file() else bin_path3
+                    if target_exe.is_file() or (item / "pyvenv.cfg").is_file():
+                        add_env(f"{item.name} (project)", item, target_exe, "project_venv")
+        except Exception:
+            pass
+
+    # 2. Currently active environment
+    active_venv = os.environ.get("VIRTUAL_ENV")
+    if active_venv:
+        av_path = Path(active_venv)
+        exe = av_path / sub_dir / exe_name
+        add_env("Active Virtualenv (VIRTUAL_ENV)", av_path, exe, "active_venv")
+
+    active_conda = os.environ.get("CONDA_PREFIX")
+    if active_conda:
+        ac_path = Path(active_conda)
+        exe = ac_path / sub_dir / exe_name
+        add_env(f"Active Conda ({ac_path.name})", ac_path, exe, "conda")
+
+    # 3. Pyenv versions (~/.pyenv/versions/*)
+    pyenv_dir = Path.home() / ".pyenv" / "versions"
+    if pyenv_dir.is_dir():
+        try:
+            for item in pyenv_dir.iterdir():
+                if item.is_dir():
+                    exe = item / sub_dir / exe_name
+                    if not exe.is_file():
+                        exe = item / sub_dir / exe_name_3
+                    if exe.is_file():
+                        add_env(f"pyenv: {item.name}", item, exe, "pyenv")
+        except Exception:
+            pass
+
+    # 4. Conda environments (~/.conda/envs/*, ~/miniconda3/envs/*, ~/anaconda3/envs/*)
+    conda_base_dirs = [
+        Path.home() / ".conda" / "envs",
+        Path.home() / "miniconda3" / "envs",
+        Path.home() / "anaconda3" / "envs",
+        Path.home() / "miniforge3" / "envs",
+        Path("/opt/conda/envs"),
+    ]
+    for cb in conda_base_dirs:
+        if cb.is_dir():
+            try:
+                for item in cb.iterdir():
+                    if item.is_dir():
+                        exe = item / sub_dir / exe_name
+                        if exe.is_file():
+                            add_env(f"conda: {item.name}", item, exe, "conda")
+            except Exception:
+                pass
+
+    # 5. Poetry cache environments (~/.cache/pypoetry/virtualenvs/*)
+    poetry_dir = Path.home() / ".cache" / "pypoetry" / "virtualenvs"
+    if poetry_dir.is_dir():
+        try:
+            for item in poetry_dir.iterdir():
+                if item.is_dir():
+                    exe = item / sub_dir / exe_name
+                    if exe.is_file():
+                        add_env(f"poetry: {item.name}", item, exe, "poetry")
+        except Exception:
+            pass
+
+    # 6. System / Toolchain Python interpreters
+    system_candidates = [
+        "python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8", "python3.7", "python3", "python",
+        "/opt/homebrew/bin/python3", "/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3.11",
+        "/usr/local/bin/python3", "/usr/bin/python3"
+    ]
+    for cand in system_candidates:
+        resolved = shutil.which(cand) or (Path(cand) if Path(cand).is_file() else None)
+        if resolved:
+            p_res = Path(resolved)
+            if p_res.is_file():
+                add_env(f"System ({p_res.name})", p_res.parent, p_res, "system")
+
+    return envs
 
 
 def detect_local_environments(project_dir: str | Path) -> list[str]:
     """Scan the project directory for standard virtual environment directories and custom python envs."""
-    import os
     project_path = Path(project_dir)
     found = []
     if not project_path.is_dir():
         return found
-    
+
     is_windows = os.name == "nt"
     sub_dir = "Scripts" if is_windows else "bin"
     exe_name = "python.exe" if is_windows else "python"
-    
-    # Directories to ignore during scanning
+
     ignored_names = {".git", ".pymolt", ".pymolt_cache", ".pytest_cache", "__pycache__", "tests", "pymolt"}
-    
+
     try:
         for item in project_path.iterdir():
             if item.is_dir() and item.name not in ignored_names:
                 bin_path = item / sub_dir / exe_name
                 name_lower = item.name.lower()
-                # If python executable exists or folder matches common env prefixes
                 if bin_path.is_file() or any(p in name_lower for p in ("venv", "env", "conda")):
                     found.append(item.name)
     except Exception:
         pass
-        
+
     return sorted(list(set(found)))
 
 
