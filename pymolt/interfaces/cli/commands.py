@@ -162,6 +162,16 @@ env_app = typer.Typer(
 )
 app.add_typer(env_app, name="env", rich_help_panel="Tools & account")
 
+config_app = typer.Typer(
+    help="Manage pymolt configuration and local offline delta cache."
+)
+app.add_typer(config_app, name="config", rich_help_panel="Tools & account")
+
+auth_app = typer.Typer(
+    help="Manage Axiom Cloud Hub authentication and API tokens."
+)
+app.add_typer(auth_app, name="auth", rich_help_panel="Tools & account")
+
 
 _STATE_MARK = {
     "done": ("✓", "green"),
@@ -244,20 +254,6 @@ def scan(
         _render_inventory(inv)
 
     next_step(project_path)
-
-
-@app.command(rich_help_panel="Tools & account", hidden=True, deprecated=True)
-def init():
-    """Deprecated: `pymolt setup` creates everything this used to.
-
-    It only ever made a cache directory — in the *current* working directory, not
-    the project's — which setup and the phases now do for themselves.
-    """
-    err.print(
-        "[yellow]`pymolt init` is deprecated and does nothing.[/yellow] "
-        "Start with [bold]pymolt status .[/bold] to see where you are, "
-        "then [bold]pymolt setup .[/bold]."
-    )
 
 
 def _eol_hint(status: str, eol_date: str | None) -> str:
@@ -1273,31 +1269,162 @@ def _render_surface_map(smap) -> None:
 
 def _render_codemod_auth_prompt():
     from rich.panel import Panel
+    from pymolt.config import load_endpoint
 
+    endpoint = load_endpoint()
     msg = (
         "[bold cyan]✨ What are PyMolt Codemods?[/bold cyan]\n"
         "Codemods are automatic AST transformations (using LibCST) applied during library upgrades.\n"
         "They rewrite deprecated syntax, API calls, imports, and methods ([dim]pandas 1.x → 2.x, pydantic v1 → v2, etc.[/dim]).\n\n"
-        "[bold cyan]🔑 Axiom Graph Authentication[/bold cyan]\n"
-        "Codemod rules and recipes are fetched on-demand from the **Axiom Graph** service.\n"
-        "• [bold green]Privacy-first:[/bold green] Your source code [bold]never leaves your machine[/bold]. Only package names and version jumps are sent to Axiom Graph.\n"
-        "• [bold green]First recipe is 100% free[/bold green] for any package tier.\n\n"
+        "[bold cyan]🔑 Axiom Cloud Hub Authentication[/bold cyan]\n"
+        "Codemod rules and recipes are fetched on-demand from the **Axiom Cloud Hub** service.\n"
+        "• [bold green]Privacy-first:[/bold green] Your source code [bold]never leaves your machine[/bold]. Only package names and version jumps are sent.\n"
+        "• [bold green]Free & Open Source ecosystem:[/bold green] All public PyPI migrations are free.\n\n"
         "[bold yellow]Getting Started:[/bold yellow]\n"
-        "1. Create a free account & get an API token: [bold underline blue]https://pymolt.zeelex.me[/bold underline blue] (Account → API tokens)\n"
-        "2. Save your token locally:\n"
-        "   [bold green]pymolt login[/bold green]\n"
-        "   [dim](or set env variable: export PYMOLT_API_TOKEN=\"your_token\")[/dim]\n"
-        "3. Re-run your command:\n"
+        "1. Authorize your CLI device session:\n"
+        "   [bold green]pymolt auth login[/bold green]\n"
+        f"   [dim](or visit: {endpoint}/cli/auth)[/dim]\n"
+        "2. Re-run your command:\n"
         "   [bold green]pymolt codemods .[/bold green]"
     )
     console.print(
         Panel(
             msg,
-            title="[bold]PyMolt Codemods & Axiom Graph Service[/bold]",
+            title="[bold]PyMolt Codemods & Axiom Cloud Hub[/bold]",
             border_style="cyan",
             padding=(1, 2),
         )
     )
+
+
+@app.command(rich_help_panel="Migration Workflow")
+def migrate(
+    project_dir: str = typer.Argument(".", help="The target project directory to migrate"),
+    target_python: str | None = typer.Option(
+        None, "--target-python", "-t", help="Target Python version (e.g. 3.12 or 3.13)"
+    ),
+    manifest: str | None = typer.Option(
+        None, "--manifest", "-m", help="Manifest path (e.g. requirements.txt or pyproject.toml)"
+    ),
+    write: bool = typer.Option(
+        False, "--write", "-w", help="Apply code transformations directly to disk (default: dry-run preview)"
+    ),
+    endpoint: str | None = typer.Option(
+        None, "--endpoint", help="Axiom Cloud Hub / On-Prem endpoint URL"
+    ),
+):
+    """Run the complete end-to-end Python migration workflow in one command.
+
+    Steps:
+      1. Setup / Auto-configure target Python & manifest
+      2. Assess dependencies & generate requirements-target.txt
+      3. Fetch verified LibCST codemods from Axiom Cloud Hub & apply rewrites
+      4. Display executive summary & contract verification next steps
+    """
+    from pymolt.assess.service import run_assess
+    from pymolt.codemods.service import resolve_codemod_migrations, run_codemods
+    from pymolt.config import load_endpoint
+    from pymolt.ingestion.config import EnvConfig
+
+    project_path = require_project_dir(project_dir)
+    console.print(f"\n[bold cyan]🚀 Starting PyMolt End-to-End Migration for [white]{project_path.resolve()}[/white][/bold cyan]\n")
+
+    # 1. Config & Target Python
+    try:
+        from pymolt.ingestion.detect import detect_sources
+        sources = detect_sources(project_path)
+    except Exception as e:
+        fail(f"Source detection failed: {e}", hint="Check directory permissions")
+
+    if not sources:
+        fail(
+            f"No Python dependency sources detected in {project_path}",
+            hint="pymolt resolves from a manifest (requirements*.txt, pyproject.toml, Pipfile, environment.yml, setup.cfg, setup.py); none was found.",
+        )
+
+    config_file = project_path / ".pymolt" / "env_config.json"
+    cfg = EnvConfig.load(config_file) if config_file.is_file() else None
+    config = cfg.model_dump(mode="json") if cfg else {}
+
+    target_py = target_python or config.get("target_python")
+    if not target_py:
+        target_py = "3.12"
+        console.print(f"[dim]No target Python configured; defaulting to Python {target_py}[/dim]")
+
+    selected_manifest = manifest or config.get("selected_manifest")
+    if not selected_manifest:
+        lock_sources = [s for s in sources if s.is_lock]
+        selected_manifest = lock_sources[0].path.name if lock_sources else sources[0].path.name
+
+    tool = config.get("selected_tool", "uv")
+    if hasattr(tool, "value"):
+        tool = tool.value
+
+    # 2. Run Assess
+    try:
+        with err.status(f"[bold cyan]Phase 1/2: Assessing dependencies against Python {target_py}…[/bold cyan]", spinner="dots"):
+            result = run_assess(
+                str(project_path),
+                target_python=target_py,
+                source_manifest=selected_manifest,
+                config=config,
+                tool=tool,
+            )
+    except Exception as exc:
+        fail(f"Assessment failed: {exc}", hint="Ensure resolution tool (uv or system pip) is available.")
+
+    if not result.target_resolved:
+        fail(
+            f"Target dependency resolution failed: {result.target_error or 'Dependency conflict'}",
+            hint="Check that packages have compatible wheels for the target Python version.",
+        )
+
+    target_manifest = result.target_manifest_path or "requirements-target.txt"
+    console.print(f"[green]✓ Assessed {len(result.rows)} package(s)[/green] → [cyan]{target_manifest}[/cyan]")
+
+    # 3. Derive and Run Codemods
+    degrade_warnings: list[str] = []
+    try:
+        migrations, source_desc = resolve_codemod_migrations(
+            str(project_path),
+            target_dependency_file=target_manifest,
+            config=config,
+            warnings=degrade_warnings,
+        )
+    except Exception as exc:
+        warn(f"Could not derive migrations from target manifest: {exc}")
+        migrations = []
+        source_desc = "target manifest"
+
+    if not migrations:
+        console.print("[yellow]No dependency version jumps requiring codemods.[/yellow]\n")
+        return
+
+    effective_endpoint = load_endpoint(endpoint)
+    console.print(f"[bold]Phase 2/2: Fetching LibCST codemods[/bold] for [cyan]{source_desc}[/cyan] from {effective_endpoint}…")
+
+    try:
+        with err.status("[bold cyan]Applying AST transformations…[/bold cyan]", spinner="dots") as st:
+            by_pkg, codemod_result = run_codemods(
+                str(project_path),
+                migrations,
+                base_url=effective_endpoint,
+                write=write,
+                progress=lambda msg: st.update(f"[cyan]{msg}[/cyan]"),
+            )
+    except Exception as exc:
+        warn(f"Codemods step could not complete: {exc}")
+        return
+
+    total_patterns = sum(len(items) for items in by_pkg.values())
+    mode_badge = "[bold red]WRITTEN TO DISK[/bold red]" if write else "[yellow]DRY-RUN PREVIEW[/yellow]"
+    console.print(f"\n[bold green]✓ Migration pipeline finished![/bold green] ({mode_badge})")
+    console.print(f"  • Target Python: [cyan]{target_py}[/cyan]")
+    console.print(f"  • Upgraded packages: [cyan]{len(migrations)}[/cyan]")
+    console.print(f"  • AST Codemods applied: [cyan]{total_patterns}[/cyan]")
+    if not write:
+        console.print(f"\n[dim]To write changes to disk, re-run with:[/dim] [bold]pymolt migrate --write[/bold]")
+    console.print(f"[dim]Next step:[/dim] [bold]pymolt contract capture --when baseline -- pytest[/bold]\n")
 
 
 @app.command(rich_help_panel="Migration Workflow")
@@ -1311,8 +1438,11 @@ def codemods(
         "--target-file",
         help="Target dependency file to compare against the current config",
     ),
-    axiom_url: str = typer.Option(
-        "https://api.pymolt.zeelex.me", "--axiom-url", help="Axiom Graph service base URL"
+    endpoint: str | None = typer.Option(
+        None, "--endpoint", help="Axiom Cloud Hub / On-Prem endpoint URL (e.g. http://localhost:8000)"
+    ),
+    axiom_url: str | None = typer.Option(
+        None, "--axiom-url", hidden=True, help="[Deprecated alias for --endpoint]"
     ),
     write: bool = typer.Option(
         False, "--write", help="Apply changes to disk (default: dry-run preview)"
@@ -1328,8 +1458,9 @@ def codemods(
     from pymolt.codemods.client import AxiomGraphError, DependencyMigration
     from pymolt.codemods.models import CodemodPattern
     from pymolt.codemods.service import resolve_codemod_migrations, run_codemods
-    from pymolt.config import load_token
+    from pymolt.config import load_endpoint, load_token
 
+    effective_endpoint = load_endpoint(endpoint or axiom_url)
     token = load_token()
     require_project_dir(project_dir)
     config = None
@@ -1370,18 +1501,18 @@ def codemods(
         source_desc = f"{package} {from_version} → {to_version}"
 
     console.print(
-        f"[bold]Requesting codemods[/bold] for [cyan]{source_desc}[/cyan] via {axiom_url}"
+        f"[bold]Requesting codemods[/bold] for [cyan]{source_desc}[/cyan] via {effective_endpoint}"
     )
     if not migrations:
         console.print("[yellow]No dependency migrations to request (nothing changed).[/yellow]")
         return
 
     try:
-        with err.status("Connecting to Axiom Graph…", spinner="dots") as status:
+        with err.status("Connecting to Axiom Cloud Hub…", spinner="dots") as status:
             by_pkg, result = run_codemods(
                 project_dir,
                 migrations,
-                base_url=axiom_url,
+                base_url=effective_endpoint,
                 write=write,
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
             )
@@ -1390,26 +1521,26 @@ def codemods(
         if not token:
             _render_codemod_auth_prompt()
             fail(
-                f"Axiom Graph unavailable: {exc}",
-                hint="Register at https://pymolt.zeelex.me and run 'pymolt login'",
+                f"Axiom Cloud Hub unavailable: {exc}",
+                hint="Run 'pymolt auth login' to authenticate.",
                 code=EXIT_ENVIRONMENT,
             )
         elif any(k in exc_str for k in ("401", "403", "Unauthorized", "Forbidden")):
             fail(
-                "Axiom Graph authentication error: invalid or expired API token.",
-                hint="Update your token at https://pymolt.zeelex.me (Account → API tokens) and run 'pymolt login'.",
+                "Axiom Cloud Hub authentication error: invalid or expired API token.",
+                hint="Re-authenticate with 'pymolt auth login'.",
                 code=EXIT_ENVIRONMENT,
             )
-        elif "localhost" in axiom_url or "127.0.0.1" in axiom_url:
+        elif "localhost" in effective_endpoint or "127.0.0.1" in effective_endpoint:
             fail(
-                f"Axiom Graph unavailable: {exc}",
-                hint="Is the service running?  docker run -p 8000:8000 axiom-graph",
+                f"Axiom service unavailable: {exc}",
+                hint="Is the container running?  docker run -p 8000:8000 axiom-graph",
                 code=EXIT_ENVIRONMENT,
             )
         else:
             fail(
-                f"Failed to connect to Axiom Graph service ({axiom_url}).",
-                hint="Check your network connection or verify your API token with 'pymolt login'.",
+                f"Failed to connect to Axiom Cloud Hub service ({effective_endpoint}).",
+                hint="Check your network connection or verify your API token with 'pymolt auth status'.",
                 code=EXIT_ENVIRONMENT,
             )
 
@@ -1653,36 +1784,141 @@ def _render_transplant_plan(plan) -> None:
         console.print(f"[dim]note: {escape(note)}[/dim]")
 
 
+# ---------------------------------------------------------------------------
+# Config Commands (`pymolt config ...`)
+# ---------------------------------------------------------------------------
+
+@config_app.command("show")
+def config_show_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Emit config status as JSON"),
+):
+    """Display active Axiom Cloud Hub configuration and local cache metrics."""
+    from pymolt.config import config_show
+
+    info = config_show()
+    if json_output:
+        import json
+        print(json.dumps(info, indent=2))
+        return
+
+    console.print("\n[bold cyan]⚙  PyMolt Configuration & Cache[/bold cyan]")
+    endpoint_badge = "[dim](default)[/dim]" if info["is_default_endpoint"] else "[yellow](custom on-prem/vpc)[/yellow]"
+    console.print(f"  • [bold]Axiom Cloud Hub Endpoint:[/bold] [cyan]{info['endpoint']}[/cyan] {endpoint_badge}")
+    auth_badge = "[green](configured)[/green]" if info["token_configured"] else "[dim](anonymous / free-tier)[/dim]"
+    console.print(f"  • [bold]Authentication Token:[/bold] {info['token_preview']} {auth_badge}")
+    console.print(f"  • [bold]Config File:[/bold] [dim]{info['config_file']}[/dim]")
+
+    c = info["cache"]
+    size_kb = round(c["total_size_bytes"] / 1024, 1)
+    console.print(f"  • [bold]Local Delta Cache:[/bold] {c['packages']} packages, {c['total_files']} files ({size_kb} KB)")
+    console.print(f"    [dim]{c['path']}[/dim]\n")
+
+
+@config_app.command("set-endpoint")
+def config_set_endpoint_cmd(
+    url: str = typer.Argument(
+        ..., help="Custom Axiom Cloud Hub or on-prem endpoint URL (e.g. https://hub.internal.corp or http://localhost:8000)"
+    ),
+):
+    """Set custom Axiom Cloud Hub / On-Premise Docker endpoint URL."""
+    from pymolt.config import save_endpoint
+
+    clean_url = url.strip().rstrip("/")
+    if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+        fail("Invalid endpoint URL format.", hint="URL must start with http:// or https://")
+    path = save_endpoint(clean_url)
+    console.print(f"[green]✓ Set[/green] Axiom endpoint to [cyan]{clean_url}[/cyan] (saved to [dim]{path}[/dim])")
+
+
+@config_app.command("reset-endpoint")
+def config_reset_endpoint_cmd():
+    """Reset Axiom Cloud Hub endpoint to the default public service."""
+    from pymolt.config import clear_endpoint, DEFAULT_ENDPOINT
+
+    clear_endpoint()
+    console.print(f"[green]✓ Reset[/green] Axiom endpoint to default public Hub: [cyan]{DEFAULT_ENDPOINT}[/cyan]")
+
+
+@config_app.command("clear-cache")
+def config_clear_cache_cmd():
+    """Purge all locally cached delta bundles."""
+    from pymolt.config import clear_delta_cache
+
+    count = clear_delta_cache()
+    console.print(f"[green]✓ Cleared[/green] local delta cache ({count} package cache folder(s) removed).")
+
+
+# ---------------------------------------------------------------------------
+# Auth Commands (`pymolt auth ...` and top-level `login`/`logout`)
+# ---------------------------------------------------------------------------
+
+@auth_app.command("login")
 @app.command(rich_help_panel="Tools & account")
 def login(
     token: str | None = typer.Option(
-        None, "--token", help="API token (pmk_…); omit to be prompted (hidden input)"),
+        None, "--token", help="API token (pmk_…); omit to open browser verification link"),
 ):
-    """Store your pymolt API token for the Axiom Graph codemod service.
+    """Authenticate PyMolt CLI with Axiom Cloud Hub.
 
-    Create one at https://pymolt.zeelex.me (Account → API tokens). The token is
-    saved to your user config (chmod 600) and sent by `pymolt codemods`. The
-    PYMOLT_API_TOKEN env var overrides the saved token when set.
+    Generates a secure, anti-bot verification link to authorize this CLI
+    device session and persists the API token to your user config (0600).
     """
-    from pymolt.config import save_token
+    import secrets
+    from pymolt.config import load_endpoint, save_token
 
-    tok = (token or typer.prompt("Paste your pymolt API token", hide_input=True)).strip()
+    endpoint = load_endpoint()
+    session_id = f"pm_sess_{secrets.token_hex(8)}"
+    auth_url = f"{endpoint}/cli/auth?session={session_id}"
+
+    if not token:
+        console.print("\n[bold cyan]🔐 Axiom Cloud Hub CLI Authorization[/bold cyan]")
+        console.print("To authenticate and verify against automated bot access, visit:")
+        console.print(f"  [bold underline yellow]{auth_url}[/bold underline yellow]\n")
+
+        tok = typer.prompt("Paste your API token (pmk_…)", hide_input=True).strip()
+    else:
+        tok = token.strip()
+
     if not tok:
-        fail("no token provided.",
-             hint="Create one at https://pymolt.zeelex.me (Account → API tokens).")
+        fail("no token provided.", hint=f"Obtain an API token at {auth_url}")
+
     path = save_token(tok)
-    console.print(f"[green]Saved[/green] API token to [cyan]{path}[/cyan]")
+    console.print(f"[green]✓ Successfully authenticated![/green] Token saved to [cyan]{path}[/cyan]\n")
 
 
+@auth_app.command("status")
+def auth_status_cmd():
+    """Check authentication and connection status to Axiom Cloud Hub."""
+    from pymolt.codemods.client import AxiomGraphClient
+    from pymolt.config import load_endpoint, load_token
+
+    tok = load_token()
+    endpoint = load_endpoint()
+    client = AxiomGraphClient(base_url=endpoint)
+    is_healthy = client.health()
+
+    console.print(f"\n[bold cyan]🔐 Axiom Cloud Hub Status[/bold cyan]")
+    status_badge = "[green]● Online[/green]" if is_healthy else "[yellow]○ Unreachable[/yellow]"
+    console.print(f"  • Endpoint: [cyan]{endpoint}[/cyan] {status_badge}")
+    if tok:
+        masked = f"{tok[:6]}...{tok[-4:]}" if len(tok) > 10 else "Set"
+        console.print(f"  • Authentication: [green]Logged in[/green] ({masked})")
+    else:
+        console.print(f"  • Authentication: [dim]Anonymous / Free-tier mode[/dim]")
+    console.print()
+
+
+@auth_app.command("logout")
 @app.command(rich_help_panel="Tools & account")
 def logout():
-    """Remove the stored pymolt API token."""
+    """Remove stored Axiom Cloud Hub API token."""
     from pymolt.config import clear_token
 
     if clear_token():
-        console.print("[green]Removed[/green] the stored API token.")
+        console.print("[green]✓ Logged out.[/green] Removed stored API token.")
     else:
         console.print("[dim]No stored API token to remove.[/dim]")
+
 
 
 @env_app.command("hint")
