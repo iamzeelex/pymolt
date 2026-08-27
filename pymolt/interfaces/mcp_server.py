@@ -60,8 +60,8 @@ PyMolt migration funnel as tools. Workflow:
   ->  [engineer builds the target env themselves; human/agent edits the project's code]
   ->  contract_capture(when='baseline' BEFORE editing, when='post-migration' AFTER)
   ->  contract_report  (repeat edits + post-migration capture until no result_changed)
-codemods_preview is a DRY RUN: it never applies changes and never spends money.
-Purchases / applying codemods always require explicit human approval via the CLI,
+codemods_preview is a DRY RUN: it never applies changes to disk.
+Applying codemods always requires explicit human approval via the CLI,
 outside this server. Prefer these tools over reading Dockerfiles, lockfiles, or
 running tracers by hand.
 """
