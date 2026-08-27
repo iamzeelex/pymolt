@@ -37,7 +37,5 @@ the shell with `--json`.
 - A fact from PyMolt carries provenance + confidence — cite it, don't re-derive it.
 - BLIND zones in the report are honest gaps: exercise them with tests or flag
   them to the human, never paper over them.
-- **Money:** codemod recipes cost real money ($5/$10/$25 by delivered weight;
-  the first one is free). `codemods_preview` is always safe (dry-run, no
-  spend). Anything that consumes a slot requires the human's explicit approval
-  — show the quote, wait for a yes.
+- **Dry-run safety:** `codemods_preview` is always safe (dry-run, read-only preview).
+  Applying codemods to disk requires the human's explicit approval via CLI (`pymolt codemods ... --write`).

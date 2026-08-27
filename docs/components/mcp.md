@@ -44,7 +44,7 @@ Every tool takes `dir: str = "."` (the project directory).
 | `contract_map` | `pymolt contract map` | Static contact map: where your code calls into third-party deps. |
 | `contract_capture` | `pymolt contract capture` | Runs YOUR command with the boundary tracer injected (zero edits to the project); records a `baseline` / `post-migration` slot. |
 | `contract_report` | `pymolt contract report` | The verification oracle: static × dynamic → confirmed / BLIND / trust %, plus the behavioral verdict (result_changed / raise_changed / disappeared) across the migration. |
-| `codemods_preview` | `pymolt codemods` (dry-run) | Dry-run preview of the codemods that would rewrite call sites. Never writes files, never spends money. |
+| `codemods_preview` | `pymolt codemods` (dry-run) | Dry-run preview of the codemods that would rewrite call sites. Never writes files. |
 
 ### Workflow
 
@@ -84,9 +84,8 @@ with a sibling `"truncated": <N>` when cut; the full payload is written under
 `.pymolt/mcp/<tool>.json` and its path returned in `full_report_path`. Output is
 plain text — no rich/ANSI.
 
-## The money rule
+## The preview rule
 
-`codemods_preview` is a **dry run**: it never writes files and never spends
-slots or money. Applying codemods (and any purchase) always requires explicit
-human approval through the CLI (`pymolt codemods ... --write`), outside this
-server. Agents preview and recommend; humans apply.
+`codemods_preview` is a **dry run**: it never writes files to disk.
+Applying codemods always requires explicit human approval through the CLI (`pymolt codemods ... --write`),
+outside this server. Agents preview and recommend; humans apply.
