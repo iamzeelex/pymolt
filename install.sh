@@ -84,11 +84,15 @@ ensure_uv() {
 # ---------------------------------------------------------------------------
 # Install with the `mcp` extra so `pymolt mcp` (the stdio MCP server) works
 # out of the box. The extra goes between the name and any version specifier:
-# pymolt[mcp] or pymolt[mcp]==0.1.0.
-SPEC_BASE="$PACKAGE[mcp]"
-SPEC="$SPEC_BASE"
-if [ -n "${PYMOLT_VERSION:-}" ]; then
-  SPEC="$SPEC_BASE==$PYMOLT_VERSION"
+# pymolt[mcp] or pymolt[mcp]==0.1.0. If PYMOLT_SOURCE is set (e.g. git URL), use that.
+if [ -n "${PYMOLT_SOURCE:-}" ]; then
+  SPEC="$PYMOLT_SOURCE"
+else
+  SPEC_BASE="$PACKAGE[mcp]"
+  SPEC="$SPEC_BASE"
+  if [ -n "${PYMOLT_VERSION:-}" ]; then
+    SPEC="$SPEC_BASE==$PYMOLT_VERSION"
+  fi
 fi
 
 installer="${PYMOLT_INSTALLER:-}"

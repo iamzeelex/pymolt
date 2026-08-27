@@ -1,211 +1,148 @@
-# PyMolt (`pymolt`)
+# PyMolt
 
-🐍 **PyMolt** is an open-source CLI migration tool (and MCP server) that brings all codebase migration facts into one place — making Python version upgrades and dependency changes visible, predictable, and behaviorally verifiable.
+Modernizing legacy Python codebases without breaking things.
 
-If you have ever had to upgrade a codebase from Python 3.7 to 3.12 or transition between major dependency versions (such as Pandas 1.x to 2.x or Pydantic v1 to v2), you know how easily subtle runtime breaking changes can slip through. PyMolt helps you navigate these migrations systematically across 5 core steps: **Scan → Setup → Assess → Codemods → Contract**, providing clear, verifiable evidence at every step for both you and your AI tools.
+PyMolt is an open-source migration tool and MCP server designed to take the guesswork out of Python version bumps (3.6/3.8 → 3.12/3.13) and major dependency upgrades (Pandas 1.x → 2.x, Pydantic v1 → v2, SQLAlchemy 1.4 → 2.0).
 
----
-
-## Key Features
-
-- 🛡️ **Behavioral Contract Locking (`contract`)**: PyMolt's primary focus — help you understand, record, and lock down the runtime interaction contract (`your_code → dependency`) before migrating, so you can diff execution behavior after the upgrade and catch silent breaks before production.
-- ⚡ **Automated Code Rewrites (`codemods`) [Alpha]**: Automatically rewrite breaking API changes, renamed imports, and deprecated methods using recipes fetched from Axiom Graph. *(Currently in active alpha development & testing — details and status available at [pymolt.zeelex.me](https://pymolt.zeelex.me)).*
-- 🎯 **Lock-First Feasibility & Risk Scoring (`assess`)**: Perform lock-first dependency graph resolution against target Python versions, compare baseline vs. target, rank risk tiers (OSV CVE deltas, C-compilation wheel requirements, package abandonment), and emit pinned target manifests.
-- 🔍 **Zero-Context Surface Scanning (`scan`)**: Map all Python surfaces across monorepos, multi-stage Dockerfiles, tox/nox configs, and lockfiles in a single pass to discover version divergence across environments.
-- 🤖 **AI Assistant Support via MCP (`pymolt mcp`)**: Serve these verified migration facts and contract evidence directly to AI editors (Claude Code, Cursor, ChatGPT) via a built-in stdio MCP server with deterministic `--json` outputs.
+It combines lock-first dependency resolution, LibCST AST codemods, and zero-instrumentation runtime behavioral contracts. You can run it manually via CLI or hand it over to AI coding agents (Claude, Cursor, Windsurf) through its built-in Model Context Protocol server.
 
 ---
 
-## Migration Workflow
+## Quick Start
+
+Install via `uv` or `pipx`:
 
 ```bash
-# 1. SCAN: Discover all surfaces, version divergence, and dependency edges in one pass
+uv tool install pymolt
+# or with MCP server support:
+uv tool install "pymolt[mcp]"
+```
+
+Run an end-to-end migration in one pass:
+
+```bash
+cd your-legacy-project
+pymolt migrate
+```
+
+PyMolt automatically discovers your environments, resolves target dependency versions for Python 3.12+, fetches verified AST codemods, and shows you clean Git diffs before touching a single line of code.
+
+---
+
+## How It Works: The 5-Step Funnel
+
+You don't have to guess what's broken or why a package won't install. PyMolt breaks migrations down into five distinct phases:
+
+```
+  ┌──────────┐     ┌───────────┐     ┌───────────┐     ┌───────────┐     ┌───────────┐
+  │   Scan   │ ──► │   Setup   │ ──► │  Assess   │ ──► │ Codemods  │ ──► │ Verify /  │
+  │ Surfaces │     │ Target Py │     │ Resolv &  │     │ LibCST    │     │ Contract  │
+  │ & Edges  │     │  & Tool   │     │ Risk Plan │     │ Transforms│     │ Capture   │
+  └──────────┘     └───────────┘     └───────────┘     └───────────┘     └───────────┘
+```
+
+```bash
+# 1. SCAN: Discover monorepo surfaces, Dockerfiles, and Python version divergence offline
 pymolt scan .
 
-# 2. SETUP: Configure target Python version, toolset (uv/pip), and target manifest
+# 2. SETUP: Pick your target Python (3.12 / 3.13) and resolver toolset (uv, pip, conda)
 pymolt setup .
 
-# 3. ASSESS: Perform lock-first resolution, compare versions, and score migration risks
-pymolt assess . --target-python 3.12 --risk      # add --json for CI / AI Agents
+# 3. ASSESS: Perform lock-first resolution, calculate CVE deltas and compilation risks
+pymolt assess . --target-python 3.12 --risk
 
-# 4. CODEMODS: Fetch AST transformation recipes and rewrite code for target dependencies
-pymolt codemods .
+# 4. CODEMODS: Fetch AST transformation rules from Axiom Cloud Hub and preview or apply diffs
+pymolt codemods .             # dry-run preview with unified diffs
+pymolt codemods . --write     # apply verified AST transforms to disk
 
-# 5. CONTRACT: Verify behavioral stability across dependency bumps (zero code edits required)
+# 5. CONTRACT: Ensure runtime behavior hasn't shifted underneath you
 pymolt contract capture --when baseline --mode tests -- pytest tests/
-# ... apply migration updates ...
+# ... apply code and dependency upgrades ...
 pymolt contract capture --when post-migration --mode tests -- pytest tests/
-pymolt contract report .                          # auto-diffs baseline vs post-migration
+pymolt contract report .      # diff runtime interaction contracts
 ```
 
 ---
 
-## Installation
+## Built for AI Agents (MCP Server)
 
-PyMolt requires Python 3.12+ (or will automatically provision one via `uv`). The one-line installer provisions PyMolt as an isolated global tool without touching your system Python:
+PyMolt isn't just a CLI — it's a first-class Model Context Protocol (MCP) server. If you use Cursor, Claude Desktop, Windsurf, or Google Antigravity, your agent can run migrations autonomously without hallucinatory guesswork.
 
-```bash
-curl -fsSL https://pymolt.zeelex.me/install.sh | sh
+### Configure in your MCP Client
+
+Add PyMolt to your agent config (e.g. `~/.cursor/mcp.json` or `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "pymolt": {
+      "command": "pymolt",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-Or install via standard Python tool installers:
+### Available MCP Tools
 
-```bash
-uv tool install pymolt      # recommended
-pipx install pymolt
-pip install --user pymolt
-```
-
-Verify installation:
-
-```bash
-pymolt --version
-pymolt status .
-```
+| Tool | What the agent gets |
+|---|---|
+| `status` | Instant funnel orientation (`scan` → `setup` → `assess` → `codemods` → `contract`). |
+| `scan` | Project roots, dependency edges, and version divergence without parsing Dockerfiles manually. |
+| `setup_options` / `setup_apply` | Valid target Python versions and package managers. |
+| `assess` | Target dependency resolution matrix with risk scoring (CVEs, C-wheel compilation, package abandonment). |
+| `codemods_preview` / `codemods` | Structured Unified Git Diffs of AST rewrites with optional `write=True`. |
+| `contract_map` / `contract_capture` | Static dependency contact maps and dynamic test execution traces. |
+| `contract_report` | Behavioral regression comparison between baseline and post-migration runs. |
+| `migrate` | Complete end-to-end migration execution in a single RPC call. |
+| `env_hint` | Ready-to-use Dockerfile recipes and `uv` virtualenv setup commands. |
 
 ---
 
-## Project Architecture
+## AST Codemods & Axiom Cloud Hub
 
-PyMolt uses a structured, modular design targeting a single navigable dependency graph substrate layered with static analysis, dependency resolution, migration-risk scoring, codemods, and behavioral verification.
+Regex replacements break code; large language models frequently hallucinate non-existent API flags. PyMolt uses **LibCST (Concrete Syntax Trees)** paired with **Axiom Cloud Hub** recipes.
 
-```text
-pymolt/
-├── core/            # The Substrate (Graph, Node, Edge, Serialization)
-├── discovery/       # Surface map: monorepo roots, Dockerfile/tox/nox, version evidence
-├── ingestion/       # World-as-found (uv/conda/pip inputs, lock-first, name maps, config)
-├── inventory/       # Dependency edge classification + code-usage intersection
-├── setup/           # Manifest / toolset / base+target Python / container selection
-├── assess/          # Lock-first resolve, baseline vs target compare, feasibility
-├── risk/            # Migration risk: CVEs (OSV), wheels/compilation, abandonment
-├── codemods/        # Fetch patterns/rules from Axiom Graph, apply with LibCST
-├── verify/          # Behavioral contract: static contact map × dynamic trace, diff
-└── interfaces/      # CLI (Typer) and MCP server entry points
-```
+- **Non-destructive AST edits**: Preserves your formatting, indentation, and comments exactly as written.
+- **Typed Metavariables**: Declarative match/rewrite templates (e.g., `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`).
+- **Client Verification**: PyMolt locally re-verifies every rule before applying it to your repository.
+- **Free Public Cloud Hub**: Recipes are fetched on demand from Axiom Cloud Hub. Custom/private on-prem instances are supported via `--endpoint <url>` or `PYMOLT_ENDPOINT`.
 
 ---
 
-## Commands Overview
+## Behavioral Contract Verification
 
-| Command | Category | What it does |
-|---|---|---|
-| `pymolt status [dir]` | Status | **Migration State**: Reads current state on disk, flags stale or missing evidence, and suggests the exact next step to run. |
-| `pymolt scan [dir]` | Phase 1 | **As-Is Discovery**: Gathers monorepo surfaces, Dockerfile multi-stage builds, tox/nox configs, Python version divergence, and dependency edges offline. |
-| `pymolt setup [dir]` | Phase 2 | **Configuration**: Configures project migration settings, manifest type, target Python version, and toolset (`.pymolt/env_config.json`). |
-| `pymolt assess [dir]` | Phase 3 | **Feasibility & Risk**: Lock-first dependency graph resolution against target Python, baseline vs target comparison, risk scoring (CVEs/compilation/abandonment), and pinned manifest generation. |
-| `pymolt codemods [dir]` | Phase 4 | **Automated Rewrites [Alpha]**: Fetches syntax and API migration recipes from Axiom Graph and applies code rewrites locally. *(Active alpha testing — details at [pymolt.zeelex.me](https://pymolt.zeelex.me))*. |
-| `pymolt contract ...` | Behavioral | **Runtime Verification**: Static contact map × dynamic boundary tracing, guided baseline → post-migration behavior diffing. |
-| `pymolt succession [dir]` | Experimental | **Framework Succession [Experimental]**: Identifies migration pathways for deprecated frameworks (e.g. `Keras → tensorflow.keras` / `PyTorch`) and applies shim AST transforms. |
-| `pymolt forks OWNER/REPO` | Experimental | **Fork Network Triage [Experimental]**: Ranks live community successor forks for unmaintained GitHub repositories based on recency, stars, and Python 3.12+ porting signals. |
-| `pymolt env hint [dir]` | Utility | **Environment Guide**: Generates target `Dockerfile.pymolt-target` recipes and `uv` setup commands. |
-| `pymolt login` / `logout` | Auth | **Account Auth**: Manage API authentication tokens for Axiom Graph codemods ([pymolt.zeelex.me](https://pymolt.zeelex.me)). |
-| `pymolt mcp` | AI Integration | **MCP Server**: Stdio Model Context Protocol server exposing PyMolt tools to AI agents. |
+Static type checkers catch signature changes, but they cannot tell you if a method started returning an empty generator instead of `None`.
+
+PyMolt includes a zero-dependency runtime tracer that attaches via standard library hooks (`sys.setprofile` / import wrappers) — **no code changes or decorators required**.
+
+1. Run your existing test suite under baseline Python to record runtime interaction shapes.
+2. Upgrade dependencies and apply codemods.
+3. Re-run tests under the target Python.
+4. `pymolt contract report .` surfaces real behavioral drifts (type changes, unexpected exceptions, missing keys) while ignoring volatile values like timestamps and randomized IDs.
 
 ---
 
-## Detailed Features
+## Commands Summary
 
-### Risk Assessment (`pymolt assess --risk`)
-
-`assess --risk` performs network-backed (cached under `.pymolt/cache/`) vulnerability and health lookups:
-- **CVE Delta (OSV.dev)**: Evaluates security vulnerability deltas before vs. after migration.
-- **Wheel / Compilation Status (PyPI)**: Flags `sdist-only` packages requiring C compilation environments on target platforms.
-- **Package Abandonment**: Measures release recency and flags unmaintained dependencies.
-- Assigns a structured `HIGH` / `MEDIUM` / `LOW` `RiskTier` for every dependency.
-
-### Experimental Features (`succession` & `forks`)
-
-> ⚠️ **Experimental & Active Evaluation**: The commands below cover non-standard migration edge cases. They are strictly experimental, in active testing, and we are currently evaluating how effectively they perform across real-world codebases.
-
-1. **Framework Succession (`pymolt succession [dir]`)**
-   - **Target Use-Case**: Transitioning away from a deprecated or unmaintained framework (e.g. legacy `Keras 2.x` → `tensorflow.keras` or `PyTorch`, or `Flask` → `FastAPI`).
-   - **How it works**: Analyzes symbol import usage, queries migration path mappings from Axiom Graph, and applies compatibility shims to bridge API changes.
-
-2. **Fork Network Triage (`pymolt forks OWNER/REPO`)**
-   - **Target Use-Case**: Continuing migration when an upstream dependency is completely abandoned by its maintainer (no Python 3.12+ releases or wheel builds published to PyPI).
-   - **How it works**: Analyzes the GitHub fork network for the target repository, scoring community forks by commit recency, star count, code divergence, and Python 3.12+ porting status to find active successor forks.
+| Command | Description |
+|---|---|
+| `pymolt migrate [dir]` | Autonomous macro-command: detects, resolves dependencies, and applies codemods in one step. |
+| `pymolt status [dir]` | Inspects funnel status and recommends the exact next command to run. |
+| `pymolt scan [dir]` | Scans monorepos, Dockerfiles, and lockfiles for version divergence and edges. |
+| `pymolt setup [dir]` | Interactive setup for target Python, package manager, and manifest. |
+| `pymolt assess [dir]` | Resolves target dependencies, calculates CVE deltas, and emits pinned manifests. |
+| `pymolt codemods [dir]` | Previews (`--dry-run`) or writes (`--write`) AST transformations. |
+| `pymolt contract ...` | Captures, traces, and reports runtime behavior contracts. |
+| `pymolt env hint [dir]` | Generates target `Dockerfile` and `uv` virtual environment commands. |
+| `pymolt mcp` | Starts the stdio Model Context Protocol server for AI coding agents. |
+| `pymolt auth login` | Authenticates your CLI for Axiom Cloud Hub recipe access. |
 
 ---
 
-## For AI Agents & Claude Code Plugin (`plugin/`)
+## License
 
-PyMolt is engineered to be driven autonomously by AI coding agents (Claude Code, Cursor, ChatGPT):
-- **Claude Code Plugin (`plugin/`)**: Auto-registers the `pymolt` MCP server, adds the `/pymolt:migrate` slash command, and provides the specialized `pymolt-migrator` subagent for guided migrations.
-- **Deterministic JSON Output**: Every report command supports `--json` with strict stdout (data) and stderr (diagnostics) separation.
-- **Typed Exit Codes**: `0` (Success/Info), `1` (Behavior change / negative finding), `2` (Usage error), `3` (Environment error).
+PyMolt is open-source software licensed under the [Apache License, Version 2.0](LICENSE).
+Axiom Cloud Hub recipes are provided under the Business Source License 1.1 with free public community access.
 
-### Installing the Claude Code Plugin
-```bash
-/plugin marketplace add zeelex/python_migrator
-/plugin install pymolt
-```
-Installing wires the `pymolt mcp` server automatically, adds the `/pymolt:migrate [project-dir]` slash command, and activates the `pymolt-migrator` subagent.
 
-### Model Context Protocol (MCP) Setup (Cursor, Windsurf, ChatGPT)
-For other MCP clients, install the `pymolt[mcp]` package and register the stdio server:
-
-```bash
-uv tool install 'pymolt[mcp]'
-```
-
-```toml
-# Editor MCP Config (e.g. ~/.codex/config.toml)
-[mcp_servers.pymolt]
-command = "pymolt"
-args = ["mcp"]
-```
-
-### Recommended `AGENTS.md` / `CLAUDE.md` snippet:
-
-```markdown
-## Python Migrations
-This repository uses PyMolt for codebase migration facts — do not rediscover them manually.
-- Monorepo surfaces & version divergence: `pymolt scan . --json`
-- Feasibility & risk on target Python: `pymolt assess . --target-python <X.Y> --risk --json --no-write`
-- Behavioral ground truth: `pymolt contract report . --json`
-  After modifying code, run `pymolt contract capture --when post-migration --mode tests -- <test cmd>` and re-check `pymolt contract report .`
-```
-
----
-
-## Behavioral Verification (`verify/`)
-
-Static analysis detects declared signatures; `verify/` answers whether **code still behaves identically at runtime** after upgrading dependencies.
-
-PyMolt attaches to your target application **without modifying any code in your repository**. A lightweight tracer is injected via `sitecustomize` / `.pth` + environment variables. The runtime watcher is **pure Python standard library (Python 3.6+)** with zero third-party dependencies, running inside any interpreter or container.
-
-### Boundary Tracer Modes
-- `setprofile` (3.6–3.11): Complete call-graph trace across the interpreter (ideal for test suites).
-- `wrap` (`--wrap sym1,sym2`): Monkeypatches only specific target dependency symbols with import-hook preservation (ultra-low overhead for production/staging runs).
-- `hybrid`: Combines `wrap` for named symbols with `setprofile` for C-extensions and dynamic dispatch.
-
-### Guided Contract Workflow
-
-```bash
-# 1. Capture baseline behavior BEFORE migrating
-pymolt contract capture --when baseline --mode tests -- pytest tests/
-
-# 2. Perform migration (assess → codemods → edits)
-
-# 3. Capture post-migration behavior
-pymolt contract capture --when post-migration --mode tests -- pytest tests/
-
-# 4. Compare behavior
-pymolt contract report .
-```
-
-`contract diff --contract` compares **interaction shapes** (return types, exception types, dictionary structures) rather than volatile scalar values (timestamps, temporary paths), preventing false positives while catching true API signature and behavioral breaks.
-
----
-
-## Design Note: What Happened to the TUI?
-
-An interactive Terminal User Interface (TUI) was originally prototyped (`pymolt ui`) to visualize dependency graphs. However, practical migration experience quickly showed that a TUI offered minimal real-world value compared to **deterministic, pipeable CLI commands** (`--json`) and **native Model Context Protocol (MCP)** integration for AI pair-programming.
-
-Visual TUI widgets added maintenance overhead without accelerating verification or evidence gathering. The TUI was intentionally removed, and PyMolt remains focused strictly on fast, headless CLI tools and structured MCP tool feeds.
-
----
-
-## License & Support
-
-Maintained as part of the PyMolt project. Documentation and machine-readable schema available at <https://pymolt.zeelex.me/llms.txt>.
