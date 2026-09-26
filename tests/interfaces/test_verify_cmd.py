@@ -13,8 +13,10 @@ import sys
 
 from typer.testing import CliRunner
 
+from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE
 from pymolt.interfaces.cli.verify_cmd import app
-from pymolt.verify.models import CaptureMode, ContractState
+from pymolt.verify import service
+from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
 
 runner = CliRunner()
 
@@ -49,12 +51,44 @@ def test_capture_writes_named_state(tmp_path):
     state = ContractState.load(tmp_path / ".pymolt" / "contract_state.json")
     assert state is not None and state.baseline is not None
     assert state.baseline.mode == CaptureMode.TEST_SUITE
+    assert state.baseline.validity is CaptureValidity.VALID
+
+
+def test_failed_test_capture_is_diagnostic_and_fails_cli(tmp_path):
+    app_py = tmp_path / "fails.py"
+    app_py.write_text("import json\njson.loads('{}')\nraise SystemExit(5)\n")
+
+    result = runner.invoke(app, [
+        "capture", "--when", "baseline", "--mode", "tests",
+        "--project-dir", str(tmp_path), "--target", "json",
+        "--", sys.executable, str(app_py),
+    ])
+
+    assert result.exit_code == EXIT_FINDING
+    state = ContractState.load(tmp_path / ".pymolt" / "contract_state.json")
+    assert state is not None and state.baseline is None
+    assert state.diagnostic_captures[-1].validity is CaptureValidity.COMMAND_FAILED
+
+
+def test_zero_event_capture_is_inconclusive_and_not_active(tmp_path):
+    app_py = _write_app(tmp_path, third_party=False)
+    result = runner.invoke(app, [
+        "capture", "--when", "baseline", "--mode", "command",
+        "--project-dir", str(tmp_path), "--target", "definitely_missing_dependency",
+        "--", sys.executable, str(app_py),
+    ])
+
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    state = ContractState.load(tmp_path / ".pymolt" / "contract_state.json")
+    assert state is not None and state.baseline is None
+    assert state.diagnostic_captures[-1].validity is CaptureValidity.EMPTY
 
 
 def test_capture_overwrite_requires_confirmation_unless_forced(tmp_path):
     app_py = _write_app(tmp_path, third_party=False)
     args = ["capture", "--when", "baseline", "--mode", "tests",
-            "--project-dir", str(tmp_path), "--", sys.executable, str(app_py)]
+            "--project-dir", str(tmp_path), "--target", "json",
+            "--", sys.executable, str(app_py)]
 
     first = runner.invoke(app, args)
     assert first.exit_code == 0, first.output
@@ -63,7 +97,7 @@ def test_capture_overwrite_requires_confirmation_unless_forced(tmp_path):
     assert declined.exit_code == 1
 
     forced_args = ["capture", "--when", "baseline", "--mode", "tests",
-                   "--project-dir", str(tmp_path), "--force",
+                   "--project-dir", str(tmp_path), "--target", "json", "--force",
                    "--", sys.executable, str(app_py)]
     forced = runner.invoke(app, forced_args)
     assert forced.exit_code == 0, forced.output
@@ -77,7 +111,7 @@ def test_capture_attach_then_collect(tmp_path):
     assert started.exit_code == 0, started.output
     assert "run this yourself" in started.output.lower()
 
-    out_path = tmp_path / ".pymolt" / "contract_traces" / "post_migration.jsonl"
+    out_path = service.pending_attach_path(tmp_path, "post_migration")
     assert out_path.parent.is_dir()
     out_path.write_text('{"q": "requests.get"}\n')
 
@@ -112,7 +146,7 @@ def test_report_auto_sources_from_captured_state_and_explicit_override_wins(tmp_
     assert cap.exit_code == 0, cap.output
 
     rep = runner.invoke(app, ["report", str(tmp_path), "--json"])
-    assert rep.exit_code == 0, rep.output
+    assert rep.exit_code == EXIT_INCONCLUSIVE, rep.output
     data = json.loads(rep.output)
     assert data["static_targets"] >= 1
     # the captured baseline trace was picked up (auto-sourced from state, no --trace given):
@@ -146,6 +180,33 @@ def test_diff_human_rendering_does_not_crash_on_skipped_opaque_rows(tmp_path):
     assert result.exit_code in (0, 1)
     assert "Traceback" not in result.output
     assert "NameError" not in result.output
+
+
+def test_diff_with_opaque_values_is_inconclusive(tmp_path):
+    event = {
+        "q": "pkg.call", "in": {"bound": {}}, "t": "return",
+        "result": {"__opaque__": "Thing"},
+    }
+    old = tmp_path / "old.jsonl"
+    new = tmp_path / "new.jsonl"
+    old.write_text(json.dumps(event) + "\n")
+    new.write_text(json.dumps(event) + "\n")
+
+    result = runner.invoke(app, ["diff", str(old), str(new), "--json"])
+
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    assert json.loads(result.output)["verdict"] == "inconclusive"
+
+
+def test_report_without_comparable_pair_is_inconclusive(tmp_path):
+    _write_app(tmp_path, third_party=True)
+
+    result = runner.invoke(app, ["report", str(tmp_path), "--json"])
+
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    payload = json.loads(result.output)
+    assert payload["verdict"] == "inconclusive"
+    assert payload["verdict_reasons"]
 
 
 def test_boundary_interactive_flow_does_not_crash(tmp_path):

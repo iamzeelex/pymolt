@@ -1,7 +1,8 @@
 import json
 import sys
 
-from pymolt.verify.probe import _reconstruct, probe_trace
+from pymolt.verify.probe import _classify, _reconstruct, probe_trace
+from pymolt.verify.reinvoke import ReinvokeResult
 
 PY = sys.executable
 
@@ -46,3 +47,12 @@ def test_probe_opaque_inputs_skipped(tmp_path):
     res = probe_trace(trace, PY)
     assert res["some.func"].status == "opaque-inputs"
     assert res["some.func"].probed_contacts == 0
+
+
+def test_probe_compares_exception_type():
+    assert _classify(
+        "raise", "ValueError", ReinvokeResult(outcome="raised", error="ValueError")
+    ) == "stable"
+    assert _classify(
+        "raise", "ValueError", ReinvokeResult(outcome="raised", error="TypeError")
+    ) == "changed"

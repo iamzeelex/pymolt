@@ -28,6 +28,7 @@ from rich.table import Table
 from pymolt.core.enums import Verdict
 from pymolt.interfaces.cli.output import (
     EXIT_FINDING,
+    EXIT_INCONCLUSIVE,
     EXIT_OK,
     console,
     err,
@@ -38,10 +39,20 @@ from pymolt.interfaces.cli.output import (
 )
 from pymolt.verify import service
 from pymolt.verify.cascade import _verdict_from_boundary
-from pymolt.verify.contract import build_contract_diff
+from pymolt.verify.comparators import (
+    ComparatorError,
+    ComparatorProfile,
+    compare_traces,
+    load_custom_comparator,
+)
 from pymolt.verify.diff import build_boundary_diff
 from pymolt.verify.export_watcher import export_watcher
-from pymolt.verify.models import BoundaryDiff, CaptureMode
+from pymolt.verify.models import (
+    BoundaryDiff,
+    CaptureMode,
+    CaptureValidity,
+    VerificationVerdict,
+)
 
 app = typer.Typer(help="Behavioral boundary tracing & diff (runs entirely outside the target).")
 
@@ -52,10 +63,23 @@ _VERDICT_STYLE = {
 }
 
 
+def _verification_exit(verdict: VerificationVerdict) -> int:
+    return {
+        VerificationVerdict.PASS: EXIT_OK,
+        VerificationVerdict.FAIL: EXIT_FINDING,
+        VerificationVerdict.INCONCLUSIVE: EXIT_INCONCLUSIVE,
+    }[verdict]
+
+
 # ── shared helpers ────────────────────────────────────────────────────────────
 def _trace_command(target: str, command: list[str], out_path: Path, backend: str,
                    container: str | None = None, workdir: str | None = None,
-                   exclude: str = "", source: str = "", include_internal: bool = False) -> int:
+                   exclude: str = "", source: str = "", include_internal: bool = False,
+                   privacy: str = "shape", sample_rate: float = 1.0,
+                   impact_targets: list[str] | None = None,
+                   deployment_id: str | None = None,
+                   request_id: str | None = None,
+                   correlation_id: str | None = None) -> int:
     """Render-and-run wrapper over ``service.capture_trace``: prints progress/result, returns
     the number of events captured (the CLI commands below all key off this)."""
     where = f"container [cyan]{container}[/cyan]" if container else "local"
@@ -65,6 +89,9 @@ def _trace_command(target: str, command: list[str], out_path: Path, backend: str
     result = service.capture_trace(
         target, command, out_path, backend, container=container, workdir=workdir,
         exclude=exclude, source=source, include_internal=include_internal,
+        privacy=privacy, sample_rate=sample_rate,
+        impact_targets=impact_targets, deployment_id=deployment_id,
+        request_id=request_id, correlation_id=correlation_id,
     )
     err.print(f"[green]captured[/green] {result.events} events from "
               f"{result.processes} process(es) -> {result.out_path}")
@@ -77,8 +104,8 @@ def render_boundary_diff(diff: BoundaryDiff, full: bool = False) -> None:
     counts = diff.counts()
     console.print(Panel(
         f"verdict: [{_VERDICT_STYLE[verdict]}]{verdict.value}[/]\n"
-        f"clean (no breaking boundary change): "
-        f"{'[green]yes[/]' if diff.is_clean() else '[red]no[/]'}\n"
+        f"comparable behavior changed: "
+        f"{'[red]yes[/]' if not diff.is_clean() else '[green]no[/]'}\n"
         f"disappeared={counts['disappeared']}  result_changed={counts['result_changed']}  "
         f"raise_changed={counts['raise_changed']}  appeared={counts['appeared']}  "
         f"[yellow]skipped_opaque={counts['skipped_opaque']}[/]",
@@ -146,6 +173,10 @@ def trace_cmd(
              "(e.g. flask.jsonify,flask.views.MethodView,flask.app.Flask.add_url_rule). Implies "
              "--backend wrap (low overhead). Add --backend hybrid to also run setprofile for "
              "completeness (the C-remainder + dynamic usage)."),
+    impact_targets: str | None = typer.Option(
+        None, "--impact-targets",
+        help="Comma-separated affected API symbols; exact paths use low-overhead wrapping",
+    ),
     exclude: str = typer.Option(
         "", "--exclude", "-x", help="Comma-separated top-levels to skip (e.g. your own package)"),
     source: str = typer.Option(
@@ -159,6 +190,16 @@ def trace_cmd(
         help="Run CMD inside an ALREADY-RUNNING container (docker exec), not locally"),
     workdir: str | None = typer.Option(
         None, "--workdir", "-w", help="Working dir inside the container (default: image WORKDIR)"),
+    privacy: str = typer.Option(
+        "shape", "--privacy", help="shape (safe default) | values (exact, may contain sensitive data)"
+    ),
+    sample_rate: float = typer.Option(
+        1.0, "--sample-rate", min=0.000001, max=1.0,
+        help="Fraction of completed calls to retain",
+    ),
+    deployment_id: str | None = typer.Option(None, "--deployment-id"),
+    request_id: str | None = typer.Option(None, "--request-id"),
+    correlation_id: str | None = typer.Option(None, "--correlation-id"),
 ):
     """Run a command with the watcher injected externally; write a JSONL recording.
 
@@ -167,11 +208,20 @@ def trace_cmd(
     targeted overhead — fit for prod). With --container the command runs via `docker exec` in a
     running container (bundle copied in and removed; no `docker run`).
     """
+    if privacy not in {"values", "shape"}:
+        fail(f"--privacy must be 'values' or 'shape' (got {privacy!r})")
     if wrap:
         target = wrap                       # wrap list goes through PYMOLT_TRACE_TARGET
         backend = "hybrid" if backend == "hybrid" else "wrap"
+    parsed_impacts = (
+        [item.strip() for item in impact_targets.split(",") if item.strip()]
+        if impact_targets else None
+    )
     _trace_command(target, command, Path(out), backend, container=container, workdir=workdir,
-                   exclude=exclude, source=source, include_internal=include_internal)
+                   exclude=exclude, source=source, include_internal=include_internal,
+                   privacy=privacy, sample_rate=sample_rate,
+                   impact_targets=parsed_impacts, deployment_id=deployment_id,
+                   request_id=request_id, correlation_id=correlation_id)
 
 
 _CAPTURE_WHEN = {"baseline": "baseline", "post-migration": "post_migration"}
@@ -209,6 +259,21 @@ def capture_cmd(
         False, "--collect", help="Finalize a --mode attach capture (reads whatever was written)"),
     force: bool = typer.Option(
         False, "--force", help="Overwrite an existing baseline/post-migration capture, no prompt"),
+    privacy: str = typer.Option(
+        "auto", "--privacy",
+        help="auto (values for tests, shape for live) | values | shape",
+    ),
+    sample_rate: float = typer.Option(
+        1.0, "--sample-rate", min=0.000001, max=1.0,
+        help="Fraction of completed calls to retain (sampled reports stay inconclusive)",
+    ),
+    impact_targets: str | None = typer.Option(
+        None, "--impact-targets",
+        help="Affected API symbols; post-migration defaults to the applied Axiom plan",
+    ),
+    deployment_id: str | None = typer.Option(None, "--deployment-id"),
+    request_id: str | None = typer.Option(None, "--request-id"),
+    correlation_id: str | None = typer.Option(None, "--correlation-id"),
 ):
     """Capture a dynamic trace and name it 'baseline' or 'post-migration' — the same watcher
     injection `trace` uses, but persisted to .pymolt/contract_state.json so `report` (run with
@@ -227,17 +292,33 @@ def capture_cmd(
     capture_mode = _CAPTURE_MODE.get(mode)
     if capture_mode is None:
         fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})")
+    if privacy not in {"auto", "values", "shape"}:
+        fail(f"--privacy must be 'auto', 'values', or 'shape' (got {privacy!r})")
+    effective_privacy = (
+        "values" if capture_mode is CaptureMode.TEST_SUITE else "shape"
+    ) if privacy == "auto" else privacy
 
     if collect:
-        out_path = Path(project_dir) / ".pymolt" / "contract_traces" / f"{when_key}.jsonl"
+        out_path = service.pending_attach_path(project_dir, when_key)
         if not out_path.is_file():
             fail(
                 f"no pending attach capture at {out_path}",
                 hint=f"Start one first: pymolt contract capture --when {when} --mode attach",
             )
-        slot = service.finalize_attached_capture(project_dir, when_key, out_path, target=target)
-        err.print(f"[green]collected[/green] {slot.events} events -> {slot.trace_path}")
-        return
+        slot = service.finalize_attached_capture(
+            project_dir, when_key, out_path, target=target,
+            privacy=effective_privacy, sample_rate=sample_rate,
+        )
+        if slot.validity is CaptureValidity.VALID:
+            err.print(f"[green]collected[/green] {slot.events} events -> {slot.trace_path}")
+            next_step(project_dir)
+            return
+        err.print(
+            f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
+            f"{slot.validity_reason or slot.validity.value}\n"
+            f"diagnostic artifact: {slot.trace_path}"
+        )
+        raise typer.Exit(code=EXIT_INCONCLUSIVE)
 
     existing = getattr(service.load_contract_state(project_dir), when_key)
     if existing is not None and not force:
@@ -253,11 +334,13 @@ def capture_cmd(
 
     if capture_mode is CaptureMode.LIVE_ATTACH:
         instr = service.start_attached_capture(
-            project_dir, when_key, target=target, backend=backend
+            project_dir, when_key, target=target, backend=backend,
+            privacy=effective_privacy, sample_rate=sample_rate,
         )
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
-            f"  [white]pymolt contract capture --when {when} --mode attach --collect[/white]\n\n"
+            f"  [white]pymolt contract capture --when {when} --mode attach --collect "
+            f"--privacy {effective_privacy} --sample-rate {sample_rate}[/white]\n\n"
             f"  [white]{instr.command_hint}[/white]",
             title="capture (attach)", expand=False, border_style="cyan",
         ))
@@ -270,21 +353,36 @@ def capture_cmd(
     slot = service.capture_named_trace(
         project_dir, when_key, capture_mode, command=command, target=target, backend=backend,
         container=container, workdir=workdir, exclude=exclude, source=source,
+        privacy=effective_privacy, sample_rate=sample_rate,
+        impact_targets=(
+            [item.strip() for item in impact_targets.split(",") if item.strip()]
+            if impact_targets else None
+        ),
+        deployment_id=deployment_id,
+        request_id=request_id,
+        correlation_id=correlation_id,
     )
+    if slot.validity is not CaptureValidity.VALID:
+        err.print(
+            f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
+            f"{slot.validity_reason or slot.validity.value}\n"
+            f"diagnostic artifact: {slot.trace_path}"
+        )
+        code = (
+            EXIT_FINDING
+            if slot.validity is CaptureValidity.COMMAND_FAILED
+            else EXIT_INCONCLUSIVE
+        )
+        raise typer.Exit(code=code)
     err.print(f"[green]captured[/green] {slot.events} events -> {slot.trace_path}")
+    if slot.duration_seconds is not None:
+        err.print(
+            f"[dim]duration={slot.duration_seconds:.3f}s  "
+            f"dropped={slot.dropped_events if slot.dropped_events is not None else 'unknown'}  "
+            f"backend={slot.backend or backend}[/dim]"
+        )
     if slot.archived_previous:
         err.print(f"[dim]previous {when} recording kept at {slot.archived_previous}[/dim]")
-    if slot.events == 0:
-        err.print(
-            "[bold yellow]0 events[/bold yellow] — the command never called into "
-            f"'{target}'. An empty capture is not a baseline: a later diff would read "
-            "as 'everything disappeared'. Check --target and the command."
-        )
-    if slot.returncode:
-        err.print(
-            f"[bold yellow]command exited {slot.returncode}[/bold yellow] — "
-            f"full output: {slot.command_log or '(no log)'}"
-        )
     next_step(project_dir)
 
 
@@ -295,6 +393,12 @@ def diff_cmd(
     contract: bool = typer.Option(
         False, "--contract", "-C",
         help="Compare by interaction SHAPE (type/structure), ignoring concrete data values"),
+    profile: str = typer.Option(
+        "exact", "--profile", help="Comparator: exact | shape | custom"
+    ),
+    comparator: str | None = typer.Option(
+        None, "--comparator", help="Custom comparator as module:callable"
+    ),
     as_json: bool = typer.Option(False, "--json", help="Emit the BoundaryDiff as JSON"),
     full: bool = typer.Option(False, "--full", help="Show all entries, not just the first 15"),
 ):
@@ -308,12 +412,24 @@ def diff_cmd(
     require_file(old, what="OLD recording", json_output=as_json)
     require_file(new, what="NEW recording", json_output=as_json)
 
-    diff = build_contract_diff(old, new) if contract else build_boundary_diff(old, new)
+    if contract:
+        if profile != "exact":
+            fail("--contract cannot be combined with --profile", json_output=as_json)
+        profile = "shape"
+    try:
+        selected = ComparatorProfile(profile)
+        if selected is ComparatorProfile.CUSTOM:
+            if comparator is None:
+                raise ComparatorError("--profile custom requires --comparator module:callable")
+            load_custom_comparator(comparator)
+        diff = compare_traces(old, new, profile=selected, custom=comparator)
+    except ComparatorError as exc:
+        fail(str(exc), json_output=as_json)
     if as_json:
         console.print_json(diff.model_dump_json())
     else:
         render_boundary_diff(diff, full=full)
-    raise typer.Exit(code=EXIT_OK if diff.is_clean() else EXIT_FINDING)
+    raise typer.Exit(code=_verification_exit(diff.verdict))
 
 
 # ── interactive orchestrator ──────────────────────────────────────────────────
@@ -357,7 +473,9 @@ def boundary_cmd(
     old = _obtain_recording("old", target, work, backend, exclude, source)
     new = _obtain_recording("new", target, work, backend, exclude, source)
     console.print()
-    render_boundary_diff(build_boundary_diff(str(old), str(new)), full=full)
+    diff = build_boundary_diff(str(old), str(new))
+    render_boundary_diff(diff, full=full)
+    raise typer.Exit(code=_verification_exit(diff.verdict))
 
 
 
@@ -397,7 +515,11 @@ def map_cmd(
 
 def _render_contract_report(rep) -> None:
     trust_pct = round(rep.trust * 100)
-    border = "green" if rep.blind == 0 and rep.dynamic_only == 0 else "yellow"
+    border = {
+        VerificationVerdict.PASS: "green",
+        VerificationVerdict.FAIL: "red",
+        VerificationVerdict.INCONCLUSIVE: "yellow",
+    }[rep.verdict]
     if rep.baseline_stale:
         # Above the report, not inside it: every number below describes the old
         # world, and that has to be read first or not at all.
@@ -416,21 +538,34 @@ def _render_contract_report(rep) -> None:
         f"[red]dynamic-only: {rep.dynamic_only}[/red]\n"
         f"Contract trust (dynamic coverage of the static map): [bold]{trust_pct}%[/bold]"
     )
+    if rep.impact_filter_active:
+        head += (
+            f"\nImpact focus: [bold]{len(rep.impact_paths)}[/bold] changed API path(s); "
+            f"full surface: {rep.all_static_targets} static / {rep.all_blind} blind"
+        )
     if rep.probed:
         head += (f"\nSandbox-probed: [bold]{rep.probed}[/bold] symbol(s) re-invoked under target — "
                  f"[{'bold red' if rep.probe_changed else 'green'}]{rep.probe_changed} changed[/]")
     if rep.diff is not None:
-        verdict = ("[green]✔ no behavior change[/green]" if rep.diff_clean
-                   else "[bold red]⚠ behavior changed[/bold red]")
+        if rep.verdict is VerificationVerdict.FAIL:
+            verdict = "[bold red]⚠ behavior changed[/bold red]"
+        elif rep.verdict is VerificationVerdict.PASS:
+            verdict = "[green]✔ no observed change on the covered surface[/green]"
+        else:
+            verdict = "[bold yellow]? inconclusive[/bold yellow]"
         # Spell the counts out: `{'disappeared': 235, 'result_changed': 0, …}` was a
         # raw dict repr leaking into an otherwise composed report.
         parts = [f"{name.replace('_', ' ')} {count}"
                  for name, count in rep.diff.items() if count]
         detail = ", ".join(parts) if parts else "nothing moved"
         head += f"\nVersion diff: {verdict}  [dim]({detail})[/dim]"
+    head = f"VERDICT: [bold {border}]{rep.verdict.value.upper()}[/bold {border}]\n" + head
+    if rep.verdict_reasons:
+        head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
 
-    probed = [s for s in rep.symbols if s.probed]
+    visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols
+    probed = [s for s in visible_symbols if s.probed]
     if probed:
         t = Table(title=f"Sandbox probes (re-invoked under target version) ({len(probed)})")
         t.add_column("Dependency symbol", style="cyan")
@@ -441,7 +576,7 @@ def _render_contract_report(rep) -> None:
             t.add_row(s.target, _pv.get(s.probe_status, s.probe_status or "—"))
         console.print(t)
 
-    blind = [s for s in rep.symbols if s.status == "blind"]
+    blind = [s for s in visible_symbols if s.status == "blind"]
     if blind:
         # The symbol name is the deliverable — it is what you go write a test for,
         # grep, or paste into --wrap. Truncating it to `apispec.ext.marshmallo…`
@@ -457,7 +592,7 @@ def _render_contract_report(rep) -> None:
         t.caption = "candidates for the sandbox (probe in isolation under old vs new)"
         console.print(t)
 
-    dyn = [s for s in rep.symbols if s.status == "dynamic-only"]
+    dyn = [s for s in visible_symbols if s.status == "dynamic-only"]
     if dyn:
         t = Table(title=f"DYNAMIC-ONLY — observed but the static map missed ({len(dyn)})",
                   header_style="red")
@@ -478,6 +613,12 @@ def report_cmd(
     trace: str = typer.Option(None, "--trace", help="Observed trace JSONL (the dynamic numerator)"),
     against: str = typer.Option(None, "--against", help="Older trace to diff the --trace against (version diff)"),
     probe_python: str = typer.Option(None, "--probe-python", help="Target venv interpreter: sandbox-probe captured contacts under it"),
+    profile: str = typer.Option(
+        "exact", "--profile", help="Comparator: exact | shape | custom"
+    ),
+    comparator: str | None = typer.Option(
+        None, "--comparator", help="Custom comparator as module:callable"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit the report as JSON"),
 ):
     """Unified contract report: static map × dynamic trace → confirmed / BLIND / dynamic-only
@@ -492,11 +633,25 @@ def report_cmd(
     if against:
         require_file(against, what="--against recording", json_output=json_output)
 
-    rep = service.build_contract_report_from_state(
-        project_path, trace_override=trace, against_override=against, probe_python=probe_python,
-    )
+    try:
+        selected = ComparatorProfile(profile)
+        if selected is ComparatorProfile.CUSTOM:
+            if comparator is None:
+                raise ComparatorError("--profile custom requires --comparator module:callable")
+            load_custom_comparator(comparator)
+        rep = service.build_contract_report_from_state(
+            project_path,
+            trace_override=trace,
+            against_override=against,
+            probe_python=probe_python,
+            comparator_profile=selected.value,
+            custom_comparator=comparator,
+        )
+    except (ComparatorError, ValueError) as exc:
+        fail(str(exc), json_output=json_output)
     if json_output:
         typer.echo(json.dumps(rep.model_dump(mode="json"), indent=2))
-        return
+        raise typer.Exit(code=_verification_exit(rep.verdict))
     _render_contract_report(rep)
     next_step(project_path)
+    raise typer.Exit(code=_verification_exit(rep.verdict))

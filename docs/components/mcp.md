@@ -41,8 +41,8 @@ Every tool takes `dir: str = "."` (the project directory).
 | `setup_apply` | `pymolt setup` (apply) | Writes `.pymolt/env_config.json`. Deterministic: an invalid choice returns `ok:false` with the valid values. |
 | `assess` | `pymolt assess` | Resolves baseline vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest. `risk=true` does cached network calls. |
 | `env_create` | `pymolt env create` | Provisions the target migration environment (uv venv or derived Dockerfile) from the assess target manifest. Run assess first. |
-| `contract_map` | `pymolt contract map` | Static contact map: where your code calls into third-party deps. |
-| `contract_capture` | `pymolt contract capture` | Runs YOUR command with the boundary tracer injected (zero edits to the project); records a `baseline` / `post-migration` slot. |
+| `contract_map` | `pymolt contract map` | Static dependency boundary: calls, attributes, decorators, bases, contexts, constants and protocols. |
+| `contract_capture` | `pymolt contract capture` | Runs YOUR command with the boundary tracer injected; post-migration automatically targets APIs from the applied Axiom plan and records runtime/loss metadata. |
 | `contract_report` | `pymolt contract report` | The verification oracle: static × dynamic → confirmed / BLIND / trust %, plus the behavioral verdict (result_changed / raise_changed / disappeared) across the migration. |
 | `codemods_preview` | `pymolt codemods` (dry-run) | Dry-run preview of the codemods that would rewrite call sites. Never writes files. |
 
@@ -53,7 +53,7 @@ scan  ->  (setup_options -> setup_apply)  ->  assess  ->  env_create
 ->  [human/agent edits the project's code]
 ->  contract_capture(when='baseline'  BEFORE editing)
 ->  contract_capture(when='post-migration'  AFTER editing)
-->  contract_report   (repeat edits + post-migration capture until no result_changed)
+->  pymolt verify .   (CLI: unified persisted verdict and optional canary policy)
 ```
 
 This is also encoded in the server's `instructions`, which the client surfaces
@@ -86,6 +86,8 @@ plain text — no rich/ANSI.
 
 ## The preview rule
 
-`codemods_preview` is a **dry run**: it never writes files to disk.
-Applying codemods always requires explicit human approval through the CLI (`pymolt codemods ... --write`),
-outside this server. Agents preview and recommend; humans apply.
+`codemods_preview` is a **dry run**: it never writes files to disk. Applying
+codemods always requires explicit human approval through the CLI plan/apply
+workflow (`pymolt plan .` then `pymolt apply .`), outside this server. Agents
+preview and recommend; humans apply. The applied plan retains durable rollback
+data (`pymolt rollback .`).

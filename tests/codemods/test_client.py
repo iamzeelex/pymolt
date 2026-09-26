@@ -230,3 +230,33 @@ def test_fetch_bundle_falls_back_to_patterns_when_rules_absent(monkeypatch):
     out = AxiomGraphClient().fetch_bundle([DependencyMigration("flask", "2.0.3", "3.0.0")])
     assert out["flask"].rules == []
     assert out["flask"].patterns[0].new_qualname == "werkzeug.utils.safe_join"
+
+
+def test_fetch_bundle_preserves_structured_api_impacts(monkeypatch):
+    payload = {
+        "results": [{
+            "name": "flask",
+            "codemods": [],
+            "impacts": [{
+                "path": "flask.helpers.safe_join",
+                "replacement_path": "werkzeug.utils.safe_join",
+                "kind": "object-removed",
+                "state": "removed",
+                "risk": "high",
+                "explanation": "public function moved",
+                "transition_confidence": "high",
+            }],
+        }]
+    }
+    monkeypatch.setattr(
+        client_mod.httpx,
+        "post",
+        lambda url, json, timeout, headers=None: _FakeResp(payload),
+    )
+
+    bundle = AxiomGraphClient(use_cache=False).fetch_bundle([
+        DependencyMigration("flask", "2.0.3", "3.0.0")
+    ])["flask"]
+
+    assert bundle.impacts[0].path == "flask.helpers.safe_join"
+    assert bundle.impacts[0].replacement_path == "werkzeug.utils.safe_join"

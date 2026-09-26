@@ -19,6 +19,7 @@ Markers emitted:
     {"__nondeterministic__": true}    set by the sinks when identical inputs differ
 """
 import json
+import os
 
 _SAFE_SCALARS = (type(None), bool, int, float, str, bytes)
 
@@ -37,14 +38,19 @@ def typename(value):
     return t.__qualname__
 
 
-def normalize(value, depth=0, _seen=frozenset()):
+def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
     # type: (Any, int, frozenset) -> Any
     """Reduce ``value`` to a deterministic JSON-compatible structure.
 
     Cycles are broken via ``id()`` tracking in ``_seen``. Anything not safely
     representable becomes ``{"__opaque__": typename}`` — never a raw repr.
     """
+    if _privacy is None:
+        _privacy = os.environ.get("PYMOLT_TRACE_PRIVACY", "values").strip().lower()
+
     if isinstance(value, _SAFE_SCALARS):
+        if _privacy == "shape":
+            return {"__shape__": typename(value)}
         if isinstance(value, bytes):
             return {"__bytes__": value.hex()}
         if isinstance(value, float):
@@ -62,7 +68,10 @@ def normalize(value, depth=0, _seen=frozenset()):
     seen = _seen | {vid}
 
     if isinstance(value, (list, tuple)):
-        seq = [normalize(v, depth + 1, seen) for v in list(value)[:MAX_SEQ]]
+        seq = [
+            normalize(v, depth + 1, seen, _privacy)
+            for v in list(value)[:MAX_SEQ]
+        ]
         tag = "tuple" if isinstance(value, tuple) else "list"
         out = {"__{0}__".format(tag): seq}
         if len(value) > MAX_SEQ:
@@ -73,16 +82,19 @@ def normalize(value, depth=0, _seen=frozenset()):
         items = []
         for k in list(value.keys())[:MAX_SEQ]:
             if isinstance(k, _SAFE_SCALARS):
-                nk = normalize(k, depth + 1, seen)
+                nk = normalize(k, depth + 1, seen, _privacy)
             else:
                 nk = {"__opaque__": typename(k)}
-            items.append([nk, normalize(value[k], depth + 1, seen)])
+            items.append([nk, normalize(value[k], depth + 1, seen, _privacy)])
         items.sort(key=_stable_key)
         return {"__dict__": items}
 
     if isinstance(value, (set, frozenset)):
         norm = sorted(
-            (normalize(v, depth + 1, seen) for v in list(value)[:MAX_SEQ]),
+            (
+                normalize(v, depth + 1, seen, _privacy)
+                for v in list(value)[:MAX_SEQ]
+            ),
             key=_stable_key,
         )
         return {"__set__": norm}

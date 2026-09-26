@@ -21,7 +21,7 @@ from collections.abc import Callable
 
 import httpx
 
-from pymolt.codemods.models import CodemodBundle, CodemodPattern
+from pymolt.codemods.models import ApiImpact, CodemodBundle, CodemodPattern
 from pymolt.codemods.rules import CodemodRule, verify_rule
 from pymolt.config import (
     DEFAULT_ENDPOINT,
@@ -95,7 +95,15 @@ class AxiomGraphClient:
         self.use_cache = use_cache and not os.environ.get("PYMOLT_NO_CACHE")
 
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        from pymolt import __version__
+
+        headers = {
+            "User-Agent": f"PyMolt-CLI/{__version__}",
+            "X-PyMolt-Client": "CLI",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def health(self) -> bool:
         """True if the service answers /health."""
@@ -199,6 +207,9 @@ class AxiomGraphClient:
         for result in data.get("results", []):
             name = result.get("name", "")
             patterns = [CodemodPattern.model_validate(c) for c in result.get("codemods", [])]
+            impacts = [
+                ApiImpact.model_validate(item) for item in result.get("impacts", [])
+            ]
 
             rules: list[CodemodRule] = []
             downgraded: list[str] = []
@@ -217,7 +228,12 @@ class AxiomGraphClient:
                     rule = rule.model_copy(update={"confidence": "heuristic"})
                 rules.append(rule)
 
-            out[name] = CodemodBundle(patterns=patterns, rules=rules, downgraded=downgraded)
+            out[name] = CodemodBundle(
+                patterns=patterns,
+                rules=rules,
+                impacts=impacts,
+                downgraded=downgraded,
+            )
         return out
 
     def fetch_codemods(

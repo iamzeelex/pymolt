@@ -117,7 +117,9 @@ def _fold(trace_path: str | Path) -> list[tuple[str, dict, Any, str]]:
         if key in seen:
             continue
         seen.add(key)
-        contacts.append((q, bound, rec.get("result"), rec.get("t", "return")))
+        kind = rec.get("t", "return")
+        captured = rec.get("raised") if kind == "raise" else rec.get("result")
+        contacts.append((q, bound, captured, kind))
     return contacts
 
 
@@ -129,7 +131,7 @@ def _classify(captured_kind: str, captured_result: Any, res) -> str:
         return "changed"
     if new_kind == "return":
         return "stable" if res.value == captured_result else "changed"
-    return "stable"  # both raise — type-level raise compare is a follow-up
+    return "stable" if res.error == captured_result else "changed"
 
 
 def probe_trace(trace_path: str | Path, target_python: str, timeout: float = 20.0) -> dict[str, ProbeResult]:

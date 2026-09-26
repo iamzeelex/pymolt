@@ -273,9 +273,14 @@ def test_codemods_tool_dry_run_and_write(tmp_path, monkeypatch):
         assert res["data"]["write"] is False
         assert "DRY-RUN preview" in res["summary"]
 
+    refused = mcp_server.codemods(project_dir=str(project), write=True)
+    assert refused["ok"] is False
+    assert "baseline-gated CLI" in refused["error"]
+
 
 def test_migrate_tool_executes_pipeline(tmp_path):
     from unittest.mock import MagicMock, patch
+
     from pymolt.assess.service import AssessResult
     project = _make_project(tmp_path)
 
@@ -285,7 +290,7 @@ def test_migrate_tool_executes_pipeline(tmp_path):
         target_python="3.12",
         target_resolved=True,
         target_manifest_path=str(project / "requirements-target.txt"),
-        rows=[{"name": "requests", "baseline_version": "2.31.0", "target_version": "2.32.0", "status": "upgrade"}],
+        rows=[{"package": "requests", "legacy_version": "2.31.0", "target_version": "2.32.0", "status": "upgrade"}],
     )
 
     with patch("pymolt.assess.service.run_assess", return_value=fake_assess), \
@@ -295,3 +300,117 @@ def test_migrate_tool_executes_pipeline(tmp_path):
         assert "Migrate (PREVIEW)" in res["summary"]
         assert res["data"]["packages_assessed"] == 1
 
+    refused = mcp_server.migrate(project_dir=str(project), target_python="3.12", write=True)
+    assert refused["ok"] is False
+    assert "baseline-gated CLI" in refused["error"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Answer lists are budgeted, not clipped
+#
+# Regression cover for the benchmarked failure: capping an answer list at a
+# fixed item count made agents answer from a partial list, and the summary
+# reported the truncated length as the finding count.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_fit_answer_keeps_everything_that_fits():
+    rows = [f"pkg{i} 1.0>2.0 upgrade" for i in range(40)]
+    fitted, dropped = mcp_server._fit_answer(rows)
+    assert dropped == 0
+    assert fitted == rows, "40 compact rows are well inside the budget"
+
+
+def test_fit_answer_budgets_by_size_not_item_count():
+    rows = ["x" * 500 for _ in range(40)]
+    fitted, dropped = mcp_server._fit_answer(rows, budget=2000)
+    assert 0 < len(fitted) < 40
+    assert dropped == 40 - len(fitted)
+    assert sum(len(r) + 1 for r in fitted) <= 2000
+
+
+def test_fit_answer_always_returns_at_least_one_row():
+    """A single row larger than the whole budget still gets through."""
+    fitted, dropped = mcp_server._fit_answer(["y" * 9000], budget=100)
+    assert len(fitted) == 1 and dropped == 0
+
+
+def test_truncation_note_states_completeness():
+    assert mcp_server._truncation_note(31, 0, None) == "All 31 listed."
+    note = mcp_server._truncation_note(20, 11, "/tmp/full.json")
+    assert "20 of 31" in note and "11 omitted" in note and "/tmp/full.json" in note
+
+
+def test_assess_lists_every_change_and_says_so(tmp_path, monkeypatch):
+    """The changed-set is the answer: it ships whole, and the summary confirms it."""
+    project = _make_project(tmp_path)
+    monkeypatch.setattr(mcp_server, "_WORKSPACE_ROOT", tmp_path.resolve())
+
+    rows = [
+        {"name": f"pkg{i}", "baseline_version": "1.0.0",
+         "target_version": "2.0.0", "status": "upgrade"}
+        for i in range(31)
+    ]
+
+    class _Result:
+        target_resolved = True
+        target_error = None
+        manual_zone: list = []
+        risk = None
+        target_manifest_path = None
+
+        def __init__(self):
+            self.rows = rows
+
+        def counts_by_status(self):
+            return {"upgrade": 31}
+
+        def model_dump(self, mode="json"):
+            return {"rows": rows}
+
+    monkeypatch.setattr("pymolt.assess.service.run_assess",
+                        lambda *a, **k: _Result())
+    monkeypatch.setattr(
+        "pymolt.interfaces.cli.commands._load_or_autodetect_assess_config",
+        lambda *a, **k: {"target_python": "3.12", "selected_tool": "uv"},
+    )
+
+    res = mcp_server.assess(project_dir=str(project), target_python="3.12")
+    assert res["ok"] is True
+    changes = res["data"]["changes"]
+    assert len(changes) == 31, "no clip at 20 — the whole changed-set is the answer"
+    assert changes[0] == "pkg0 1.0.0>2.0.0 upgrade"
+    assert "All 31 listed." in res["summary"]
+    assert "truncated" not in res["data"]
+
+
+def test_scan_description_tells_the_agent_to_expect_a_monorepo():
+    """Guards a measured regression.
+
+    A tool description is the only text that reaches the model — the server's
+    FastMCP `instructions` do not (measured: rewriting them moved no tokens in the
+    request, while rewriting docstrings moved exactly their token delta). When the
+    description stopped naming the monorepo case, agents began reporting only the
+    roots carrying a setup.py and silently dropping a nested root whose sole marker
+    is its own requirements.txt.
+    """
+    doc = mcp_server.scan.__doc__ or ""
+    assert "monorepo" in doc.lower()
+    assert "requirements.txt" in doc
+    assert "EVERY project root" in doc
+
+
+def test_scan_finds_a_nested_requirements_only_root(tmp_path, monkeypatch):
+    """The root that the regression dropped: nested, no setup.py, own manifest."""
+    monkeypatch.setattr(mcp_server, "_WORKSPACE_ROOT", tmp_path.resolve())
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='top')\n")
+    (tmp_path / "requirements.txt").write_text("flask>=1.0\n")
+    demo = tmp_path / "demo_app"
+    demo.mkdir()
+    (demo / "requirements.txt").write_text("flask>=2.0\n")
+    (demo / "app.py").write_text("import flask\n")
+
+    res = mcp_server.scan(project_dir=str(tmp_path))
+    assert res["ok"] is True
+    paths = {r["path"] for r in res["data"]["roots"]}
+    assert "demo_app" in paths, f"nested requirements-only root dropped: {paths}"

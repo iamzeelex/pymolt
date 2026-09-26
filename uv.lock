@@ -686,7 +686,6 @@ crypto = [
 
 [[package]]
 name = "pymolt"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "griffe", extra = ["pypi"] },

@@ -66,13 +66,20 @@ class TestArchiveNeverDestroys:
         kept = list((tmp_path / ".pymolt" / "contract_traces" / "archive").glob("*.jsonl"))
         assert len(kept) == 2  # three captures displaced two predecessors
 
-    def test_attach_archives_before_the_engineer_starts_appending(self, tmp_path):
-        """The attach flow writes into the slot path itself, so the displacement
-        has to happen at start — by --collect time the two runs are one file."""
+    def test_attach_keeps_active_capture_until_pending_trace_is_valid(self, tmp_path):
+        """Starting attach must not displace the last valid evidence."""
         _capture(tmp_path)
         original = (tmp_path / ".pymolt" / "contract_traces" / "baseline.jsonl").read_bytes()
 
-        service.start_attached_capture(tmp_path, "baseline", target="json")
+        instructions = service.start_attached_capture(tmp_path, "baseline", target="json")
+
+        active = tmp_path / ".pymolt" / "contract_traces" / "baseline.jsonl"
+        assert active.read_bytes() == original
+        assert not (tmp_path / ".pymolt" / "contract_traces" / "archive").exists()
+
+        pending = service.Path(instructions.out_path)
+        pending.write_text('{"q":"json.loads"}\n', encoding="utf-8")
+        service.finalize_attached_capture(tmp_path, "baseline", pending, target="json")
 
         kept = list((tmp_path / ".pymolt" / "contract_traces" / "archive").glob("*.jsonl"))
         assert len(kept) == 1 and kept[0].read_bytes() == original
@@ -159,3 +166,14 @@ class TestStalenessInTheReport:
         report = service.build_contract_report_from_state(tmp_path)
         assert report.baseline_stale is None
         assert any("staleness unchecked" in n for n in report.notes)
+
+    def test_dropped_events_are_never_silently_treated_as_complete(self, tmp_path):
+        self._project(tmp_path)
+        slot = _capture(tmp_path)
+        state = service.load_contract_state(tmp_path)
+        state.baseline = slot.model_copy(update={"dropped_events": 3})
+        state.save(tmp_path / ".pymolt" / "contract_state.json")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert any("dropped 3 event" in reason for reason in report.verdict_reasons)

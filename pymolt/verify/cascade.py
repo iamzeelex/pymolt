@@ -112,14 +112,26 @@ def verify_node(node: NodeRef, scope: TraceScope, deps: CascadeDeps) -> NodeVeri
         golden = deps.run_golden(node)
         if golden is not None:
             crosscheck["golden"] = {"changed": len(golden.changed), "skipped": len(golden.skipped)}
-            verdict = Verdict.BEHAVIOR_STABLE if golden.is_clean() else Verdict.BEHAVIOR_CHANGED
+            if not golden.is_clean():
+                return NodeVerifyResult(
+                    node=node,
+                    verdict=Verdict.BEHAVIOR_CHANGED,
+                    evidence_level=EvidenceLevel.GOLDEN,
+                    detail={"golden": golden.model_dump(), "tests": crosscheck["tests"]},
+                    honesty=honesty,
+                )
             if golden.skipped:
                 honesty.append(f"golden-skipped:{len(golden.skipped)}")
-            return NodeVerifyResult(node=node, verdict=verdict,
-                                    evidence_level=EvidenceLevel.GOLDEN,
-                                    detail={"golden": golden.model_dump(),
-                                            "tests": crosscheck["tests"]}, honesty=honesty)
-        honesty.append("no-golden-points")
+            else:
+                return NodeVerifyResult(
+                    node=node,
+                    verdict=Verdict.BEHAVIOR_STABLE,
+                    evidence_level=EvidenceLevel.GOLDEN,
+                    detail={"golden": golden.model_dump(), "tests": crosscheck["tests"]},
+                    honesty=honesty,
+                )
+        else:
+            honesty.append("no-golden-points")
 
         # ── L3 TRACE (terminal) ───────────────────────────────────────────────
         diff = deps.run_trace(node)

@@ -24,7 +24,11 @@ see rules.py's module docstring).
 from __future__ import annotations
 
 import logging
+import os
+import stat
+import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import libcst as cst
@@ -453,12 +457,143 @@ def _iter_py_files(root: Path):
     for path in sorted(root.rglob("*.py")):
         try:
             rel = path.relative_to(root)
-            if any(part in _SKIP_DIRS or (part.startswith(".") and part != ".") for part in rel.parts):
+            if any(
+                part in _SKIP_DIRS or (part.startswith(".") and part != ".")
+                for part in rel.parts
+            ):
                 continue
         except Exception:
-            if any(part in _SKIP_DIRS or (part.startswith(".") and part != ".") for part in path.parts):
+            if any(
+                part in _SKIP_DIRS or (part.startswith(".") and part != ".")
+                for part in path.parts
+            ):
                 continue
         yield path
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRewrite:
+    """One fully computed source rewrite, before any project file is replaced."""
+
+    path: Path
+    original: bytes
+    replacement: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRewrite:
+    """Same-directory files that make one rewrite atomic and reversible."""
+
+    rewrite: _PendingRewrite
+    staged: Path
+    rollback: Path
+
+
+def _read_source(path: Path) -> tuple[bytes, str]:
+    """Read once so the rollback copy is byte-identical to the original file."""
+    original = path.read_bytes()
+    return original, original.decode("utf-8")
+
+
+def _write_transaction_file(path: Path, payload: bytes, *, kind: str, mode: int) -> Path:
+    """Create and fsync a hidden same-directory transaction file."""
+    fd, raw_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.pymolt-{kind}-",
+        suffix=".tmp",
+    )
+    temp_path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, mode)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return temp_path
+
+
+def _cleanup_transaction_files(prepared: list[_PreparedRewrite]) -> None:
+    for item in prepared:
+        for path in (item.staged, item.rollback):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _commit_rewrites(rewrites: list[_PendingRewrite]) -> None:
+    """Atomically apply a set of rewrites, rolling the whole set back on failure.
+
+    Every replacement and rollback file is validated and materialized beside its
+    destination before the first source file is touched.  ``os.replace`` then
+    makes each individual transition atomic.  A later failure restores every
+    destination already replaced in this transaction.
+    """
+    if not rewrites:
+        return
+
+    prepared: list[_PreparedRewrite] = []
+    try:
+        # Prepare the complete transaction before replacing any project source.
+        for rewrite in rewrites:
+            if rewrite.path.is_symlink():
+                raise OSError(f"refusing to replace symlink: {rewrite.path}")
+            if rewrite.path.read_bytes() != rewrite.original:
+                raise RuntimeError(
+                    f"file changed while codemods were being computed: {rewrite.path}"
+                )
+
+            # A generated module must parse before it is allowed into the write set.
+            cst.parse_module(rewrite.replacement.decode("utf-8"))
+            mode = stat.S_IMODE(rewrite.path.stat().st_mode)
+            rollback = _write_transaction_file(
+                rewrite.path, rewrite.original, kind="rollback", mode=mode
+            )
+            try:
+                staged = _write_transaction_file(
+                    rewrite.path, rewrite.replacement, kind="new", mode=mode
+                )
+            except BaseException:
+                try:
+                    rollback.unlink()
+                except OSError:
+                    pass
+                raise
+            prepared.append(
+                _PreparedRewrite(rewrite=rewrite, staged=staged, rollback=rollback)
+            )
+
+        replaced: list[_PreparedRewrite] = []
+        try:
+            for item in prepared:
+                # Catch edits made after preparation but before this destination's commit.
+                if item.rewrite.path.read_bytes() != item.rewrite.original:
+                    raise RuntimeError(
+                        f"file changed while codemods were being committed: {item.rewrite.path}"
+                    )
+                os.replace(item.staged, item.rewrite.path)
+                replaced.append(item)
+        except BaseException as exc:
+            rollback_errors: list[str] = []
+            for item in reversed(replaced):
+                try:
+                    os.replace(item.rollback, item.rewrite.path)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"{item.rewrite.path}: {rollback_exc}")
+            if rollback_errors:
+                raise RuntimeError(
+                    "codemod transaction failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from exc
+            raise
+    finally:
+        _cleanup_transaction_files(prepared)
 
 
 def apply_to_repo(
@@ -477,10 +612,11 @@ def apply_to_repo(
     root = Path(root)
     result = CodemodRunResult(root=str(root), dry_run=not write)
 
+    rewrites: list[_PendingRewrite] = []
     for path in _iter_py_files(root):
         result.files_scanned += 1
         try:
-            original = path.read_text(encoding="utf-8")
+            original_bytes, original = _read_source(path)
         except (OSError, UnicodeDecodeError) as exc:
             log.warning("skip %s: %s", path, exc)
             continue
@@ -501,8 +637,16 @@ def apply_to_repo(
             )
         )
         result.patterns_applied += total_sites
-        if write:
-            path.write_text(new_source, encoding="utf-8")
+        rewrites.append(
+            _PendingRewrite(
+                path=path,
+                original=original_bytes,
+                replacement=new_source.encode("utf-8"),
+            )
+        )
+
+    if write:
+        _commit_rewrites(rewrites)
 
     return result
 
@@ -527,7 +671,7 @@ def preview_repo(
     previews: list[FilePreview] = []
     for path in _iter_py_files(root):
         try:
-            original = path.read_text(encoding="utf-8")
+            _original_bytes, original = _read_source(path)
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
@@ -555,9 +699,34 @@ def preview_repo(
 
 def write_preview(preview: FilePreview) -> None:
     """Persist a single reviewed preview's new source to disk (on Accept)."""
-    Path(preview.path).write_text(preview.new_source, encoding="utf-8")
+    write_previews([preview])
 
 
+def write_previews(previews: list[FilePreview]) -> None:
+    """Persist an exact reviewed preview batch in one rollback boundary.
+
+    Unlike re-running recipes, this writes precisely the source the engineer
+    reviewed. Every file must still match ``old_source``; otherwise the entire
+    batch is rejected before any destination is replaced.
+    """
+    rewrites: list[_PendingRewrite] = []
+    for preview in previews:
+        if preview.old_source == preview.new_source:
+            continue
+        path = Path(preview.path)
+        original, source = _read_source(path)
+        if source != preview.old_source:
+            raise RuntimeError(
+                f"file changed since the codemod preview was computed: {path}"
+            )
+        rewrites.append(
+            _PendingRewrite(
+                path=path,
+                original=original,
+                replacement=preview.new_source.encode("utf-8"),
+            )
+        )
+    _commit_rewrites(rewrites)
 # ─────────────────────────────────────────────────────────────────────────────
 # Tier-2: rules (declarative match/rewrite + advisories)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -636,10 +805,11 @@ def apply_rules_to_repo(
     result = CodemodRunResult(root=str(root), dry_run=not write)
     allow = (lambda rule: rule.confidence == "verified") if write else None
 
+    rewrites: list[_PendingRewrite] = []
     for path in _iter_py_files(root):
         result.files_scanned += 1
         try:
-            original = path.read_text(encoding="utf-8")
+            original_bytes, original = _read_source(path)
         except (OSError, UnicodeDecodeError) as exc:
             log.warning("skip %s: %s", path, exc)
             continue
@@ -664,10 +834,136 @@ def apply_rules_to_repo(
             )
         )
         result.patterns_applied += total_sites
-        if write:
-            path.write_text(new_source, encoding="utf-8")
+        rewrites.append(
+            _PendingRewrite(
+                path=path,
+                original=original_bytes,
+                replacement=new_source.encode("utf-8"),
+            )
+        )
+
+    if write:
+        _commit_rewrites(rewrites)
 
     return result
+
+
+def apply_mixed_to_repo(
+    root: str | Path,
+    rules: list[CodemodRule],
+    patterns: list[CodemodPattern],
+    *,
+    write: bool = False,
+) -> CodemodRunResult:
+    """Apply Tier-2 rules then legacy patterns in one repository transaction.
+
+    The two recipe sets belong to disjoint packages, but may still touch the
+    same source file. Computing both passes in memory before one commit keeps a
+    mixed server response just as atomic as a rules-only or patterns-only run.
+    """
+    root = Path(root)
+    result = CodemodRunResult(root=str(root), dry_run=not write)
+    allow = (lambda rule: rule.confidence == "verified") if write else None
+    rewrites: list[_PendingRewrite] = []
+
+    for path in _iter_py_files(root):
+        result.files_scanned += 1
+        try:
+            original_bytes, original = _read_source(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            log.warning("skip %s: %s", path, exc)
+            continue
+
+        current = original
+        rule_hits: list[tuple[CodemodRule, int]] = []
+        advisories: list[RuleAdvisory] = []
+        try:
+            current, rule_hits, _touched, advisories = apply_rules(
+                current, rules, allow=allow
+            )
+        except Exception as exc:
+            log.warning("skip rules for %s (rule error): %s", path, exc)
+
+        pattern_hits: list[tuple[CodemodPattern, int]] = []
+        try:
+            current, pattern_hits = apply_patterns(current, patterns)
+        except Exception as exc:
+            log.warning("skip patterns for %s (parse error): %s", path, exc)
+
+        if advisories:
+            result.advisories_by_file[str(path)] = advisories
+        if current == original or not (rule_hits or pattern_hits):
+            continue
+
+        sites = sum(count for _, count in rule_hits) + sum(
+            count for _, count in pattern_hits
+        )
+        summaries = [_rule_summary(rule) for rule, _ in rule_hits]
+        summaries.extend(pattern.summary() for pattern, _ in pattern_hits)
+        result.changes.append(
+            FileChange(
+                path=str(path), sites=sites, patterns=summaries,
+                advisories=advisories,
+            )
+        )
+        result.patterns_applied += sites
+        rewrites.append(
+            _PendingRewrite(
+                path=path,
+                original=original_bytes,
+                replacement=current.encode("utf-8"),
+            )
+        )
+
+    if write:
+        _commit_rewrites(rewrites)
+    return result
+
+
+def preview_mixed_repo(
+    root: str | Path,
+    rules: list[CodemodRule],
+    patterns: list[CodemodPattern],
+    *,
+    on_file: ProgressSink = None,
+    verified_only: bool = False,
+) -> list[FilePreview]:
+    """Preview the exact chained output that :func:`apply_mixed_to_repo` writes."""
+    root = Path(root)
+    previews: list[FilePreview] = []
+    allow = (lambda rule: rule.confidence == "verified") if verified_only else None
+    for path in _iter_py_files(root):
+        try:
+            _original_bytes, original = _read_source(path)
+        except (OSError, UnicodeDecodeError):
+            _emit(on_file, path)
+            continue
+        try:
+            after_rules, rule_hits, touched, advisories = apply_rules(
+                original, rules, allow=allow
+            )
+            new_source, pattern_hits = apply_patterns(after_rules, patterns)
+        except Exception as exc:
+            log.warning("skip %s (mixed preview error): %s", path, exc)
+            _emit(on_file, path)
+            continue
+        if not (touched or pattern_hits):
+            _emit(on_file, path)
+            continue
+        previews.append(
+            FilePreview(
+                path=str(path),
+                old_source=original,
+                new_source=new_source,
+                sites=sum(count for _, count in rule_hits)
+                + sum(count for _, count in pattern_hits),
+                patterns=[pattern for pattern, _ in pattern_hits],
+                rules=touched,
+                advisories=advisories,
+            )
+        )
+        _emit(on_file, path, [*rule_hits, *pattern_hits])
+    return previews
 
 
 def preview_rules_repo(
@@ -675,6 +971,7 @@ def preview_rules_repo(
     rules: list[CodemodRule],
     *,
     on_file: ProgressSink = None,
+    verified_only: bool = False,
 ) -> list[FilePreview]:
     """
     Compute per-file before/after for every file the rules would change OR
@@ -686,14 +983,17 @@ def preview_rules_repo(
     """
     root = Path(root)
     previews: list[FilePreview] = []
+    allow = (lambda rule: rule.confidence == "verified") if verified_only else None
     for path in _iter_py_files(root):
         try:
-            original = path.read_text(encoding="utf-8")
+            _original_bytes, original = _read_source(path)
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
         try:
-            new_source, hits, touched, advisories = apply_rules(original, rules)
+            new_source, hits, touched, advisories = apply_rules(
+                original, rules, allow=allow
+            )
         except Exception as exc:  # malformed rule / libcst parse error → skip
             log.warning("skip %s (rule error): %s", path, exc)
             _emit(on_file, path)

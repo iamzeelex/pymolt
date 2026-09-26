@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+from pymolt.codemods import apply as apply_module
 from pymolt.codemods.apply import apply_pattern, apply_to_repo
 from pymolt.codemods.models import CodemodPattern
 
@@ -185,9 +192,11 @@ class TestApplyToRepo:
 
     def test_write_applies(self, tmp_path):
         repo = self._make_repo(tmp_path)
+        os.chmod(repo / "app.py", 0o744)
         result = apply_to_repo(repo, [_rewrite_import()], write=True)
         assert result.dry_run is False
         assert "werkzeug.utils" in (repo / "app.py").read_text()
+        assert stat.S_IMODE((repo / "app.py").stat().st_mode) == 0o744
 
     def test_skips_virtualenv(self, tmp_path):
         repo = self._make_repo(tmp_path)
@@ -202,3 +211,66 @@ class TestApplyToRepo:
         result = apply_to_repo(tmp_path, [_rewrite_import()], write=True)
         # good file still processed despite the broken one
         assert result.files_changed == 1
+
+    def test_dry_run_never_prepares_transaction_files(self, tmp_path, monkeypatch):
+        repo = self._make_repo(tmp_path)
+
+        def unexpected_commit(_rewrites):
+            raise AssertionError("dry-run must not prepare or commit files")
+
+        monkeypatch.setattr(apply_module, "_commit_rewrites", unexpected_commit)
+        result = apply_to_repo(repo, [_rewrite_import()], write=False)
+
+        assert result.files_changed == 1
+        assert "flask.helpers" in (repo / "app.py").read_text()
+
+    def test_prepare_failure_leaves_every_source_untouched(self, tmp_path, monkeypatch):
+        first = tmp_path / "a.py"
+        second = tmp_path / "b.py"
+        source = "from flask.helpers import safe_join\n"
+        first.write_text(source)
+        second.write_text(source)
+        real_prepare = apply_module._write_transaction_file
+
+        def fail_second_new(path, payload, *, kind, mode):
+            if path == second and kind == "new":
+                raise OSError("disk full")
+            return real_prepare(path, payload, kind=kind, mode=mode)
+
+        monkeypatch.setattr(apply_module, "_write_transaction_file", fail_second_new)
+
+        with pytest.raises(OSError, match="disk full"):
+            apply_to_repo(tmp_path, [_rewrite_import()], write=True)
+
+        assert first.read_text() == source
+        assert second.read_text() == source
+        assert not list(tmp_path.glob(".*.pymolt-*.tmp"))
+
+    def test_commit_failure_rolls_back_already_replaced_files(self, tmp_path, monkeypatch):
+        first = tmp_path / "a.py"
+        second = tmp_path / "b.py"
+        source = "from flask.helpers import safe_join\n"
+        first.write_text(source)
+        second.write_text(source)
+        real_replace = apply_module.os.replace
+        failed = False
+
+        def fail_second_replace(src, dst):
+            nonlocal failed
+            if (
+                not failed
+                and Path(dst) == second
+                and ".pymolt-new-" in Path(src).name
+            ):
+                failed = True
+                raise OSError("replace failed")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(apply_module.os, "replace", fail_second_replace)
+
+        with pytest.raises(OSError, match="replace failed"):
+            apply_to_repo(tmp_path, [_rewrite_import()], write=True)
+
+        assert first.read_text() == source
+        assert second.read_text() == source
+        assert not list(tmp_path.glob(".*.pymolt-*.tmp"))

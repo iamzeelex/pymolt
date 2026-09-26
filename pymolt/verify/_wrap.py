@@ -150,9 +150,9 @@ class WrapBackend(object):
             try:
                 result = inner(*a, **kw)
             except BaseException as exc:
-                backend._record(qualname, inner, a, kw, None, exc)
+                backend._safe_record(qualname, inner, a, kw, None, exc)
                 raise
-            backend._record(qualname, inner, a, kw, result, None)
+            backend._safe_record(qualname, inner, a, kw, result, None)
             return result
 
         setattr(wrapper, _WRAP_MARK, True)
@@ -181,10 +181,10 @@ class WrapBackend(object):
             try:
                 real_init(self_obj, *a, **kw)
             except BaseException as exc:
-                backend._record(qualname, real_init, bound_args, kw, None, exc)
+                backend._safe_record(qualname, real_init, bound_args, kw, None, exc)
                 raise
             # construction "result" is the instance -> shape becomes opaque:<Class>
-            backend._record(qualname, real_init, bound_args, kw, self_obj, None)
+            backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None)
 
         setattr(init_wrapper, _WRAP_MARK, True)
         init_wrapper.__wrapped__ = real_init
@@ -199,10 +199,23 @@ class WrapBackend(object):
             self._restore.append(_restore_delattr(cls, "__init__"))
 
     # ── recording ──────────────────────────────────────────────────────────────
-    def _record(self, qualname, real, args, kwargs, result, exc):
-        # caller frame: 0=_record, 1=wrapper, 2=the code that made the call (our boundary near side)
+    def _safe_record(self, qualname, real, args, kwargs, result, exc):
+        """Tracing must never alter the wrapped API's return/raise behavior."""
         try:
-            caller = sys._getframe(2)
+            self._record(qualname, real, args, kwargs, result, exc)
+        except Exception:
+            note = getattr(self.sink, "note_failure", None)
+            if note is not None:
+                try:
+                    note("sink_failures")
+                except Exception:
+                    pass
+
+    def _record(self, qualname, real, args, kwargs, result, exc):
+        # caller frame: 0=_record, 1=_safe_record, 2=wrapper, 3=the code that
+        # made the call (our boundary near side)
+        try:
+            caller = sys._getframe(3)
         except ValueError:
             caller = None
         if self.near is not None:
@@ -318,3 +331,87 @@ class HybridBackend(object):
         if self.sp is not None:
             self.sp.stop()
         self.wrap.stop()
+
+
+def _partition_impact_targets(targets):
+    """Split explicit symbols from opt-in module prefixes.
+
+    A trailing ``.*`` (or ``.``) is the unambiguous prefix notation.  Plain
+    dotted names are treated as symbols and can therefore use wrapping without
+    enabling a process-wide profile hook.
+    """
+    symbols = []
+    prefixes = []
+    seen_symbols = set()
+    seen_prefixes = set()
+    for raw in targets or ():
+        value = (raw or "").strip()
+        if not value:
+            continue
+        if value.endswith(".*"):
+            prefix = value[:-2].rstrip(".")
+        elif value.endswith("."):
+            prefix = value.rstrip(".")
+        elif "." not in value:
+            # A top-level package cannot identify a callable, so it is naturally
+            # a prefix even without the explicit wildcard notation.
+            prefix = value
+        else:
+            if value not in seen_symbols:
+                symbols.append(value)
+                seen_symbols.add(value)
+            continue
+        if prefix and prefix not in seen_prefixes:
+            prefixes.append(prefix)
+            seen_prefixes.add(prefix)
+    return symbols, prefixes
+
+
+class TargetedBackend(object):
+    """Instrument only the supplied impact set.
+
+    Exact API symbols use transparent wrapping and install no profile hook.
+    Explicit ``package.module.*`` entries use ``setprofile`` restricted to that
+    module prefix.  Mixed sets combine both and de-duplicate wrapped calls.
+    """
+
+    name = "targeted"
+
+    def __init__(self, targets, sink, source=None, include_internal=False):
+        self.symbols, self.prefixes = _partition_impact_targets(targets)
+        self.wrap = None
+        self.profile = None
+        if self.symbols:
+            self.wrap = WrapBackend(
+                self.symbols, sink, source=source, include_internal=include_internal,
+            )
+        if self.prefixes:
+            self.profile = SetProfileBackend(
+                self.prefixes, sink, source=source, include_internal=include_internal,
+            )
+            self.profile.skip_wrapped = bool(self.wrap)
+
+    @property
+    def skipped(self):
+        return self.wrap.skipped if self.wrap is not None else []
+
+    @property
+    def uses_profiling(self):
+        return self.profile is not None
+
+    def start(self):
+        if self.wrap is not None:
+            self.wrap.start()
+        if self.profile is not None:
+            try:
+                self.profile.start()
+            except BaseException:
+                if self.wrap is not None:
+                    self.wrap.stop()
+                raise
+
+    def stop(self):
+        if self.profile is not None:
+            self.profile.stop()
+        if self.wrap is not None:
+            self.wrap.stop()

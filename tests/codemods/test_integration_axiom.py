@@ -159,8 +159,8 @@ def _no_auth_env(monkeypatch, tmp_path):
     developer's real environment or saved config file."""
     monkeypatch.delenv("AXIOM_ALLOW_ANONYMOUS", raising=False)
     monkeypatch.delenv("PYMOLT_API_TOKEN", raising=False)
-    monkeypatch.delenv("PYMOLT_BILLING_URL", raising=False)
-    monkeypatch.delenv("PYMOLT_BILLING_SECRET", raising=False)
+    monkeypatch.delenv("PYMOLT_AUTH_URL", raising=False)
+    monkeypatch.delenv("PYMOLT_AUTH_SECRET", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))  # no saved token file
 
 
@@ -178,8 +178,8 @@ def test_missing_token_is_rejected_with_401(_no_auth_env, monkeypatch):
     tc.close()
 
 
-def test_token_without_billing_backend_fails_closed(_no_auth_env, monkeypatch):
-    """Enforcement on but billing backend unconfigured → 503, never a silent allow."""
+def test_token_without_auth_backend_fails_closed(_no_auth_env, monkeypatch):
+    """Enforcement on but auth backend unconfigured → 503, never a silent allow."""
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("PYMOLT_API_TOKEN", "pmk_sometoken")
@@ -192,3 +192,19 @@ def test_token_without_billing_backend_fails_closed(_no_auth_env, monkeypatch):
             [DependencyMigration("flask", "2.0.3", "3.0.0")]
         )
     tc.close()
+
+
+def test_non_cli_client_is_rejected_with_403(monkeypatch):
+    """Requests from browser/generic clients (not PyMolt CLI) are rejected with 403."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("AXIOM_ALLOW_ANONYMOUS", "1")
+    monkeypatch.setattr(axiom_api, "compute_full_delta", _fake_delta)
+    tc = TestClient(axiom_api.app)
+
+    # Request without PyMolt CLI User-Agent or client header
+    resp = tc.post("/codemods", json={"dependencies": []}, headers={"User-Agent": "curl/8.1.2"})
+    assert resp.status_code == 403
+    assert "PyMolt CLI" in resp.text
+    tc.close()
+

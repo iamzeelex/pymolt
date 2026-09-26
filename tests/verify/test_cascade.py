@@ -76,6 +76,21 @@ def test_l3_trace_terminal_when_no_golden_points(flask_node):
     assert "no-golden-points" in res.honesty
 
 
+def test_skipped_golden_value_descends_to_trace_instead_of_passing(flask_node):
+    deps = FakeDeps(
+        tests=TestStatus.INCONCLUSIVE,
+        golden=GoldenDiff(skipped=["nondeterministic-value"]),
+        boundary=BoundaryDiff(skipped_opaque=[{"qualname": "flask.x"}]),
+    )
+
+    res = verify_node(flask_node, TraceScope.BLIND_SPOTS, deps)
+
+    assert deps.traced == [flask_node.name]
+    assert res.evidence_level is EvidenceLevel.TRACE
+    assert res.verdict is Verdict.NEEDS_ACTION
+    assert "golden-skipped:1" in res.honesty
+
+
 def test_skipped_opaque_only_yields_needs_action(flask_node):
     deps = FakeDeps(tests=TestStatus.INCONCLUSIVE, golden=None,
                     boundary=BoundaryDiff(skipped_opaque=[{"qualname": "flask.x"}]))

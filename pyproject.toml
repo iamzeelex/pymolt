@@ -1,8 +1,37 @@
 [project]
 name = "pymolt"
-version = "0.1.0"
-description = "Python migration CLI tool with semantic changelog analysis"
+dynamic = ["version"]
+description = "Prove your Python migration didn't change what your code does."
+readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.12"
+authors = [
+    { name = "Leo Vaychik", email = "pymolt@zeelex.me" },
+]
+keywords = [
+    "python",
+    "migration",
+    "upgrade",
+    "dependency-management",
+    "codemod",
+    "libcst",
+    "behavioral-testing",
+    "mcp",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.0",
     "typer>=0.12.0",
@@ -34,12 +63,31 @@ mcp = [
 [project.scripts]
 pymolt = "pymolt.interfaces.cli.__main__:main"
 
+[project.urls]
+Homepage = "https://pymolt.zeelex.me"
+Repository = "https://github.com/iamzeelex/pymolt"
+Issues = "https://github.com/iamzeelex/pymolt/issues"
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "pymolt/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pymolt"]
+
+[tool.hatch.build.targets.sdist]
+# Keep the sdist to the installable package only. Everything else here (bench/,
+# docs/, integrations/, plugin/, services/axiom_graph — repo-internal services and tooling per
+# EDITIONS.md — tests/, install.sh, tox.ini, uv.lock, requirements-target.txt) is
+# repo-only tooling/content, not part of the `pymolt` distribution.
+include = [
+    "/pymolt",
+    "/README.md",
+    "/LICENSE",
+]
 
 [tool.ruff]
 line-length = 100

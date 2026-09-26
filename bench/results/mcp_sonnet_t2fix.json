@@ -49,7 +49,17 @@
       "total_cost_usd": 0.13724160000000002,
       "tools_used": [],
       "result_text": "Resolution done via `uv pip compile requirements.txt --python-version <3.9|3.12>` (real PyPI dependency resolution, pip-equivalent, respecting each interpreter's environment markers).\n\n**Full py3.9 set (19 pkgs):** attrs 26.1.0, blinker 1.9.0, click 8.1.8, flask 3.1.3, importlib-metadata 8.7.1, itsdangerous 2.2.0, jinja2 3.1.6, jsonschema 4.25.1, jsonschema-specifications 2025.9.1, markupsafe 3.0.3, mistune 3.3.4, packaging 26.3, pyyaml 6.0.3, referencing 0.36.2, rpds-py 0.27.1, six 1.17.0, typing-extensions 4.16.0, werkzeug 3.1.8, zipp 3.23.1\n\n**Full py3.12 set (17 pkgs):** attrs 26.1.0, blinker 1.9.0, click 8.5.0, flask 3.1.3, itsdangerous 2.2.0, jinja2 3.1.6, jsonschema 4.26.0, jsonschema-specifications 2025.9.1, markupsafe 3.0.3, mistune 3.3.4, packaging 26.3, pyyaml 6.0.3, referencing 0.37.0, rpds-py 2026.6.3, six 1.17.0, typing-extensions 4.16.0, werkzeug 3.1.8\n\n`click` and `jsonschema`'s dep chain (`referencing`/`rpds-py`) get newer releases on 3.12 that are gated `requires-python >=3.10`; `importlib-metadata`/`zipp` only exist in the 3.9 graph as click's backport for `importlib.metadata.entry_points(group=...)`, unneeded on 3.12's stdlib.\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Ran `uv pip compile requirements.txt --python-version 3.9` and `--python-version 3.12` (pip-equivalent PyPI resolver respecting each interpreter's environment markers) to produce two full locked dependency graphs, then diffed package sets and pinned versions.\"}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 33444,
+      "tool_result_tokens": 2812,
+      "tool_result_blocks": 8,
+      "tool_calls": {
+        "Bash": 6,
+        "Read": 2
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -71,7 +81,16 @@
       "total_cost_usd": 0.16954940000000002,
       "tools_used": [],
       "result_text": "## Summary\n\nI resolved `flasgger`'s full dependency set (from `requirements.txt`: Flask, PyYAML, jsonschema, six, mistune, werkzeug, packaging) using `pip install --dry-run --report` against real Python 3.9.23 and 3.12.11 interpreters (via `pip`'s actual resolver, not just static inspection), which produces the complete transitive closure with pinned versions for each.\n\n- **Python 3.9** resolved to 19 packages (includes `importlib_metadata` + `zipp`, needed as Flask's backport since `importlib.metadata.entry_points(group=...)` support landed later / these packages backport features not fully present in 3.9's stdlib).\n- **Python 3.12** resolved to 17 packages (no `importlib_metadata`/`zipp` needed \u2014 stdlib `importlib.metadata` suffices).\n- Union of both sets: 19 distinct packages.\n- 6 packages differ: `click`, `jsonschema`, `referencing`, `rpds-py` picked newer versions under 3.12 (due to python-version-gated dependency constraints from those packages' own metadata), and `importlib_metadata`/`zipp` exist only under 3.9.\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"importlib_metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Ran `pip install --dry-run --ignore-installed --report report.json -r requirements.txt` separately under a real Python 3.9.23 and Python 3.12.11 interpreter, letting pip's actual dependency resolver compute the full transitive closure for each, then diffed the resulting name/version maps.\"}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 38073,
+      "tool_result_tokens": 4604,
+      "tool_result_blocks": 10,
+      "tool_calls": {
+        "Bash": 10
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -93,7 +112,17 @@
       "total_cost_usd": 0.1312026,
       "tools_used": [],
       "result_text": "Resolved `requirements.txt` (Flask, PyYAML, jsonschema, six, mistune, werkzeug, packaging as direct deps) via `uv pip compile --python-version 3.9` and `--python-version 3.12`, which lock the full transitive set using PEP 508 environment-marker-aware resolution without needing either interpreter actually installed.\n\n**Py3.9 resolution (19 pkgs):** attrs 26.1.0, blinker 1.9.0, click 8.1.8, flask 3.1.3, importlib-metadata 8.7.1, itsdangerous 2.2.0, jinja2 3.1.6, jsonschema 4.25.1, jsonschema-specifications 2025.9.1, markupsafe 3.0.3, mistune 3.3.4, packaging 26.3, pyyaml 6.0.3, referencing 0.36.2, rpds-py 0.27.1, six 1.17.0, typing-extensions 4.16.0, werkzeug 3.1.8, zipp 3.23.1\n\n**Py3.12 resolution (17 pkgs):** same list minus `importlib-metadata` and `zipp` (both are `sys.version_info < (3.10)` backport-only deps of Flask/jsonschema and drop out once Python's stdlib `importlib.metadata` is sufficient), with click/jsonschema/referencing/rpds-py bumped.\n\n6 packages differ between the two resolutions:\n\n| package | py3.9 | py3.12 |\n|---|---|---|\n| click | 8.1.8 | 8.5.0 |\n| importlib-metadata | 8.7.1 | *(absent)* |\n| jsonschema | 4.25.1 | 4.26.0 |\n| referencing | 0.36.2 | 0.37.0 |\n| rpds-py | 0.27.1 | 2026.6.3 |\n| zipp | 3.23.1 | *(absent)* |\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Resolved requirements.txt's direct deps (Flask, PyYAML, jsonschema, six, mistune, werkzeug, packaging) into full transitive locksets using `uv pip compile --python-version 3.9` and `--python-version 3.12`, which apply PEP 508 environment markers for each target version without requiring either interpreter to be installed, then diffed the two locked package sets.\"}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 34830,
+      "tool_result_tokens": 3168,
+      "tool_result_blocks": 9,
+      "tool_calls": {
+        "Bash": 4,
+        "Read": 5
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -115,7 +144,16 @@
       "total_cost_usd": 0.15847619999999998,
       "tools_used": [],
       "result_text": "Resolved flasgger's `requirements.txt` dependency set with `uv pip compile` against real Python 3.9.23 and 3.12.11 interpreters. Union of both resolutions = 19 distinct packages; 6 differ, all traceable to those packages' own `requires-python` floors (verified against PyPI metadata) rather than any flasgger-side constraint \u2014 click 8.5.0, jsonschema 4.26.0, referencing 0.37.0, and rpds-py 2026.6.3 all require Python \u22653.10/3.11, so 3.9 falls back to older releases; `importlib-metadata`/`zipp` disappear entirely on 3.12 since Flask only needs that backport pre-3.10.\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Ran `uv pip compile requirements.txt` twice against real Python 3.9.23 and 3.12.11 interpreters (--python-version/--python flags), producing full transitive lockfiles that were then diffed by package name/version.\"}\n```",
-      "repeat": 2
+      "repeat": 2,
+      "peak_context_tokens": 35318,
+      "tool_result_tokens": 2836,
+      "tool_result_blocks": 8,
+      "tool_calls": {
+        "Bash": 8
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -137,7 +175,17 @@
       "total_cost_usd": 0.11826020000000001,
       "tools_used": [],
       "result_text": "Resolved the project's direct dependencies (`requirements.txt`: Flask, PyYAML, jsonschema, six, mistune, werkzeug, packaging) into full dependency sets using `uv pip compile` pinned against actual Python 3.9.23 and 3.12.11 interpreters (environment-marker-aware resolution, current PyPI state).\n\n**Py3.9 resolution** (19 packages): attrs 26.1.0, blinker 1.9.0, click 8.1.8, flask 3.1.3, importlib-metadata 8.7.1, itsdangerous 2.2.0, jinja2 3.1.6, jsonschema 4.25.1, jsonschema-specifications 2025.9.1, markupsafe 3.0.3, mistune 3.3.4, packaging 26.3, pyyaml 6.0.3, referencing 0.36.2, rpds-py 0.27.1, six 1.17.0, typing-extensions 4.16.0, werkzeug 3.1.8, zipp 3.23.1\n\n**Py3.12 resolution** (17 packages): same list minus `importlib-metadata` and `zipp` (both are py<3.10-only backport deps of click/importlib machinery), with click, jsonschema, referencing, and rpds-py landing on newer versions.\n\nDifferences are driven by: click's `importlib_metadata` backport marker (`python_version < '3.10'`), and jsonschema/referencing/rpds-py's newer releases dropping support for 3.9 (so the 3.9 resolver is capped to older compatible releases while 3.12 gets the latest).\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Ran `uv pip compile requirements.txt` twice, once pinned to a real Python 3.9.23 interpreter and once to a real Python 3.12.11 interpreter, letting uv's PyPI-backed resolver apply each version's environment markers and package python_requires constraints, then diffed the two lock outputs by package name and version.\"}\n```",
-      "repeat": 2
+      "repeat": 2,
+      "peak_context_tokens": 33501,
+      "tool_result_tokens": 2556,
+      "tool_result_blocks": 6,
+      "tool_calls": {
+        "Bash": 4,
+        "Read": 2
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -159,7 +207,22 @@
       "total_cost_usd": 0.2820992,
       "tools_used": [],
       "result_text": "I resolved this via the pymolt migration funnel (`scan` \u2192 `setup_options` \u2192 `setup_apply(base_python=3.9, target_python=3.12)` \u2192 `assess`), which uses `uv` to independently resolve the project's full dependency closure (from `requirements-dev.txt`, which also pulls in `requirements.txt`/`setup.py` via `-e .`) under each interpreter version and diffs the two resolved graphs package-by-package.\n\nTotal resolved set: 77 packages. Changed: 31 (3 added under 3.12, 8 removed/absent under 3.12, 20 upgraded to a different version).\n\n```json\n{\"total_packages\": 77, \"changed\": [{\"name\": \"annotated-doc\", \"py39\": null, \"py312\": \"0.0.5\"}, {\"name\": \"apispec\", \"py39\": \"6.8.4\", \"py312\": \"6.10.0\"}, {\"name\": \"backports-datetime-fromisoformat\", \"py39\": \"2.0.3\", \"py312\": null}, {\"name\": \"backports-tarfile\", \"py39\": \"1.2.0\", \"py312\": null}, {\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"coverage\", \"py39\": \"7.10.7\", \"py312\": \"7.15.4\"}, {\"name\": \"coveralls\", \"py39\": \"4.0.1\", \"py312\": \"4.1.0\"}, {\"name\": \"docopt\", \"py39\": \"0.6.2\", \"py312\": null}, {\"name\": \"exceptiongroup\", \"py39\": \"1.3.1\", \"py312\": null}, {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"iniconfig\", \"py39\": \"2.1.0\", \"py312\": \"2.3.0\"}, {\"name\": \"jaraco-context\", \"py39\": \"6.1.1\", \"py312\": \"6.1.2\"}, {\"name\": \"jaraco-functools\", \"py39\": \"4.4.0\", \"py312\": \"4.6.0\"}, {\"name\": \"jsonpointer\", \"py39\": \"3.0.0\", \"py312\": \"3.1.1\"}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"markdown-it-py\", \"py39\": \"3.0.0\", \"py312\": \"4.2.0\"}, {\"name\": \"marshmallow\", \"py39\": \"4.0.1\", \"py312\": \"4.3.1\"}, {\"name\": \"more-itertools\", \"py39\": \"10.8.0\", \"py312\": \"11.1.0\"}, {\"name\": \"pip\", \"py39\": \"26.0.1\", \"py312\": null}, {\"name\": \"pipdeptree\", \"py39\": \"2.28.0\", \"py312\": \"3.1.1\"}, {\"name\": \"pytest\", \"py39\": \"8.4.2\", \"py312\": \"9.1.1\"}, {\"name\": \"readme-renderer\", \"py39\": \"44.0\", \"py312\": \"45.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"requests\", \"py39\": \"2.32.5\", \"py312\": \"2.34.2\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"setuptools\", \"py39\": \"82.0.1\", \"py312\": \"84.0.0\"}, {\"name\": \"shellingham\", \"py39\": null, \"py312\": \"1.5.4\"}, {\"name\": \"tomli\", \"py39\": \"2.4.1\", \"py312\": null}, {\"name\": \"twine\", \"py39\": \"6.2.0\", \"py312\": \"7.0.0\"}, {\"name\": \"typer\", \"py39\": null, \"py312\": \"0.27.1\"}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Used the pymolt MCP funnel (scan, setup_options, setup_apply with base_python=3.9/target_python=3.12 against requirements-dev.txt which pulls in requirements.txt and setup.py via -e ., then assess) to have uv independently resolve the full dependency closure under each Python version and diff the two resolved graphs.\"}\n```",
-      "repeat": 2
+      "repeat": 2,
+      "peak_context_tokens": 65353,
+      "tool_result_tokens": 22695,
+      "tool_result_blocks": 8,
+      "tool_calls": {
+        "Bash": 2,
+        "ToolSearch": 1,
+        "mcp__pymolt__scan": 1,
+        "mcp__pymolt__setup_options": 1,
+        "mcp__pymolt__setup_apply": 1,
+        "mcp__pymolt__assess": 1,
+        "Read": 1
+      },
+      "pymolt_calls": 4,
+      "score": 0.984,
+      "score_detail": "31 claimed, 31/31 right pkg, 30/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -181,7 +244,17 @@
       "total_cost_usd": 0.1679378,
       "tools_used": [],
       "result_text": "I resolved the project's dependencies (from `requirements.txt`, which matches `setup.py`'s `install_requires` plus explicit `werkzeug`) using `uv pip compile` against PyPI, once targeting Python 3.9 and once targeting Python 3.12 \u2014 this performs a real PubGrub resolution and picks the newest versions compatible with each interpreter's constraints (as of 2026-08-26).\n\n**Results:**\n- Python 3.9 \u2192 19 packages (includes `importlib-metadata` and `zipp`, needed as `importlib.metadata` backports for py<3.10, pulled in by Flask)\n- Python 3.12 \u2192 17 packages (those two backports drop out since 3.12 has native `importlib.metadata`)\n- Union of both = 19 distinct packages total\n\n6 packages differ in version (or presence) between the two resolutions: `click`, `jsonschema`, `referencing`, and `rpds-py` get newer releases resolved under 3.12 (looser/newer wheel compatibility ranges), while `importlib-metadata` and `zipp` disappear entirely under 3.12 since they're conditional backport deps only needed pre-3.10.\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Ran `uv pip compile requirements.txt --python 3.9` and `--python 3.12` (PubGrub resolver against live PyPI metadata) to produce two fully pinned direct+transitive dependency sets, then diffed package-by-package.\"}\n```",
-      "repeat": 3
+      "repeat": 3,
+      "peak_context_tokens": 35618,
+      "tool_result_tokens": 3683,
+      "tool_result_blocks": 9,
+      "tool_calls": {
+        "Bash": 7,
+        "Read": 2
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -203,7 +276,16 @@
       "total_cost_usd": 0.1632662,
       "tools_used": [],
       "result_text": "Total distinct packages across both resolutions: 19 (17 common versions match on 13, differ on 4, plus 2 exist only under 3.9).\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"importlib_metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}], \"method\": \"Ran `pip install --dry-run --ignore-installed --report` (pip 24.3.1's real PyPI resolver, no code executed) against requirements.txt separately under a real Python 3.9.23 interpreter and a real Python 3.12.11 interpreter, then diffed the resulting install reports.\"}\n```",
-      "repeat": 3
+      "repeat": 3,
+      "peak_context_tokens": 37921,
+      "tool_result_tokens": 4541,
+      "tool_result_blocks": 10,
+      "tool_calls": {
+        "Bash": 10
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -225,7 +307,22 @@
       "total_cost_usd": 0.16981380000000001,
       "tools_used": [],
       "result_text": "Both resolutions came from a single `pymolt assess` comparison (baseline pinned at Python 3.9 via `setup_apply`, target re-resolved at Python 3.12 with `uv`), so the tool's own package-by-package diff (`unchanged` / `upgrade` / `removed`) is authoritative here \u2014 no manual pip/uv commands were run.\n\n**Findings:** 19 total resolved packages (main `requirements.txt` dependency tree). 4 packages get upgraded on 3.12 (click, jsonschema, referencing, rpds-py \u2014 this last one jumps dramatically, from 0.27.1 to 2026.6.3, since it's a Rust-backed wheel with a much newer build available for 3.12). 2 packages drop out entirely on 3.12: `importlib-metadata` and `zipp`, both backports that are no longer needed once the stdlib `importlib.metadata`/`zipfile` support covers the target version \u2014 they exist under 3.9 but resolve to nothing under 3.12.\n\n```json\n{\"total_packages\": 19, \"changed\": [{\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null}, {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}, {\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"}, {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"}, {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"}, {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"}], \"method\": \"Used pymolt setup_apply to pin requirements.txt with uv as the resolver and base_python=3.9, then ran assess once with target_python=3.9 (baseline==target, giving the pure 3.9 resolution) and once with target_python=3.12 (diffing the 3.9 baseline against a fresh 3.12 resolution) to get both complete dependency sets and their per-package version deltas.\"}\n```",
-      "repeat": 3
+      "repeat": 3,
+      "peak_context_tokens": 39317,
+      "tool_result_tokens": 4602,
+      "tool_result_blocks": 9,
+      "tool_calls": {
+        "Bash": 1,
+        "Read": 2,
+        "ToolSearch": 1,
+        "mcp__pymolt__scan": 1,
+        "mcp__pymolt__setup_options": 1,
+        "mcp__pymolt__setup_apply": 1,
+        "mcp__pymolt__assess": 2
+      },
+      "pymolt_calls": 5,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     }
   ]
 }

@@ -72,8 +72,9 @@ class TestCaptureNamedTraceAutoSelectsEnv:
     def _stub_capture_trace(self, monkeypatch, calls: list):
         def _fake_capture_trace(target, command, out_path, backend, container=None,
                                  workdir=None, exclude="", source="", include_internal=False,
-                                 cancel_event=None, cwd=None):
-            calls.append({"container": container, "workdir": workdir})
+                                 cancel_event=None, cwd=None, privacy="values",
+                                 sample_rate=1.0):
+            calls.append({"container": container, "workdir": workdir, "command": command})
             from pymolt.verify.service import TraceCaptureResult
 
             return TraceCaptureResult(
@@ -92,7 +93,8 @@ class TestCaptureNamedTraceAutoSelectsEnv:
         slot = service.capture_named_trace(
             tmp_path, "baseline", CaptureMode.TEST_SUITE, command=["pytest", "tests/"],
         )
-        assert calls == [{"container": "mycontainer", "workdir": None}]
+        assert calls == [{"container": "mycontainer", "workdir": None,
+                          "command": ["pytest", "tests/"]}]
         assert slot.env_note is not None
         assert "mycontainer" in slot.env_note
 
@@ -106,7 +108,8 @@ class TestCaptureNamedTraceAutoSelectsEnv:
             tmp_path, "baseline", CaptureMode.TEST_SUITE, command=["pytest", "tests/"],
             container="x",
         )
-        assert calls == [{"container": "x", "workdir": None}]
+        assert calls == [{"container": "x", "workdir": None,
+                          "command": ["pytest", "tests/"]}]
         # explicit container passed -> no auto-resolution note attached
         assert slot.env_note is None
 
@@ -124,8 +127,28 @@ class TestCaptureNamedTraceAutoSelectsEnv:
         slot = service.capture_named_trace(
             tmp_path, "baseline", CaptureMode.TEST_SUITE, command=["pytest", "tests/"],
         )
-        assert calls == [{"container": None, "workdir": None}]
+        assert calls == [{"container": None, "workdir": None,
+                          "command": ["pytest", "tests/"]}]
         assert slot.env_note == "no saved config — running locally"
+
+    def test_post_capture_uses_configured_target_venv_executable(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / ".target" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "python").write_text("")
+        pytest_exe = bin_dir / "pytest"
+        pytest_exe.write_text("")
+        _write_config(tmp_path, target_env_path=str(tmp_path / ".target"))
+        calls: list = []
+        self._stub_capture_trace(monkeypatch, calls)
+
+        slot = service.capture_named_trace(
+            tmp_path, "post_migration", CaptureMode.TEST_SUITE,
+            command=["pytest", "tests/"],
+        )
+
+        assert calls == [{"container": None, "workdir": None,
+                          "command": [str(pytest_exe), "tests/"]}]
+        assert slot.command == [str(pytest_exe), "tests/"]
 
 
 class TestContainerIsRunning:

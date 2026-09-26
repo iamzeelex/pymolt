@@ -34,9 +34,11 @@ from __future__ import annotations
 import glob
 import hashlib
 import importlib.util
+import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -46,14 +48,21 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.gaps import classify_gaps, scan_usage_sites
-from pymolt.verify.models import CaptureMode, ContractSlot, ContractState
+from pymolt.verify.models import (
+    CaptureMode,
+    CaptureValidity,
+    ContractSlot,
+    ContractState,
+    TraceArtifactQuality,
+    VerificationVerdict,
+)
 from pymolt.verify.report import ContractReport, build_contract_report
 
 logger = logging.getLogger(__name__)
@@ -79,6 +88,25 @@ class TraceCaptureResult(BaseModel):
     command_log: str | None = None
     # Exit code of the traced command (None for the container path / attach).
     returncode: int | None = None
+    # A user-requested Stop & Collect normally terminates a live command with a
+    # non-zero signal code; distinguish that expected stop from command failure.
+    cancelled: bool = False
+    # Optional/defaulted for compatibility with older callers and test doubles.
+    duration_seconds: float | None = None
+    deployment_id: str | None = None
+    request_id: str | None = None
+    correlation_id: str | None = None
+    sample_rate: float = 1.0
+    backend: str | None = None
+    impact_targets: list[str] = Field(default_factory=list)
+    metadata_path: str | None = None
+    events_seen: int | None = None
+    dropped_events: int | None = None
+    sampling_dropped: int | None = None
+    backpressure_dropped: int | None = None
+    write_failures: int | None = None
+    sink_failures: int | None = None
+    instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,9 +114,44 @@ class TraceCaptureResult(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def trace_env(target: str, backend: str, exclude: str, source: str, include_internal: bool) -> dict:
+def trace_env(
+    target: str,
+    backend: str,
+    exclude: str,
+    source: str,
+    include_internal: bool,
+    privacy: str = "values",
+    sample_rate: float = 1.0,
+    impact_targets: list[str] | tuple[str, ...] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
+) -> dict:
     """The PYMOLT_TRACE_* variables that drive the watcher (shared by local + container)."""
-    env = {"PYMOLT_TRACE_TARGET": target, "PYMOLT_TRACE_BACKEND": backend}
+    if privacy not in {"values", "shape"}:
+        raise ValueError("privacy must be 'values' or 'shape'")
+    if not 0 < sample_rate <= 1:
+        raise ValueError("sample_rate must be greater than 0 and at most 1")
+    env = {
+        "PYMOLT_TRACE_TARGET": target,
+        "PYMOLT_TRACE_BACKEND": backend,
+        "PYMOLT_TRACE_PRIVACY": privacy,
+        "PYMOLT_TRACE_SAMPLE_RATE": str(sample_rate),
+    }
+    normalized_targets = _normalize_impact_targets(impact_targets)
+    if normalized_targets:
+        env["PYMOLT_TRACE_IMPACT_TARGETS"] = json.dumps(
+            normalized_targets, separators=(",", ":"),
+        )
+    identities = {
+        "PYMOLT_TRACE_DEPLOYMENT_ID": deployment_id,
+        "PYMOLT_TRACE_REQUEST_ID": request_id,
+        "PYMOLT_TRACE_CORRELATION_ID": correlation_id,
+    }
+    for key, supplied in identities.items():
+        value = supplied if supplied is not None else os.environ.get(key)
+        if value:
+            env[key] = value
     if exclude:
         env["PYMOLT_TRACE_EXCLUDE"] = exclude
     if source:
@@ -98,12 +161,61 @@ def trace_env(target: str, backend: str, exclude: str, source: str, include_inte
     return env
 
 
+def _normalize_impact_targets(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    if values is None:
+        raw = os.environ.get("PYMOLT_TRACE_IMPACT_TARGETS", "")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = raw.split(",")
+            values = parsed if isinstance(parsed, list) else raw.split(",")
+    result: list[str] = []
+    for value in values or ():
+        if not isinstance(value, str):
+            raise ValueError("impact_targets must contain only strings")
+        value = value.strip()
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
+def _applied_plan_impact_targets(project_dir: str | Path) -> list[str]:
+    """Resolve old and replacement API paths from the currently applied plan."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.migration_state import MigrationReceipt
+
+    receipt = MigrationReceipt.load(project_dir)
+    if receipt is None or receipt.status != "applied" or not receipt.plan_path:
+        return []
+    plan = MigrationPlan.load(project_dir, receipt.plan_path)
+    if plan is None:
+        return []
+    paths: list[str] = []
+    for impact in plan.impacts:
+        for value in (impact.path, impact.replacement_path):
+            if value and value not in paths:
+                paths.append(value)
+    return paths
+
+
+def _capture_identity(supplied: str | None, env_name: str) -> str | None:
+    value = supplied if supplied is not None else os.environ.get(env_name)
+    return value or None
+
+
 def capture_trace_local(
     target: str, command: list[str], backend: str, bundle: Path, work: Path,
     exclude: str, source: str, include_internal: bool,
     cancel_event: threading.Event | None = None,
     cwd: str | Path | None = None,
     log_path: Path | None = None,
+    privacy: str = "values",
+    sample_rate: float = 1.0,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> tuple[list[str], int | None]:
     """Inject the watcher into a locally-run command via PYTHONPATH + env.
 
@@ -127,7 +239,10 @@ def capture_trace_local(
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(bundle), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
     env["PYMOLT_TRACE_OUT"] = str(work / "trace-{pid}.jsonl")
-    env.update(trace_env(target, backend, exclude, source, include_internal))
+    env.update(trace_env(
+        target, backend, exclude, source, include_internal, privacy, sample_rate,
+        impact_targets, deployment_id, request_id, correlation_id,
+    ))
 
     log_file = None
     returncode: int | None = None
@@ -183,7 +298,12 @@ def capture_trace_local(
 def capture_trace_in_container(
     target: str, command: list[str], backend: str, bundle: Path, work: Path,
     container: str, workdir: str | None, exclude: str, source: str, include_internal: bool,
-) -> list[str]:
+    privacy: str = "values", sample_rate: float = 1.0,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
+) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
     No `docker run` from scratch and no new volume mounts: the standalone bundle is copied in,
@@ -199,18 +319,22 @@ def capture_trace_in_container(
     exec_args = ["exec",
                  "-e", f"PYTHONPATH={bundle_in}",
                  "-e", f"PYMOLT_TRACE_OUT={trace_in}/trace-{{pid}}.jsonl"]
-    for key, val in trace_env(target, backend, exclude, source, include_internal).items():
+    for key, val in trace_env(
+        target, backend, exclude, source, include_internal, privacy, sample_rate,
+        impact_targets, deployment_id, request_id, correlation_id,
+    ).items():
         exec_args += ["-e", f"{key}={val}"]
     if workdir:
         exec_args += ["-w", workdir]
     exec_args += [container, *command]
-    _docker(exec_args, check=False)  # don't fail on the app/suite's own exit code
+    command_result = _docker(exec_args, check=False)
 
     pull = work / "pull"
     _docker(["cp", f"{container}:{trace_in}", str(pull)])
     # best-effort cleanup so the container is left exactly as found
     _docker(["exec", container, "rm", "-rf", bundle_in, trace_in], check=False)
-    return sorted(glob.glob(str(pull / "**" / "trace-*.jsonl"), recursive=True))
+    produced = sorted(glob.glob(str(pull / "**" / "trace-*.jsonl"), recursive=True))
+    return produced, command_result.returncode
 
 
 def _docker(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -297,6 +421,23 @@ def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
             "note": "running locally"}
 
 
+def _command_in_configured_env(command: list[str], prefix: list[str] | None) -> list[str]:
+    """Resolve a post-capture command into the configured target virtualenv."""
+    if not prefix or not command:
+        return list(command)
+    python = Path(prefix[0])
+    executable = Path(command[0])
+    if executable.name.lower().startswith("python"):
+        return [str(python), *command[1:]]
+    if executable.parent == Path("."):
+        venv_executable = python.parent / executable.name
+        if venv_executable.is_file():
+            return [str(venv_executable), *command[1:]]
+        return [str(python), "-m", *command]
+    # An explicit path is an explicit environment choice; do not reinterpret it.
+    return list(command)
+
+
 def _merge_traces(produced: list[str], out_path: Path) -> int:
     """The watcher writes one file per process ({pid}); merge children into one artifact."""
     out_path = Path(out_path)
@@ -312,12 +453,135 @@ def _merge_traces(produced: list[str], out_path: Path) -> int:
     return events
 
 
+_DROP_COUNTERS = (
+    "sampling_dropped", "backpressure_dropped", "write_failures", "shutdown_dropped",
+)
+_RUNTIME_COUNTERS = (
+    "events_seen",
+    "events_written",
+    "sampling_dropped",
+    "backpressure_dropped",
+    "write_failures",
+    "sink_failures",
+    "shutdown_dropped",
+)
+
+
+def _runtime_counters_complete(counters: object) -> bool:
+    return isinstance(counters, dict) and all(
+        isinstance(counters.get(name), int) and counters[name] >= 0
+        for name in _RUNTIME_COUNTERS
+    )
+
+
+def _trace_metadata_path(trace_path: str | Path) -> Path:
+    return Path(str(trace_path) + ".meta.json")
+
+
+def _read_trace_metadata(trace_path: str | Path) -> dict:
+    path = _trace_metadata_path(trace_path)
+    try:
+        with path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _aggregate_runtime_metadata(produced: list[str]) -> dict:
+    counters = {
+        "events_seen": 0,
+        "events_written": 0,
+        "sampling_dropped": 0,
+        "backpressure_dropped": 0,
+        "write_failures": 0,
+        "sink_failures": 0,
+        "shutdown_dropped": 0,
+    }
+    processes: list[dict] = []
+    backends: list[str] = []
+    skipped: list[dict[str, str]] = []
+    metadata_complete = True
+    for trace_path in produced:
+        metadata = _read_trace_metadata(trace_path)
+        if not metadata:
+            metadata_complete = False
+            continue
+        processes.append(metadata)
+        backend = metadata.get("backend")
+        if isinstance(backend, str) and backend not in backends:
+            backends.append(backend)
+        for item in metadata.get("instrumentation_skipped", ()):
+            if isinstance(item, dict) and isinstance(item.get("target"), str):
+                normalized = {
+                    "target": item["target"],
+                    "reason": str(item.get("reason", "unknown")),
+                }
+                if normalized not in skipped:
+                    skipped.append(normalized)
+        raw_counters = metadata.get("counters")
+        if not isinstance(raw_counters, dict):
+            metadata_complete = False
+            continue
+        process_counters_complete = _runtime_counters_complete(raw_counters)
+        for name in counters:
+            value = raw_counters.get(name)
+            if isinstance(value, int) and value >= 0:
+                counters[name] += value
+        metadata_complete = metadata_complete and process_counters_complete
+    if len(processes) != len(produced):
+        metadata_complete = False
+    counters["dropped_events"] = sum(counters[name] for name in _DROP_COUNTERS)
+    return {
+        "counters": counters,
+        "metadata_complete": metadata_complete,
+        "process_metadata": processes,
+        "backends": backends,
+        "instrumentation_skipped": skipped,
+    }
+
+
+def _write_trace_metadata(trace_path: str | Path, payload: dict) -> str | None:
+    path = _trace_metadata_path(trace_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
+    try:
+        with pending.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.flush()
+        os.replace(pending, path)
+    except OSError as exc:
+        logger.warning("could not persist trace metadata %s: %s", path, exc)
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+        return None
+    return str(path)
+
+
+def _move_trace_metadata(source: str | Path, destination: str | Path) -> str | None:
+    source_path = _trace_metadata_path(source)
+    if not source_path.is_file():
+        return None
+    destination_path = _trace_metadata_path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(source_path, destination_path)
+    return str(destination_path)
+
+
 def capture_trace(
     target: str, command: list[str], out_path: str | Path, backend: str,
     container: str | None = None, workdir: str | None = None,
     exclude: str = "", source: str = "", include_internal: bool = False,
     cancel_event: threading.Event | None = None,
     cwd: str | Path | None = None,
+    privacy: str = "values",
+    sample_rate: float = 1.0,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> TraceCaptureResult:
     """Run ``command`` with the watcher injected; merge produced JSONL into ``out_path``.
 
@@ -330,15 +594,23 @@ def capture_trace(
     trace artifacts (surfaced via ``command_log`` / ``returncode``), never on the
     parent tty.
     """
+    started = time.monotonic()
+    impact_targets = _normalize_impact_targets(impact_targets)
+    deployment_id = _capture_identity(deployment_id, "PYMOLT_TRACE_DEPLOYMENT_ID")
+    request_id = _capture_identity(request_id, "PYMOLT_TRACE_REQUEST_ID")
+    correlation_id = _capture_identity(correlation_id, "PYMOLT_TRACE_CORRELATION_ID")
+
     work = Path(tempfile.mkdtemp(prefix="pymolt-trace-"))
     bundle = export_watcher(work / "bundle")
 
     command_log: str | None = None
     returncode: int | None = None
     if container:
-        produced = capture_trace_in_container(
+        produced, returncode = capture_trace_in_container(
             target, command, backend, bundle, work,
             container, workdir, exclude, source, include_internal,
+            privacy, sample_rate, impact_targets,
+            deployment_id, request_id, correlation_id,
         )
     else:
         # Keep the log next to the durable trace artifact (out_path), not the
@@ -348,16 +620,61 @@ def capture_trace(
         produced, returncode = capture_trace_local(
             target, command, backend, bundle, work,
             exclude, source, include_internal, cancel_event=cancel_event,
-            cwd=cwd, log_path=log_path,
+            cwd=cwd, log_path=log_path, privacy=privacy, sample_rate=sample_rate,
+            impact_targets=impact_targets, deployment_id=deployment_id,
+            request_id=request_id, correlation_id=correlation_id,
         )
         command_log = str(log_path) if log_path.exists() else None
 
     events = _merge_traces(produced, Path(out_path))
-    return TraceCaptureResult(
+    runtime = _aggregate_runtime_metadata(produced)
+    counters = runtime["counters"]
+    runtime_backends = runtime["backends"]
+    effective_backend = ",".join(runtime_backends) if runtime_backends else backend
+    # Sidecars from older/interrupted watcher bundles may be absent. Written
+    # events remain useful, but loss cannot then be claimed to be zero.
+    metadata_complete = runtime["metadata_complete"]
+    events_seen = (
+        max(counters["events_seen"], events + counters["dropped_events"])
+        if metadata_complete else None
+    )
+    dropped_events = counters["dropped_events"] if metadata_complete else None
+    result = TraceCaptureResult(
         out_path=str(out_path), events=events, processes=len(produced),
         where=f"container:{container}" if container else "local",
         command_log=command_log, returncode=returncode,
+        cancelled=bool(cancel_event is not None and cancel_event.is_set()),
+        duration_seconds=round(max(0.0, time.monotonic() - started), 6),
+        deployment_id=deployment_id, request_id=request_id,
+        correlation_id=correlation_id, sample_rate=sample_rate,
+        backend=effective_backend, impact_targets=impact_targets,
+        events_seen=events_seen, dropped_events=dropped_events,
+        sampling_dropped=(counters["sampling_dropped"] if metadata_complete else None),
+        backpressure_dropped=(
+            counters["backpressure_dropped"] if metadata_complete else None
+        ),
+        write_failures=(counters["write_failures"] if metadata_complete else None),
+        sink_failures=(counters["sink_failures"] if metadata_complete else None),
+        instrumentation_skipped=runtime["instrumentation_skipped"],
     )
+    metadata = {
+        "schema_version": 1,
+        "duration_seconds": result.duration_seconds,
+        "deployment_id": deployment_id,
+        "request_id": request_id,
+        "correlation_id": correlation_id,
+        "sample_rate": sample_rate,
+        "backend": effective_backend,
+        "impact_targets": impact_targets,
+        "events": events,
+        "events_seen": events_seen,
+        "runtime_metadata_complete": metadata_complete,
+        "counters": counters,
+        "instrumentation_skipped": result.instrumentation_skipped,
+        "processes": runtime["process_metadata"],
+    }
+    result.metadata_path = _write_trace_metadata(out_path, metadata)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -376,6 +693,94 @@ def load_contract_state(project_dir: str | Path) -> ContractState:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def inspect_trace_artifact(path: str | Path) -> TraceArtifactQuality:
+    """Validate that a trace exists, is parseable, and contains usable events."""
+    trace = Path(path)
+    if not trace.is_file():
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.MISSING,
+            reason="trace artifact does not exist",
+        )
+    try:
+        text = trace.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.CORRUPT,
+            reason=f"trace artifact is unreadable: {exc}",
+        )
+    if not text.strip():
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.EMPTY,
+            reason="trace contains no events",
+        )
+
+    records: list[object] = []
+    invalid_lines = 0
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            aggregate = json.loads(text)
+        except json.JSONDecodeError:
+            aggregate = None
+        if isinstance(aggregate, dict) and isinstance(aggregate.get("records"), list):
+            records = list(aggregate["records"])
+        else:
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    invalid_lines += 1
+    else:
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                invalid_lines += 1
+
+    usable = [record for record in records if isinstance(record, dict) and (
+        record.get("q") or record.get("qualname")
+    )]
+    malformed_records = len(records) - len(usable)
+    invalid_lines += malformed_records
+    if invalid_lines:
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.CORRUPT,
+            events=len(usable), comparable_events=len(usable), invalid_lines=invalid_lines,
+            reason=f"trace contains {invalid_lines} malformed record(s)",
+        )
+    if not usable:
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.CORRUPT,
+            reason="trace contains no records with a dependency symbol",
+        )
+    return TraceArtifactQuality(
+        path=str(trace), validity=CaptureValidity.VALID,
+        events=len(usable), comparable_events=len(usable),
+    )
+
+
+def _capture_validity(
+    result: TraceCaptureResult, staged_path: Path,
+) -> tuple[CaptureValidity, str | None]:
+    if result.returncode not in (None, 0) and not result.cancelled:
+        return CaptureValidity.COMMAND_FAILED, f"command exited with code {result.returncode}"
+    if result.events == 0:
+        return CaptureValidity.EMPTY, "capture produced zero events"
+    quality = inspect_trace_artifact(staged_path)
+    return quality.validity, quality.reason
+
+
+def _diagnostic_path(project_dir: Path, when: str) -> Path:
+    directory = project_dir / ".pymolt" / "contract_traces" / "diagnostics"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = re.sub(r"[^0-9A-Za-z]", "-", _now())
+    return directory / f"{when}-{stamp}-{uuid.uuid4().hex[:8]}.jsonl"
 
 
 def _coverage_available() -> bool:
@@ -424,6 +829,12 @@ def capture_named_trace(
     exclude: str = "", source: str = "", include_internal: bool = False,
     cancel_event: threading.Event | None = None,
     cwd: str | Path | None = None,
+    privacy: str | None = None,
+    sample_rate: float = 1.0,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> ContractSlot:
     """Capture a trace and persist it as the named slot (``"baseline"`` or
     ``"post_migration"``). For ``mode in (TEST_SUITE, LIVE_COMMAND)`` — pymolt
@@ -457,34 +868,145 @@ def capture_named_trace(
         raise ValueError("command is required for TEST_SUITE/LIVE_COMMAND capture")
 
     project_dir = Path(project_dir)
+    if privacy is None:
+        privacy = "values" if mode is CaptureMode.TEST_SUITE else "shape"
+    if (
+        impact_targets is None
+        and when == "post_migration"
+        and not os.environ.get("PYMOLT_TRACE_IMPACT_TARGETS")
+    ):
+        impact_targets = _applied_plan_impact_targets(project_dir)
+    normalized_targets = _normalize_impact_targets(impact_targets)
+    # Validate before creating staging paths or spawning the target.
+    trace_env(
+        target, backend, exclude, source, include_internal, privacy, sample_rate,
+        normalized_targets, deployment_id, request_id, correlation_id,
+    )
 
     # No explicit container from the caller -> default from the project's saved
     # EnvConfig (baseline -> its configured container if still running;
     # post-migration -> no container, just a note/prefill suggestion). An
     # explicit container passed by the caller always wins.
     env_note = None
+    command_prefix = None
     if container is None:
         resolved = resolve_capture_env(project_dir, when)
         container = resolved["container"]
+        command_prefix = resolved["command_prefix"]
         if workdir is None:
             workdir = resolved["workdir"]
         env_note = resolved["note"]
+
+    command = _command_in_configured_env(list(command), command_prefix)
 
     # Local commands run in the target project by default (not pymolt's cwd), so
     # a relative command like `pytest tests/` collects the target's tests.
     if cwd is None and not container:
         cwd = project_dir
-    # Displace, never destroy: the recording being replaced can never be retaken.
-    archived_previous = archive_existing_capture(project_dir, when)
     out_path = project_dir / ".pymolt" / "contract_traces" / f"{when}.jsonl"
-    result = capture_trace(
-        target, command, out_path, backend, container=container, workdir=workdir,
-        exclude=exclude, source=source, include_internal=include_internal,
-        cancel_event=cancel_event, cwd=cwd,
+    # Capture into a sibling first.  A subprocess can fail to start or time out;
+    # archiving the current slot before that succeeds leaves contract_state
+    # pointing at a missing trace.  A sibling also makes the final promotion an
+    # atomic rename on the same filesystem.
+    staged_path = out_path.with_name(
+        f".{out_path.stem}-{uuid.uuid4().hex}.pending{out_path.suffix}"
     )
+    staged_log = staged_path.parent / f"{staged_path.stem}.command.log"
+    try:
+        capture_kwargs = {
+            "container": container,
+            "workdir": workdir,
+            "exclude": exclude,
+            "source": source,
+            "include_internal": include_internal,
+            "cancel_event": cancel_event,
+            "cwd": cwd,
+            "privacy": privacy,
+            "sample_rate": sample_rate,
+        }
+        # Keep compatibility with third-party/test capture_trace adapters that
+        # predate P2: only send the new keyword arguments when actually used.
+        if normalized_targets:
+            capture_kwargs["impact_targets"] = normalized_targets
+        if deployment_id is not None:
+            capture_kwargs["deployment_id"] = deployment_id
+        if request_id is not None:
+            capture_kwargs["request_id"] = request_id
+        if correlation_id is not None:
+            capture_kwargs["correlation_id"] = correlation_id
+        result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
+    except BaseException:
+        # A timeout/start failure may happen after the command log or a partial
+        # trace was created.  They were never committed, so do not leave them
+        # looking like a recoverable capture.
+        for pending in (staged_path, staged_log, _trace_metadata_path(staged_path)):
+            try:
+                pending.unlink()
+            except OSError:
+                pass
+        raise
+
+    # ``capture_trace`` normally creates this while merging per-process files.
+    # Materialize an empty artifact as well: alternate backends and test doubles
+    # are allowed to report a successful zero-event capture, and the persisted
+    # slot must never point at a path that does not exist.
+    if not staged_path.exists():
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.touch()
+    validity, validity_reason = _capture_validity(result, staged_path)
+    state = load_contract_state(project_dir)
+    archived_previous = None
+
+    if validity is not CaptureValidity.VALID:
+        # Keep failed evidence for diagnosis, but never let it displace the last
+        # valid baseline/post slot.  Its distinct path also makes accidental
+        # auto-sourcing impossible.
+        diagnostic = _diagnostic_path(project_dir, when)
+        os.replace(staged_path, diagnostic)
+        result.out_path = str(diagnostic)
+        try:
+            result.metadata_path = _move_trace_metadata(staged_path, diagnostic)
+        except OSError as exc:
+            logger.warning("could not move diagnostic trace metadata: %s", exc)
+        if result.command_log:
+            pending_log = Path(result.command_log)
+            diagnostic_log = diagnostic.with_suffix(".command.log")
+            if pending_log.is_file():
+                os.replace(pending_log, diagnostic_log)
+                result.command_log = str(diagnostic_log)
+    else:
+        # Displace only a fully valid recording. If promotion fails after the
+        # archive move, restore the previous active artifact before propagating.
+        previous = getattr(state, when, None)
+        had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
+        archived_previous = archive_existing_capture(project_dir, when)
+        if had_previous_trace and archived_previous is None:
+            for pending in (staged_path, staged_log):
+                try:
+                    pending.unlink()
+                except OSError:
+                    pass
+            raise RuntimeError(f"could not safely replace existing {when} capture")
+        try:
+            os.replace(staged_path, out_path)
+        except BaseException:
+            if archived_previous is not None and not out_path.exists():
+                shutil.move(archived_previous, out_path)
+            raise
+        result.out_path = str(out_path)
+        try:
+            result.metadata_path = _move_trace_metadata(staged_path, out_path)
+        except OSError as exc:
+            logger.warning("could not promote trace metadata: %s", exc)
+        if result.command_log:
+            pending_log = Path(result.command_log)
+            final_log = out_path.parent / f"{out_path.stem}.command.log"
+            if pending_log.is_file():
+                os.replace(pending_log, final_log)
+                result.command_log = str(final_log)
     coverage_pct: float | None = None
     covered_sites = blind_sites = 0
-    if mode == CaptureMode.TEST_SUITE:
+    if mode == CaptureMode.TEST_SUITE and validity is CaptureValidity.VALID:
         coverage_pct, covered_sites, blind_sites, coverage_notes = _coverage_gap_summary(
             project_dir, list(command),
         )
@@ -498,9 +1020,27 @@ def capture_named_trace(
         coverage_pct=coverage_pct, covered_sites=covered_sites, blind_sites=blind_sites,
         env_fingerprint=environment_fingerprint(project_dir),
         archived_previous=archived_previous,
+        validity=validity, validity_reason=validity_reason,
+        privacy_profile=privacy, sample_rate=sample_rate,
+        duration_seconds=result.duration_seconds,
+        deployment_id=result.deployment_id,
+        request_id=result.request_id,
+        correlation_id=result.correlation_id,
+        backend=result.backend,
+        impact_targets=result.impact_targets,
+        metadata_path=result.metadata_path,
+        events_seen=result.events_seen,
+        dropped_events=result.dropped_events,
+        sampling_dropped=result.sampling_dropped,
+        backpressure_dropped=result.backpressure_dropped,
+        write_failures=result.write_failures,
+        sink_failures=result.sink_failures,
+        instrumentation_skipped=result.instrumentation_skipped,
     )
-    state = load_contract_state(project_dir)
-    setattr(state, when, slot)
+    if validity is CaptureValidity.VALID:
+        setattr(state, when, slot)
+    else:
+        state.diagnostic_captures.append(slot)
     state.save(_state_path(project_dir))
     return slot
 
@@ -538,6 +1078,12 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
         # Never let bookkeeping block a capture — but say so, loudly enough to log.
         logger.warning("could not archive previous %s capture: %s", when, e)
         return None
+    current_metadata = _trace_metadata_path(current)
+    if current_metadata.is_file():
+        try:
+            shutil.move(str(current_metadata), str(_trace_metadata_path(destination)))
+        except OSError as exc:
+            logger.warning("could not archive previous %s trace metadata: %s", when, exc)
     return str(destination)
 
 
@@ -579,10 +1125,20 @@ class AttachInstructions(BaseModel):
 
     command_hint: str   # a ready-to-copy `PYTHONPATH=... PYMOLT_TRACE_*=... <your command>` line
     out_path: str        # where the trace will accumulate as they exercise the app
+    metadata_path: str | None = None
+
+
+def pending_attach_path(project_dir: str | Path, when: str) -> Path:
+    return Path(project_dir) / ".pymolt" / "contract_traces" / f".{when}.attach-pending.jsonl"
 
 
 def start_attached_capture(
     project_dir: str | Path, when: str, *, target: str = "all", backend: str = "auto",
+    privacy: str = "shape", sample_rate: float = 1.0,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> AttachInstructions:
     """Prepare (but do not launch) a LIVE_ATTACH capture: export the watcher bundle
     and pick a stable output path, returning the command the engineer runs THEMSELVES
@@ -591,20 +1147,28 @@ def start_attached_capture(
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
 
     project_dir = Path(project_dir)
+    watcher_env = trace_env(
+        target, backend, "", "", False, privacy, sample_rate,
+        impact_targets, deployment_id, request_id, correlation_id,
+    )
     bundle_dir = project_dir / ".pymolt" / "contract_bundle"
-    out_path = project_dir / ".pymolt" / "contract_traces" / f"{when}.jsonl"
+    out_path = pending_attach_path(project_dir, when)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Displace any previous recording now, before the engineer's own run starts
-    # appending to this path — by --collect time it is too late to tell the two
-    # apart.
-    archive_existing_capture(project_dir, when)
+    if out_path.exists():
+        raise ValueError(
+            f"an unfinished {when} attach capture already exists at {out_path}; "
+            "collect it before starting another"
+        )
     bundle = export_watcher(bundle_dir)
 
-    hint = (
-        f"PYTHONPATH={bundle} PYMOLT_TRACE_TARGET={target} "
-        f"PYMOLT_TRACE_OUT={out_path} <your command>"
+    exported = {"PYTHONPATH": str(bundle), **watcher_env, "PYMOLT_TRACE_OUT": str(out_path)}
+    hint = " ".join(f"{key}={shlex.quote(value)}" for key, value in exported.items())
+    hint += " <your command>"
+    return AttachInstructions(
+        command_hint=hint,
+        out_path=str(out_path),
+        metadata_path=str(_trace_metadata_path(out_path)),
     )
-    return AttachInstructions(command_hint=hint, out_path=str(out_path))
 
 
 def poll_attached_capture(out_path: str | Path) -> int:
@@ -618,18 +1182,117 @@ def poll_attached_capture(out_path: str | Path) -> int:
 
 def finalize_attached_capture(
     project_dir: str | Path, when: str, out_path: str | Path, *,
-    target: str = "all",
+    target: str = "all", privacy: str = "shape", sample_rate: float = 1.0,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> ContractSlot:
     """Called when the engineer signals "I'm done" on a LIVE_ATTACH capture:
     reads whatever landed on disk and persists it as the named slot."""
+    project_dir = Path(project_dir)
+    out_path = Path(out_path)
     events = poll_attached_capture(out_path)
+    metadata = _read_trace_metadata(out_path)
+    raw_counters = metadata.get("counters")
+    counters = raw_counters if isinstance(raw_counters, dict) else {}
+    runtime_metadata_complete = metadata.get("runtime_metadata_complete")
+    if runtime_metadata_complete is None:
+        runtime_metadata_complete = _runtime_counters_complete(counters)
+    else:
+        runtime_metadata_complete = (
+            runtime_metadata_complete is True
+            and _runtime_counters_complete(counters)
+        )
+    normalized_targets = _normalize_impact_targets(impact_targets)
+    if not normalized_targets and isinstance(metadata.get("impact_targets"), list):
+        normalized_targets = _normalize_impact_targets(metadata["impact_targets"])
+    deployment_id = (
+        _capture_identity(deployment_id, "PYMOLT_TRACE_DEPLOYMENT_ID")
+        or metadata.get("deployment_id")
+    )
+    request_id = (
+        _capture_identity(request_id, "PYMOLT_TRACE_REQUEST_ID")
+        or metadata.get("request_id")
+    )
+    correlation_id = (
+        _capture_identity(correlation_id, "PYMOLT_TRACE_CORRELATION_ID")
+        or metadata.get("correlation_id")
+    )
+    dropped_events = (
+        sum(counters[name] for name in _DROP_COUNTERS)
+        if runtime_metadata_complete else None
+    )
+    events_seen = counters.get("events_seen") if runtime_metadata_complete else None
+    quality = inspect_trace_artifact(out_path)
+    validity = quality.validity
+    validity_reason = quality.reason
+    state = load_contract_state(project_dir)
+    archived_previous = None
+    committed_path = out_path
+    if validity is CaptureValidity.VALID:
+        final_path = project_dir / ".pymolt" / "contract_traces" / f"{when}.jsonl"
+        previous = getattr(state, when, None)
+        had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
+        archived_previous = archive_existing_capture(project_dir, when)
+        if had_previous_trace and archived_previous is None:
+            raise RuntimeError(f"could not safely replace existing {when} capture")
+        try:
+            os.replace(out_path, final_path)
+        except BaseException:
+            if archived_previous is not None and not final_path.exists():
+                shutil.move(archived_previous, final_path)
+            raise
+        try:
+            metadata_path = _move_trace_metadata(out_path, final_path)
+        except OSError as exc:
+            logger.warning("could not promote attached trace metadata: %s", exc)
+            metadata_path = None
+        committed_path = final_path
+    else:
+        diagnostic = _diagnostic_path(project_dir, when)
+        if out_path.exists():
+            os.replace(out_path, diagnostic)
+        try:
+            metadata_path = _move_trace_metadata(out_path, diagnostic)
+        except OSError as exc:
+            logger.warning("could not move attached diagnostic metadata: %s", exc)
+            metadata_path = None
+        committed_path = diagnostic
     slot = ContractSlot(
-        trace_path=str(out_path), captured_at=_now(), mode=CaptureMode.LIVE_ATTACH,
+        trace_path=str(committed_path), captured_at=_now(), mode=CaptureMode.LIVE_ATTACH,
         command=[], target=target, events=events, processes=1,
         env_fingerprint=environment_fingerprint(project_dir),
+        archived_previous=archived_previous,
+        validity=validity, validity_reason=validity_reason,
+        privacy_profile=privacy, sample_rate=sample_rate,
+        duration_seconds=metadata.get("duration_seconds"),
+        deployment_id=deployment_id,
+        request_id=request_id,
+        correlation_id=correlation_id,
+        backend=metadata.get("backend"),
+        impact_targets=normalized_targets,
+        metadata_path=metadata_path,
+        events_seen=events_seen,
+        dropped_events=dropped_events,
+        sampling_dropped=(
+            counters.get("sampling_dropped") if runtime_metadata_complete else None
+        ),
+        backpressure_dropped=(
+            counters.get("backpressure_dropped") if runtime_metadata_complete else None
+        ),
+        write_failures=(
+            counters.get("write_failures") if runtime_metadata_complete else None
+        ),
+        sink_failures=(
+            counters.get("sink_failures") if runtime_metadata_complete else None
+        ),
+        instrumentation_skipped=metadata.get("instrumentation_skipped", []),
     )
-    state = load_contract_state(project_dir)
-    setattr(state, when, slot)
+    if validity is CaptureValidity.VALID:
+        setattr(state, when, slot)
+    else:
+        state.diagnostic_captures.append(slot)
     state.save(_state_path(project_dir))
     return slot
 
@@ -638,6 +1301,9 @@ def build_contract_report_from_state(
     project_dir: str | Path, *,
     trace_override: str | None = None, against_override: str | None = None,
     probe_python: str | None = None,
+    changed_api_paths=None,
+    comparator_profile: str = "exact",
+    custom_comparator=None,
 ) -> ContractReport:
     """The unified report, sourcing trace/against from the persisted state when
     not explicitly overridden.
@@ -648,6 +1314,16 @@ def build_contract_report_from_state(
     no diff; neither -> trace=None (today's all-BLIND behavior, unchanged).
     """
     state = load_contract_state(project_dir)
+
+    if changed_api_paths is None:
+        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import MigrationReceipt
+
+        receipt = MigrationReceipt.load(project_dir)
+        if receipt is not None and receipt.status == "applied" and receipt.plan_path:
+            applied_plan = MigrationPlan.load(project_dir, receipt.plan_path)
+            if applied_plan is not None and applied_plan.impacts:
+                changed_api_paths = applied_plan.impacts
 
     def _slot_trace(slot) -> str | None:
         """A slot's trace, resolved against the project.
@@ -678,10 +1354,123 @@ def build_contract_report_from_state(
             used_slots.append(("baseline", state.baseline))
 
     report = build_contract_report(
-        project_dir, trace=trace, against=against, probe_python=probe_python,
+        project_dir,
+        trace=trace,
+        against=against,
+        probe_python=probe_python,
+        changed_api_paths=changed_api_paths,
+        comparator_profile=comparator_profile,
+        custom_comparator=custom_comparator,
     )
     _stamp_staleness(project_dir, report, used_slots)
+    _stamp_verdict(report, trace, against, used_slots)
     return report
+
+
+def _stamp_verdict(
+    report: ContractReport,
+    trace: str | None,
+    against: str | None,
+    used_slots: list[tuple[str, object]],
+) -> None:
+    """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty."""
+    comparability: list[str] = []
+    if trace is None:
+        comparability.append("no current trace is available")
+    else:
+        quality = inspect_trace_artifact(trace)
+        if quality.validity is not CaptureValidity.VALID:
+            comparability.append(
+                quality.reason or f"current trace is {quality.validity.value}"
+            )
+    if against is None:
+        comparability.append("no baseline trace is available for a version diff")
+    else:
+        quality = inspect_trace_artifact(against)
+        if quality.validity is not CaptureValidity.VALID:
+            comparability.append(
+                quality.reason or f"baseline trace is {quality.validity.value}"
+            )
+
+    slots = {name: slot for name, slot in used_slots}
+    for name, slot in used_slots:
+        validity = getattr(slot, "validity", CaptureValidity.UNKNOWN)
+        if validity is not CaptureValidity.VALID:
+            comparability.append(f"{name} capture validity is {validity.value}")
+        dropped = getattr(slot, "dropped_events", None)
+        if dropped is None:
+            comparability.append(f"{name} capture has no event-loss counters")
+        elif dropped:
+            comparability.append(f"{name} capture dropped {dropped} event(s)")
+        skipped = getattr(slot, "instrumentation_skipped", [])
+        if skipped:
+            comparability.append(
+                f"{name} capture skipped {len(skipped)} instrumentation target(s)"
+            )
+    baseline = slots.get("baseline")
+    post = slots.get("post-migration")
+    if baseline is not None and post is not None:
+        def _workload(command: list[str]) -> list[str]:
+            if not command:
+                return []
+            executable = Path(command[0]).name
+            if executable.lower().startswith("python") and command[1:2] == ["-m"]:
+                return command[2:]
+            return [executable, *command[1:]]
+
+        if _workload(baseline.command) != _workload(post.command):
+            comparability.append("baseline and post-migration used different commands")
+        if baseline.target != post.target:
+            comparability.append("baseline and post-migration traced different targets")
+        if baseline.mode != post.mode:
+            comparability.append("baseline and post-migration used different capture modes")
+        if baseline.privacy_profile != post.privacy_profile:
+            comparability.append("baseline and post-migration used different privacy profiles")
+        if baseline.sample_rate != post.sample_rate:
+            comparability.append("baseline and post-migration used different sample rates")
+        if baseline.sample_rate < 1 or post.sample_rate < 1:
+            comparability.append(
+                "sampled captures cannot prove that unmatched interactions disappeared"
+            )
+
+    if report.baseline_stale is True:
+        comparability.append("capture evidence is stale")
+    elif used_slots and report.baseline_stale is None:
+        comparability.append("capture freshness could not be established")
+
+    # A negative oracle is authoritative only over a valid, comparable pair.
+    # Changed output from stale or mismatched workloads is evidence to inspect,
+    # but it cannot honestly describe the current migration.
+    if comparability:
+        report.verdict = VerificationVerdict.INCONCLUSIVE
+        report.verdict_reasons = list(dict.fromkeys(comparability))
+        return
+    if report.diff_clean is False or report.probe_changed:
+        report.verdict = VerificationVerdict.FAIL
+        if report.diff_clean is False:
+            report.verdict_reasons.append("behavioral boundary changes were detected")
+        if report.probe_changed:
+            report.verdict_reasons.append("sandbox replay changed behavior")
+        return
+
+    reasons: list[str] = []
+    if report.diff is None:
+        reasons.append("no before/after diff was produced")
+    elif report.diff.get("skipped_opaque", 0):
+        reasons.append("some boundary interactions were opaque or nondeterministic")
+    if report.blind:
+        reasons.append(f"{report.blind} static dependency symbol(s) were not exercised")
+    if report.dynamic_only:
+        reasons.append(f"{report.dynamic_only} observed symbol(s) are missing from the static map")
+    if report.static_targets == 0:
+        reasons.append("the static contract surface is empty")
+
+    # Keep output stable and readable when two checks identify the same cause.
+    report.verdict_reasons = list(dict.fromkeys(reasons))
+    report.verdict = (
+        VerificationVerdict.INCONCLUSIVE if report.verdict_reasons
+        else VerificationVerdict.PASS
+    )
 
 
 def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots) -> None:

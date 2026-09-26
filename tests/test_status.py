@@ -15,9 +15,13 @@ from typer.testing import CliRunner
 
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app
+from pymolt.migration_plan import create_migration_plan
+from pymolt.migration_state import MigrationReceipt
 from pymolt.status import build_status
 from pymolt.verify import service
-from pymolt.verify.models import CaptureMode
+from pymolt.verify.models import CaptureMode, VerificationVerdict
+from pymolt.verify.report import ContractReport
+from pymolt.verify.unified import build_unified_verification
 
 runner = CliRunner()
 
@@ -46,6 +50,34 @@ def _state(status, phase):
     found = status.phase(phase)
     assert found is not None, f"no {phase} phase in {[p.phase for p in status.phases]}"
     return found.state
+
+
+def _receipt(project, baseline, **overrides):
+    payload = {
+        "target_python": "3.12",
+        "source_manifest": "requirements.txt",
+        "target_manifest_path": str(project / "requirements-target.txt"),
+        "baseline_trace_path": baseline.trace_path,
+        "baseline_captured_at": baseline.captured_at,
+    }
+    payload.update(overrides)
+    receipt = MigrationReceipt(**payload)
+    receipt.save(project)
+    return receipt
+
+
+def _plan(project):
+    plan = create_migration_plan(
+        project,
+        [],
+        [],
+        target_python="3.12",
+        source_manifest="requirements.txt",
+        target_manifest_path=project / "requirements-target.txt",
+        files_scanned=0,
+    )
+    plan.save(project)
+    return plan
 
 
 class TestProgression:
@@ -81,24 +113,83 @@ class TestProgression:
         assert "capture --when baseline" in status.next_command
         assert "cannot be done later" in status.next_reason
 
-    def test_baseline_captured_points_at_post_migration(self, tmp_path):
+    def test_baseline_captured_points_at_plan(self, tmp_path):
         _manifest(tmp_path)
         _configure(tmp_path)
         (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
         _capture(tmp_path, "baseline")
         status = build_status(tmp_path)
         assert _state(status, "baseline") == "done"
+        assert _state(status, "migration") == "todo"
+        assert status.next_command == "pymolt plan ."
+
+    def test_reviewed_plan_points_at_exact_apply(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        _capture(tmp_path, "baseline")
+        _plan(tmp_path)
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "plan") == "done"
+        assert status.next_command == "pymolt apply ."
+
+    def test_migration_receipt_points_at_post_migration(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(tmp_path, "baseline")
+        _receipt(tmp_path, baseline)
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "done"
         assert "capture --when post-migration" in status.next_command
 
     def test_both_captured_points_at_the_report(self, tmp_path):
         _manifest(tmp_path)
         _configure(tmp_path)
         (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
-        _capture(tmp_path, "baseline")
+        baseline = _capture(tmp_path, "baseline")
+        _receipt(tmp_path, baseline)
         _capture(tmp_path, "post_migration")
         status = build_status(tmp_path)
-        assert status.next_command == "pymolt contract report ."
+        assert status.next_command == "pymolt verify ."
         assert _state(status, "report") == "todo"
+
+    def test_saved_unified_verdict_completes_report_phase(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text(
+            "flask==3.0.0\n", encoding="utf-8"
+        )
+        baseline = _capture(tmp_path, "baseline")
+        receipt = _receipt(tmp_path, baseline)
+        _capture(tmp_path, "post_migration")
+        build_unified_verification(
+            ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS),
+            run_id=receipt.run_id,
+        ).save(tmp_path)
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "report") == "done"
+        assert status.next_command is None
+        assert "complete" in status.next_reason.lower()
+
+    def test_post_capture_without_receipt_is_stale(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        _capture(tmp_path, "baseline")
+        _capture(tmp_path, "post_migration")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "todo"
+        assert _state(status, "post-migration") == "stale"
+        assert status.next_command == "pymolt plan ."
 
 
 class TestWorseThanNotDone:
@@ -146,7 +237,8 @@ class TestStatusCommand:
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
         assert [p["phase"] for p in payload["phases"]] == [
-            "scan", "setup", "assess", "baseline", "post-migration", "report",
+            "scan", "setup", "assess", "baseline", "plan", "migration",
+            "post-migration", "report",
         ]
         assert payload["next_command"].startswith("pymolt assess")
 

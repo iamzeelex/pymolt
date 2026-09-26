@@ -43,6 +43,9 @@ EXIT_ENVIRONMENT = 3
 """The world outside pymolt failed: a service is down, docker is missing, an
 optional extra isn't installed. Retrying after fixing the environment may work."""
 
+EXIT_INCONCLUSIVE = 4
+"""The command ran, but the available evidence cannot support a pass/fail verdict."""
+
 
 def warn(message: str, *, hint: str | None = None) -> None:
     """A diagnostic the user should see but which is not the answer."""

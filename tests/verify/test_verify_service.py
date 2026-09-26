@@ -8,12 +8,14 @@ and build_contract_report_from_state's trace/against resolution rules.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 from pymolt.verify import service
-from pymolt.verify.models import CaptureMode, ContractState
+from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
 
 
 def _write_script(tmp_path, body: str, name: str = "app.py"):
@@ -75,6 +77,22 @@ class TestCaptureTrace:
             raise AssertionError("expected ValueError")
         assert time.monotonic() - start < 10  # bounded, not left hanging
 
+    def test_container_capture_returns_child_exit_code(self, tmp_path, monkeypatch):
+        def fake_docker(args, check=True):
+            returncode = 7 if args[:1] == ["exec"] and "pytest" in args else 0
+            return subprocess.CompletedProcess(args, returncode, "", "")
+
+        monkeypatch.setattr(service, "_docker", fake_docker)
+        monkeypatch.setattr(service.glob, "glob", lambda *_a, **_kw: ["trace-1.jsonl"])
+
+        produced, returncode = service.capture_trace_in_container(
+            "flask", ["pytest"], "auto", tmp_path / "bundle", tmp_path / "work",
+            "container-id", None, "", "", False,
+        )
+
+        assert produced == ["trace-1.jsonl"]
+        assert returncode == 7
+
 
 class TestCaptureNamedTrace:
     def test_writes_slot_and_persists_state(self, tmp_path):
@@ -87,10 +105,59 @@ class TestCaptureNamedTrace:
         assert slot.command == [sys.executable, str(script)]
         assert slot.events >= 1
         assert slot.captured_at  # non-empty ISO timestamp
+        assert slot.privacy_profile == "values"
 
         state = service.load_contract_state(tmp_path)
         assert state.baseline == slot
         assert state.post_migration is None
+
+    def test_live_capture_defaults_to_shape_privacy(self, tmp_path):
+        script = _write_script(tmp_path, "import json\njson.loads('secret')\n")
+
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json",
+        )
+
+        assert slot.privacy_profile == "shape"
+        assert "secret" not in Path(slot.trace_path).read_text()
+
+    def test_failed_command_is_diagnostic_and_not_active_evidence(self, tmp_path):
+        script = _write_script(
+            tmp_path, "import json\njson.loads('{}')\nraise SystemExit(7)\n"
+        )
+
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json",
+        )
+
+        state = service.load_contract_state(tmp_path)
+        assert slot.validity is CaptureValidity.COMMAND_FAILED
+        assert state.baseline is None
+        assert state.diagnostic_captures == [slot]
+        assert "diagnostics" in slot.trace_path
+
+    def test_invalid_recapture_preserves_the_active_baseline(self, tmp_path):
+        good = _write_script(tmp_path, "import json\njson.loads('{}')\n", "good.py")
+        active = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(good)], target="json",
+        )
+        bad = _write_script(
+            tmp_path, "import json\njson.loads('{}')\nraise SystemExit(9)\n", "bad.py"
+        )
+
+        diagnostic = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(bad)], target="json",
+        )
+
+        state = service.load_contract_state(tmp_path)
+        assert state.baseline == active
+        assert diagnostic.validity is CaptureValidity.COMMAND_FAILED
+        assert state.diagnostic_captures[-1] == diagnostic
+        assert Path(active.trace_path).is_file()
 
     def test_recapture_overwrites_in_place_no_history(self, tmp_path):
         script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
@@ -219,7 +286,7 @@ class TestAttachedCapture:
     def test_start_returns_hint_and_deterministic_path(self, tmp_path):
         instr = service.start_attached_capture(tmp_path, "post_migration", target="requests")
         assert "PYMOLT_TRACE_TARGET=requests" in instr.command_hint
-        expected = tmp_path / ".pymolt" / "contract_traces" / "post_migration.jsonl"
+        expected = service.pending_attach_path(tmp_path, "post_migration")
         assert instr.out_path == str(expected)
 
     def test_poll_counts_lines_zero_when_absent(self, tmp_path):
@@ -242,6 +309,7 @@ class TestAttachedCapture:
 
         state = service.load_contract_state(tmp_path)
         assert state.baseline == slot
+        assert slot.validity is CaptureValidity.VALID
 
 
 class TestContractStateRoundTrip:

@@ -195,15 +195,35 @@ class TestRendering:
         assert "next →" in result.stderr
         assert "next →" not in result.stdout
 
-    def test_help_lists_the_funnel_in_funnel_order(self):
+    def test_help_lists_the_preparation_phases_in_funnel_order(self):
         result = runner.invoke(app, ["--help"])
-        funnel = result.output.split("Migration Workflow")[1].split("╰")[0]
-        order = [name for name in ("scan", "setup", "assess", "codemods", "contract")
-                 if name in funnel]
+        funnel = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
+        order = [name for name in ("scan", "setup", "assess", "codemods") if name in funnel]
         positions = [funnel.index(name) for name in order]
         assert positions == sorted(positions), f"funnel out of order: {order}"
         # scan is Phase 1 and must not sit below the phase that consumes it
         assert funnel.index("scan") < funnel.index("assess")
+
+    def test_contract_is_its_own_panel_not_a_funnel_step(self):
+        """The behavioural contract is the product, not the last chore in a list.
+
+        It brackets the migration (baseline before, post-migration after), so it
+        gets its own help panel rather than trailing the preparation phases.
+        """
+        result = runner.invoke(app, ["--help"])
+        # Match the panel border, not the phrase — the help text names the panel too.
+        assert "╭─ Behavioural proof" in result.output
+        proof = result.output.split("╭─ Behavioural proof")[1].split("╰")[0]
+        assert "contract" in proof
+        prep = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
+        assert "contract" not in prep
+
+    def test_help_leads_with_capturing_a_baseline_first(self):
+        """The one instruction a user cannot act on retroactively goes up top."""
+        result = runner.invoke(app, ["--help"])
+        lead = result.output.split("╭─ Options")[0]
+        assert "contract capture" in lead
+        assert "BEFORE" in lead
 
     def test_version_diff_is_prose_not_a_python_dict(self, tmp_path):
         from pymolt.interfaces.cli.verify_cmd import _render_contract_report
