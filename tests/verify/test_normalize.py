@@ -58,3 +58,14 @@ def test_dicts_are_order_independent():
 
 def test_sets_are_normalized_and_sorted():
     assert nz.normalize({3, 1, 2}) == {"__set__": [1, 2, 3]}
+
+
+def test_shape_privacy_never_persists_scalar_values(monkeypatch):
+    monkeypatch.setenv("PYMOLT_TRACE_PRIVACY", "shape")
+
+    out = nz.normalize({"token": "super-secret", "user_id": 42})
+
+    rendered = repr(out)
+    assert "super-secret" not in rendered
+    assert "42" not in rendered
+    assert "__shape__" in rendered

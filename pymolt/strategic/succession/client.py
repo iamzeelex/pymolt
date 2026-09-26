@@ -37,7 +37,15 @@ class SuccessionClient:
         self.token = token or load_token()
 
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        from pymolt import __version__
+
+        headers = {
+            "User-Agent": f"PyMolt-CLI/{__version__}",
+            "X-PyMolt-Client": "CLI",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def fetch(
         self, frameworks: Iterable[str], *, progress: Callable[[str], None] | None = None

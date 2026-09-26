@@ -30,7 +30,7 @@ BLOCKED = "blocked"
 class PhaseState(BaseModel):
     """One phase of the funnel, as found on disk."""
 
-    phase: str          # scan | setup | assess | baseline | post-migration | report
+    phase: str          # scan | setup | assess | baseline | plan | migration | post-migration | report
     state: str          # done | todo | stale | blocked
     detail: str = ""    # what was found, or what is missing
     blocker: str = ""   # why this cannot run yet (state == blocked)
@@ -93,6 +93,14 @@ def _capture_phase(name: str, slot, current_fingerprint: str | None) -> PhaseSta
             phase=label, state=STALE,
             detail=f"{detail} — EMPTY: the command never touched the traced dependency",
         )
+    validity = getattr(slot, "validity", None)
+    validity_value = getattr(validity, "value", validity)
+    if validity_value != "valid":
+        reason = getattr(slot, "validity_reason", None) or validity_value or "unknown"
+        return PhaseState(
+            phase=label, state=STALE,
+            detail=f"{detail} — capture validity is {reason}",
+        )
     if (current_fingerprint is not None and slot.env_fingerprint is not None
             and slot.env_fingerprint != current_fingerprint):
         return PhaseState(
@@ -102,10 +110,115 @@ def _capture_phase(name: str, slot, current_fingerprint: str | None) -> PhaseSta
     return PhaseState(phase=label, state=DONE, detail=detail)
 
 
+def _migration_phase(receipt, baseline: PhaseState, baseline_slot) -> PhaseState:
+    """Project the explicit mutation receipt; never infer an apply from captures."""
+    if receipt is None:
+        if baseline.state == DONE:
+            return PhaseState(
+                phase="migration", state=TODO,
+                detail="baseline is ready — code changes have not been applied",
+            )
+        return PhaseState(
+            phase="migration", state=BLOCKED,
+            blocker="a valid baseline is required before applying code changes",
+            detail="no migration receipt",
+        )
+
+    if getattr(receipt, "status", "applied") == "rolled_back":
+        return PhaseState(
+            phase="migration",
+            state=TODO,
+            detail=f"run {receipt.run_id[:8]} was rolled back; no migration is applied",
+        )
+
+    detail = (
+        f"run {receipt.run_id[:8]} · {len(receipt.files_changed)} file(s) · "
+        f"{receipt.patterns_applied} rewrite(s)"
+    )
+    if receipt.allow_no_baseline:
+        return PhaseState(
+            phase="migration", state=DONE,
+            detail=f"{detail} — applied without baseline; behavioral proof is unavailable",
+        )
+    if baseline_slot is None:
+        return PhaseState(
+            phase="migration", state=STALE,
+            detail=f"{detail} — its authorising baseline is missing",
+        )
+    if (
+        receipt.baseline_trace_path != baseline_slot.trace_path
+        or receipt.baseline_captured_at != baseline_slot.captured_at
+    ):
+        return PhaseState(
+            phase="migration", state=STALE,
+            detail=f"{detail} — baseline was replaced after this migration",
+        )
+    return PhaseState(phase="migration", state=DONE, detail=detail)
+
+
+def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
+    """Project the saved exact plan, including hash/environment staleness."""
+    from pymolt.migration_plan import MigrationPlan, inspect_migration_plan
+
+    if receipt is not None and getattr(receipt, "status", "applied") == "applied":
+        return PhaseState(
+            phase="plan", state=DONE,
+            detail=f"consumed by migration run {receipt.run_id[:8]}",
+        )
+    if receipt is not None and getattr(receipt, "status", "applied") == "rolled_back":
+        return PhaseState(
+            phase="plan", state=STALE,
+            detail=(
+                f"plan {receipt.run_id[:8]} was already applied and rolled back; "
+                "create a fresh review plan"
+            ),
+        )
+    if assess.state != DONE:
+        return PhaseState(
+            phase="plan", state=BLOCKED,
+            detail="no target dependency snapshot to plan against",
+            blocker="assessment has not produced a pinned target manifest",
+        )
+    plan = MigrationPlan.load(project_path)
+    if plan is None:
+        return PhaseState(
+            phase="plan", state=TODO,
+            detail="no exact reviewed migration plan",
+        )
+    inspection = inspect_migration_plan(project_path, plan)
+    if not inspection.valid:
+        return PhaseState(
+            phase="plan", state=STALE,
+            detail=f"plan {plan.plan_id[:8]} is stale: {inspection.reasons[0]}",
+        )
+    return PhaseState(
+        phase="plan", state=DONE,
+        detail=(
+            f"plan {plan.plan_id[:8]} · {len(plan.changes)} file(s) · "
+            f"{sum(change.sites for change in plan.changes)} rewrite(s)"
+        ),
+    )
+
+
+def _capture_precedes(captured_at: str, applied_at: str) -> bool:
+    try:
+        captured = datetime.fromisoformat(captured_at)
+        applied = datetime.fromisoformat(applied_at)
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=UTC)
+        if applied.tzinfo is None:
+            applied = applied.replace(tzinfo=UTC)
+        return captured < applied
+    except ValueError:
+        return True
+
+
 def build_status(project_dir: str | Path) -> FunnelStatus:
     """Read the project's funnel state. Pure: opens files, writes none."""
+    from pymolt.doctor import detect_workload_command
     from pymolt.ingestion.config import EnvConfig
     from pymolt.ingestion.detect import detect_sources
+    from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.service import environment_fingerprint, load_contract_state
 
     project_path = Path(project_dir)
@@ -161,31 +274,85 @@ def build_status(project_dir: str | Path) -> FunnelStatus:
     # ── contract: the two captures, then the report they enable ──────────────
     contract = load_contract_state(project_path)
     fingerprint = environment_fingerprint(project_path)
-    baseline = _capture_phase("baseline", contract.baseline, fingerprint)
-    post = _capture_phase("post_migration", contract.post_migration, fingerprint)
-    status.phases.extend([baseline, post])
+    baseline_slot = contract.baseline
+    post_slot = contract.post_migration
+    baseline = _capture_phase("baseline", baseline_slot, fingerprint)
+    receipt = MigrationReceipt.load(project_path)
+    assess_phase = status.phase("assess")
+    assert assess_phase is not None
+    plan = _plan_phase(project_path, assess_phase, receipt)
+    migration = _migration_phase(receipt, baseline, baseline_slot)
+    post = _capture_phase("post_migration", post_slot, fingerprint)
+    if post_slot is not None and receipt is None:
+        post = PhaseState(
+            phase="post-migration", state=STALE,
+            detail=f"{post.detail} — no recorded migration precedes this capture",
+        )
+    elif (
+        post_slot is not None
+        and receipt is not None
+        and _capture_precedes(post_slot.captured_at, receipt.applied_at)
+    ):
+        post = PhaseState(
+            phase="post-migration", state=STALE,
+            detail=f"{post.detail} — captured before migration run {receipt.run_id[:8]}",
+        )
+    status.phases.extend([baseline, plan, migration, post])
 
     if baseline.state == TODO and post.state == TODO:
-        status.phases.append(PhaseState(
+        report = PhaseState(
             phase="report", state=BLOCKED, blocker="no capture to build a report from",
             detail="static map only — every contact would be BLIND",
-        ))
+        )
     elif baseline.state == DONE and post.state == DONE:
-        status.phases.append(PhaseState(
+        report = PhaseState(
             phase="report", state=TODO,
             detail="both sides captured — the before/after diff is available",
-        ))
+        )
     else:
-        status.phases.append(PhaseState(
+        report = PhaseState(
             phase="report", state=TODO,
             detail="one side captured — coverage report, no version diff yet",
-        ))
+        )
 
-    _decide_next(status, config, baseline, post)
+    from pymolt.verify.unified import UnifiedVerificationReport
+
+    verification = UnifiedVerificationReport.load(project_path)
+    if (
+        verification is not None
+        and receipt is not None
+        and receipt.status == "applied"
+        and verification.run_id == receipt.run_id
+        and post_slot is not None
+        and not _capture_precedes(verification.created_at, post_slot.captured_at)
+    ):
+        report = PhaseState(
+            phase="report",
+            state=DONE,
+            detail=f"unified verdict: {verification.verdict.value}",
+        )
+    status.phases.append(report)
+
+    workload = detect_workload_command(project_path)
+    _decide_next(
+        status, config, baseline, plan, migration, post, report,
+        receipt, verification, workload,
+    )
     return status
 
 
-def _decide_next(status: FunnelStatus, config, baseline: PhaseState, post: PhaseState) -> None:
+def _decide_next(
+    status: FunnelStatus,
+    config,
+    baseline: PhaseState,
+    plan: PhaseState,
+    migration: PhaseState,
+    post: PhaseState,
+    report: PhaseState,
+    receipt,
+    verification,
+    workload: list[str],
+) -> None:
     """The single next command. One, not a menu: the point is to remove the choice."""
     scan = status.phase("scan")
     assess = status.phase("assess")
@@ -205,25 +372,55 @@ def _decide_next(status: FunnelStatus, config, baseline: PhaseState, post: Phase
         status.next_command = f"pymolt assess . --target-python {target}"
         status.next_reason = "Resolve baseline vs target and pin the target manifest."
         return
-    if baseline.state == TODO:
-        status.next_command = "pymolt contract capture --when baseline --mode tests -- <test cmd>"
+    workload_text = " ".join(workload) if workload else "<command that exercises the app>"
+    migrated_without_baseline = receipt is not None and receipt.allow_no_baseline
+    if baseline.state == TODO and not migrated_without_baseline:
+        status.next_command = (
+            f"pymolt contract capture --when baseline --mode tests -- {workload_text}"
+        )
         status.next_reason = (
             "Record how the code behaves BEFORE migrating — this is the one step that "
             "cannot be done later."
         )
         return
-    if baseline.state == STALE:
-        status.next_command = "pymolt contract capture --when baseline --mode tests -- <test cmd>"
+    if baseline.state == STALE and not migrated_without_baseline:
+        status.next_command = (
+            f"pymolt contract capture --when baseline --mode tests -- {workload_text}"
+        )
         status.next_reason = (
             "The baseline no longer describes this project — re-capture before trusting "
             "any diff against it."
         )
         return
-    if post.state == TODO:
-        status.next_command = (
-            "pymolt contract capture --when post-migration --mode tests -- <test cmd>"
+    if migration.state != DONE and plan.state in {TODO, STALE}:
+        status.next_command = "pymolt plan ."
+        status.next_reason = (
+            "Freeze the exact locally verified diff before applying any source changes."
         )
-        status.next_reason = "Migrate, then record the new behavior to diff against the baseline."
         return
-    status.next_command = "pymolt contract report ."
-    status.next_reason = "Both sides captured — fold them into the before/after verdict."
+    if migration.state in {TODO, STALE}:
+        status.next_command = "pymolt apply ."
+        status.next_reason = (
+            "Apply the hash-bound reviewed plan. Durable rollback data will be retained."
+        )
+        return
+    if post.state in {TODO, STALE}:
+        status.next_command = (
+            f"pymolt contract capture --when post-migration --mode tests -- {workload_text}"
+        )
+        status.next_reason = "Record the new behavior after the recorded migration."
+        return
+    if report.state != DONE:
+        status.next_command = "pymolt verify ."
+        status.next_reason = "Both sides captured — fold every oracle into one verdict."
+        return
+    if verification is not None and verification.verdict.value == "fail":
+        status.next_command = "pymolt rollback ."
+        status.next_reason = "The unified policy failed; restore the frozen pre-migration sources."
+        return
+    status.next_command = None
+    status.next_reason = (
+        "Migration verification is complete."
+        if verification is not None and verification.verdict.value == "pass"
+        else "Verification completed but remains inconclusive; add evidence before promotion."
+    )

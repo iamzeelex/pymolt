@@ -37,6 +37,23 @@ class CodemodPattern(BaseModel):
         return f"[{self.kind}] {self.old_qualname} → {self.new_qualname}  ({self.confidence})"
 
 
+class ApiImpact(BaseModel):
+    """A changed dependency API path returned by Axiom Graph.
+
+    The package name is supplied by the surrounding ``CodemodBundle`` map and
+    is added only when impacts are frozen into a migration plan.
+    """
+
+    path: str
+    replacement_path: str | None = None
+    kind: str
+    state: str
+    risk: str
+    explanation: str
+    transition_confidence: str | None = None
+    transition_reason: str | None = None
+
+
 class CodemodBundle(BaseModel):
     """Everything the server returned for one package: Tier-1 patterns (legacy,
     unchanged) and Tier-2 rules (new). Migration policy (client.py/service.py):
@@ -48,6 +65,8 @@ class CodemodBundle(BaseModel):
 
     patterns: list[CodemodPattern] = Field(default_factory=list)
     rules: list[CodemodRule] = Field(default_factory=list)
+    impacts: list[ApiImpact] = Field(default_factory=list)
+    """Changed public API paths used to scope local ContactMap verification."""
     downgraded: list[str] = Field(default_factory=list)
     """Short summaries of rules the client downgraded: the server claimed
     `verified` but local re-verification (the sole verification authority)

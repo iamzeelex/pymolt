@@ -49,7 +49,12 @@
       "total_cost_usd": 0.28546,
       "tools_used": [],
       "result_text": "OK",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 28537,
+      "tool_result_tokens": 0,
+      "tool_result_blocks": 0,
+      "tool_calls": {},
+      "pymolt_calls": 0
     },
     {
       "task": "T0_noop",
@@ -71,7 +76,12 @@
       "total_cost_usd": 0.1149195,
       "tools_used": [],
       "result_text": "OK",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 29019,
+      "tool_result_tokens": 0,
+      "tool_result_blocks": 0,
+      "tool_calls": {},
+      "pymolt_calls": 0
     },
     {
       "task": "T0_noop",
@@ -93,7 +103,12 @@
       "total_cost_usd": 0.29151,
       "tools_used": [],
       "result_text": "OK",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 29142,
+      "tool_result_tokens": 0,
+      "tool_result_blocks": 0,
+      "tool_calls": {},
+      "pymolt_calls": 0
     },
     {
       "task": "T1_recon",
@@ -115,7 +130,16 @@
       "total_cost_usd": 0.363131,
       "tools_used": [],
       "result_text": "## Findings\n\n**3 project roots.**\n\n**1. `.` \u2014 the `flasgger` distribution (main root)**\n- Manifests: `setup.py` (name `flasgger`, deps Flask/PyYAML/jsonschema/mistune/six/packaging), `setup.cfg` (`bdist_wheel universal=1`), `requirements.txt`, `requirements-dev.txt`, `MANIFEST.in`, `tox.ini`\n- Python evidence:\n  - `.python-version` \u2192 `3.6.1`\n  - `Dockerfile` \u2192 `FROM python:3.6`\n  - `setup.py` classifiers \u2192 `Programming Language :: Python :: 3`, `:: 3.6` (mirrored in `flasgger.egg-info/PKG-INFO`)\n  - `tox.ini` envlist \u2192 py36, py37, py38(dev), py39, py311 (crossed with flask 0.10/0.12/1.0/1.0.4/latest, marshmallow, apispec)\n  - `.travis.yml` matrix \u2192 3.6, 3.7, 3.8-dev, 3.9, 3.11 (3.6-flask010/flask10 and 3.8-dev in `allow_failures`)\n- Note: `requirements-dev.txt` installs both roots editable (`-e .` and `-e etc/flasgger_package`); no `pyproject.toml` anywhere, and no GitHub Actions workflows (`.github/` holds only `dependabot.yml`, pip ecosystem on `/`).\n\n**2. `etc/flasgger_package` \u2014 a separate installable test-fixture distribution**\n- Manifests: `setup.py` (name `flasgger_package` 0.0.1, requires `flasgger>=0.9.4.dev0`), `MANIFEST.in`\n- Python evidence: no declared version \u2014 only the stale build artifact `dist/flasgger_package-0.0.1-py3.6.egg` implies 3.6. Built/installed via the root `Makefile` (`flasgger_package` target) and the Dockerfile's `pip install etc/flasgger_package`.\n\n**3. `demo_app` \u2014 the demo Flask app**\n- Manifests: `requirements.txt` (flasgger, marshmallow, apispec, flask-restful, decorator)\n- Python evidence: none of its own; inherits the root `Dockerfile`, which runs it as `CMD [\"python3\", \"demo_app/app.py\"]` on `python:3.6`\n- Caveat: it's a borderline root \u2014 it has `__init__.py` (importable as a package) and is explicitly *excluded* from the root's `find_packages()`, but it carries its own dependency manifest and README, so I'm counting it. `examples/` has no manifest and is not a root.\n\n```json\n{\n  \"root_count\": 3,\n  \"roots\": [\n    {\n      \"path\": \".\",\n      \"manifests\": [\"setup.py\", \"setup.cfg\", \"requirements.txt\", \"requirements-dev.txt\", \"MANIFEST.in\", \"tox.ini\"],\n      \"python_versions_found\": [\"3.6.1\", \"3.6\", \"3.7\", \"3.8\", \"3.9\", \"3.11\"]\n    },\n    {\n      \"path\": \"etc/flasgger_package\",\n      \"manifests\": [\"setup.py\", \"MANIFEST.in\"],\n      \"python_versions_found\": [\"3.6\"]\n    },\n    {\n      \"path\": \"demo_app\",\n      \"manifests\": [\"requirements.txt\"],\n      \"python_versions_found\": [\"3.6\"]\n    }\n  ]\n}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 37481,
+      "tool_result_tokens": 4384,
+      "tool_result_blocks": 5,
+      "tool_calls": {
+        "Bash": 5
+      },
+      "pymolt_calls": 0,
+      "score": 1.0,
+      "score_detail": "roots ['.', 'demo_app', 'etc/flasgger_package'] vs ['.', 'demo_app', 'etc/flasgger_package']; 3.6 evidence=True"
     },
     {
       "task": "T1_recon",
@@ -137,7 +161,16 @@
       "total_cost_usd": 0.37536100000000006,
       "tools_used": [],
       "result_text": "## Repository: `flasgger` \u2014 3 Python project roots\n\n### 1. `.` (repo root) \u2014 the `flasgger` distribution\n| Manifest | Role |\n|---|---|\n| `setup.py` | Distribution `flasgger`, version grepped from `flasgger/__init__.py`; `install_requires`: Flask, PyYAML, jsonschema, mistune, six, packaging. No `python_requires`. |\n| `setup.cfg` | `[bdist_wheel] universal = 1` only |\n| `requirements.txt` | Runtime deps |\n| `requirements-dev.txt` | Dev deps; installs both other roots editable (`-e .`, `-e etc/flasgger_package`) |\n| `tox.ini` | Test matrix + per-env pins |\n| `MANIFEST.in` | Packaging (non-dependency) |\n\n**Python version evidence:**\n- `.python-version` \u2192 `3.6.1` (pyenv)\n- `Dockerfile` \u2192 `FROM python:3.6`\n- `setup.py` classifiers \u2192 `Python :: 3`, `Python :: 3.6` (mirrored in `flasgger.egg-info/PKG-INFO`)\n- `tox.ini` envlist \u2192 `py36`, `py37`, `py38-dev`, `py39`, `py311`\n- `.travis.yml` matrix \u2192 3.6, 3.7, 3.8-dev, 3.9, 3.11 (3.8-dev and two py36 envs in `allow_failures`)\n\n### 2. `etc/flasgger_package` \u2014 CI/test fixture package\n- `setup.py` only: distribution `flasgger_package` 0.0.1, `install_requires=['flasgger>=0.9.4.dev0']`, no classifiers, no `python_requires`. Falls back to `distutils` if setuptools is missing.\n- Version evidence is indirect: built artifact `dist/flasgger_package-0.0.1-py3.6.egg` (**3.6**), and it's installed by the root `Dockerfile` on `python:3.6` and by `make flasgger_package`.\n\n### 3. `demo_app` \u2014 standalone demo Flask app\n- `requirements.txt` only (flasgger, marshmallow, apispec, flask-restful, decorator). No setup.py/pyproject; has its own `README.md` and `update.sh`, and is the Docker entrypoint (`CMD [\"python3\", \"demo_app/app.py\"]`).\n- No own version pin; **3.6** inherited from the root `Dockerfile` image it runs under.\n\nNotes: no `pyproject.toml` anywhere, no `python_requires` in either setup.py, and no GitHub Actions workflows \u2014 `.github/` holds only `dependabot.yml` (pip ecosystem, directory `/`). The 66 files in `examples/` are test fixtures under the root project, not a separate root.\n\n```json\n{\n  \"root_count\": 3,\n  \"roots\": [\n    {\n      \"path\": \".\",\n      \"manifests\": [\"setup.py\", \"setup.cfg\", \"requirements.txt\", \"requirements-dev.txt\", \"tox.ini\", \"MANIFEST.in\"],\n      \"python_versions_found\": [\"3.6.1\", \"3.6\", \"3.7\", \"3.8\", \"3.9\", \"3.11\"]\n    },\n    {\n      \"path\": \"etc/flasgger_package\",\n      \"manifests\": [\"setup.py\", \"MANIFEST.in\"],\n      \"python_versions_found\": [\"3.6\"]\n    },\n    {\n      \"path\": \"demo_app\",\n      \"manifests\": [\"requirements.txt\"],\n      \"python_versions_found\": [\"3.6\"]\n    }\n  ]\n}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 37873,
+      "tool_result_tokens": 4536,
+      "tool_result_blocks": 5,
+      "tool_calls": {
+        "Bash": 5
+      },
+      "pymolt_calls": 0,
+      "score": 1.0,
+      "score_detail": "roots ['.', 'demo_app', 'etc/flasgger_package'] vs ['.', 'demo_app', 'etc/flasgger_package']; 3.6 evidence=True"
     },
     {
       "task": "T1_recon",
@@ -159,7 +192,17 @@
       "total_cost_usd": 0.17272400000000004,
       "tools_used": [],
       "result_text": "Three project roots, no Python-version divergence between them.\n\n- **`.`** (repo root) \u2014 `requirements-dev.txt`, `requirements.txt`, `setup.cfg`, `setup.py`. Python evidence: `.python-version` \u2192 3.6.1, `Dockerfile` `FROM` \u2192 3.6.\n- **`demo_app`** \u2014 `requirements.txt` only, no Python-version evidence.\n- **`etc/flasgger_package`** \u2014 `setup.py` only, no Python-version evidence.\n\nDependency graph: 32 edges (12 main, 20 dev; 30 PyPI, 1 local, 1 unknown).\n\n```json\n{\"root_count\": 3, \"roots\": [{\"path\": \".\", \"manifests\": [\"requirements-dev.txt\", \"requirements.txt\", \"setup.cfg\", \"setup.py\"], \"python_versions_found\": [\"3.6.1\", \"3.6\"]}, {\"path\": \"demo_app\", \"manifests\": [\"requirements.txt\"], \"python_versions_found\": []}, {\"path\": \"etc/flasgger_package\", \"manifests\": [\"setup.py\"], \"python_versions_found\": []}]}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 30448,
+      "tool_result_tokens": 422,
+      "tool_result_blocks": 2,
+      "tool_calls": {
+        "ToolSearch": 1,
+        "mcp__pymolt__scan": 1
+      },
+      "pymolt_calls": 1,
+      "score": 1.0,
+      "score_detail": "roots ['.', 'demo_app', 'etc/flasgger_package'] vs ['.', 'demo_app', 'etc/flasgger_package']; 3.6 evidence=True"
     },
     {
       "task": "T2_upgrade",
@@ -181,7 +224,16 @@
       "total_cost_usd": 0.30493349999999997,
       "tools_used": [],
       "result_text": "Resolved both from `requirements.txt` (the project's runtime set \u2014 same as `setup.py`'s `install_requires` plus an explicit `werkzeug`, which Flask pulls in anyway).\n\n**Resolved set:** 19 packages under 3.9, 17 under 3.12 \u2014 union of 19.\n\n| package | py3.9 | py3.12 |\n|---|---|---|\n| click | 8.1.8 | 8.5.0 |\n| jsonschema | 4.25.1 | 4.26.0 |\n| referencing | 0.36.2 | 0.37.0 |\n| rpds-py | 0.27.1 | 2026.6.3 |\n| importlib-metadata | 8.7.1 | \u2014 |\n| zipp | 3.23.1 | \u2014 |\n\nCause of each difference, verified against PyPI metadata:\n- `click` 8.5.0, `jsonschema` 4.26.0, `referencing` 0.37.0 all declare `requires-python >=3.10`; `rpds-py` 2026.6.3 declares `>=3.11`. Under 3.9 the resolver backs down to the last version still supporting it.\n- `importlib-metadata` (and its dep `zipp`) exist only under 3.9 \u2014 Flask/click depend on the backport behind a `python_version < \"3.10\"` marker, so they vanish entirely on 3.12.\n\nThe other 13 packages (attrs, blinker, flask, itsdangerous, jinja2, jsonschema-specifications, markupsafe, mistune, packaging, pyyaml, six, typing-extensions, werkzeug) land on identical versions. Note `typing-extensions` survives on 3.12 because `mistune` requires it unconditionally, not just as a backport.\n\nThese are today's resolutions against live PyPI \u2014 the project pins no upper bounds, so re-running later will drift.\n\n```json\n{\n  \"total_packages\": 19,\n  \"changed\": [\n    {\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"},\n    {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"},\n    {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"},\n    {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"},\n    {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null},\n    {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}\n  ],\n  \"method\": \"Ran `uv pip compile requirements.txt` twice against live PyPI with `--python-version 3.9` and `--python-version 3.12`, then diffed the two fully-pinned transitive lockfiles and confirmed each difference against the packages' requires-python metadata.\"\n}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 32981,
+      "tool_result_tokens": 1517,
+      "tool_result_blocks": 6,
+      "tool_calls": {
+        "Bash": 6
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -203,7 +255,16 @@
       "total_cost_usd": 0.308753,
       "tools_used": [],
       "result_text": "I resolved flasgger's runtime dependencies (`install_requires`: Flask, PyYAML, jsonschema, mistune, six, packaging) twice with `uv pip compile`, targeting each Python version.\n\n**Resolved sets:** 17 packages under 3.12, 19 under 3.9 (union: 19). Six packages differ:\n\n| Package | Python 3.9 | Python 3.12 | Why |\n|---|---|---|---|\n| click | 8.1.8 | 8.5.0 | click \u22658.2 requires Python \u22653.10 |\n| jsonschema | 4.25.1 | 4.26.0 | newer release dropped 3.9 |\n| referencing | 0.36.2 | 0.37.0 | newer release dropped 3.9 |\n| rpds-py | 0.27.1 | 2026.6.3 | newer release dropped 3.9 |\n| importlib-metadata | 8.7.1 | *absent* | Flask conditional dep, `python_version < \"3.10\"` |\n| zipp | 3.23.1 | *absent* | only pulled in by importlib-metadata |\n\nThe rest (attrs, blinker, flask 3.1.3, itsdangerous, jinja2, jsonschema-specifications, markupsafe, mistune, packaging, pyyaml, six, typing-extensions, werkzeug) are identical across both.\n\nNote: this covers runtime deps only. `requirements-dev.txt` (pytest, flex, apispec, etc.) is a separate test/dev set and isn't part of the package's dependency declaration.\n\n```json\n{\n  \"total_packages\": 19,\n  \"changed\": [\n    {\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"},\n    {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null},\n    {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"},\n    {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"},\n    {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"},\n    {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}\n  ],\n  \"method\": \"Extracted install_requires from setup.py into a requirements input, then ran `uv pip compile --python-version 3.9` and `--python-version 3.12` against live PyPI to produce two full transitive lockfiles and diffed them by package name.\"\n}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 33507,
+      "tool_result_tokens": 1514,
+      "tool_result_blocks": 5,
+      "tool_calls": {
+        "Bash": 5
+      },
+      "pymolt_calls": 0,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T2_upgrade",
@@ -225,7 +286,18 @@
       "total_cost_usd": 0.40236700000000003,
       "tools_used": [],
       "result_text": "Resolved the root `requirements.txt` (the project's runtime set: Flask, PyYAML, jsonschema, six, mistune, werkzeug, packaging) transitively at both targets.\n\n**Result:** 19 packages in the union \u2014 19 under 3.9, 17 under 3.12. Six differ.\n\n| package | py3.9 | py3.12 |\n|---|---|---|\n| click | 8.1.8 | 8.5.0 |\n| jsonschema | 4.25.1 | 4.26.0 |\n| referencing | 0.36.2 | 0.37.0 |\n| rpds-py | 0.27.1 | 2026.6.3 |\n| importlib-metadata | 8.7.1 | \u2014 |\n| zipp | 3.23.1 | \u2014 |\n\nThe pattern is one cause: the current releases of `click`, `jsonschema`, `referencing`, and `rpds-py` all declare `requires-python >= 3.10`, so the 3.9 resolution backs each down to its last 3.9-compatible release. `importlib-metadata` (and its dependency `zipp`) drop out entirely under 3.12 because Flask only pulls them in behind a `python_version < \"3.10\"` marker \u2014 `importlib.metadata` is in the stdlib from 3.10 on.\n\nScope note: I resolved runtime dependencies only. `requirements-dev.txt` is a separate test/tooling environment (pytest, flake8, flex, `-e .`, pinned `urllib3<2.0.0`) and would produce a much larger, differently-shaped set \u2014 say the word if you want that resolved too. The 3.9 run is a metadata-marker resolution, not an install against a real 3.9 interpreter, so it reflects what pip/uv would select rather than a verified build.\n\n```json\n{\n  \"total_packages\": 19,\n  \"changed\": [\n    {\"name\": \"click\", \"py39\": \"8.1.8\", \"py312\": \"8.5.0\"},\n    {\"name\": \"jsonschema\", \"py39\": \"4.25.1\", \"py312\": \"4.26.0\"},\n    {\"name\": \"referencing\", \"py39\": \"0.36.2\", \"py312\": \"0.37.0\"},\n    {\"name\": \"rpds-py\", \"py39\": \"0.27.1\", \"py312\": \"2026.6.3\"},\n    {\"name\": \"importlib-metadata\", \"py39\": \"8.7.1\", \"py312\": null},\n    {\"name\": \"zipp\", \"py39\": \"3.23.1\", \"py312\": null}\n  ],\n  \"method\": \"Ran `uv pip compile requirements.txt` twice against the same package index, once with --python-version 3.9 and once with --python-version 3.12, then diffed the two fully-pinned transitive outputs by package name.\"\n}\n```",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 36451,
+      "tool_result_tokens": 1992,
+      "tool_result_blocks": 8,
+      "tool_calls": {
+        "Bash": 6,
+        "ToolSearch": 1,
+        "mcp__pymolt__scan": 1
+      },
+      "pymolt_calls": 1,
+      "score": 0.243,
+      "score_detail": "6 claimed, 6/31 right pkg, 5/31 right pkg+version"
     },
     {
       "task": "T3_contact",
@@ -247,7 +319,16 @@
       "total_cost_usd": 0.430073,
       "tools_used": [],
       "result_text": "You've hit your monthly spend limit \u00b7 raise it at claude.ai/settings/usage?from=cc_cli_limit_message \u00b7 your session limit resets 8:40pm (America/Edmonton)",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 38248,
+      "tool_result_tokens": 3764,
+      "tool_result_blocks": 5,
+      "tool_calls": {
+        "Bash": 5
+      },
+      "pymolt_calls": 0,
+      "score": 0.0,
+      "score_detail": "no parseable JSON answer"
     },
     {
       "task": "T3_contact",
@@ -269,7 +350,14 @@
       "total_cost_usd": 0,
       "tools_used": [],
       "result_text": "You've hit your monthly spend limit \u00b7 raise it at claude.ai/settings/usage?from=cc_cli_limit_message \u00b7 your session limit resets 8:40pm (America/Edmonton)",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 0,
+      "tool_result_tokens": 0,
+      "tool_result_blocks": 0,
+      "tool_calls": {},
+      "pymolt_calls": 0,
+      "score": 0.0,
+      "score_detail": "no parseable JSON answer"
     },
     {
       "task": "T3_contact",
@@ -291,7 +379,14 @@
       "total_cost_usd": 0,
       "tools_used": [],
       "result_text": "You've hit your monthly spend limit \u00b7 raise it at claude.ai/settings/usage?from=cc_cli_limit_message \u00b7 your session limit resets 8:40pm (America/Edmonton)",
-      "repeat": 1
+      "repeat": 1,
+      "peak_context_tokens": 0,
+      "tool_result_tokens": 0,
+      "tool_result_blocks": 0,
+      "tool_calls": {},
+      "pymolt_calls": 0,
+      "score": 0.0,
+      "score_detail": "no parseable JSON answer"
     }
   ]
 }

@@ -26,13 +26,16 @@ from pymolt.assess.service import (
     resolve_chosen_source,
 )
 from pymolt.codemods.apply import (
+    apply_mixed_to_repo,
     apply_rules_to_repo,
     apply_to_repo,
+    preview_mixed_repo,
     preview_repo,
     preview_rules_repo,
 )
 from pymolt.codemods.client import AxiomGraphClient, DependencyMigration
 from pymolt.codemods.models import (
+    ApiImpact,
     CodemodBundle,
     CodemodPattern,
     CodemodRunResult,
@@ -378,13 +381,13 @@ def run_codemods(
         # No package returned rules (old server, or nothing to migrate) — the
         # Tier-1 path runs byte-identical to today.
         result = apply_to_repo(root, patterns_flat, write=write)
+    elif patterns_flat:
+        result = apply_mixed_to_repo(
+            root, rules_flat, patterns_flat, write=write
+        )
     else:
         rules_result = apply_rules_to_repo(root, rules_flat, write=write)
-        result = (
-            _merge_run_results(rules_result, apply_to_repo(root, patterns_flat, write=write))
-            if patterns_flat
-            else rules_result
-        )
+        result = rules_result
     result.downgraded = downgraded
     return by_pkg, result
 
@@ -397,7 +400,9 @@ def preview_codemods(
     client: AxiomGraphClient | None = None,
     progress: Callable[[str], None] | None = None,
     on_recipes: Callable[[dict[str, list[CodemodPattern] | list[CodemodRule]]], None] | None = None,
+    on_impacts: Callable[[dict[str, list[ApiImpact]]], None] | None = None,
     on_file: ProgressSink = None,
+    auto_apply_only: bool = False,
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], list[FilePreview]]:
     """
     Fetch patterns/rules for `migrations` and compute per-file before/after
@@ -416,7 +421,9 @@ def preview_codemods(
     `progress` reports phase transitions (fetch → preview), `on_recipes` hands
     over the fetched recipe set the moment it is known (before the walk starts,
     so an interface can show what is about to be applied), and `on_file`
-    reports every file the walk scans. All three are pure observers — none of
+    reports every file the walk scans. ``on_impacts`` exposes the structured
+    Axiom delta paths for persistence in the local migration plan. All four are
+    pure observers — none of
     them changes what is returned.
 
     Raises AxiomGraphError if the service is unreachable (caller decides UX).
@@ -427,6 +434,8 @@ def preview_codemods(
 
     if on_recipes:
         on_recipes(by_pkg)
+    if on_impacts:
+        on_impacts({name: bundle.impacts for name, bundle in bundles.items()})
     if progress:
         n = len(rules_flat) + len(patterns_flat)
         progress(f"Previewing {n} codemod(s) under {root} via LibCST…")
@@ -434,7 +443,11 @@ def preview_codemods(
     if not rules_flat:
         return by_pkg, preview_repo(root, patterns_flat, on_file=on_file)
 
-    previews = preview_rules_repo(root, rules_flat, on_file=on_file)
     if patterns_flat:
-        previews = previews + preview_repo(root, patterns_flat, on_file=on_file)
-    return by_pkg, previews
+        return by_pkg, preview_mixed_repo(
+            root, rules_flat, patterns_flat, on_file=on_file,
+            verified_only=auto_apply_only,
+        )
+    return by_pkg, preview_rules_repo(
+        root, rules_flat, on_file=on_file, verified_only=auto_apply_only
+    )

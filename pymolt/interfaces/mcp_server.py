@@ -38,6 +38,13 @@ from mcp.server.fastmcp import FastMCP
 
 LIST_CAP = 20
 
+# Lists that ARE the answer (which packages change, which symbols changed
+# behaviour) are budgeted by size, not clipped at a fixed item count. Measured on
+# flasgger: 31 compact assess rows cost 453 tokens, while the 20 JSON rows this
+# used to send cost 643 — the clip made the payload *larger* per unit of answer
+# and made agents answer from a partial list. ~6000 chars ≈ 1.5k tokens.
+ANSWER_BUDGET_CHARS = 6000
+
 # Workspace confinement: every `project_dir` argument must resolve to this root or one
 # of its descendants. `PYMOLT_MCP_ROOT` lets an operator (or a test) pin the
 # root explicitly; otherwise it is the server process's CWD at import/startup.
@@ -55,15 +62,32 @@ _WORKSPACE_ROOT = (
 _EXEC_ENV_VAR = "PYMOLT_MCP_ALLOW_EXEC"
 
 _INSTRUCTIONS = """\
-PyMolt migration funnel as tools. Workflow:
-  scan  ->  (setup_options -> setup_apply)  ->  assess  ->  env_hint
-  ->  [engineer builds the target env themselves; human/agent edits the project's code]
-  ->  contract_capture(when='baseline' BEFORE editing, when='post-migration' AFTER)
-  ->  contract_report  (repeat edits + post-migration capture until no result_changed)
-codemods_preview is a DRY RUN: it never applies changes to disk.
-Applying codemods always requires explicit human approval via the CLI,
-outside this server. Prefer these tools over reading Dockerfiles, lockfiles, or
-running tracers by hand.
+PyMolt proves whether a Python migration changed your program's behaviour.
+
+START HERE — the two tools nothing else can replace:
+  contract_map     every call site into a dependency, resolved through imports
+                   and scopes (LibCST). Grepping imports finds modules, not the
+                   symbols actually called, and undercounts the surface severalfold.
+  contract_capture / contract_report
+                   record what the code really calls at runtime before AND after
+                   the migration, then report what changed: results, raises,
+                   symbols that vanished. This cannot be derived by reading files
+                   or by resolving dependencies — it requires the recorded traces.
+
+Supporting phases, in order:  scan -> setup_options/setup_apply -> assess -> env_hint
+  These prepare the migration; assess resolves baseline vs target and tells you
+  which versions move. A successful resolve is NOT evidence the program still
+  works — it is an input to the contract, never the conclusion.
+
+Typical run:
+  contract_capture(when='baseline')  BEFORE editing anything
+  -> assess -> engineer/agent edits code and builds the target env
+  -> contract_capture(when='post-migration') -> contract_report
+  Repeat edits + post-migration capture until contract_report is clean.
+
+codemods_preview is a DRY RUN: it never applies changes.
+Applying codemods requires explicit human approval via the CLI,
+outside this server.
 """
 
 mcp = FastMCP("pymolt", instructions=_INSTRUCTIONS)
@@ -107,6 +131,35 @@ def _cap_list(items: list[Any]) -> tuple[list[Any], int]:
     if len(items) <= LIST_CAP:
         return list(items), 0
     return list(items[:LIST_CAP]), len(items) - LIST_CAP
+
+
+def _fit_answer(rows: list[str], budget: int = ANSWER_BUDGET_CHARS) -> tuple[list[str], int]:
+    """Return (rows that fit in ``budget`` chars, number dropped).
+
+    Use for any list the agent is expected to answer *from*; use ``_cap_list``
+    only for lists that are context around an answer stated elsewhere.
+    """
+    out: list[str] = []
+    used = 0
+    for row in rows:
+        cost = len(row) + 1
+        if out and used + cost > budget:
+            return out, len(rows) - len(out)
+        out.append(row)
+        used += cost
+    return out, 0
+
+
+def _truncation_note(shown: int, dropped: int, full_report_path: str | None) -> str:
+    """One line stating how complete a list is — appended to the summary.
+
+    Silence about truncation is what makes an agent treat a partial list as the
+    whole answer.
+    """
+    if not dropped:
+        return f"All {shown} listed."
+    where = f" Full list: {full_report_path}" if full_report_path else ""
+    return f"Showing {shown} of {shown + dropped} — {dropped} omitted.{where}"
 
 
 def _write_full_report(path: Path, name: str, payload: Any) -> str:
@@ -181,14 +234,21 @@ def status(project_dir: str = ".") -> dict:
 
 @mcp.tool()
 def scan(project_dir: str = ".") -> dict:
-    """Reconnaissance of a repo: project roots, Python-version evidence + divergence,
-    and dependency edges — offline, no resolution. Call this instead of reading
-    Dockerfiles, .python-version, tox.ini, or lockfiles by hand.
+    """Find EVERY project root in the repo, with its manifests, Python-version
+    evidence and dependency edges — offline, no resolution.
+
+    Assume the repo is a monorepo until this tool says otherwise. A nested
+    directory whose only marker is its own requirements.txt is a separate project
+    root with its own dependency set, and it is exactly the kind that gets missed
+    when the tree is walked by hand looking for setup.py/pyproject.toml. This also
+    reports where roots *disagree* about the target Python — divergence a
+    file-by-file read does not surface.
 
     Args:
         project_dir: Project/repo directory to scan (default: current directory).
 
-    Use first, before setup/assess, to understand what you are migrating.
+    Run this before setup/assess, and before answering any question about what the
+    project depends on or which Python it targets.
     """
     try:
         path = _resolve_dir(project_dir)
@@ -425,9 +485,15 @@ def assess(
     risk: bool = False,
     no_cache: bool = False,
 ) -> dict:
-    """Resolve baseline vs target dependency graphs and compare them: per-package
-    upgrades/blockers/conflicts, and where the pinned target manifest is written.
-    Call this instead of running uv/pip resolutions by hand.
+    """Resolve baseline vs target dependency graphs and compare them: which package
+    versions move, which conflict, which enter the manual zone, and where the pinned
+    target manifest lands. Faster and more reproducible than driving uv/pip by hand,
+    and it records the honesty markers (fixation, resolution quality, baseline tier)
+    that a hand-run resolve loses.
+
+    A successful resolve is an INPUT to the migration, not evidence it worked.
+    Never report "the migration is feasible" from this tool alone — cite the
+    baseline tier, and get behavioural proof from contract_report.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -480,18 +546,16 @@ def assess(
                 tier = p.tier.value if hasattr(p.tier, "value") else str(p.tier)
                 risk_by_pkg[p.name] = tier
 
-        rows_capped, rows_trunc = _cap_list(rows_sorted)
-        pkg_rows = []
-        for r in rows_capped:
-            row = {
-                "name": r["name"],
-                "baseline": r["baseline_version"],
-                "target": r["target_version"],
-                "status": r["status"],
-            }
+        def _fmt_row(r: dict) -> str:
+            line = (f"{r['name']} {r['baseline_version'] or '-'}"
+                    f">{r['target_version'] or '-'} {r['status']}")
             if risk:
-                row["risk_tier"] = risk_by_pkg.get(r["name"])
-            pkg_rows.append(row)
+                tier = risk_by_pkg.get(r["name"])
+                if tier:
+                    line += f" risk={tier}"
+            return line
+
+        pkg_rows, rows_trunc = _fit_answer([_fmt_row(r) for r in rows_sorted])
 
         counts = result.counts_by_status()
         # run_assess writes the pinned target manifest on a successful resolve and
@@ -502,7 +566,8 @@ def assess(
             "target_python": effective_target,
             "target_resolved": result.target_resolved,
             "target_error": result.target_error,
-            "packages": pkg_rows,
+            "changes_format": "name baseline>target status" + (" risk=tier" if risk else ""),
+            "changes": pkg_rows,
             "status_counts": counts,
             "conflicts": counts.get("conflict", 0),
             "manual_zone_count": len(result.manual_zone),
@@ -518,7 +583,9 @@ def assess(
         summary = (
             f"{head}\n"
             f"Upgrades: {counts.get('upgrade', 0)}, added: {counts.get('added', 0)}, "
-            f"conflicts: {counts.get('conflict', 0)}, manual-zone: {len(result.manual_zone)}."
+            f"conflicts: {counts.get('conflict', 0)}, manual-zone: {len(result.manual_zone)}.\n"
+            f"{len(rows_sorted)} package(s) differ between baseline and target. "
+            + _truncation_note(len(pkg_rows), rows_trunc, full_path)
         )
         if target_manifest:
             summary += f"\nPinned target manifest written: {target_manifest}"
@@ -543,13 +610,19 @@ def assess(
 
 @mcp.tool()
 def contract_map(project_dir: str = ".") -> dict:
-    """Static contact map: every place your code calls into a third-party dependency
-    (cheap, no runtime). Call this instead of grepping imports by hand.
+    """Every call site where this project's code enters a third-party dependency,
+    resolved through imports and scopes with LibCST. Cheap, static, no runtime.
+
+    Do not try to reconstruct this by reading files or grepping imports: an import
+    tells you a module is present, not which symbols are called or how often, and
+    counting imports undercounts the real contact surface severalfold. This is the
+    denominator every coverage and trust number is measured against.
 
     Args:
         project_dir: Project directory (default: current directory).
 
-    Use to see the denominator the contract report measures dynamic coverage against.
+    Returns total call sites, distinct symbols, and per-dependency ranking.
+    Run it before migrating, to see the surface a change could break.
     """
     try:
         path = _resolve_dir(project_dir)
@@ -563,18 +636,24 @@ def contract_map(project_dir: str = ".") -> dict:
             ((dep, len(targets)) for dep, targets in cmap.by_dep.items()),
             key=lambda kv: (-kv[1], kv[0]),
         )
-        per_dep_capped, per_dep_trunc = _cap_list(per_dep)
+        per_dep_capped, per_dep_trunc = _fit_answer([f"{d} {c}" for d, c in per_dep])
         data: dict[str, Any] = {
             "total_contacts": len(cmap.contacts),
+            "distinct_symbols": len({c.target for c in cmap.contacts}),
             "files_scanned": cmap.files_scanned,
-            "per_dependency": [{"dep": d, "count": c} for d, c in per_dep_capped],
+            "per_dependency_format": "dep distinct_symbol_count",
+            "per_dependency": per_dep_capped,
         }
         if per_dep_trunc:
             data["truncated"] = per_dep_trunc
 
         summary = (
-            f"{len(cmap.contacts)} static contact(s) across {len(cmap.by_dep)} "
-            f"dependency(ies), {cmap.files_scanned} file(s) scanned."
+            f"{len(cmap.contacts)} static contact(s) — call sites — across "
+            f"{len(cmap.by_dep)} dependency(ies) and "
+            f"{len({c.target for c in cmap.contacts})} distinct symbol(s), "
+            f"{cmap.files_scanned} file(s) scanned.\n"
+            f"Ranked by distinct symbols per dependency. "
+            + _truncation_note(len(per_dep_capped), per_dep_trunc, full_path)
         )
         return _ok(
             summary,
@@ -601,6 +680,10 @@ def contract_capture(
     mode: str = "tests",
     command: list[str] | None = None,
     force: bool = False,
+    impact_targets: list[str] | None = None,
+    deployment_id: str | None = None,
+    request_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> dict:
     """Runs YOUR command with the boundary tracer injected — zero edits to the
     project — and records the observed dependency calls as a named baseline /
@@ -616,6 +699,10 @@ def contract_capture(
         mode: "tests" (run your suite) or "command" (run your app).
         command: The command to run, as a list (e.g. ["pytest", "tests/"]).
         force: Overwrite an existing capture in this slot without prompting.
+        impact_targets: Affected API symbols; post-migration defaults to the applied plan.
+        deployment_id: Stage/canary deployment identity for provenance.
+        request_id: Request identity for correlation.
+        correlation_id: Cross-system correlation identity.
 
     Use baseline before editing code, post-migration after — contract_report diffs them.
     """
@@ -657,6 +744,10 @@ def contract_capture(
 
         slot = service.capture_named_trace(
             str(path), when_key, capture_mode, command=list(command),
+            impact_targets=impact_targets,
+            deployment_id=deployment_id,
+            request_id=request_id,
+            correlation_id=correlation_id,
         )
 
         state = service.load_contract_state(str(path))
@@ -670,6 +761,13 @@ def contract_capture(
             "trace_path": slot.trace_path,
             "filled_slots": filled,
             "env_note": slot.env_note,
+            "duration_seconds": slot.duration_seconds,
+            "deployment_id": slot.deployment_id,
+            "request_id": slot.request_id,
+            "correlation_id": slot.correlation_id,
+            "impact_targets": slot.impact_targets,
+            "dropped_events": slot.dropped_events,
+            "metadata_path": slot.metadata_path,
         }
         summary = (
             f"Recorded {slot.events} contact(s) into the '{when}' slot.\n"
@@ -698,10 +796,16 @@ def contract_capture(
 
 @mcp.tool()
 def contract_report(project_dir: str = ".") -> dict:
-    """The verification oracle: static contact map × dynamic traces → confirmed /
-    BLIND coverage + trust %, plus the behavioral verdict (which dependency
-    results/raises changed, which disappeared) across the migration. Call this to
-    decide whether a migration is behaviorally safe.
+    """The verdict on whether the migration changed your program's behaviour:
+    static contact map × recorded runtime traces → confirmed / BLIND coverage,
+    a trust %, and exactly which dependency calls now return something else,
+    raise something else, or stopped happening.
+
+    This is the one question no amount of file reading, type checking or
+    dependency resolution can answer — it requires the baseline and
+    post-migration traces from contract_capture. A green test suite and a clean
+    resolve are not substitutes: they do not tell you a call started returning an
+    empty generator instead of None.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -737,17 +841,26 @@ def contract_report(project_dir: str = ".") -> dict:
 
             def _names(entries: list[dict]) -> tuple[list[str], int]:
                 names = [e.get("qualname", "?") for e in entries]
-                return _cap_list(names)
+                return _fit_answer(names)
 
             rc, rc_t = _names(bdiff.result_changed)
             rk, rk_t = _names(bdiff.raise_changed)
             dp, dp_t = _names(bdiff.disappeared)
             nh, nh_t = _names(bdiff.skipped_opaque)
+            # True totals, independent of what fit in the payload — the summary
+            # below must never report a truncated length as the finding count.
+            totals = {
+                "result_changed": len(bdiff.result_changed),
+                "raise_changed": len(bdiff.raise_changed),
+                "disappeared": len(bdiff.disappeared),
+                "needs_action": len(bdiff.skipped_opaque),
+            }
             data["behavioral"] = {
                 "result_changed": rc,
                 "raise_changed": rk,
                 "disappeared": dp,
                 "needs_action": nh,
+                "counts": totals,
                 "clean": bdiff.is_clean(),
             }
             for key, trunc in (("result_changed", rc_t), ("raise_changed", rk_t),
@@ -762,12 +875,19 @@ def contract_report(project_dir: str = ".") -> dict:
         ]
         behavioral = data.get("behavioral")
         if behavioral is not None:
+            c = behavioral["counts"]
             summary_lines.append(
-                f"Behavior: result_changed {len(behavioral['result_changed'])}, "
-                f"raise_changed {len(behavioral['raise_changed'])}, "
-                f"disappeared {len(behavioral['disappeared'])} "
+                f"Behavior: result_changed {c['result_changed']}, "
+                f"raise_changed {c['raise_changed']}, "
+                f"disappeared {c['disappeared']} "
                 f"({'clean' if behavioral['clean'] else 'CHANGED'})."
             )
+            dropped = sum(t for t in (rc_t, rk_t, dp_t, nh_t))
+            if dropped:
+                summary_lines.append(
+                    f"{dropped} symbol name(s) omitted from the lists below — "
+                    f"full report: {full_path}"
+                )
 
         hint = None
         if not post_captured:
@@ -808,18 +928,29 @@ def codemods(
     write: bool = False,
     endpoint: str | None = None,
 ) -> dict:
-    """Fetch AST transformation rules from Axiom Cloud Hub and apply them under project_dir.
+    """Fetch AST transformation rules and return an exact local preview.
+
+    MCP is intentionally read-only for source mutations: use the CLI's
+    ``plan``/``apply`` pair after human review.
 
     Args:
         project_dir: Project directory (default: current directory).
-        write: When True, applies AST transformations to disk. When False, performs a dry-run preview.
+        write: Deprecated mutation request; always rejected for safety.
         endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
     """
+    if write:
+        return _fail(
+            "MCP codemod writes are disabled: mutation requires the baseline-gated CLI.",
+            hint="Create a plan with `pymolt plan .`, then run `pymolt apply .` in the project.",
+        )
     try:
         import difflib
         path = _resolve_dir(project_dir)
         from pymolt.codemods.models import CodemodPattern
-        from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations, run_codemods
+        from pymolt.codemods.service import (
+            preview_codemods,
+            resolve_codemod_migrations,
+        )
         from pymolt.config import load_endpoint
         from pymolt.ingestion.config import EnvConfig
 
@@ -834,26 +965,26 @@ def codemods(
                 hint="Run assess first so codemods can derive the changed packages.",
             )
 
-        if not write:
-            by_pkg, previews = preview_codemods(str(path), migrations, base_url=effective_endpoint)
-            changed_files = sorted({p.path for p in previews if p.old_source != p.new_source})
-            diffs = []
-            for p in previews:
-                if p.old_source != p.new_source:
-                    diff_lines = list(difflib.unified_diff(
-                        p.old_source.splitlines(keepends=True),
-                        p.new_source.splitlines(keepends=True),
-                        fromfile=f"a/{p.path}",
-                        tofile=f"b/{p.path}",
-                    ))
-                    diffs.append({"path": p.path, "diff": "".join(diff_lines)})
-        else:
-            by_pkg, run_result = run_codemods(str(path), migrations, base_url=effective_endpoint, write=True)
-            changed_files = sorted({c.path for c in run_result.changes})
-            diffs = []
+        by_pkg, previews = preview_codemods(
+            str(path), migrations, base_url=effective_endpoint, auto_apply_only=True
+        )
+        changed_files = sorted({p.path for p in previews if p.old_source != p.new_source})
+        diffs = []
+        for p in previews:
+            if p.old_source != p.new_source:
+                diff_lines = list(difflib.unified_diff(
+                    p.old_source.splitlines(keepends=True),
+                    p.new_source.splitlines(keepends=True),
+                    fromfile=f"a/{p.path}",
+                    tofile=f"b/{p.path}",
+                ))
+                diffs.append({"path": p.path, "diff": "".join(diff_lines)})
 
-        files_capped, files_trunc = _cap_list(changed_files)
-        diffs_capped, diffs_trunc = _cap_list(diffs)
+        files_capped, files_trunc = _fit_answer(changed_files)
+        diffs_capped, diffs_trunc = _fit_answer(
+            [json.dumps(d) for d in diffs], budget=ANSWER_BUDGET_CHARS * 2
+        )
+        diffs_capped = [json.loads(d) for d in diffs_capped]
 
         per_package = []
         for pkg, items in by_pkg.items():
@@ -872,7 +1003,11 @@ def codemods(
                 "patterns": patterns,
                 "confidence_mix": conf_mix,
             })
-        per_package_capped, pkg_trunc = _cap_list(per_package)
+        per_package_capped, pkg_trunc = _fit_answer([
+            f"{e['package']} rules={e['rules']} patterns={e['patterns']} "
+            + ",".join(f"{k}:{v}" for k, v in sorted(e["confidence_mix"].items()))
+            for e in per_package
+        ])
 
         full = {
             "write": write,
@@ -897,17 +1032,18 @@ def codemods(
         if diffs_trunc:
             data["diffs_truncated"] = diffs_trunc
 
-        action_desc = "WRITTEN TO DISK" if write else "DRY-RUN preview"
+        action_desc = "DRY-RUN preview"
         summary = (
             f"Codemods ({action_desc}):\n"
             f"{len(per_package)} package(s) from {source_desc}; "
-            f"{len(changed_files)} file(s) {'rewritten' if write else 'would change'}."
+            f"{len(changed_files)} file(s) would change.\n"
+            + _truncation_note(len(files_capped), files_trunc, full_path)
         )
         return _ok(
             summary,
             data,
             full_report_path=full_path,
-            hint="Run contract_capture (when='post-migration') to verify behavior." if write else "Set write=True to apply these AST rewrites to disk.",
+            hint="Create a plan with `pymolt plan .`, review it, then apply via the baseline-gated CLI.",
         )
     except Exception as e:  # noqa: BLE001
         return _fail(
@@ -937,13 +1073,18 @@ def migrate(
         project_dir: Project directory (default: current directory).
         target_python: Target Python version (e.g. '3.12' or '3.13'). Defaults to 3.12.
         manifest: Manifest path (e.g. 'requirements.txt'). Defaults to detected manifest.
-        write: Whether to write AST transformations to disk (default: False for dry-run preview).
+        write: Deprecated mutation request; always rejected. Use CLI plan/apply for writes.
         endpoint: Custom Axiom Cloud Hub URL.
     """
+    if write:
+        return _fail(
+            "MCP migration writes are disabled: mutation requires the baseline-gated CLI.",
+            hint="Capture a baseline, then run `pymolt plan .` and `pymolt apply .` after human review.",
+        )
     try:
         path = _resolve_dir(project_dir)
         from pymolt.assess.service import run_assess
-        from pymolt.codemods.service import resolve_codemod_migrations, run_codemods
+        from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations
         from pymolt.config import load_endpoint
         from pymolt.ingestion.config import EnvConfig
         from pymolt.ingestion.detect import detect_sources
@@ -975,6 +1116,9 @@ def migrate(
             source_manifest=selected_manifest,
             config=config,
             tool=tool,
+            base_python=config.get("base_python"),
+            container_id=config.get("container_id"),
+            write_manifest=False,
         )
 
         if not assess_res.target_resolved:
@@ -983,28 +1127,28 @@ def migrate(
                 hint="Check that packages support the target Python version.",
             )
 
-        target_manifest = assess_res.target_manifest_path or "requirements-target.txt"
+        target_manifest = assess_res.target_manifest_path or "preview only — not written"
         degrade_warnings: list[str] = []
         try:
             migrations, source_desc = resolve_codemod_migrations(
                 str(path),
-                target_dependency_file=target_manifest,
+                assess_result=assess_res,
                 config=config,
                 warnings=degrade_warnings,
             )
         except Exception:
-            migrations, source_desc = [], "target manifest"
+            migrations = []
 
         effective_endpoint = load_endpoint(endpoint)
-        by_pkg, codemod_res = run_codemods(
-            str(path),
-            migrations,
-            base_url=effective_endpoint,
-            write=write,
+        by_pkg, previews = preview_codemods(
+            str(path), migrations, base_url=effective_endpoint, auto_apply_only=True
         )
 
         total_patterns = sum(len(items) for items in by_pkg.values())
-        changed_files = [c.path for c in codemod_res.changes]
+        changed_files = [
+            preview.path for preview in previews
+            if preview.old_source != preview.new_source
+        ]
         full_data = {
             "target_python": target_py,
             "target_manifest": target_manifest,
@@ -1021,7 +1165,12 @@ def migrate(
             f"Target Python: {target_py} | Assessed: {len(assess_res.rows)} packages | "
             f"Upgrades: {len(migrations)} | Codemods: {total_patterns} across {len(changed_files)} file(s)."
         )
-        return _ok(summary, full_data, full_report_path=full_path, hint="Run contract_capture (when='baseline') to verify behavior.")
+        return _ok(
+            summary,
+            full_data,
+            full_report_path=full_path,
+            hint="Capture baseline, then create a plan with `pymolt plan .` and apply it with `pymolt apply .`.",
+        )
     except Exception as e:  # noqa: BLE001
         return _fail(f"migrate failed: {e}", hint="Ensure project directory and dependencies are accessible.")
 

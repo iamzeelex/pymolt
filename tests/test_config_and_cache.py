@@ -181,7 +181,7 @@ def test_cli_auth_commands() -> None:
     # 1. Status when logged out
     result = runner.invoke(app, ["auth", "status"])
     assert result.exit_code == 0
-    assert "Anonymous / Free-tier" in result.output
+    assert "Anonymous / Community" in result.output
 
     # 2. Login with token
     result = runner.invoke(app, ["auth", "login", "--token", "pmk_test_auth_123456789"])

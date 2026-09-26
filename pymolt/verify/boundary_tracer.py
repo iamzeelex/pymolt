@@ -29,8 +29,17 @@ Watcher environment:
   PYMOLT_TRACE_INTERNAL "1" to also record internal dep<->dep calls (full audit; default off)
   PYMOLT_TRACE_OUT      output path template; "{pid}" -> PID (default ./pymolt-trace-{pid}.jsonl)
   PYMOLT_TRACE_BACKEND  auto | setprofile | monitoring (default auto)
+  PYMOLT_TRACE_PRIVACY  values | shape (default values)
+  PYMOLT_TRACE_SAMPLE_RATE  fraction in (0, 1], default 1
+  PYMOLT_TRACE_IMPACT_TARGETS  JSON array (preferred) or comma-list of exact symbols and/or
+                               ``module.*`` prefixes. Exact-only sets use wrappers and do not
+                               install a global profile hook.
+  PYMOLT_TRACE_DEPLOYMENT_ID   optional deployment/release identifier
+  PYMOLT_TRACE_REQUEST_ID      optional request identifier for a scoped capture
+  PYMOLT_TRACE_CORRELATION_ID  optional distributed correlation identifier
 """
 import atexit
+import json
 import os
 
 from ._backend import select_backend
@@ -42,6 +51,10 @@ ENV_BACKEND = "PYMOLT_TRACE_BACKEND"
 ENV_EXCLUDE = "PYMOLT_TRACE_EXCLUDE"
 ENV_SOURCE = "PYMOLT_TRACE_SOURCE"
 ENV_INTERNAL = "PYMOLT_TRACE_INTERNAL"
+ENV_IMPACT_TARGETS = "PYMOLT_TRACE_IMPACT_TARGETS"
+ENV_DEPLOYMENT_ID = "PYMOLT_TRACE_DEPLOYMENT_ID"
+ENV_REQUEST_ID = "PYMOLT_TRACE_REQUEST_ID"
+ENV_CORRELATION_ID = "PYMOLT_TRACE_CORRELATION_ID"
 DEFAULT_OUT = "./pymolt-trace-{pid}.jsonl"
 
 
@@ -49,14 +62,75 @@ def _split_excludes(raw):
     return tuple(p.strip() for p in (raw or "").split(",") if p.strip())
 
 
+def _parse_impact_targets(raw):
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, list):
+        values = parsed
+    else:
+        values = raw.split(",")
+    result = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return tuple(result)
+
+
+def _profile_prefixes(impact_targets):
+    prefixes = []
+    for value in impact_targets:
+        if value.endswith(".*"):
+            prefix = value[:-2].rstrip(".")
+        elif value.endswith("."):
+            prefix = value.rstrip(".")
+        else:
+            prefix = value.rsplit(".", 1)[0] if "." in value else value
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
+
+def _select_runtime_backend(target, impact_targets, sink, prefer, exclude, source,
+                            include_internal):
+    """Choose the narrowest backend that honors the supplied impact set."""
+    if not impact_targets:
+        return select_backend(
+            target, sink, prefer=prefer, exclude=exclude,
+            source=source, include_internal=include_internal,
+        )
+    if prefer in ("auto", "wrap", "hybrid"):
+        from ._wrap import TargetedBackend
+        return TargetedBackend(
+            impact_targets, sink, source=source, include_internal=include_internal,
+        )
+    # An explicit profiling/monitoring request is respected, but its matcher is
+    # narrowed from the broad dependency target to affected module prefixes.
+    return select_backend(
+        _profile_prefixes(impact_targets), sink, prefer=prefer, exclude=exclude,
+        source=source, include_internal=include_internal,
+    )
+
+
 class Recorder(object):
     """Mode A context manager: aggregate in memory, ``dump()`` to aggregated JSON."""
 
-    def __init__(self, target, backend="auto", exclude=(), source=None, include_internal=False):
+    def __init__(self, target, backend="auto", exclude=(), source=None, include_internal=False,
+                 impact_targets=None):
         self.target = target
         self._sink = MemorySink()
-        self._backend = select_backend(target, self._sink, prefer=backend, exclude=exclude,
-                                       source=source, include_internal=include_internal)
+        self._backend = _select_runtime_backend(
+            target, tuple(impact_targets or ()), self._sink, backend, exclude,
+            source, include_internal,
+        )
 
     def __enter__(self):
         self._backend.start()
@@ -74,7 +148,8 @@ class Recorder(object):
         self._sink.dump(path, target=self.target)
 
 
-def record(target, backend="auto", exclude=(), source=None, include_internal=False):
+def record(target, backend="auto", exclude=(), source=None, include_internal=False,
+           impact_targets=None):
     """Mode A: wrap a test run. ``target`` is a prefix, "all"/"*", or a comma list.
 
     By default records only the boundary *our code -> dependency*; ``source`` names the near
@@ -82,7 +157,8 @@ def record(target, backend="auto", exclude=(), source=None, include_internal=Fal
     ``with record("flask") as rec: ...; rec.dump("old.json")``
     """
     return Recorder(target, backend=backend, exclude=exclude,
-                    source=source, include_internal=include_internal)
+                    source=source, include_internal=include_internal,
+                    impact_targets=impact_targets)
 
 
 _active = None
@@ -102,17 +178,42 @@ def activate():
     exclude = _split_excludes(os.environ.get(ENV_EXCLUDE))
     source = _split_excludes(os.environ.get(ENV_SOURCE)) or None
     include_internal = os.environ.get(ENV_INTERNAL, "") not in ("", "0", "false", "False")
+    impact_targets = _parse_impact_targets(os.environ.get(ENV_IMPACT_TARGETS))
 
-    sink = JsonlSink(out)
-    backend = select_backend(target, sink, prefer=backend_pref, exclude=exclude,
-                             source=source, include_internal=include_internal)
-    backend.start()
+    sink = JsonlSink(out, metadata={
+        "target": target,
+        "impact_targets": list(impact_targets),
+        "deployment_id": os.environ.get(ENV_DEPLOYMENT_ID),
+        "request_id": os.environ.get(ENV_REQUEST_ID),
+        "correlation_id": os.environ.get(ENV_CORRELATION_ID),
+        "requested_backend": backend_pref,
+    })
+    backend = _select_runtime_backend(
+        target, impact_targets, sink, backend_pref, exclude, source, include_internal,
+    )
+    sink.set_metadata(
+        backend=backend.name,
+        profiling_enabled=bool(
+            getattr(backend, "uses_profiling", backend.name not in ("wrap",))
+        ),
+    )
+    try:
+        backend.start()
+    except BaseException:
+        sink.note_failure("sink_failures")
+        sink.close()
+        return
     _active = (backend, sink)
 
     def _shutdown():
         try:
             backend.stop()
         finally:
+            skipped = getattr(backend, "skipped", ())
+            if skipped:
+                sink.set_metadata(instrumentation_skipped=[
+                    {"target": item[0], "reason": item[1]} for item in skipped
+                ])
             sink.close()
 
     atexit.register(_shutdown)

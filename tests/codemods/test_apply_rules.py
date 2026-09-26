@@ -6,7 +6,18 @@ two wrap around apply_rule_detailed."""
 
 from __future__ import annotations
 
-from pymolt.codemods.apply import apply_rules_to_repo, preview_rules_repo
+from pathlib import Path
+
+import pytest
+
+from pymolt.codemods import apply as apply_module
+from pymolt.codemods.apply import (
+    apply_mixed_to_repo,
+    apply_rules_to_repo,
+    preview_mixed_repo,
+    preview_rules_repo,
+)
+from pymolt.codemods.models import CodemodPattern
 from pymolt.codemods.rules import CodemodRule
 
 LOOKUP_RULE = CodemodRule(
@@ -74,6 +85,88 @@ class TestApplyRulesToRepoWrite:
         out = (tmp_path / "app.py").read_text()
         assert "secure_filename" in out
         assert result.files_changed == 1
+
+    def test_commit_failure_rolls_back_all_rule_rewrites(self, tmp_path, monkeypatch):
+        first = tmp_path / "a.py"
+        second = tmp_path / "b.py"
+        source = "vals = df.lookup(rows, cols)\n"
+        first.write_text(source)
+        second.write_text(source)
+        real_replace = apply_module.os.replace
+        failed = False
+
+        def fail_second_replace(src, dst):
+            nonlocal failed
+            if (
+                not failed
+                and Path(dst) == second
+                and ".pymolt-new-" in Path(src).name
+            ):
+                failed = True
+                raise OSError("replace failed")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(apply_module.os, "replace", fail_second_replace)
+
+        with pytest.raises(OSError, match="replace failed"):
+            apply_rules_to_repo(tmp_path, [LOOKUP_RULE], write=True)
+
+        assert first.read_text() == source
+        assert second.read_text() == source
+        assert not list(tmp_path.glob(".*.pymolt-*.tmp"))
+
+    def test_mixed_rules_and_patterns_share_one_rollback_boundary(self, tmp_path, monkeypatch):
+        first = tmp_path / "a.py"
+        second = tmp_path / "b.py"
+        source = (
+            "from flask.helpers import safe_join\n"
+            "vals = df.lookup(rows, cols)\n"
+        )
+        first.write_text(source)
+        second.write_text(source)
+        pattern = CodemodPattern(
+            old_qualname="flask.helpers.safe_join",
+            new_qualname="werkzeug.utils.safe_join",
+            kind="rewrite-import",
+        )
+        real_replace = apply_module.os.replace
+        failed = False
+
+        def fail_second_replace(src, dst):
+            nonlocal failed
+            if not failed and Path(dst) == second and ".pymolt-new-" in Path(src).name:
+                failed = True
+                raise OSError("replace failed")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(apply_module.os, "replace", fail_second_replace)
+
+        with pytest.raises(OSError, match="replace failed"):
+            apply_mixed_to_repo(tmp_path, [LOOKUP_RULE], [pattern], write=True)
+
+        assert first.read_text() == source
+        assert second.read_text() == source
+        assert not list(tmp_path.glob(".*.pymolt-*.tmp"))
+
+    def test_mixed_preview_matches_the_chained_apply_output(self, tmp_path):
+        source = (
+            "from flask.helpers import safe_join\n"
+            "vals = df.lookup(rows, cols)\n"
+        )
+        path = tmp_path / "app.py"
+        path.write_text(source)
+        pattern = CodemodPattern(
+            old_qualname="flask.helpers.safe_join",
+            new_qualname="werkzeug.utils.safe_join",
+            kind="rewrite-import",
+        )
+
+        (preview,) = preview_mixed_repo(tmp_path, [LOOKUP_RULE], [pattern])
+        apply_mixed_to_repo(tmp_path, [LOOKUP_RULE], [pattern], write=True)
+
+        assert path.read_text() == preview.new_source
+        assert "werkzeug.utils" in preview.new_source
+        assert ".to_numpy()" in preview.new_source
 
 
 class TestAdvisorySurfacing:

@@ -8,17 +8,61 @@ downstream consumer never has to ask "how good is this verdict?".
 """
 import json
 import logging
-from enum import Enum
+import os
+import tempfile
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, computed_field
 
 from pymolt.core.enums import EvidenceLevel, TestStatus, TraceScope, Verdict
 
 logger = logging.getLogger(__name__)
 
 CONTRACT_STATE_SCHEMA_VERSION = 1
+
+
+class VerificationVerdict(StrEnum):
+    """Machine-facing result of a verification oracle.
+
+    ``INCONCLUSIVE`` is deliberately distinct from ``PASS``: missing, stale,
+    opaque, or otherwise insufficient evidence must never become a green CI
+    result merely because no concrete incompatibility was observed.
+    """
+
+    PASS = "pass"
+    FAIL = "fail"
+    INCONCLUSIVE = "inconclusive"
+
+
+class CaptureValidity(StrEnum):
+    """Whether a captured trace is eligible to act as named evidence."""
+
+    VALID = "valid"
+    UNKNOWN = "unknown"  # legacy state written before validity was recorded
+    COMMAND_FAILED = "command-failed"
+    EMPTY = "empty"
+    CORRUPT = "corrupt"
+    MISSING = "missing"
+
+
+class VerificationOutcome(BaseModel):
+    """A verdict plus the concrete facts that prevented a stronger result."""
+
+    verdict: VerificationVerdict
+    reasons: list[str] = Field(default_factory=list)
+
+
+class TraceArtifactQuality(BaseModel):
+    """Cheap structural validation of a JSON/JSONL trace artifact."""
+
+    path: str
+    validity: CaptureValidity
+    events: int = 0
+    comparable_events: int = 0
+    invalid_lines: int = 0
+    reason: str | None = None
 
 
 class TestOutcome(BaseModel):
@@ -69,6 +113,16 @@ class BoundaryDiff(BaseModel):
     def is_clean(self) -> bool:
         return not (self.disappeared or self.result_changed or self.raise_changed)
 
+    @computed_field
+    @property
+    def verdict(self) -> VerificationVerdict:
+        """A clean-but-uncomparable diff is inconclusive, never a pass."""
+        if not self.is_clean():
+            return VerificationVerdict.FAIL
+        if self.skipped_opaque:
+            return VerificationVerdict.INCONCLUSIVE
+        return VerificationVerdict.PASS
+
     def counts(self) -> dict[str, int]:
         return {
             "disappeared": len(self.disappeared),
@@ -108,7 +162,7 @@ class VerifyReport(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class CaptureMode(str, Enum):
+class CaptureMode(StrEnum):
     """How a dynamic trace was captured — a label, not a different mechanism:
     all three ultimately produce a JSONL recording via the same injected
     boundary tracer; they differ in who drives the process."""
@@ -154,6 +208,29 @@ class ContractSlot(BaseModel):
     # The previous recording this one displaced, if any: overwriting a capture
     # archives it instead of deleting it, and this is where it went.
     archived_previous: str | None = None
+    # Added without a schema bump: old state files load as UNKNOWN and remain
+    # readable, but are not silently vouched for by the newer verifier.
+    validity: CaptureValidity = CaptureValidity.UNKNOWN
+    validity_reason: str | None = None
+    privacy_profile: str = "values"
+    sample_rate: float = 1.0
+    # Runtime-capture observability.  All fields default to ``None``/empty so
+    # state written before runtime metrics existed remains loadable and is not
+    # misrepresented as a measured zero-loss capture.
+    duration_seconds: float | None = None
+    deployment_id: str | None = None
+    request_id: str | None = None
+    correlation_id: str | None = None
+    backend: str | None = None
+    impact_targets: list[str] = Field(default_factory=list)
+    metadata_path: str | None = None
+    events_seen: int | None = None
+    dropped_events: int | None = None
+    sampling_dropped: int | None = None
+    backpressure_dropped: int | None = None
+    write_failures: int | None = None
+    sink_failures: int | None = None
+    instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ContractState(BaseModel):
@@ -162,6 +239,9 @@ class ContractState(BaseModel):
     schema_version: int = CONTRACT_STATE_SCHEMA_VERSION
     baseline: ContractSlot | None = None
     post_migration: ContractSlot | None = None
+    # Failed/empty/corrupt attempts are durable diagnostics, but never replace
+    # either active evidence slot above.
+    diagnostic_captures: list[ContractSlot] = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "ContractState | None":
@@ -185,7 +265,21 @@ class ContractState(BaseModel):
             return None
 
     def save(self, path: Path) -> None:
-        """Write the state as JSON (creating the parent directory if needed)."""
+        """Atomically write state so interruption cannot destroy active evidence."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.model_dump(mode="json"), f, indent=2)
+        fd, staged = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(self.model_dump(mode="json"), stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(staged, path)
+        except BaseException:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+            raise

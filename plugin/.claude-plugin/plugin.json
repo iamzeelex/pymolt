@@ -1,15 +1,28 @@
 {
   "name": "pymolt",
   "version": "0.1.0",
-  "description": "Python migration funnel (scan → assess → contract → codemods) as agent tools + slash commands. Auto-registers the pymolt stdio MCP server.",
-  "author": { "name": "zeelex", "url": "https://pymolt.zeelex.me" },
+  "description": "Prove a Python migration didn't change behaviour: records what your code actually calls into its dependencies before and after, and reports what changed. Plus the funnel that feeds it (scan → setup → assess → codemods). Auto-registers the pymolt stdio MCP server.",
+  "author": {
+    "name": "zeelex",
+    "url": "https://pymolt.zeelex.me"
+  },
   "homepage": "https://pymolt.zeelex.me",
   "license": "MIT",
-  "keywords": ["python", "migration", "dependencies", "codemod", "tensorflow", "mcp"],
+  "keywords": [
+    "python",
+    "migration",
+    "behavioral-contract",
+    "verification",
+    "dependencies",
+    "codemod",
+    "mcp"
+  ],
   "mcpServers": {
     "pymolt": {
       "command": "pymolt",
-      "args": ["mcp"]
+      "args": [
+        "mcp"
+      ]
     }
   }
 }

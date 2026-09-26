@@ -56,3 +56,14 @@ def test_jsonl_sink_expands_pid_template(tmp_path):
     sink.close()
     assert "{pid}" not in sink.path
     assert sink.path.endswith(".jsonl")
+
+
+def test_jsonl_sink_sampling_can_drop_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0.25")
+    monkeypatch.setattr("pymolt.verify._sinks.random.random", lambda: 0.9)
+    sink = JsonlSink(str(tmp_path / "trace-{pid}.jsonl"))
+
+    sink.on_return("flask.f", {"bound": {}}, 1)
+    sink.close()
+
+    assert open(sink.path).read() == ""
