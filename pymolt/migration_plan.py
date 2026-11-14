@@ -490,6 +490,10 @@ def _apply_migration_plan_unlocked(
             "stale migration plan: " + "; ".join(inspection.reasons)
         )
 
+    # The world this migration starts from, taken before any source write. The
+    # receipt keeps it so the baseline can later be judged against it rather
+    # than against whatever manifest the migration moved the project to.
+    starting_fingerprint = environment_fingerprint(root)
     baseline = load_contract_state(root).baseline
     if not allow_no_baseline:
         if baseline is None:
@@ -500,7 +504,7 @@ def _apply_migration_plan_unlocked(
         if (
             baseline.validity is not CaptureValidity.VALID
             or quality.validity is not CaptureValidity.VALID
-            or baseline.env_fingerprint != environment_fingerprint(root)
+            or baseline.env_fingerprint != starting_fingerprint
         ):
             raise MigrationEvidenceError("the baseline capture is invalid or stale")
         if not plan.baseline_trace_path or not plan.baseline_captured_at:
@@ -567,6 +571,7 @@ def _apply_migration_plan_unlocked(
         ),
         baseline_trace_path=baseline.trace_path if baseline else None,
         baseline_captured_at=baseline.captured_at if baseline else None,
+        environment_fingerprint=starting_fingerprint,
         allow_no_baseline=allow_no_baseline,
         files_changed=[str(_project_file(root, item.path)) for item in plan.changes],
         patterns_applied=sum(item.sites for item in plan.changes),
