@@ -1601,7 +1601,18 @@ def _stamp_verdict(
     if report.blind:
         reasons.append(f"{report.blind} static dependency symbol(s) were not exercised")
     if report.dynamic_only:
-        reasons.append(f"{report.dynamic_only} observed symbol(s) are missing from the static map")
+        unverified = _unverified_dynamic_only(report)
+        if unverified:
+            reasons.append(
+                f"{len(unverified)} observed symbol(s) are missing from the static map"
+                + (" and were not compared equal on both sides" if report.fact_diff else "")
+            )
+        else:
+            report.notes.append(
+                f"{report.dynamic_only} observed symbol(s) are missing from the static map but "
+                "every one of their call facts compared equal on both sides: a static "
+                "under-approximation, not an unverified contact"
+            )
     if report.static_targets == 0:
         reasons.append("the static contract surface is empty")
 
@@ -1611,6 +1622,21 @@ def _stamp_verdict(
         VerificationVerdict.INCONCLUSIVE if report.verdict_reasons
         else VerificationVerdict.PASS
     )
+
+
+def _unverified_dynamic_only(report: ContractReport) -> list[str]:
+    """Dynamic-only symbols that still block PASS.
+
+    A symbol the static map missed but the trace observed is only a coverage gap if its
+    behaviour was not verified. With a fact diff, those whose every fact compared equal on
+    both sides are verified; without one (custom comparator, single trace) none are.
+    """
+    visible = report.impacted_symbols if report.impact_filter_active else report.symbols
+    dynamic = [s.target for s in visible if s.status == "dynamic-only"]
+    if report.fact_diff is None:
+        return dynamic
+    verified = set(report.fact_equal_symbols)
+    return [target for target in dynamic if target not in verified]
 
 
 def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:

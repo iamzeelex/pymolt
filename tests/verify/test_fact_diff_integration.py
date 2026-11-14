@@ -101,3 +101,71 @@ def test_cli_renders_each_non_equal_fact(capsys, monkeypatch):
     assert "toyapp/core.py:24" in out
     assert "raises TypeError" in out
     assert "x.y" not in out  # equal facts are not listed
+
+
+def _views_project(root):
+    (root / "myapp").mkdir()
+    (root / "myapp" / "__init__.py").write_text("")
+    (root / "myapp" / "views.py").write_text(
+        "import dep\n\n\ndef handler():\n    result = dep.compute()\n    return result.size()\n"
+    )
+    return root
+
+
+def _view_event(sym, result, root, t="return", line=5):
+    ev = {"v": 2, "t": t, "q": sym, "sym": sym, "in": {"bound": {}},
+          "where": {"file": str(root / "myapp" / "views.py"), "line": line, "func": "handler"}}
+    ev["raised" if t == "raise" else "result"] = result
+    return ev
+
+
+def _verdict_for(root, old_events, new_events):
+    from pymolt.verify.report import build_contract_report
+
+    old = _write(root / "old.jsonl", old_events)
+    new = _write(root / "new.jsonl", new_events)
+    rep = build_contract_report(root, trace=new, against=old, resolve_identities=False)
+    _stamp_verdict(rep, str(new), str(old), [])
+    return rep
+
+
+def test_dynamic_only_symbols_compared_equal_do_not_block_pass(tmp_path):
+    root = _views_project(tmp_path)
+    # dep.compute is in the static map; dep.Result.size (a method on its return value)
+    # is not, but it was observed on both sides with the same outcome.
+    events = [_view_event("dep.compute", {"__opaque__": "dep.Result"}, root),
+              _view_event("dep.Result.size", 3, root, line=6)]
+    rep = _verdict_for(root, events, events)
+    assert rep.dynamic_only == 1
+    assert rep.fact_equal_symbols == ["dep.Result.size", "dep.compute"]
+    assert rep.verdict is VerificationVerdict.PASS, rep.verdict_reasons
+    assert any("under-approximation" in note for note in rep.notes)
+
+
+def test_dynamic_only_symbol_with_unsettled_fact_still_blocks_pass(tmp_path):
+    root = _views_project(tmp_path)
+    old = [_view_event("dep.compute", {"__opaque__": "dep.Result"}, root),
+           _view_event("dep.Result.size", 3, root, line=6)]
+    # The method's outcome cannot be compared: it lost its distribution on the new side.
+    new = [_view_event("dep.compute", {"__opaque__": "dep.Result"}, root),
+           _view_event("dep.Result.size", {"__nondeterministic__": True}, root, line=6)]
+    rep = _verdict_for(root, old, new)
+    assert "dep.Result.size" not in rep.fact_equal_symbols
+    assert rep.verdict is not VerificationVerdict.PASS
+    assert any("not compared equal on both sides" in r for r in rep.verdict_reasons)
+
+
+def test_dynamic_only_blocks_pass_without_a_fact_diff(tmp_path):
+    root = _views_project(tmp_path)
+    report = ContractReport(
+        root=str(root), diff={"disappeared": 0}, diff_clean=True, static_targets=1,
+        confirmed=1, dynamic_only=1,
+    )
+    report.symbols = []
+    from pymolt.verify.report import SymbolStatus
+
+    report.symbols = [SymbolStatus(target="dep.Result.size", dep="dep", status="dynamic-only")]
+    trace = _write(root / "t.jsonl", [_view_event("dep.compute", 1, root)])
+    _stamp_verdict(report, str(trace), str(trace), [])
+    assert report.verdict is VerificationVerdict.INCONCLUSIVE
+    assert "1 observed symbol(s) are missing from the static map" in report.verdict_reasons

@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 from pymolt.verify import identity_resolver
 from pymolt.verify.comparators import ComparatorProfile, TraceComparator, compare_traces
 from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map, contact_class
-from pymolt.verify.facts import DiffProfile, FactDiff, diff_traces
+from pymolt.verify.facts import Comparison, DiffProfile, FactCategory, FactDiff, diff_traces
 from pymolt.verify.identity_resolver import ResolvedIdentity
 from pymolt.verify.models import BoundaryDiff, VerificationVerdict
 
@@ -170,6 +170,10 @@ class ContractReport(BaseModel):
     # ``all_fact_diff`` is always the whole surface.
     fact_diff: dict[str, Any] | None = None
     all_fact_diff: dict[str, Any] | None = None
+    # Runtime symbols every one of whose facts compared equal on both sides (equal, DRIFT,
+    # or REWRITTEN with an equal outcome) in the scoped fact diff. A dynamic-only symbol
+    # in this set was observed AND verified, so it does not block PASS.
+    fact_equal_symbols: list[str] = Field(default_factory=list)
 
 
 _IMPACT_PATH_FIELDS = (
@@ -835,6 +839,7 @@ def _attach_fact_diff(
     report.all_diff_clean = fdiff.is_clean()
     if not impact_filter_active:
         report.fact_diff = report.all_fact_diff
+        report.fact_equal_symbols = _compared_equal_symbols(fdiff)
         report.diff = report.all_diff
         report.diff_clean = report.all_diff_clean
         return
@@ -851,6 +856,7 @@ def _attach_fact_diff(
         "entries": [e for e in fdiff.entries if impacted(e.symbol) or impacted(e.new_symbol)],
     })
     report.fact_diff = scoped.to_json_dict()
+    report.fact_equal_symbols = _compared_equal_symbols(scoped)
     bdiff = scoped.to_boundary_diff()
     report.diff = bdiff.counts()
     report.diff_clean = scoped.is_clean()
@@ -880,3 +886,21 @@ def _unresolvable_class(error: str, dep: str) -> str | None:
     if error.startswith("ModuleNotFoundError") and f"No module named '{dep}'" in error:
         return "absent-dependency"
     return None
+
+
+def _compared_equal_symbols(fdiff: FactDiff) -> list[str]:
+    """Symbols whose every fact was compared on both sides and found equal.
+
+    Equal, DRIFT (only the library's defaults moved) and REWRITTEN-with-equal-outcome all
+    count as compared-equal; any other entry for a symbol — changed, vanished, appeared,
+    uncomparable, unpaired — disqualifies it.
+    """
+    settled: set[str] = set()
+    unsettled: set[str] = set()
+    for entry in fdiff.entries:
+        names = {entry.symbol, *([entry.new_symbol] if entry.new_symbol else [])}
+        equal = entry.comparison is Comparison.EQUAL and entry.category in (
+            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN,
+        )
+        (settled if equal else unsettled).update(names)
+    return sorted(settled - unsettled)
