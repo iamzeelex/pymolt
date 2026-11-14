@@ -108,6 +108,9 @@ class TraceCaptureResult(BaseModel):
     write_failures: int | None = None
     sink_failures: int | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
+    # Interpreters where tracing was requested but the watcher could not load (each wrote
+    # ``<trace>.activation-error.json``): those processes ran UNTRACED.
+    activation_failures: list[dict] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -632,6 +635,34 @@ def _move_trace_metadata(source: str | Path, destination: str | Path) -> str | N
     return str(destination_path)
 
 
+_ACTIVATION_ERROR_SUFFIX = ".activation-error.json"
+
+
+def _collect_activation_failures(work: Path) -> list[dict]:
+    """Read the markers a watcher leaves when it was requested but could not load.
+
+    They live in the ephemeral work dir, so they must be read before it is removed: a
+    process that never traced is otherwise indistinguishable from one that never called
+    a dependency.
+    """
+    failures: list[dict] = []
+    for marker in sorted(glob.glob(str(work / "**" / f"trace-*{_ACTIVATION_ERROR_SUFFIX}"),
+                                   recursive=True)):
+        try:
+            payload = json.loads(Path(marker).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {"error": "unreadable activation-error marker"}
+        if not isinstance(payload, dict):
+            payload = {"error": str(payload)}
+        failures.append({
+            "pid": payload.get("pid"),
+            "python": payload.get("python"),
+            "executable": payload.get("executable"),
+            "error": str(payload.get("error", "unknown")),
+        })
+    return failures
+
+
 def capture_trace(
     target: str, command: list[str], out_path: str | Path, backend: str,
     container: str | None = None, workdir: str | None = None,
@@ -694,12 +725,14 @@ def capture_trace(
 
         events = _merge_traces(produced, Path(out_path))
         runtime = _aggregate_runtime_metadata(produced)
+        activation_failures = _collect_activation_failures(work)
         counters = runtime["counters"]
         runtime_backends = runtime["backends"]
         effective_backend = ",".join(runtime_backends) if runtime_backends else backend
         # Sidecars from older/interrupted watcher bundles may be absent. Written
-        # events remain useful, but loss cannot then be claimed to be zero.
-        metadata_complete = runtime["metadata_complete"]
+        # events remain useful, but loss cannot then be claimed to be zero. Likewise
+        # when some interpreter never traced at all.
+        metadata_complete = runtime["metadata_complete"] and not activation_failures
         events_seen = (
             max(counters["events_seen"], events + counters["dropped_events"])
             if metadata_complete else None
@@ -724,6 +757,7 @@ def capture_trace(
             write_failures=(counters["write_failures"] if metadata_complete else None),
             sink_failures=(counters["sink_failures"] if metadata_complete else None),
             instrumentation_skipped=runtime["instrumentation_skipped"],
+            activation_failures=activation_failures,
         )
         metadata = {
             "schema_version": 1,
@@ -739,6 +773,7 @@ def capture_trace(
             "runtime_metadata_complete": metadata_complete,
             "counters": counters,
             "instrumentation_skipped": result.instrumentation_skipped,
+            "activation_failures": activation_failures,
             "processes": runtime["process_metadata"],
         }
         result.metadata_path = _write_trace_metadata(out_path, metadata)
@@ -1116,6 +1151,7 @@ def capture_named_trace(
         write_failures=result.write_failures,
         sink_failures=result.sink_failures,
         instrumentation_skipped=result.instrumentation_skipped,
+        activation_failures=getattr(result, "activation_failures", []),
     )
     if validity is CaptureValidity.VALID:
         setattr(state, when, slot)
@@ -1486,6 +1522,12 @@ def _stamp_verdict(
         if skipped:
             comparability.append(
                 f"{name} capture skipped {len(skipped)} instrumentation target(s)"
+            )
+        failed = getattr(slot, "activation_failures", [])
+        if failed:
+            comparability.append(
+                f"{name} capture: the watcher failed to activate in {len(failed)} "
+                "process(es), which ran untraced"
             )
     baseline = slots.get("baseline")
     post = slots.get("post-migration")
