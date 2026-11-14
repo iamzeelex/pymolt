@@ -1019,6 +1019,7 @@ def capture_named_trace(
         command_log=result.command_log, returncode=result.returncode, env_note=env_note,
         coverage_pct=coverage_pct, covered_sites=covered_sites, blind_sites=blind_sites,
         env_fingerprint=environment_fingerprint(project_dir),
+        env_setup_fingerprint=environment_setup_fingerprint(project_dir),
         archived_previous=archived_previous,
         validity=validity, validity_reason=validity_reason,
         privacy_profile=privacy, sample_rate=sample_rate,
@@ -1098,6 +1099,34 @@ def environment_fingerprint(project_dir: str | Path) -> str | None:
     Returns None when there is nothing to fingerprint (no config, no manifest) —
     "unknown", which callers must not treat as "fresh".
     """
+    inputs = _fingerprint_inputs(project_dir)
+    if inputs is None:
+        return None
+    parts, content = inputs
+    if content is not None:
+        parts = [*parts, content]
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def environment_setup_fingerprint(project_dir: str | Path) -> str | None:
+    """``environment_fingerprint`` without the manifest's *contents*.
+
+    Which manifest file, base Python, toolset and container a capture was taken
+    against — the setup, as opposed to what the manifest currently pins. When only
+    the contents of the same manifest moved since a baseline, that move *is* the
+    migration (bumped pins), so the baseline is still its starting point; when the
+    setup moved (another manifest, another base Python), it is not. None means
+    unknown, as for the full fingerprint.
+    """
+    inputs = _fingerprint_inputs(project_dir)
+    if inputs is None:
+        return None
+    parts, _content = inputs
+    return hashlib.sha256("\n".join(["setup", *parts]).encode("utf-8")).hexdigest()[:16]
+
+
+def _fingerprint_inputs(project_dir: str | Path) -> tuple[list[str], str | None] | None:
+    """(setup parts, manifest-content part) of the environment fingerprint."""
     from pymolt.ingestion.config import EnvConfig
 
     project_dir = Path(project_dir)
@@ -1111,13 +1140,14 @@ def environment_fingerprint(project_dir: str | Path) -> str | None:
         f"container={config.container_id or ''}",
         f"manifest={config.selected_manifest or ''}",
     ]
+    content: str | None = None
     if config.selected_manifest:
         manifest = project_dir / config.selected_manifest
         try:
-            parts.append("content=" + hashlib.sha256(manifest.read_bytes()).hexdigest())
+            content = "content=" + hashlib.sha256(manifest.read_bytes()).hexdigest()
         except OSError:
-            parts.append("content=<unreadable>")
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+            content = "content=<unreadable>"
+    return parts, content
 
 
 class AttachInstructions(BaseModel):
@@ -1263,6 +1293,7 @@ def finalize_attached_capture(
         trace_path=str(committed_path), captured_at=_now(), mode=CaptureMode.LIVE_ATTACH,
         command=[], target=target, events=events, processes=1,
         env_fingerprint=environment_fingerprint(project_dir),
+        env_setup_fingerprint=environment_setup_fingerprint(project_dir),
         archived_previous=archived_previous,
         validity=validity, validity_reason=validity_reason,
         privacy_profile=privacy, sample_rate=sample_rate,
@@ -1473,6 +1504,14 @@ def _stamp_verdict(
     )
 
 
+def baseline_setup_unchanged(slot, current_setup: str | None) -> bool:
+    """True when the baseline's setup (manifest file, base Python, toolset, container)
+    is the current one, so any fingerprint difference is the manifest's contents.
+    Unknown on either side (old slots, no config) is never "unchanged"."""
+    recorded = getattr(slot, "env_setup_fingerprint", None)
+    return recorded is not None and current_setup is not None and recorded == current_setup
+
+
 def _applied_migration(project_dir: str | Path):
     """The receipt of the migration currently applied, or None (none, or rolled back)."""
     from pymolt.migration_state import MigrationReceipt
@@ -1496,7 +1535,11 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
       recorded migration started from. A migration that upgrades the manifest
       moves "now" away from the baseline by design — that is the migration, not
       staleness. A baseline taken against some *other* starting point (setup
-      re-run with another manifest before migrating) is still stale.
+      re-run with another manifest before migrating) is still stale. With no
+      recorded start (a migration done by hand, without ``pymolt apply``), a
+      baseline whose *setup* (manifest file, base Python, toolset, container) is
+      unchanged and only the manifest's contents moved is the starting point too:
+      bumping pins is the migration.
 
     Absence of evidence is reported as unknown, never as fresh: a capture from
     before fingerprints existed, or a baseline whose starting point no recorded
@@ -1521,10 +1564,12 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
             run = migration.run_id[:8]
             start = migration.starting_fingerprint(project_dir)
 
+    current_setup = environment_setup_fingerprint(project_dir)
     stale_now: list[str] = []
     stale_start: list[str] = []
     unstamped: list[str] = []
     unpinned: list[str] = []
+    content_moved: list[str] = []
     for name, slot in used_slots:
         fingerprint = getattr(slot, "env_fingerprint", None)
         if fingerprint is None:
@@ -1534,10 +1579,16 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
                 if fingerprint != start:
                     stale_start.append(name)
             elif fingerprint != current:
-                # Nothing pins where the migration started, and the world has
-                # moved since this baseline: it either drifted before migrating
-                # (stale) or moved as part of the migration (fine). Can't tell.
-                unpinned.append(name)
+                # Nothing pins where the migration started, and the world has moved
+                # since this baseline. If only the contents of the same manifest
+                # moved (same file, base Python, toolset, container), that move is
+                # the migration — bumped pins — and the baseline is its starting
+                # point. Otherwise it drifted before migrating or the migration
+                # changed the setup itself: can't tell.
+                if baseline_setup_unchanged(slot, current_setup):
+                    content_moved.append(name)
+                else:
+                    unpinned.append(name)
             # else: nothing moved since the baseline, so it describes the start too.
         elif fingerprint != current:
             stale_now.append(name)
@@ -1559,6 +1610,12 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
         report.baseline_stale = True
     elif not (unstamped or unpinned):
         report.baseline_stale = False
+    if content_moved:
+        report.notes.append(
+            f"the {', '.join(content_moved)} capture predates a change to the contents of "
+            "the same manifest (same file, base Python, toolset and container) — taken as "
+            "the migration's starting point, since bumping pins is the migration."
+        )
     if unstamped:
         report.notes.append(
             f"staleness unknown for the {', '.join(unstamped)} capture "
