@@ -19,11 +19,11 @@ Standalone: ``python -m pymolt.verify.export_watcher <dir>``
 import shutil
 from pathlib import Path
 
-from pymolt.verify import _backend, _normalize, _sinks, _wrap, boundary_tracer
+from pymolt.verify import _backend, _identity, _normalize, _sinks, _wrap, boundary_tracer
 
 # The injected runtime modules, copied verbatim. Their intra-package relative imports
 # (``from ._backend import ...``) resolve inside the ``pymolt_trace`` package unchanged.
-_RUNTIME_MODULES = (_normalize, _backend, _sinks, _wrap, boundary_tracer)
+_RUNTIME_MODULES = (_normalize, _identity, _backend, _sinks, _wrap, boundary_tracer)
 
 _SITECUSTOMIZE_SRC = Path(__file__).with_name("sitecustomize.py")
 _IMPORT_LINE = "from pymolt.verify.boundary_tracer import activate"

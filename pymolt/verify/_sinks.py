@@ -34,9 +34,24 @@ def _result_repr(result_obj):
     return normalize(result_obj)
 
 
+# Event schema version (docs/design/tier1-fact-model-v2.md): v2 adds the canonical ``sym``
+# (+ ``symq`` when not exact, ``own`` for a receiver of another class) and ``in.defaulted``;
+# every v1 field keeps its meaning.
+EVENT_VERSION = 2
+
+
+def _identity_fields(ev, sym, symq, own):
+    if sym is not None:
+        ev["sym"] = sym
+        if symq is not None:
+            ev["symq"] = symq
+    if own is not None:
+        ev["own"] = own
+
+
 class JsonlSink(object):
     """Streaming NDJSON writer. One event per line:
-    ``{"t": "return"|"raise", "q": qualname, "in": inputs, ...}``.
+    ``{"v": 2, "t": "return"|"raise", "q": qualname, "sym": ..., "in": inputs, ...}``.
 
     Producers only enqueue with ``put_nowait``.  A daemon writer owns the file,
     so a slow filesystem, full pipe, or wedged sink cannot hold application
@@ -216,20 +231,24 @@ class JsonlSink(object):
         # No need to persist 'call' separately — return/raise carry the inputs.
         pass
 
-    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False):
+    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
+                  symq=None, own=None):
         if not admitted and not self.admit():
             return
-        ev = {"t": "return", "q": qualname, "in": inputs,
+        ev = {"v": EVENT_VERSION, "t": "return", "q": qualname, "in": inputs,
               "result": _result_repr(result_obj), "ts": time.time()}
+        _identity_fields(ev, sym, symq, own)
         if site is not None:
             ev["where"] = site  # call site in our code: {file, line, func}
         self._write(ev)
 
-    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False):
+    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
+                 symq=None, own=None):
         if not admitted and not self.admit(force=True):
             return
-        ev = {"t": "raise", "q": qualname, "in": inputs,
+        ev = {"v": EVENT_VERSION, "t": "raise", "q": qualname, "in": inputs,
               "raised": exc_typename, "ts": time.time()}
+        _identity_fields(ev, sym, symq, own)
         if site is not None:
             ev["where"] = site
         self._write(ev)
@@ -287,8 +306,9 @@ class MemorySink(object):
         self._lock = threading.Lock()
 
     @staticmethod
-    def _key(qualname, inputs):
-        return json.dumps({"q": qualname, "in": inputs}, sort_keys=True, default=str)
+    def _key(qualname, inputs, sym=None, own=None):
+        return json.dumps({"q": qualname, "sym": sym, "own": own, "in": inputs},
+                          sort_keys=True, default=str)
 
     def on_call(self, qualname, inputs, site=None):
         pass
@@ -297,14 +317,21 @@ class MemorySink(object):
         """Tests aggregate everything: every call is admitted (see ``JsonlSink.admit``)."""
         return True
 
-    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False):
-        self._store(qualname, inputs, result=_result_repr(result_obj), raised=None, site=site)
+    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
+                  symq=None, own=None):
+        self._store(qualname, inputs, result=_result_repr(result_obj), raised=None, site=site,
+                    sym=sym, symq=symq, own=own)
 
-    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False):
-        self._store(qualname, inputs, result=None, raised=exc_typename, site=site)
+    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
+                 symq=None, own=None):
+        self._store(qualname, inputs, result=None, raised=exc_typename, site=site,
+                    sym=sym, symq=symq, own=own)
 
-    def _store(self, qualname, inputs, result, raised, site=None):
-        k = self._key(qualname, inputs)
+    def _store(self, qualname, inputs, result, raised, site=None, sym=None, symq=None,
+               own=None):
+        # Keyed by identity too: two ``__init__`` of one module share ``q`` but are different
+        # calls, and so is one inherited method called on two receiver classes.
+        k = self._key(qualname, inputs, sym, own)
         with self._lock:
             if k in self.records:
                 rec = self.records[k]
@@ -314,6 +341,7 @@ class MemorySink(object):
             else:
                 rec = {"qualname": qualname, "inputs": inputs,
                        "result": result, "raised": raised, "count": 1}
+                _identity_fields(rec, sym, symq, own)
                 if site is not None:
                     rec["where"] = site  # representative call site (first seen)
                 self.records[k] = rec

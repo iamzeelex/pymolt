@@ -67,3 +67,25 @@ def test_jsonl_sink_sampling_can_drop_events(tmp_path, monkeypatch):
     sink.close()
 
     assert open(sink.path).read() == ""
+
+
+def test_jsonl_events_are_v2_and_carry_identity(tmp_path):
+    sink = JsonlSink(str(tmp_path / "id-{pid}.jsonl"))
+    sink.on_return("m.__init__", {"bound": {}}, None, sym="m.A.__init__")
+    sink.on_return("m.wrapper", {"bound": {}}, 1, sym="m.f", symq="unwrapped")
+    sink.on_raise("m.__init__", {"bound": {}}, "ValueError", sym="m.Base.__init__", own="m.Child")
+    sink.close()
+    events = [json.loads(line) for line in open(sink.path) if line.strip()]
+    assert all(e["v"] == 2 for e in events)
+    assert [(e["sym"], e.get("symq"), e.get("own")) for e in events] == [
+        ("m.A.__init__", None, None), ("m.f", "unwrapped", None),
+        ("m.Base.__init__", None, "m.Child")]
+
+
+def test_memory_sink_keeps_two_inits_of_one_module_apart():
+    s = MemorySink()
+    s.on_return("m.__init__", {"bound": {}}, None, sym="m.A.__init__")
+    s.on_return("m.__init__", {"bound": {}}, None, sym="m.B.__init__")
+    s.on_return("m.__init__", {"bound": {}}, None, sym="m.A.__init__", own="m.Sub")
+    assert sorted((r["sym"], r.get("own", "")) for r in s.records.values()) == [
+        ("m.A.__init__", ""), ("m.A.__init__", "m.Sub"), ("m.B.__init__", "")]
