@@ -55,6 +55,7 @@ from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
+from pymolt.verify.facts import record_site_text
 from pymolt.verify.gaps import classify_gaps, scan_usage_sites
 from pymolt.verify.models import (
     CaptureMode,
@@ -1050,6 +1051,7 @@ def capture_named_trace(
         if correlation_id is not None:
             capture_kwargs["correlation_id"] = correlation_id
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
+        _record_site_text(staged_path, project_dir)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
@@ -1296,6 +1298,20 @@ def poll_attached_capture(out_path: str | Path) -> int:
         return sum(1 for line in f if line.strip())
 
 
+def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
+    """Keep the source text of every call site with the trace.
+
+    The project's code changes between the baseline and the post-migration capture, so
+    the line text has to be read now: it is what lets the fact diff tell a rewritten call
+    site (``s1.append(s2)`` -> ``pd.concat([s1, s2])``) from a call that vanished. Best
+    effort — without it the diff falls back to line numbers.
+    """
+    try:
+        record_site_text(trace_path, project_dir)
+    except Exception as exc:  # noqa: BLE001 - never fail a capture over annotation
+        logger.warning("could not record call-site text for %s: %s", trace_path, exc)
+
+
 def finalize_attached_capture(
     project_dir: str | Path, when: str, out_path: str | Path, *,
     target: str = "all", privacy: str = "shape", sample_rate: float = 1.0,
@@ -1309,6 +1325,7 @@ def finalize_attached_capture(
     project_dir = Path(project_dir)
     out_path = Path(out_path)
     events = poll_attached_capture(out_path)
+    _record_site_text(out_path, project_dir)
     metadata = _read_trace_metadata(out_path)
     raw_counters = metadata.get("counters")
     counters = raw_counters if isinstance(raw_counters, dict) else {}
@@ -1580,6 +1597,7 @@ def _stamp_verdict(
         reasons.append("no before/after diff was produced")
     elif report.diff.get("skipped_opaque", 0):
         reasons.append("some boundary interactions were opaque or nondeterministic")
+    reasons.extend(_fact_diff_reasons(report.fact_diff))
     if report.blind:
         reasons.append(f"{report.blind} static dependency symbol(s) were not exercised")
     if report.dynamic_only:
@@ -1593,6 +1611,31 @@ def _stamp_verdict(
         VerificationVerdict.INCONCLUSIVE if report.verdict_reasons
         else VerificationVerdict.PASS
     )
+
+
+def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
+    """Why a clean fact diff still cannot prove equivalence (empty when it can)."""
+    if not fact_diff or fact_diff.get("verdict") != VerificationVerdict.INCONCLUSIVE.value:
+        return []
+    entries = fact_diff.get("entries") or []
+    counts = fact_diff.get("counts") or {}
+    reasons: list[str] = []
+    if not any(counts.values()):
+        reasons.append("no comparable call facts were recorded on both sides")
+    unpaired = sum(
+        1 for e in entries
+        if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
+    )
+    if unpaired:
+        reasons.append(
+            f"{unpaired} rewritten call site(s) could not be paired with a post-migration call"
+        )
+    uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable")
+    if uncomparable:
+        reasons.append(
+            f"{uncomparable} call fact(s) lost their outcome distribution and cannot be compared"
+        )
+    return reasons or ["the fact diff could not establish equivalence"]
 
 
 def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots) -> None:
