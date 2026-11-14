@@ -50,7 +50,7 @@ def test_wraps_function_and_captures_args_result_site(dep):
     sink, _ = _run(["wdep.jsonify"], body, source=__name__)
     (rec,) = sink.records.values()
     assert rec["qualname"] == "wdep.jsonify"
-    assert rec["inputs"] == {"bound": {"x": {"__dict__": [["a", 1]]}}}
+    assert rec["inputs"] == {"bound": {"x": {"__dict__": [["a", 1]]}}, "defaulted": []}
     assert rec["result"] == {"__dict__": [["j", {"__dict__": [["a", 1]]}]]}
     assert rec["where"]["file"].endswith("test_wrap.py")
 

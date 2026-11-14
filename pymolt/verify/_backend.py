@@ -20,11 +20,21 @@ exceptions surface as *result* changes, not *raise* changes. This is non-blockin
 (still BEHAVIOR_CHANGED) and matches the spec's Known Gaps. The Sink API still accepts
 ``on_raise`` so artifacts produced by other means carry raises uniformly.
 """
-import inspect
 import os
 import sys
 import threading
 
+from . import _normalize as _nz
+from ._identity import (
+    SYMQ_UNWRAPPED,
+    IdentityResolver,
+    bind_inputs,
+    fallback_identity,
+    frame_inputs,
+    receiver_owner,
+    sink_identity_fields,
+    wrapper_call,
+)
 from ._normalize import AMBIGUOUS_OUTCOME
 
 # A frozenset, not the tuple CPython exposes: a tuple scan on every event cost ~25% of the
@@ -206,15 +216,22 @@ class AppMatcher(object):
 
 class Sink(object):
     """Structural receiver interface. A plain base class (not ``typing.Protocol``,
-    which is 3.8+) for 3.6/3.7 reach. Implementations provide the three hooks."""
+    which is 3.8+) for 3.6/3.7 reach. Implementations provide the three hooks.
+
+    ``qualname`` is the v1 legacy name (``<frame module>.<co_name>``); ``sym`` the canonical
+    runtime identity, ``symq`` its quality ("unwrapped" / "fallback", None when exact) and
+    ``own`` the receiver's class when it differs from the class prefix of ``sym``. Backends
+    pass the identity keywords only to sinks whose signature accepts them."""
 
     def on_call(self, qualname, inputs, site=None):
         raise NotImplementedError
 
-    def on_return(self, qualname, inputs, result_obj, site=None):
+    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
+                  symq=None, own=None):
         raise NotImplementedError
 
-    def on_raise(self, qualname, inputs, exc_typename, site=None):
+    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
+                 symq=None, own=None):
         raise NotImplementedError
 
 
@@ -308,10 +325,13 @@ class SetProfileBackend(TraceBackend):
     """``sys.setprofile`` backend — events at call boundaries, not lines.
 
     Hook cheapness is load-bearing. Every decision that depends only on a code object
-    (is the callee a dependency? is the caller our code?) is made once per code object and
-    cached by ``id(code)``; the hot path is a dict lookup, with no per-event string work.
-    Sampling is decided before any introspection (``getargvalues``/normalize). The whole
-    hook body is guarded so an internal error can never propagate into the traced program.
+    (is the callee a dependency? is the caller our code? its canonical ``sym``, parameter
+    names and defaults, whether it may be a generic decorator wrapper) is made once per code
+    object and cached by ``id(code)``; the hot path is a dict lookup, with no per-event string
+    work. The only per-call introspection beyond reading the frame's locals is for generic
+    wrapper frames (closure cells), cached per inner function. Sampling is decided before any
+    introspection/normalize. The whole hook body is guarded so an internal error can never
+    propagate into the traced program.
     """
 
     name = "setprofile"
@@ -319,13 +339,20 @@ class SetProfileBackend(TraceBackend):
     def __init__(self, target, sink, exclude=(), source=None, include_internal=False):
         TraceBackend.__init__(self, target, sink, exclude, source, include_internal)
         self._prev = None
-        self._pending = {}  # id(frame) -> (qualname, inputs, site)
+        self._pending = {}  # id(frame) -> (qualname, inputs, site, sym, symq, own)
         self._lock = threading.Lock()
         self.c_event_count = 0  # classified internal C traffic, intentionally not persisted
         self.skip_wrapped = False  # hybrid: skip calls a WrapBackend wrapper already records
-        self._callee = {}  # id(code) -> (code, in_target, module, is_module_body)
+        # id(code) -> [code, in_target, module, is_module_body, CodeIdentity | None]; the
+        # identity slot is filled lazily on the first RECORDED call (most code objects in the
+        # process are never a boundary contact and never pay for it).
+        self._callee = {}
         self._near_codes = {}  # id(code) -> (code, is_near)
         self._admit = getattr(sink, "admit", None)
+        fields = sink_identity_fields(sink)          # v1 sinks keep the v1 call
+        self._sym_kw = "sym" in fields
+        self._own_kw = "own" in fields
+        self._identity = IdentityResolver(self._in_target)
 
     # ── per-code decisions ─────────────────────────────────────────────────────
     def _callee_entry(self, frame):
@@ -335,10 +362,20 @@ class SetProfileBackend(TraceBackend):
             if len(self._callee) >= _CODE_CACHE_MAX:
                 self._callee.clear()
             module = frame.f_globals.get("__name__", "") or ""
-            ent = (code, bool(self._in_target(module, frame)), module,
-                   code.co_name == "<module>")
+            ent = [code, bool(self._in_target(module, frame)), module,
+                   code.co_name == "<module>", None]
             self._callee[id(code)] = ent
         return ent
+
+    def _code_identity(self, ent, frame):
+        """The per-code identity, computed once and stored in the decision-cache entry."""
+        try:
+            ci, cacheable = self._identity.code_identity(ent[0], ent[2], frame.f_globals)
+        except Exception:
+            ci, cacheable = fallback_identity(ent[0], ent[2]), True
+        if cacheable:
+            ent[4] = ci
+        return ci
 
     def _code_is_near(self, frame):
         code = frame.f_code
@@ -385,7 +422,7 @@ class SetProfileBackend(TraceBackend):
                     return self._hook  # hybrid: a WrapBackend wrapper already recorded this call
                 if not self._caller_is_near(back):  # caller = our code?
                     return self._hook  # internal dep<->dep traffic, not our boundary
-                self._record_call(frame, ent[2])
+                self._record_call(frame, ent)
             elif event == "return":
                 if self._pending:
                     info = self._pending.pop(id(frame), None)
@@ -410,28 +447,28 @@ class SetProfileBackend(TraceBackend):
                     return self._hook
                 if not self._in_target(cmod):
                     return self._hook
-                self.sink.on_raise(self._c_qualname(arg), {"c_level": True}, "Exception",
-                                   self._site(frame))
+                cq = self._c_qualname(arg)  # a C callable's own module.qualname: exact
+                kw = {"sym": cq, "symq": None} if self._sym_kw else {}
+                self.sink.on_raise(cq, {"c_level": True}, "Exception", self._site(frame), **kw)
             # "c_return" carries nothing we persist: fall through.
         except Exception:
             pass  # the hook must never break the traced program
         return self._hook
 
     def _emit_outcome(self, info, frame, arg):
-        qual, inputs, site = info
+        qual, inputs, site, sym, symq, own = info
         outcome = frame_outcome(frame, arg)
-        admitted = self._admit is not None
+        kw = {"admitted": True} if self._admit is not None else {}
+        if self._sym_kw:
+            kw["sym"] = sym
+            kw["symq"] = symq
+        if own is not None and self._own_kw:
+            kw["own"] = own
         if outcome == OUTCOME_RAISE:
-            if admitted:
-                self.sink.on_raise(qual, inputs, UNTYPED_RAISE, site, admitted=True)
-            else:
-                self.sink.on_raise(qual, inputs, UNTYPED_RAISE, site)
+            self.sink.on_raise(qual, inputs, UNTYPED_RAISE, site, **kw)
             return
         result = arg if outcome == OUTCOME_RETURN else AMBIGUOUS_OUTCOME
-        if admitted:
-            self.sink.on_return(qual, inputs, result, site, admitted=True)
-        else:
-            self.sink.on_return(qual, inputs, result, site)
+        self.sink.on_return(qual, inputs, result, site, **kw)
 
     @staticmethod
     def _c_qualname(cfunc):
@@ -448,24 +485,47 @@ class SetProfileBackend(TraceBackend):
         code = caller_frame.f_code
         return {"file": code.co_filename, "line": caller_frame.f_lineno, "func": code.co_name}
 
-    def _record_call(self, frame, module):
-        # Sampling first: an unsampled call must not pay for getargvalues/normalize.
+    def _record_call(self, frame, ent):
+        # Sampling first: an unsampled call must not pay for introspection/normalize.
         if self._admit is not None and not self._admit():
             return
-        from ._normalize import normalize  # local import keeps cold-path cost off the reject path
-        code = frame.f_code
-        qual = "{0}.{1}".format(module, code.co_name)
+        ci = ent[4]
+        if ci is None:
+            ci = self._code_identity(ent, frame)
+        sym, symq = ci.sym, ci.symq
+        own = None
+        normalize = _nz.normalize
         try:
-            ai = inspect.getargvalues(frame)
-            bound = {n: normalize(ai.locals.get(n)) for n in ai.args}
-            inputs = {"bound": bound}
-            if ai.varargs:
-                inputs["varargs"] = normalize(ai.locals.get(ai.varargs))
-            if ai.keywords:
-                inputs["kwargs"] = normalize(ai.locals.get(ai.keywords))
+            loc = frame.f_locals
+            inputs = None
+            if ci.cells:
+                # Generic decorator wrapper: attribute the call to the single wrapped
+                # dependency function and bind the pass-through args to ITS signature, so
+                # the event looks the same whether or not the decorator is present.
+                inner = self._identity.wrapped_inner(loc, ci.cells)
+                if inner is not None:
+                    try:
+                        args, kwargs = wrapper_call(loc, ci)
+                        inputs = bind_inputs(inner.sig, args, kwargs, normalize)
+                        if inner.recv is not None and args:
+                            own = receiver_owner(args[0], inner.recv, inner.prefix)
+                        sym, symq = inner.sym, SYMQ_UNWRAPPED
+                    except Exception:
+                        inputs = own = None
+            if inputs is None:
+                if ci.via_recv:
+                    # A factory-made method (``cls.mean = mean``): name it after the class
+                    # the receiver reaches it through, with that function's defaults.
+                    rci = self._identity.receiver_identity(ci, ent[0], loc.get(ci.recv))
+                    if rci is not None:
+                        ci = rci
+                        sym, symq = ci.sym, ci.symq
+                inputs = frame_inputs(loc, ci, normalize)
+                if ci.recv is not None:
+                    own = receiver_owner(loc.get(ci.recv), ci.recv, ci.prefix)
         except Exception:
             inputs = {"unbound": True}
-        self._pending[id(frame)] = (qual, inputs, self._site(frame.f_back))
+        self._pending[id(frame)] = (ci.q, inputs, self._site(frame.f_back), sym, symq, own)
 
     def start(self):
         self._prev = sys.getprofile()

@@ -244,3 +244,27 @@ def test_default_queue_is_deep_enough_for_cpu_bound_runs(tmp_path, monkeypatch):
         assert sink._queue.maxsize >= 65536
     finally:
         sink.close()
+
+
+# ── runtime metadata ─────────────────────────────────────────────────────────
+
+
+def test_activate_records_the_capturing_interpreter(tmp_path):
+    """The host resolves static symbols in the interpreter that ran the capture."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYMOLT_TRACE")}
+    env.update(PYMOLT_TRACE_TARGET="json", PYTHONPATH=str(repo),
+               PYMOLT_TRACE_OUT=str(tmp_path / "t-{pid}.jsonl"))
+    code = ("from pymolt.verify import boundary_tracer\n"
+            "boundary_tracer.activate()\n"
+            "import json\n"
+            "json.dumps(1)\n")
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=60)
+    (meta,) = tmp_path.glob("*.meta.json")
+    payload = json.loads(meta.read_text())
+    assert payload["python"] == ".".join(str(n) for n in sys.version_info[:3])
+    assert os.path.realpath(payload["executable"]) == os.path.realpath(sys.executable)
