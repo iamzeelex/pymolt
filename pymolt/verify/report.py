@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 from pymolt.verify import identity_resolver
 from pymolt.verify.comparators import ComparatorProfile, TraceComparator, compare_traces
 from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map, contact_class
+from pymolt.verify.facts import DiffProfile, FactDiff, diff_traces
 from pymolt.verify.identity_resolver import ResolvedIdentity
 from pymolt.verify.models import BoundaryDiff, VerificationVerdict
 
@@ -164,6 +165,11 @@ class ContractReport(BaseModel):
     impact_by_kind: dict[str, int] = Field(default_factory=dict)
     unmatched_impact_paths: list[str] = Field(default_factory=list)
     impact_diff_details: dict[str, list[dict[str, Any]]] | None = None
+    # Fact-level version diff (schema ``pymolt.fact-diff/1``): every non-equal fact with its
+    # symbol, call site and old -> new outcome. ``fact_diff`` follows the impact filter;
+    # ``all_fact_diff`` is always the whole surface.
+    fact_diff: dict[str, Any] | None = None
+    all_fact_diff: dict[str, Any] | None = None
 
 
 _IMPACT_PATH_FIELDS = (
@@ -770,32 +776,91 @@ def build_contract_report(
 
     if trace and against:
         try:
-            bdiff = compare_traces(
-                str(against),
-                str(trace),
-                profile=comparator_profile,
-                custom=custom_comparator,
-            )
-            report.all_diff = bdiff.counts()
-            report.all_diff_clean = bdiff.is_clean()
-            if impact_filter_active:
-                impact_diff = _filter_diff(bdiff, impact_paths)
-                report.diff = impact_diff.counts()
-                report.diff_clean = impact_diff.is_clean()
-                report.impact_diff_details = {
-                    "disappeared": impact_diff.disappeared,
-                    "result_changed": impact_diff.result_changed,
-                    "raise_changed": impact_diff.raise_changed,
-                    "appeared": impact_diff.appeared,
-                    "skipped_opaque": impact_diff.skipped_opaque,
-                }
+            profile = ComparatorProfile(comparator_profile)
+            if profile is ComparatorProfile.CUSTOM:
+                _attach_boundary_diff(
+                    report, compare_traces(str(against), str(trace), profile=profile,
+                                           custom=custom_comparator),
+                    impact_filter_active, impact_paths,
+                )
             else:
-                report.diff = report.all_diff
-                report.diff_clean = report.all_diff_clean
+                fdiff = diff_traces(
+                    against, trace, root=root,
+                    profile=DiffProfile.SHAPE if profile is ComparatorProfile.SHAPE
+                    else DiffProfile.EXACT,
+                )
+                _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
         except (OSError, ValueError) as e:
             report.notes.append(f"version diff failed: {e}")
 
     return report
+
+
+def _attach_boundary_diff(
+    report: ContractReport, bdiff: BoundaryDiff, impact_filter_active: bool,
+    impact_paths: list[str],
+) -> None:
+    """Legacy (custom comparator) path: a BoundaryDiff with counts only."""
+    report.all_diff = bdiff.counts()
+    report.all_diff_clean = bdiff.is_clean()
+    if impact_filter_active:
+        impact_diff = _filter_diff(bdiff, impact_paths)
+        report.diff = impact_diff.counts()
+        report.diff_clean = impact_diff.is_clean()
+        report.impact_diff_details = {
+            "disappeared": impact_diff.disappeared,
+            "result_changed": impact_diff.result_changed,
+            "raise_changed": impact_diff.raise_changed,
+            "appeared": impact_diff.appeared,
+            "skipped_opaque": impact_diff.skipped_opaque,
+        }
+    else:
+        report.diff = report.all_diff
+        report.diff_clean = report.all_diff_clean
+
+
+def _attach_fact_diff(
+    report: ContractReport, fdiff: FactDiff, impact_filter_active: bool,
+    impact_paths: list[str],
+) -> None:
+    """Fact-level diff: verdict input plus every non-equal fact, named and located.
+
+    ``diff``/``all_diff`` keep the BoundaryDiff count shape existing consumers read; the
+    fact categories and entries live in ``fact_diff``/``all_fact_diff``. An impact filter
+    keeps entries whose symbol is an impacted API — matched by public path or by the
+    canonical symbol the static side resolved it to.
+    """
+    report.all_fact_diff = fdiff.to_json_dict()
+    report.all_diff = fdiff.to_boundary_diff().counts()
+    report.all_diff_clean = fdiff.is_clean()
+    if not impact_filter_active:
+        report.fact_diff = report.all_fact_diff
+        report.diff = report.all_diff
+        report.diff_clean = report.all_diff_clean
+        return
+    impacted_syms = {s.sym for s in report.impacted_symbols if s.sym}
+
+    def impacted(name: str | None) -> bool:
+        if not name:
+            return False
+        if _matches_impact(name, impact_paths):
+            return True
+        return any(name == sym or name.startswith(sym + ".") for sym in impacted_syms)
+
+    scoped = fdiff.model_copy(update={
+        "entries": [e for e in fdiff.entries if impacted(e.symbol) or impacted(e.new_symbol)],
+    })
+    report.fact_diff = scoped.to_json_dict()
+    bdiff = scoped.to_boundary_diff()
+    report.diff = bdiff.counts()
+    report.diff_clean = scoped.is_clean()
+    report.impact_diff_details = {
+        "disappeared": bdiff.disappeared,
+        "result_changed": bdiff.result_changed,
+        "raise_changed": bdiff.raise_changed,
+        "appeared": bdiff.appeared,
+        "skipped_opaque": bdiff.skipped_opaque,
+    }
 
 
 def _unresolvable_class(error: str, dep: str) -> str | None:

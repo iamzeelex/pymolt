@@ -534,6 +534,81 @@ _TRUST_TIER_LABELS = {
 }
 
 
+_FACT_LABEL = {
+    "changed": "[bold red]CHANGED[/bold red]",
+    "disappeared": "[bold red]DISAPPEARED[/bold red]",
+    "appeared": "[bold red]APPEARED[/bold red]",
+    "rewritten": "[cyan]REWRITTEN[/cyan]",
+    "uncomparable": "[yellow]UNCOMPARABLE[/yellow]",
+    "drift": "[dim]DRIFT[/dim]",
+    "equal": "[green]equal[/green]",
+}
+
+
+def _fmt_outcomes(outcomes: list[dict] | None, limit: int = 70) -> str:
+    """``[{kind, value, count}]`` -> ``returns {...}`` / ``raises TypeError`` (compact)."""
+    if not outcomes:
+        return "—"
+    parts = []
+    for outcome in outcomes:
+        if outcome.get("kind") == "raise":
+            text = f"raises {outcome.get('value') or '?'}"
+        else:
+            value = json.dumps(outcome.get("value"), sort_keys=True, default=str)
+            text = "returns " + (value if len(value) <= limit else value[: limit - 1] + "…")
+        if outcome.get("count", 1) > 1 and len(outcomes) > 1:
+            text += f" ×{outcome['count']}"
+        parts.append(text)
+    return " | ".join(parts)
+
+
+def _fmt_site(site: dict | None) -> str:
+    if not site:
+        return "—"
+    where = f"{site.get('file', '?')}:{site.get('line', '?')}"
+    return f"{where} {site.get('func')}()" if site.get("func") else where
+
+
+def _render_fact_changes(fact_diff: dict | None) -> None:
+    """Every non-equal call fact: what was called, where, and old -> new outcome."""
+    if not fact_diff:
+        return
+    entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
+    if not entries:
+        return
+    order = list(_FACT_LABEL)
+    entries.sort(key=lambda e: (not e.get("fails"), order.index(e.get("category", "equal"))
+                                if e.get("category") in order else len(order)))
+    t = Table(title=f"Behaviour diff — call facts that are not equal ({len(entries)})",
+              header_style="bold")
+    t.add_column("Change", no_wrap=True)
+    t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
+    t.add_column("Call site (your code)", overflow="fold", ratio=2)
+    t.add_column("Before → after", overflow="fold", ratio=3)
+    for e in entries:
+        symbol = e.get("symbol", "?")
+        if e.get("new_symbol"):
+            symbol = f"{symbol} → {e['new_symbol']}"
+        site = escape(_fmt_site(e.get("old_site") or e.get("new_site")))
+        old_text = (e.get("old_site") or {}).get("text")
+        new_text = (e.get("new_site") or {}).get("text")
+        if e.get("category") == "rewritten" and old_text and new_text and old_text != new_text:
+            site += f"\n[dim]{escape(old_text)}\n→ {escape(new_text)}[/dim]"
+        if e.get("category") == "drift":
+            change = escape(f"defaults {e.get('old_defaulted') or []} → "
+                            f"{e.get('new_defaulted') or []}")
+        else:
+            change = escape(f"{_fmt_outcomes(e.get('old'))}\n→ {_fmt_outcomes(e.get('new'))}")
+            if e.get("level") == "type":
+                change += "  [dim](compared by type)[/dim]"
+        t.add_row(_FACT_LABEL.get(e.get("category"), e.get("category", "?")),
+                  escape(symbol), site, change)
+    t.caption = ("REWRITTEN: the call site's code changed between captures; DRIFT: the "
+                 "library's defaults changed (reported, not failing)")
+    console.print(t)
+
+
+
 def _render_contract_report(rep) -> None:
     trust_pct = round(rep.trust * 100)
     border = {
@@ -586,14 +661,17 @@ def _render_contract_report(rep) -> None:
             verdict = "[bold yellow]? inconclusive[/bold yellow]"
         # Spell the counts out: `{'disappeared': 235, 'result_changed': 0, …}` was a
         # raw dict repr leaking into an otherwise composed report.
+        fact_counts = (rep.fact_diff or {}).get("counts")
+        source = fact_counts if fact_counts else rep.diff
         parts = [f"{name.replace('_', ' ')} {count}"
-                 for name, count in rep.diff.items() if count]
+                 for name, count in source.items() if count]
         detail = ", ".join(parts) if parts else "nothing moved"
         head += f"\nVersion diff: {verdict}  [dim]({detail})[/dim]"
     head = f"VERDICT: [bold {border}]{rep.verdict.value.upper()}[/bold {border}]\n" + head
     if rep.verdict_reasons:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
+    _render_fact_changes(rep.fact_diff)
 
     visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols
     probed = [s for s in visible_symbols if s.probed]
