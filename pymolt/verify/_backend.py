@@ -25,6 +25,12 @@ import os
 import sys
 import threading
 
+from ._normalize import AMBIGUOUS_OUTCOME
+
+# A frozenset, not the tuple CPython exposes: a tuple scan on every event cost ~25% of the
+# hook's time.
+_BUILTIN_MODULES = frozenset(sys.builtin_module_names)
+
 # ── target matching ──────────────────────────────────────────────────────────
 # A target is "what counts as a dependency boundary". Three shapes, all driven from
 # PYMOLT_TRACE_TARGET (the CLI / env): one prefix ("flask"), several ("flask,werkzeug"),
@@ -120,7 +126,7 @@ class SitePackagesMatcher(object):
         if not module or not self._roots:
             return False
         top = module.split(".", 1)[0]
-        if top in self.exclude or top in sys.builtin_module_names:
+        if top in self.exclude or top in _BUILTIN_MODULES:
             return False  # C builtins (builtins, posix, ...) are never a dependency
         cached = self._cache.get(module)
         if cached is not None:
@@ -179,7 +185,7 @@ class AppMatcher(object):
         if self.source:
             return any(module == p or module.startswith(p + ".") for p in self.source)
         top = module.split(".", 1)[0]
-        if top in sys.builtin_module_names:
+        if top in _BUILTIN_MODULES:
             return False
         if frame is None:
             return False
@@ -236,12 +242,76 @@ class TraceBackend(object):
         raise NotImplementedError
 
 
+# ── return-event outcome classification ──────────────────────────────────────
+# setprofile reports a frame unwound by an exception as ``return`` with ``arg=None`` —
+# indistinguishable from ``return None`` by the event alone. The frame's last executed
+# opcode tells them apart: a real return stops on RETURN_*, a generator suspension on
+# YIELD_*, anything else means the frame is unwinding. Verified on 2.7, 3.4-3.14
+# (3.12+ ``co_code`` is de-instrumented). On <=3.7 a ``return`` inside try/finally or
+# ``with`` stops on the same cleanup opcodes an exception propagating through the block
+# does, so those cases are reported as ambiguous rather than guessed.
+OUTCOME_RETURN = 0
+OUTCOME_RAISE = 1
+OUTCOME_AMBIGUOUS = 2
+
+# The exception TYPE is not observable from a profile hook; the raise itself is.
+UNTYPED_RAISE = "<unknown>"
+
+
+def _opcode_sets():
+    try:
+        import dis
+        opmap = dis.opmap
+    except Exception:  # pragma: no cover - dis is stdlib everywhere
+        return frozenset(), frozenset(), frozenset()
+    ret = frozenset(opmap[n] for n in ("RETURN_VALUE", "RETURN_CONST", "RETURN_GENERATOR")
+                    if n in opmap)
+    yld = frozenset(opmap[n] for n in ("YIELD_VALUE", "YIELD_FROM") if n in opmap)
+    amb = frozenset()
+    if sys.version_info < (3, 8):
+        amb = frozenset(opmap[n] for n in ("END_FINALLY", "WITH_CLEANUP", "WITH_CLEANUP_START",
+                                           "WITH_CLEANUP_FINISH") if n in opmap)
+    return ret, yld, amb
+
+
+_RETURN_OPS, _YIELD_OPS, _AMBIGUOUS_OPS = _opcode_sets()
+
+
+def frame_outcome(frame, arg):
+    """Classify a profile ``return`` event as OUTCOME_RETURN / _RAISE / _AMBIGUOUS."""
+    if arg is not None or not _RETURN_OPS:
+        return OUTCOME_RETURN  # an unwinding frame always reports None
+    try:
+        lasti = frame.f_lasti
+        if lasti < 0:
+            return OUTCOME_AMBIGUOUS
+        op = frame.f_code.co_code[lasti]
+        if not isinstance(op, int):  # Python 2: co_code is a str
+            op = ord(op)
+    except Exception:
+        return OUTCOME_AMBIGUOUS
+    if op in _RETURN_OPS or op in _YIELD_OPS:
+        return OUTCOME_RETURN
+    if op in _AMBIGUOUS_OPS:
+        return OUTCOME_AMBIGUOUS
+    return OUTCOME_RAISE
+
+
+# Per-code decision caches are keyed by ``id(code)`` and hold a reference to the code
+# object itself, so an id can never be recycled while its entry is alive. They are bounded
+# so dynamically generated code (templating engines, exec in a loop) cannot grow them
+# without limit: past the cap the cache is simply rebuilt.
+_CODE_CACHE_MAX = 200000
+
+
 class SetProfileBackend(TraceBackend):
     """``sys.setprofile`` backend — events at call boundaries, not lines.
 
-    Hook cheapness is load-bearing: reject frames outside the target prefix *before* any
-    introspection (``getargvalues``/normalize). The whole hook body is guarded so an
-    internal error can never propagate into the traced program.
+    Hook cheapness is load-bearing. Every decision that depends only on a code object
+    (is the callee a dependency? is the caller our code?) is made once per code object and
+    cached by ``id(code)``; the hot path is a dict lookup, with no per-event string work.
+    Sampling is decided before any introspection (``getargvalues``/normalize). The whole
+    hook body is guarded so an internal error can never propagate into the traced program.
     """
 
     name = "setprofile"
@@ -249,10 +319,37 @@ class SetProfileBackend(TraceBackend):
     def __init__(self, target, sink, exclude=(), source=None, include_internal=False):
         TraceBackend.__init__(self, target, sink, exclude, source, include_internal)
         self._prev = None
-        self._pending = {}  # id(frame) -> (qualname, inputs)
+        self._pending = {}  # id(frame) -> (qualname, inputs, site)
         self._lock = threading.Lock()
         self.c_event_count = 0  # classified internal C traffic, intentionally not persisted
         self.skip_wrapped = False  # hybrid: skip calls a WrapBackend wrapper already records
+        self._callee = {}  # id(code) -> (code, in_target, module, is_module_body)
+        self._near_codes = {}  # id(code) -> (code, is_near)
+        self._admit = getattr(sink, "admit", None)
+
+    # ── per-code decisions ─────────────────────────────────────────────────────
+    def _callee_entry(self, frame):
+        code = frame.f_code
+        ent = self._callee.get(id(code))
+        if ent is None:
+            if len(self._callee) >= _CODE_CACHE_MAX:
+                self._callee.clear()
+            module = frame.f_globals.get("__name__", "") or ""
+            ent = (code, bool(self._in_target(module, frame)), module,
+                   code.co_name == "<module>")
+            self._callee[id(code)] = ent
+        return ent
+
+    def _code_is_near(self, frame):
+        code = frame.f_code
+        ent = self._near_codes.get(id(code))
+        if ent is None:
+            if len(self._near_codes) >= _CODE_CACHE_MAX:
+                self._near_codes.clear()
+            module = frame.f_globals.get("__name__", "") or ""
+            ent = (code, bool(self.near.matches(module, frame)))
+            self._near_codes[id(code)] = ent
+        return ent[1]
 
     @staticmethod
     def _from_wrapper(caller_frame):
@@ -268,63 +365,73 @@ class SetProfileBackend(TraceBackend):
             return True
         if caller_frame is None:
             return False
-        return self.near.matches(caller_frame.f_globals.get("__name__", ""), caller_frame)
+        return self._code_is_near(caller_frame)
 
     def _c_caller_ok(self, frame):
         """Caller gate for C events (here `frame` IS the calling frame): near side in
         boundary mode, else the dependency itself (internal C traffic) for a full audit."""
-        module = frame.f_globals.get("__name__", "")
         if self.near is not None:
-            return self.near.matches(module, frame)
-        return self._in_target(module, frame)
+            return self._code_is_near(frame)
+        return self._callee_entry(frame)[1]
 
     def _hook(self, frame, event, arg):
         try:
             if event == "call":
-                module = frame.f_globals.get("__name__", "")
-                if not self._in_target(module, frame):
-                    return self._hook  # callee is not a dependency -> cheap reject
-                if frame.f_code.co_name == "<module>":
-                    return self._hook  # importing a module is not an API contact
-                if self.skip_wrapped and self._from_wrapper(frame.f_back):
+                ent = self._callee_entry(frame)
+                if not ent[1] or ent[3]:
+                    return self._hook  # not a dependency, or a module body (import, not a contact)
+                back = frame.f_back
+                if self.skip_wrapped and self._from_wrapper(back):
                     return self._hook  # hybrid: a WrapBackend wrapper already recorded this call
-                if not self._caller_is_near(frame.f_back):  # caller = our code?
+                if not self._caller_is_near(back):  # caller = our code?
                     return self._hook  # internal dep<->dep traffic, not our boundary
-                self._record_call(frame, module)
+                self._record_call(frame, ent[2])
             elif event == "return":
-                info = self._pending.pop(id(frame), None)
-                if info is not None:
-                    # arg is the return value (or None if the frame raised — see header).
-                    self.sink.on_return(info[0], info[1], arg, info[2])
-            elif event == "c_call" or event == "c_return" or event == "c_exception":
-                # C events fire with `frame` = the *calling* Python frame. Gate on the caller
-                # (near side in boundary mode) so we never introspect or pollute on
-                # out-of-scope C activity.
+                if self._pending:
+                    info = self._pending.pop(id(frame), None)
+                    if info is not None:
+                        self._emit_outcome(info, frame, arg)
+            elif event == "c_call":
+                # Routine C traffic. Explicitly classified so the hook never falls into the
+                # Python-frame path or crashes; intentionally not persisted.
+                if self._c_caller_ok(frame):
+                    self.c_event_count += 1
+            elif event == "c_exception":
+                # The C-level raise signal: a C callable the dependency invoked raised. The
+                # CALLEE has to be the traced dependency: gating only on the caller recorded
+                # every C raise our code provoked anywhere (`_io.BufferedReader.seek` during an
+                # import) as a contact of a dependency it never touched. Callables with no
+                # `__module__` — most builtin method descriptors — cannot be attributed at
+                # all, and an unattributable call is not a contract.
                 if not self._c_caller_ok(frame):
                     return self._hook
-                if event == "c_exception":
-                    # The one raise signal setprofile reliably exposes — a C callable the
-                    # dependency invoked raised. The CALLEE has to be the traced
-                    # dependency: gating only on the caller recorded every C raise our
-                    # code provoked anywhere (`_io.BufferedReader.seek` during an
-                    # import) as a contact of a dependency it never touched. Callables
-                    # with no `__module__` — most builtin method descriptors — cannot be
-                    # attributed at all, and an unattributable call is not a contract.
-                    cmod = getattr(arg, "__module__", "") or ""
-                    if not cmod or cmod.split(".", 1)[0] in sys.builtin_module_names:
-                        return self._hook
-                    if not self._in_target(cmod):
-                        return self._hook
-                    self.sink.on_raise(self._c_qualname(arg), {"c_level": True}, "Exception",
-                                       self._site(frame))
-                else:
-                    # Routine C traffic *inside* the dependency (Werkzeug/Flask internals):
-                    # explicitly classified here so the hook never falls into the
-                    # Python-frame path or crashes; intentionally not persisted.
-                    self.c_event_count += 1
+                cmod = getattr(arg, "__module__", "") or ""
+                if not cmod or cmod.split(".", 1)[0] in _BUILTIN_MODULES:
+                    return self._hook
+                if not self._in_target(cmod):
+                    return self._hook
+                self.sink.on_raise(self._c_qualname(arg), {"c_level": True}, "Exception",
+                                   self._site(frame))
+            # "c_return" carries nothing we persist: fall through.
         except Exception:
             pass  # the hook must never break the traced program
         return self._hook
+
+    def _emit_outcome(self, info, frame, arg):
+        qual, inputs, site = info
+        outcome = frame_outcome(frame, arg)
+        admitted = self._admit is not None
+        if outcome == OUTCOME_RAISE:
+            if admitted:
+                self.sink.on_raise(qual, inputs, UNTYPED_RAISE, site, admitted=True)
+            else:
+                self.sink.on_raise(qual, inputs, UNTYPED_RAISE, site)
+            return
+        result = arg if outcome == OUTCOME_RETURN else AMBIGUOUS_OUTCOME
+        if admitted:
+            self.sink.on_return(qual, inputs, result, site, admitted=True)
+        else:
+            self.sink.on_return(qual, inputs, result, site)
 
     @staticmethod
     def _c_qualname(cfunc):
@@ -342,6 +449,9 @@ class SetProfileBackend(TraceBackend):
         return {"file": code.co_filename, "line": caller_frame.f_lineno, "func": code.co_name}
 
     def _record_call(self, frame, module):
+        # Sampling first: an unsampled call must not pay for getargvalues/normalize.
+        if self._admit is not None and not self._admit():
+            return
         from ._normalize import normalize  # local import keeps cold-path cost off the reject path
         code = frame.f_code
         qual = "{0}.{1}".format(module, code.co_name)

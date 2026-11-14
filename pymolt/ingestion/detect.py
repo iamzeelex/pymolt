@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from pymolt.core.enums import Mode, SourceFixation
 from pymolt.core.generated import is_pymolt_generated
+from pymolt.ingestion.probes import PYTHON_VERSION_PROBE
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +466,7 @@ def discover_python_environments(project_dir: str | Path = ".") -> list[Discover
             if not ver and exe.is_file():
                 try:
                     res = subprocess.run(
-                        [str(exe), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                        [str(exe), "-c", PYTHON_VERSION_PROBE],
                         capture_output=True, text=True, timeout=2
                     )
                     if res.returncode == 0:

@@ -13,6 +13,7 @@ inputs) with a different result collapses the stored result to
 ``{"__nondeterministic__": True}`` — surfaced, not smoothed (the diff excludes it from
 strict comparison and reports it as a typed honesty marker).
 """
+import io
 import json
 import os
 import queue
@@ -23,6 +24,10 @@ import time
 from ._normalize import normalize
 
 _NONDET = {"__nondeterministic__": True}
+
+DEFAULT_QUEUE_SIZE = 65536
+_WRITE_BATCH = 1024
+DEFAULT_CLOSE_TIMEOUT = 2.0
 
 
 def _result_repr(result_obj):
@@ -58,16 +63,21 @@ class JsonlSink(object):
         except ValueError:
             self._sample_rate = 1.0
         self._sample_rate = min(1.0, max(0.0, self._sample_rate))
+        # The writer thread is not slow (~200k events/s) but it is GIL-starved while a
+        # CPU-bound target runs: a 1024-slot queue dropped 84-99% of events in such runs
+        # while saving the producer nothing. A deep queue costs memory only while the writer
+        # is starved; the close timeout gives it time to drain at exit.
         if queue_size is None:
             try:
-                queue_size = int(os.environ.get("PYMOLT_TRACE_QUEUE_SIZE", "1024"))
+                queue_size = int(os.environ.get("PYMOLT_TRACE_QUEUE_SIZE", str(DEFAULT_QUEUE_SIZE)))
             except ValueError:
-                queue_size = 1024
+                queue_size = DEFAULT_QUEUE_SIZE
         if close_timeout is None:
             try:
-                close_timeout = float(os.environ.get("PYMOLT_TRACE_CLOSE_TIMEOUT", "0.5"))
+                close_timeout = float(os.environ.get("PYMOLT_TRACE_CLOSE_TIMEOUT",
+                                                     str(DEFAULT_CLOSE_TIMEOUT)))
             except ValueError:
-                close_timeout = 0.5
+                close_timeout = DEFAULT_CLOSE_TIMEOUT
         self._close_timeout = max(0.0, close_timeout)
         self._queue = queue.Queue(maxsize=max(1, queue_size))
         self._metrics = {
@@ -114,6 +124,22 @@ class JsonlSink(object):
     def _sampled(self):
         return self._sample_rate >= 1.0 or random.random() < self._sample_rate
 
+    def admit(self, force=False):
+        """Count one boundary call as seen and decide whether to record it.
+
+        Backends call this BEFORE any input normalization, so an unsampled call costs a
+        counter bump instead of a full ``normalize`` of its arguments (sampling used to be
+        decided at write time, after the expensive work was already done). ``force`` keeps
+        a call regardless of the sample rate — used for raises, which are always retained.
+        Pass ``admitted=True`` to ``on_return``/``on_raise`` for an admitted call so it is not
+        counted or sampled twice.
+        """
+        self.note_failure("events_seen")
+        if force or self._sampled():
+            return True
+        self.note_failure("sampling_dropped")
+        return False
+
     def _write(self, obj):
         if self._closed:
             self.note_failure("shutdown_dropped")
@@ -127,33 +153,58 @@ class JsonlSink(object):
         fh.write(json.dumps(obj, sort_keys=True, default=str) + "\n")
 
     def _writer_loop(self):
+        # Batched writes, one flush per batch. The file used to be line-buffered: one
+        # write syscall per event, each releasing and re-acquiring the GIL, so a writer
+        # competing with busy request threads lost the GIL on every line and fell behind.
+        # Each drained batch is still flushed promptly, so a killed process loses at most
+        # the batch in flight.
         fh = None
         try:
-            fh = open(self.path, "a", buffering=1)  # line-buffered
+            fh = open(self.path, "a")
         except Exception:
             self.note_failure("sink_failures")
+        stop = False
         try:
-            while True:
+            while not stop:
                 try:
                     item = self._queue.get(timeout=0.05)
                 except queue.Empty:
                     if self._closing.is_set():
                         break
                     continue
-                try:
-                    if item is self._STOP:
-                        break
-                    if fh is None:
-                        self.note_failure("write_failures")
-                        continue
+                batch = [item]
+                while len(batch) < _WRITE_BATCH:
                     try:
-                        self._write_line(fh, item)
-                    except Exception:
-                        self.note_failure("write_failures")
-                    else:
-                        self.note_failure("events_written")
+                        batch.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+                try:
+                    buf = io.StringIO()
+                    serialized = 0
+                    for obj in batch:
+                        if obj is self._STOP:
+                            stop = True
+                            continue
+                        try:
+                            self._write_line(buf, obj)
+                        except Exception:
+                            self.note_failure("write_failures")
+                        else:
+                            serialized += 1
+                    if serialized:
+                        if fh is None:
+                            self.note_failure("write_failures", serialized)
+                        else:
+                            try:
+                                fh.write(buf.getvalue())
+                                fh.flush()
+                            except Exception:
+                                self.note_failure("write_failures", serialized)
+                            else:
+                                self.note_failure("events_written", serialized)
                 finally:
-                    self._queue.task_done()
+                    for _ in batch:
+                        self._queue.task_done()
         finally:
             if fh is not None:
                 try:
@@ -165,10 +216,8 @@ class JsonlSink(object):
         # No need to persist 'call' separately — return/raise carry the inputs.
         pass
 
-    def on_return(self, qualname, inputs, result_obj, site=None):
-        self.note_failure("events_seen")
-        if not self._sampled():
-            self.note_failure("sampling_dropped")
+    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False):
+        if not admitted and not self.admit():
             return
         ev = {"t": "return", "q": qualname, "in": inputs,
               "result": _result_repr(result_obj), "ts": time.time()}
@@ -176,10 +225,8 @@ class JsonlSink(object):
             ev["where"] = site  # call site in our code: {file, line, func}
         self._write(ev)
 
-    def on_raise(self, qualname, inputs, exc_typename, site=None):
-        self.note_failure("events_seen")
-        if not self._sampled():
-            self.note_failure("sampling_dropped")
+    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False):
+        if not admitted and not self.admit(force=True):
             return
         ev = {"t": "raise", "q": qualname, "in": inputs,
               "raised": exc_typename, "ts": time.time()}
@@ -246,10 +293,14 @@ class MemorySink(object):
     def on_call(self, qualname, inputs, site=None):
         pass
 
-    def on_return(self, qualname, inputs, result_obj, site=None):
+    def admit(self, force=False):
+        """Tests aggregate everything: every call is admitted (see ``JsonlSink.admit``)."""
+        return True
+
+    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False):
         self._store(qualname, inputs, result=_result_repr(result_obj), raised=None, site=site)
 
-    def on_raise(self, qualname, inputs, exc_typename, site=None):
+    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False):
         self._store(qualname, inputs, result=None, raised=exc_typename, site=site)
 
     def _store(self, qualname, inputs, result, raised, site=None):
