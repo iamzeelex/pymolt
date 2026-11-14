@@ -222,21 +222,43 @@ class WrapBackend(object):
             mod = caller.f_globals.get("__name__", "") if caller is not None else ""
             if caller is None or not self.near.matches(mod, caller):
                 return                                  # internal dep<->dep call, not our boundary
+        # Sampling before normalization; raises are always retained.
+        admit = getattr(self.sink, "admit", None)
+        if admit is not None and not admit(force=exc is not None):
+            return
         site = None
         if caller is not None:
             code = caller.f_code
             site = {"file": code.co_filename, "line": caller.f_lineno, "func": code.co_name}
         inputs = self._inputs(real, args, kwargs)
+        extra = {"admitted": True} if admit is not None else {}
         if exc is not None:
-            self.sink.on_raise(qualname, inputs, type(exc).__qualname__, site)
+            self.sink.on_raise(qualname, inputs, type(exc).__qualname__, site, **extra)
         else:
-            self.sink.on_return(qualname, inputs, result, site)
+            self.sink.on_return(qualname, inputs, result, site, **extra)
 
-    @staticmethod
-    def _inputs(real, args, kwargs):
+    _SIG_FAILED = object()
+
+    def _signature(self, real):
+        """``inspect.signature`` once per callable (it is costly and was paid on every call)."""
+        cache = self.__dict__.setdefault("_sig_cache", {})
+        ent = cache.get(id(real))
+        if ent is not None and ent[0] is real:  # entry holds `real`, so its id can't be recycled
+            return ent[1]
+        try:
+            sig = inspect.signature(real)
+        except Exception:
+            sig = self._SIG_FAILED
+        cache[id(real)] = (real, sig)
+        return sig
+
+    def _inputs(self, real, args, kwargs):
         """Bind to the signature when possible (matches setprofile's {"bound": {...}})."""
         try:
-            bound = inspect.signature(real).bind_partial(*args, **kwargs)
+            sig = self._signature(real)
+            if sig is self._SIG_FAILED:
+                raise TypeError("no signature")
+            bound = sig.bind_partial(*args, **kwargs)
             return {"bound": {k: normalize(v) for k, v in bound.arguments.items()}}
         except Exception:
             return {"args": [normalize(v) for v in args],

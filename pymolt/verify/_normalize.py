@@ -17,9 +17,32 @@ Markers emitted:
     {"__opaque__": "<typename>"}      non-serializable / too-deep / non-finite float
     {"__cycle__": "<typename>"}       reference cycle broken here
     {"__nondeterministic__": true}    set by the sinks when identical inputs differ
+    {"__opaque__": "<label>"}         an ``OutcomeMarker`` passed where a value is expected
+                                      (e.g. "ambiguous:return-or-raise" on <=3.7 interpreters)
 """
+import binascii
 import json
 import os
+
+
+class OutcomeMarker(object):
+    """A typed honesty marker handed to a sink in place of a real value.
+
+    It normalizes to ``{"__opaque__": label}``, which the host-side diff already treats as
+    undecidable (compared by neither value nor shape) — so an outcome the runtime cannot
+    classify is surfaced instead of being guessed as ``None``.
+    """
+
+    __slots__ = ("label",)
+
+    def __init__(self, label):
+        self.label = label
+
+
+# A profile ``return`` event with ``arg is None`` whose frame stopped on a try/finally or
+# ``with`` cleanup opcode: on <=3.7 a normal ``return None`` and an exception unwinding
+# through the same block end on the same opcode.
+AMBIGUOUS_OUTCOME = OutcomeMarker("ambiguous:return-or-raise")
 
 _SAFE_SCALARS = (type(None), bool, int, float, str, bytes)
 
@@ -52,12 +75,16 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
         if _privacy == "shape":
             return {"__shape__": typename(value)}
         if isinstance(value, bytes):
-            return {"__bytes__": value.hex()}
+            # binascii, not bytes.hex(): the latter is 3.5+ and the runtime must load on 3.4.
+            return {"__bytes__": binascii.hexlify(value).decode("ascii")}
         if isinstance(value, float):
             # NaN / +-inf are not JSON-stable and not meaningfully comparable.
             if value != value or value in (float("inf"), float("-inf")):
                 return {"__opaque__": "float-nonfinite"}
         return value
+
+    if isinstance(value, OutcomeMarker):
+        return {"__opaque__": value.label}
 
     if depth >= MAX_DEPTH:
         return {"__opaque__": typename(value)}
