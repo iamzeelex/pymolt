@@ -9,6 +9,7 @@ directly, only in one that actually runs the command end-to-end.
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 from typer.testing import CliRunner
@@ -222,3 +223,37 @@ def test_boundary_interactive_flow_does_not_crash(tmp_path):
     result = runner.invoke(app, ["boundary"], input=stdin)
     assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
+
+
+def test_report_renders_trust_basis_and_tiers(tmp_path, monkeypatch):
+    """The headline trust names its basis, and every tier from exact-join up is shown."""
+    site = tmp_path / "site" / "fakedep"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("from fakedep._impl import fetch\n")
+    (site / "_impl.py").write_text("def fetch(value):\n    return value\n")
+    monkeypatch.setenv("PYTHONPATH", str(site.parent))
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "app.py").write_text("from fakedep import fetch\n\ndef run():\n    fetch(1)\n")
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "t": "return", "q": "fakedep._impl.fetch", "sym": "fakedep._impl.fetch",
+        "in": {"bound": {}}, "result": 1,
+        "where": {"file": str(project / "app.py"), "line": 4, "func": "run"},
+    }) + "\n")
+
+    result = runner.invoke(app, ["report", str(project), "--trace", str(trace)])
+    assert "Traceback" not in result.output
+    text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", result.output).split())
+    assert "Contract trust: 100% (1/1 behavioural contacts in executed files)" in text
+    assert "Trust tiers: exact-join 0% (0/1) → canonical 100% (1/1)" in text
+    assert "executed files 100% (1/1)" in text
+
+    data = json.loads(runner.invoke(
+        app, ["report", str(project), "--trace", str(trace), "--json"]
+    ).output)
+    assert [tier["name"] for tier in data["trust_tiers"]] == [
+        "exact", "canonical", "behavioural", "executed",
+    ]
+    assert data["trust"] == data["executed_trust"] == 1.0
+    assert data["exact_trust"] == 0.0

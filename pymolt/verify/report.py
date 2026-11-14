@@ -7,7 +7,20 @@ Merges the two axes we locked:
   what actually ran). Each symbol is ``confirmed`` (static ∧ observed),
   ``blind`` (static, never observed → a sandbox candidate), or ``dynamic-only``
   (observed but the static map missed it → static under-approximation, e.g. via
-  ``getattr``/monkeypatching). ``trust`` = confirmed / static.
+  ``getattr``/monkeypatching).
+* **identity** — static paths are public import paths (``requests.Request``), the
+  runtime records defining names (``sym`` = ``requests.models.Request.__init__``;
+  v1 traces only ``q`` = ``<frame module>.<co_name>``). Static paths are resolved
+  in the capture's interpreter (:mod:`pymolt.verify.identity_resolver`); a runtime
+  name confirms a static path when it is the resolved symbol, a method of a
+  resolved class, or a legacy name unique in the defining module. Unresolvable
+  paths keep the exact-string rule and are counted as such.
+* **trust** = confirmed / static over *behavioural* contacts (call, decorator,
+  context-manager, protocol) in files the trace executed — existence contacts
+  (attribute reads, bases, constants) are proven by an import, not by a trace,
+  and code the workload never ran cannot be blamed on the trace. The tiers
+  (exact-join → canonical → behavioural → executed) stay in ``trust_tiers`` so
+  every step is auditable; ``all_*`` keeps the full-surface totals.
 * **version diff** (optional) — two traces (old vs new dependency version) folded
   into a :class:`BoundaryDiff`; behavior changes are only trustworthy over the
   area the dynamics covered.
@@ -18,19 +31,25 @@ here, not a separate tool.
 
 import json
 import logging
+import os
 import sys
 from collections import Counter
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from pymolt.verify import identity_resolver
 from pymolt.verify.comparators import ComparatorProfile, TraceComparator, compare_traces
-from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map
+from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map, contact_class
+from pymolt.verify.identity_resolver import ResolvedIdentity
 from pymolt.verify.models import BoundaryDiff, VerificationVerdict
 
 logger = logging.getLogger(__name__)
+
+TRUST_BASIS = "behavioural contacts in executed files"
 
 
 class SymbolStatus(BaseModel):
@@ -45,6 +64,27 @@ class SymbolStatus(BaseModel):
     matched_impact_paths: list[str] = Field(default_factory=list)
     probed: bool = False  # re-invoked in the sandbox under the target version
     probe_status: str | None = None  # stable | changed | error | opaque-inputs
+    # Static identity, resolved in the capture's interpreter (static symbols only).
+    sym: str | None = None  # canonical "<defining module>.<qualname>"
+    identity_kind: str | None = None  # function | class | module | other
+    identity_error: str | None = None  # why the path could not be resolved
+    # behavioural | existence | interpreter (a behavioural contact that resolves to
+    # builtins/stdlib code, e.g. ``type.__or__`` for ``A | B`` — not dependency code) |
+    # returned-value (a chain through a call result) | absent-dependency (not installed)
+    contact_class: str | None = None
+    executed: bool | None = None  # a behavioural contact sits in a file the trace ran
+    matched_by: str | None = None  # exact (v1 string join) | canonical
+    observed_as: list[str] = Field(default_factory=list)  # runtime names that confirmed it
+
+
+class TrustTier(BaseModel):
+    """One step from the old exact-string join to the headline trust."""
+
+    name: str  # exact | canonical | behavioural | executed
+    basis: str
+    confirmed: int = 0
+    static: int = 0
+    trust: float = 0.0
 
 
 class ContractReport(BaseModel):
@@ -57,7 +97,29 @@ class ContractReport(BaseModel):
     # These legacy fields describe the evaluation scope. With no impact filter
     # that is the full surface; with one it is only the impacted surface, so the
     # existing verdict fold can consume focused values unchanged.
-    trust: float = 0.0  # confirmed / static_targets (0..1)
+    # Headline: confirmed / static over ``trust_basis`` (behavioural contacts in
+    # files the trace executed), within the evaluation scope above.
+    trust: float = 0.0
+    trust_basis: str = TRUST_BASIS
+    trust_confirmed: int = 0
+    trust_static: int = 0
+    # The same scope, tier by tier: exact-join (the v1 string rule) → canonical
+    # identity → behavioural contacts only → executed files only (= trust).
+    exact_trust: float = 0.0
+    canonical_trust: float = 0.0
+    behavioural_trust: float = 0.0
+    executed_trust: float = 0.0
+    trust_tiers: list[TrustTier] = Field(default_factory=list)
+    # Project files holding contacts that the trace executed; ``executed_scope``
+    # is False when the trace carries no usable call sites (scope = all files).
+    executed_files: list[str] = Field(default_factory=list)
+    executed_scope: bool | None = None
+    trace_schema: int | None = None  # 1 = runtime q only, 2 = canonical sym present
+    identity_interpreter: str | None = None
+    identity_source: str | None = None  # probe-python | trace-metadata | host
+    identity_python: str | None = None
+    identity_resolved: int = 0
+    identity_unresolved: int = 0
     probed: int = 0  # symbols re-invoked under the target version
     probe_changed: int = 0  # of those, how many changed behavior
     by_dep: dict[str, dict[str, int]] = Field(default_factory=dict)
@@ -193,14 +255,32 @@ def _filter_diff(diff: BoundaryDiff, paths: Collection[str]) -> BoundaryDiff:
     )
 
 
-def _load_trace(path: str | Path) -> dict[str, list[str]]:
-    """Map each observed dependency qualname (``q``) to its ``file:line`` sites."""
-    observed: dict[str, list[str]] = {}
+@dataclass
+class _Observation:
+    """Every event recorded under one runtime name (``sym`` when present, else ``q``)."""
+
+    name: str
+    canonical: bool  # ``name`` came from a v2 ``sym``
+    legacy: set[str] = field(default_factory=set)  # the v1 ``q`` spellings seen
+    sites: dict[str, None] = field(default_factory=dict)  # ordered set of file:line
+
+
+@dataclass
+class _TraceView:
+    observations: dict[str, _Observation] = field(default_factory=dict)
+    q_names: set[str] = field(default_factory=set)  # the exact-join (v1) vocabulary
+    files: set[str] = field(default_factory=set)  # raw ``where.file`` values
+    events: int = 0
+    v2_events: int = 0
+
+
+def _load_observations(path: str | Path) -> _TraceView:
+    view = _TraceView()
     try:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
     except OSError as e:
         logger.warning("Could not read trace %s: %s", path, e)
-        return observed
+        return view
     for line in lines:
         line = line.strip()
         if not line:
@@ -209,15 +289,129 @@ def _load_trace(path: str | Path) -> dict[str, list[str]]:
             rec = json.loads(line)
         except ValueError:
             continue
-        q = rec.get("q")
-        if not q:
+        if not isinstance(rec, dict):
             continue
-        where = rec.get("where") or {}
-        loc = f"{where.get('file', '?')}:{where.get('line', '?')}"
-        sites = observed.setdefault(q, [])
-        if loc not in sites:
-            sites.append(loc)
-    return observed
+        q = rec.get("q") if isinstance(rec.get("q"), str) and rec.get("q") else None
+        sym = rec.get("sym") if isinstance(rec.get("sym"), str) and rec.get("sym") else None
+        name = sym or q
+        if not name:
+            continue
+        view.events += 1
+        if sym:
+            view.v2_events += 1
+        obs = view.observations.get(name)
+        if obs is None:
+            obs = view.observations[name] = _Observation(name=name, canonical=sym is not None)
+        elif sym:
+            obs.canonical = True
+        if q:
+            obs.legacy.add(q)
+            view.q_names.add(q)
+        where = rec.get("where") if isinstance(rec.get("where"), dict) else {}
+        file = where.get("file")
+        if isinstance(file, str) and file:
+            view.files.add(file)
+        obs.sites.setdefault(f"{where.get('file', '?')}:{where.get('line', '?')}", None)
+    return view
+
+
+class _IdentityIndex:
+    """Which static targets a runtime name confirms.
+
+    * any name equal to the static path (the v1 exact-string rule);
+    * a v1 ``q`` equal to a *legacy* name of the resolved object (unique in its
+      defining module — ambiguous ``module.__init__`` never confirms a class);
+    * a v2 ``sym`` equal to the resolved symbol or one of its aliases, or — for a
+      class — any ``sym`` under it (``class_sym + "."``: a method or constructor).
+    """
+
+    def __init__(self, targets: Iterable[str], identities: Mapping[str, ResolvedIdentity]):
+        self.exact = set(targets)
+        self.by_name: dict[str, set[str]] = {}
+        self.by_legacy: dict[str, set[str]] = {}
+        self.by_class: dict[str, set[str]] = {}
+        for target in self.exact:
+            identity = identities.get(target)
+            if identity is None or not identity.resolved:
+                continue
+            names = {identity.sym, *identity.aliases}
+            for name in names:
+                self.by_name.setdefault(name, set()).add(target)
+                if identity.kind == "class":
+                    self.by_class.setdefault(name, set()).add(target)
+            for name in identity.legacy:
+                self.by_legacy.setdefault(name, set()).add(target)
+
+    def match(self, obs: _Observation) -> set[str]:
+        hits: set[str] = set()
+        legacy = obs.legacy if obs.canonical else obs.legacy | {obs.name}
+        for name in legacy:
+            if name in self.exact:
+                hits.add(name)
+            hits |= self.by_legacy.get(name, set())
+        if obs.canonical:
+            name = obs.name
+            if name in self.exact:
+                hits.add(name)
+            hits |= self.by_name.get(name, set())
+            prefix = name
+            while "." in prefix:
+                prefix = prefix.rsplit(".", 1)[0]
+                hits |= self.by_class.get(prefix, set())
+        return hits
+
+
+def _executed_files(
+    raw_files: Iterable[str], root: Path, contact_files: Iterable[str]
+) -> tuple[set[str], str | None]:
+    """Contact files (as the contact map spells them) that the trace executed."""
+    by_posix = {Path(f).as_posix(): f for f in contact_files}
+    under_root: set[str] = set()
+    outside: list[str] = []
+    for raw in raw_files:
+        if raw.startswith("<"):  # <string>, <frozen ...>: no file to attribute
+            continue
+        path = Path(raw)
+        if not path.is_absolute():
+            under_root.add(path.as_posix())
+            continue
+        rel = None
+        for candidate in (path, Path(os.path.realpath(raw))):
+            try:
+                rel = candidate.relative_to(root).as_posix()
+                break
+            except ValueError:
+                continue
+        if rel is None:
+            outside.append(raw.replace("\\", "/"))
+        else:
+            under_root.add(rel)
+    executed = {by_posix[rel] for rel in under_root if rel in by_posix}
+    if under_root or not outside:
+        return executed, None
+    # Every call site lies outside the project root: a container capture or a
+    # moved checkout. Attribute by path suffix rather than claim nothing ran.
+    for rel, original in by_posix.items():
+        if any(raw.endswith("/" + rel) for raw in outside):
+            executed.add(original)
+    return executed, (
+        "the trace's call sites lie outside the project root; executed files were "
+        "matched by path suffix"
+    )
+
+
+def _ratio(confirmed: int, static: int) -> float:
+    return confirmed / static if static else 0.0
+
+
+def _names_match_impact(names: Iterable[str], impact_names: Mapping[str, set[str]]) -> list[str]:
+    """Impact paths matching any of ``names`` (static path, resolved sym) on dotted boundaries."""
+    names = [name for name in names if name]
+    return sorted(
+        path
+        for path, aliases in impact_names.items()
+        if any(_matches_impact(name, aliases) for name in names)
+    )
 
 
 def build_contract_report(
@@ -230,6 +424,7 @@ def build_contract_report(
     impact_set: Collection[object] | None = None,
     comparator_profile: ComparatorProfile | str = ComparatorProfile.EXACT,
     custom_comparator: TraceComparator | str | None = None,
+    resolve_identities: bool = True,
 ) -> ContractReport:
     """Build the unified report.
 
@@ -239,11 +434,17 @@ def build_contract_report(
     interpreter) re-invokes each reconstructible captured contact in the sandbox
     and records whether it stays stable or changes under that version.
 
+    Static paths are resolved to canonical identities (one subprocess, cached
+    under ``.pymolt/cache/``) in ``probe_python`` if given, else the interpreter
+    the trace's metadata records, else pymolt's own — noted as such.
+    ``resolve_identities=False`` keeps the exact-string join only.
+
     ``changed_api_paths`` narrows trust and verdict inputs to Axiom's changed
     surface while keeping ``all_*`` totals and every symbol visible. Items may
     be dotted strings, serialized changes, or objects with ``path`` and optional
     ``replacement_path`` fields. ``impact_set`` is an equivalent alias useful
     to callers that already use that terminology; values from both are merged.
+    Impact paths match a static symbol by its public path or its resolved symbol.
     """
     root = Path(project_dir).resolve()
     report = ContractReport(root=str(root))
@@ -258,49 +459,166 @@ def build_contract_report(
     for c in cmap.contacts:
         s = static.setdefault(
             c.target,
-            {"dep": c.dep, "callers": set(), "files": set(), "kinds": set()},
+            {
+                "dep": c.dep,
+                "callers": set(),
+                "files": set(),
+                "kinds": set(),
+                "behavioural_files": set(),
+            },
         )
         s["callers"].add(c.caller)
         s["kinds"].add(c.kind)
         if c.file:
             s["files"].add(c.file)
+            if contact_class(c.kind) == "behavioural":
+                s["behavioural_files"].add(c.file)
 
-    observed = _load_trace(trace) if trace else {}
+    view = _load_observations(trace) if trace else _TraceView()
     if not trace:
         report.notes.append("no trace given — every static contact is BLIND (no dynamics yet)")
+    elif view.events:
+        report.trace_schema = 2 if view.v2_events else 1
+        if not view.v2_events:
+            report.notes.append(
+                "trace schema v1 (runtime names are module.co_name, no canonical sym): a "
+                "static path is confirmed by an exact match or by a name unique in its "
+                "defining module — re-capture for full canonical matching"
+            )
 
-    static_targets = set(static)
-    observed_targets = set(observed)
+    # ── static identity ──────────────────────────────────────────────────────
+    identities: dict[str, ResolvedIdentity] = {}
+    if resolve_identities and static and (view.observations or impact_filter_active):
+        choice = identity_resolver.select_interpreter(probe_python, trace)
+        resolution = identity_resolver.resolve_identities(
+            set(static) | set(impact_paths), root, choice
+        )
+        identities = resolution.results
+        report.identity_interpreter = resolution.interpreter
+        report.identity_source = resolution.interpreter_source
+        report.identity_python = resolution.python
+        report.notes.extend(resolution.notes)
+        found = {t: identities.get(t, ResolvedIdentity(error="not resolved")) for t in static}
+        unresolved = sorted(t for t, identity in found.items() if identity.error)
+        valueish = sum(1 for identity in found.values() if not identity.error and not identity.sym)
+        report.identity_resolved = sum(1 for identity in found.values() if identity.resolved)
+        report.identity_unresolved = len(unresolved)
+        python = f" (Python {resolution.python})" if resolution.python else ""
+        note = (
+            f"static identity: {report.identity_resolved}/{len(static)} static path(s) "
+            f"resolved under {resolution.interpreter}{python}"
+        )
+        if valueish:
+            note += f"; {valueish} are values without a code identity (constants, instances)"
+        if unresolved:
+            sample = ", ".join(unresolved[:5]) + (", …" if len(unresolved) > 5 else "")
+            note += f"; {len(unresolved)} unresolvable ({sample})"
+        if valueish or unresolved:
+            note += " — those keep the exact-string match"
+        report.notes.append(note)
+
+    # ── static ↔ observed ────────────────────────────────────────────────────
+    index = _IdentityIndex(static, identities)
+    matched: dict[str, list[_Observation]] = {target: [] for target in static}
+    unmatched: list[_Observation] = []
+    for obs in view.observations.values():
+        hits = index.match(obs)
+        for target in hits:
+            matched[target].append(obs)
+        if not hits:
+            unmatched.append(obs)
+
+    contact_files = {f for s in static.values() for f in s["files"]}
+    executed_files: set[str] = set()
+    executed_scope: bool | None = None
+    if view.events:
+        executed_files, scope_note = _executed_files(view.files, root, contact_files)
+        if scope_note:
+            report.notes.append(scope_note)
+        executed_scope = bool(view.files - {f for f in view.files if f.startswith("<")})
+        if not executed_scope:
+            report.notes.append(
+                "the trace records no call sites, so the executed-file scope is unknown: "
+                "trust is computed over behavioural contacts in every file"
+            )
+    report.executed_files = sorted(executed_files)
+    report.executed_scope = executed_scope
+
+    impact_names: dict[str, set[str]] = {}
+    for path in impact_paths:
+        names = {path}
+        identity = identities.get(path)
+        if identity is not None and identity.resolved:
+            names.add(identity.sym)
+        impact_names[path] = names
+
     stdlib = sys.stdlib_module_names
-
+    observed_tops = {name.split(".", 1)[0] for name in (*view.observations, *view.q_names)}
     symbols: list[SymbolStatus] = []
     for target, s in static.items():
-        status = "confirmed" if target in observed else "blind"
-        matched_paths = _matches_impact(target, impact_paths)
+        hits = matched[target]
+        identity = identities.get(target)
+        klass = (
+            "behavioural"
+            if any(contact_class(kind) == "behavioural" for kind in s["kinds"])
+            else "existence"
+        )
+        if klass == "behavioural" and identity is not None and identity.resolved:
+            if identity.sym.split(".")[0] in stdlib:
+                klass = "interpreter"
+        elif klass == "behavioural" and identity is not None and identity.error:
+            unobservable = _unresolvable_class(identity.error, s["dep"])
+            # "Not installed" is only believable when the resolver ran in the capture's
+            # own interpreter AND the trace saw nothing from that package; under pymolt's
+            # interpreter every dependency could look absent and silently empty the
+            # trust denominator.
+            if unobservable == "absent-dependency" and (
+                report.identity_source == "host" or s["dep"] in observed_tops
+            ):
+                unobservable = None
+            klass = unobservable or klass
+        names = [target]
+        if identity is not None and identity.resolved:
+            names.append(identity.sym)
+        matched_paths = _names_match_impact(names, impact_names)
+        sites: dict[str, None] = {}
+        for obs in hits:
+            sites.update(obs.sites)
         symbols.append(
             SymbolStatus(
                 target=target,
                 dep=s["dep"],
-                status=status,
+                status="confirmed" if hits else "blind",
                 callers=sorted(s["callers"]),
                 files=sorted(s["files"]),
-                observed_at=observed.get(target, []),
+                observed_at=list(sites),
                 contact_kinds=sorted(s["kinds"]),
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
+                sym=identity.sym if identity is not None else None,
+                identity_kind=identity.kind if identity is not None else None,
+                identity_error=identity.error if identity is not None else None,
+                contact_class=klass,
+                executed=(
+                    bool(s["behavioural_files"] & executed_files) if executed_scope else None
+                ),
+                matched_by=(
+                    ("exact" if target in view.q_names else "canonical") if hits else None
+                ),
+                observed_as=sorted(obs.name for obs in hits)[:20],
             )
         )
-    for target in sorted(observed_targets - static_targets):
-        dep = target.split(".")[0]
+    for obs in sorted(unmatched, key=lambda o: o.name):
+        dep = obs.name.split(".")[0]
         if dep in stdlib or dep in _IGNORE_DEPS:
             continue  # the trace boundary may include odd entries; keep deps only
-        matched_paths = _matches_impact(target, impact_paths)
+        matched_paths = _names_match_impact([obs.name, *sorted(obs.legacy)], impact_names)
         symbols.append(
             SymbolStatus(
-                target=target,
+                target=obs.name,
                 dep=dep,
                 status="dynamic-only",
-                observed_at=observed[target],
+                observed_at=list(obs.sites),
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
             )
@@ -315,11 +633,9 @@ def build_contract_report(
     report.all_confirmed = all_counts["confirmed"]
     report.all_blind = all_counts["blind"]
     report.all_dynamic_only = all_counts["dynamic-only"]
-    report.all_static_targets = len(static_targets)
-    report.all_observed_targets = len(observed_targets)
-    report.all_trust = (
-        report.all_confirmed / report.all_static_targets if report.all_static_targets else 0.0
-    )
+    report.all_static_targets = len(static)
+    report.all_observed_targets = len(view.observations)
+    report.all_trust = _ratio(report.all_confirmed, report.all_static_targets)
     report.all_by_dep = _by_dep(symbols)
 
     report.impacted_symbols = [symbol for symbol in symbols if symbol.impacted]
@@ -329,23 +645,19 @@ def build_contract_report(
     report.impacted_dynamic_only = impacted_counts["dynamic-only"]
     report.impacted_static_targets = report.impacted_confirmed + report.impacted_blind
     report.impacted_observed_targets = report.impacted_confirmed + report.impacted_dynamic_only
-    report.impacted_trust = (
-        report.impacted_confirmed / report.impacted_static_targets
-        if report.impacted_static_targets
-        else 0.0
-    )
+    report.impacted_trust = _ratio(report.impacted_confirmed, report.impacted_static_targets)
     report.impacted_by_dep = _by_dep(report.impacted_symbols)
+    sym_of = {s.target: s.sym for s in symbols if s.status != "dynamic-only"}
     report.impacted_contacts = [
-        contact for contact in cmap.contacts if _matches_impact(contact.target, impact_paths)
+        contact
+        for contact in cmap.contacts
+        if _names_match_impact([contact.target, sym_of.get(contact.target) or ""], impact_names)
     ]
     report.impact_by_kind = dict(
         sorted(Counter(contact.kind for contact in report.impacted_contacts).items())
     )
-    report.unmatched_impact_paths = [
-        path
-        for path in impact_paths
-        if not any(_matches_impact(symbol.target, [path]) for symbol in symbols)
-    ]
+    matched_impact = {path for symbol in symbols for path in symbol.matched_impact_paths}
+    report.unmatched_impact_paths = [path for path in impact_paths if path not in matched_impact]
 
     if impact_filter_active:
         report.confirmed = report.impacted_confirmed
@@ -353,7 +665,6 @@ def build_contract_report(
         report.dynamic_only = report.impacted_dynamic_only
         report.static_targets = report.impacted_static_targets
         report.observed_targets = report.impacted_observed_targets
-        report.trust = report.impacted_trust
         report.by_dep = report.impacted_by_dep
     else:
         report.confirmed = report.all_confirmed
@@ -361,15 +672,85 @@ def build_contract_report(
         report.dynamic_only = report.all_dynamic_only
         report.static_targets = report.all_static_targets
         report.observed_targets = report.all_observed_targets
-        report.trust = report.all_trust
         report.by_dep = report.all_by_dep
+
+    # ── trust tiers over the evaluation scope ────────────────────────────────
+    scope = [
+        s
+        for s in (report.impacted_symbols if impact_filter_active else symbols)
+        if s.status != "dynamic-only"
+    ]
+    behavioural_scope = [s for s in scope if s.contact_class == "behavioural"]
+    for klass, why in (
+        ("returned-value", "chain through a function's return value (e.g. typer.prompt().strip): "
+                           "statically unnameable, so neither BLIND nor confirmable"),
+        ("absent-dependency", "target a package that is not installed in the capture's "
+                              "interpreter, so no trace there can exercise them"),
+    ):
+        excluded = [s.target for s in scope if s.contact_class == klass]
+        if excluded:
+            sample = ", ".join(excluded[:3]) + (", …" if len(excluded) > 3 else "")
+            report.notes.append(
+                f"{len(excluded)} behavioural contact(s) {why} ({sample}); left out of trust"
+            )
+    interpreter = [s.target for s in scope if s.contact_class == "interpreter"]
+    if interpreter:
+        sample = ", ".join(interpreter[:3]) + (", …" if len(interpreter) > 3 else "")
+        report.notes.append(
+            f"{len(interpreter)} behavioural contact(s) resolve to interpreter code, not "
+            f"dependency code ({sample}); they are left out of trust"
+        )
+    executed_basis = TRUST_BASIS
+    if executed_scope:
+        executed_scope_symbols = [s for s in behavioural_scope if s.executed]
+    else:
+        executed_scope_symbols = behavioural_scope
+        if trace:
+            executed_basis = "behavioural contacts (the trace records no call sites)"
+
+    def tier(name: str, basis: str, members: list[SymbolStatus], exact: bool = False) -> TrustTier:
+        if exact:
+            confirmed = sum(1 for s in members if s.target in view.q_names)
+        else:
+            confirmed = sum(1 for s in members if s.status == "confirmed")
+        return TrustTier(
+            name=name,
+            basis=basis,
+            confirmed=confirmed,
+            static=len(members),
+            trust=_ratio(confirmed, len(members)),
+        )
+
+    report.trust_tiers = [
+        tier("exact", "exact string join of static path and runtime q (v1 rule)", scope, True),
+        tier("canonical", "canonical identity, every static contact", scope),
+        tier("behavioural", "canonical identity, behavioural contacts", behavioural_scope),
+        tier("executed", executed_basis, executed_scope_symbols),
+    ]
+    exact_tier, canonical_tier, behavioural_tier, executed_tier = report.trust_tiers
+    report.exact_trust = exact_tier.trust
+    report.canonical_trust = canonical_tier.trust
+    report.behavioural_trust = behavioural_tier.trust
+    report.executed_trust = executed_tier.trust
+    report.trust = executed_tier.trust
+    report.trust_basis = executed_tier.basis
+    report.trust_confirmed = executed_tier.confirmed
+    report.trust_static = executed_tier.static
 
     if trace and probe_python:
         from pymolt.verify.probe import probe_trace
 
         probes = probe_trace(trace, probe_python)
+        runtime_names = {
+            target: [obs.name for obs in hits] + sorted({q for obs in hits for q in obs.legacy})
+            for target, hits in matched.items()
+        }
         for sym in report.symbols:
             pr = probes.get(sym.target)
+            for name in runtime_names.get(sym.target, ()):
+                if pr is not None:
+                    break
+                pr = probes.get(name)
             if pr is not None:
                 sym.probe_status = pr.status
                 sym.probed = pr.probed_contacts > 0
@@ -415,3 +796,22 @@ def build_contract_report(
             report.notes.append(f"version diff failed: {e}")
 
     return report
+
+
+def _unresolvable_class(error: str, dep: str) -> str | None:
+    """Why a behavioural static path cannot be resolved, when that reason makes it
+    unobservable rather than BLIND.
+
+    ``returned-value``: the contact map extends a dotted name through a call
+    (``typer.prompt(...).strip()`` -> ``typer.prompt.strip``); the attribute lives on the
+    function's return value, which the static side cannot name.
+    ``absent-dependency``: the dependency itself is not importable where the capture ran
+    (an optional integration guarded by ``try/except ImportError``).
+    """
+    if error.startswith("AttributeError: 'function' object has no attribute") or error.startswith(
+        "AttributeError: 'builtin_function_or_method' object has no attribute"
+    ):
+        return "returned-value"
+    if error.startswith("ModuleNotFoundError") and f"No module named '{dep}'" in error:
+        return "absent-dependency"
+    return None

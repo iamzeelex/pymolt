@@ -526,6 +526,14 @@ def map_cmd(
         console.print(f"[dim]Note: {note}[/dim]")
 
 
+_TRUST_TIER_LABELS = {
+    "exact": "exact-join",
+    "canonical": "canonical",
+    "behavioural": "behavioural",
+    "executed": "executed files",
+}
+
+
 def _render_contract_report(rep) -> None:
     trust_pct = round(rep.trust * 100)
     border = {
@@ -549,8 +557,18 @@ def _render_contract_report(rep) -> None:
         f"[green]confirmed: {rep.confirmed}[/green]   "
         f"[yellow]BLIND: {rep.blind}[/yellow]   "
         f"[red]dynamic-only: {rep.dynamic_only}[/red]\n"
-        f"Contract trust (dynamic coverage of the static map): [bold]{trust_pct}%[/bold]"
+        f"Contract trust: [bold]{trust_pct}%[/bold]  "
+        f"[dim]({rep.trust_confirmed}/{rep.trust_static} {escape(rep.trust_basis)})[/dim]"
     )
+    if rep.trust_tiers:
+        # Every step from the old exact-string join to the headline, so a jump in
+        # trust is auditable rather than a single opaque number.
+        tiers = " → ".join(
+            f"{_TRUST_TIER_LABELS.get(t.name, t.name)} {round(t.trust * 100)}% "
+            f"({t.confirmed}/{t.static})"
+            for t in rep.trust_tiers
+        )
+        head += f"\n[dim]Trust tiers: {tiers}[/dim]"
     if rep.impact_filter_active:
         head += (
             f"\nImpact focus: [bold]{len(rep.impact_paths)}[/bold] changed API path(s); "
