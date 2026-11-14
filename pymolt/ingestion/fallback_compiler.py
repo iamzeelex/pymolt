@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from pymolt.adapters.subprocess_runner import run_command
+from pymolt.ingestion.probes import PYTHON_VERSION_PROBE
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def find_python_interpreter(version: str, project_dir: Path | None = None) -> Pa
     def check_version(path: str) -> bool:
         try:
             res = subprocess.run(
-                [path, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                [path, "-c", PYTHON_VERSION_PROBE],
                 capture_output=True, text=True, timeout=2
             )
             if res.returncode == 0 and res.stdout.strip() == target_ver:
@@ -186,7 +187,7 @@ def list_running_containers() -> list[dict[str, str]]:
             try:
                 r = subprocess.run(
                     ["docker", "exec", cid, cmd, "-c",
-                     "import sys;print('%d.%d'%sys.version_info[:2])"],
+                     PYTHON_VERSION_PROBE],
                     capture_output=True, text=True, timeout=3,
                 )
                 if r.returncode == 0 and r.stdout.strip():
@@ -293,7 +294,7 @@ def find_running_containers_for_project(project_dir: Path, version: str) -> list
         for py_cmd in ["python", "python3"]:
             try:
                 check_res = subprocess.run(
-                    ["docker", "exec", container_id, py_cmd, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                    ["docker", "exec", container_id, py_cmd, "-c", PYTHON_VERSION_PROBE],
                     capture_output=True, text=True, timeout=3
                 )
                 if check_res.returncode == 0 and check_res.stdout.strip() == target_major_minor:
