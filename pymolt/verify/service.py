@@ -1664,13 +1664,34 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     return reasons or ["the fact diff could not establish equivalence"]
 
 
+def _applied_migration(project_dir: str | Path):
+    """The receipt of the migration currently applied, or None (none, or rolled back)."""
+    from pymolt.migration_state import MigrationReceipt
+
+    receipt = MigrationReceipt.load(project_dir)
+    if receipt is None or receipt.status != "applied":
+        return None
+    return receipt
+
+
 def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots) -> None:
-    """Mark the report when its evidence predates the project's current state.
+    """Mark the report when a capture does not describe the world it stands for.
 
     A verdict built on a capture taken against a different manifest still *looks*
     authoritative — same tables, same percentages — which is exactly why it has
-    to say so itself. Absence of a fingerprint is reported as unknown, never as
-    fresh: a capture from before this check existed has not been vouched for.
+    to say so itself. Each capture is judged against its own world:
+
+    * the current-side trace (post-migration, or a lone baseline) against the
+      project as it is on disk now;
+    * a baseline on the "before" side of a diff against the environment the
+      recorded migration started from. A migration that upgrades the manifest
+      moves "now" away from the baseline by design — that is the migration, not
+      staleness. A baseline taken against some *other* starting point (setup
+      re-run with another manifest before migrating) is still stale.
+
+    Absence of evidence is reported as unknown, never as fresh: a capture from
+    before fingerprints existed, or a baseline whose starting point no recorded
+    migration pins down, has not been vouched for.
     """
     if not used_slots:
         return
@@ -1682,26 +1703,66 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
         )
         return
 
-    stale: list[str] = []
-    unknown: list[str] = []
+    names = {name for name, _ in used_slots}
+    run: str | None = None  # the applied migration's short id, when there is one
+    start: str | None = None
+    if "baseline" in names and "post-migration" in names:
+        migration = _applied_migration(project_dir)
+        if migration is not None:
+            run = migration.run_id[:8]
+            start = migration.starting_fingerprint(project_dir)
+
+    stale_now: list[str] = []
+    stale_start: list[str] = []
+    unstamped: list[str] = []
+    unpinned: list[str] = []
     for name, slot in used_slots:
         fingerprint = getattr(slot, "env_fingerprint", None)
         if fingerprint is None:
-            unknown.append(name)
+            unstamped.append(name)
+        elif name == "baseline" and "post-migration" in names:
+            if start is not None:
+                if fingerprint != start:
+                    stale_start.append(name)
+            elif fingerprint != current:
+                # Nothing pins where the migration started, and the world has
+                # moved since this baseline: it either drifted before migrating
+                # (stale) or moved as part of the migration (fine). Can't tell.
+                unpinned.append(name)
+            # else: nothing moved since the baseline, so it describes the start too.
         elif fingerprint != current:
-            stale.append(name)
+            stale_now.append(name)
 
-    if stale:
-        report.baseline_stale = True
+    if stale_now:
         report.notes.append(
-            f"STALE EVIDENCE: the {', '.join(stale)} capture was taken against a different "
+            f"STALE EVIDENCE: the {', '.join(stale_now)} capture was taken against a different "
             "manifest/environment than the one on disk now — this verdict describes the "
             "world as it was then. Re-capture to judge the current code."
         )
-    elif not unknown:
-        report.baseline_stale = False
-    if unknown:
+    if stale_start:
         report.notes.append(
-            f"staleness unknown for the {', '.join(unknown)} capture "
+            f"STALE EVIDENCE: the {', '.join(stale_start)} capture was taken against a "
+            f"different manifest/environment than the one migration run {run} started "
+            "from — it is not this migration's starting point, so the before/after diff "
+            "compares the wrong worlds."
+        )
+    if stale_now or stale_start:
+        report.baseline_stale = True
+    elif not (unstamped or unpinned):
+        report.baseline_stale = False
+    if unstamped:
+        report.notes.append(
+            f"staleness unknown for the {', '.join(unstamped)} capture "
             "(taken before pymolt stamped capture environments)."
+        )
+    if unpinned:
+        why = (
+            f"migration run {run} predates recording its starting environment"
+            if run is not None
+            else "no applied migration (`pymolt apply`) records where it started"
+        )
+        report.notes.append(
+            f"staleness unknown for the {', '.join(unpinned)} capture: the "
+            f"manifest/environment changed since it was taken and {why}, so it cannot be "
+            "told apart from a baseline taken against a different starting point."
         )
