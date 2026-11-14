@@ -231,6 +231,8 @@ class ContractSlot(BaseModel):
     write_failures: int | None = None
     sink_failures: int | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
+    # Processes where tracing was requested but the watcher could not load (untraced).
+    activation_failures: list[dict] = Field(default_factory=list)
 
 
 class ContractState(BaseModel):
