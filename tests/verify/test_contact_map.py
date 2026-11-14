@@ -168,3 +168,27 @@ def test_protocol_operations_are_named_when_import_target_is_resolvable(tmp_path
     assert ("toolkit.RIGHT.__contains__", "protocol") in targets
     assert ("toolkit.LEFT.__len__", "protocol") in targets
     assert ("toolkit.WAITABLE.__await__", "protocol") in targets
+
+
+def test_contact_map_skips_hidden_dirs_and_nested_checkouts(tmp_path):
+    root = _project(tmp_path)
+    src = "import django\n\ndef f():\n    return django.setup()\n"
+    wt = root / ".claude" / "worktrees" / "x"
+    wt.mkdir(parents=True)
+    (wt / "mod.py").write_text(src, encoding="utf-8")
+    nested = root / "vendored_checkout"  # not hidden, but its own git checkout
+    nested.mkdir()
+    (nested / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    (nested / "mod.py").write_text(src, encoding="utf-8")
+
+    cmap = build_contact_map(root)
+
+    assert "django" not in cmap.by_dep
+    assert set(cmap.by_dep) == {"flask", "requests"}
+
+
+def test_contact_map_root_that_is_a_git_checkout_is_still_scanned(tmp_path):
+    root = _project(tmp_path)
+    (root / ".git").mkdir()
+
+    assert "flask" in build_contact_map(root).by_dep
