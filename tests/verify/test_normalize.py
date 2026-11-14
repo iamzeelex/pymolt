@@ -69,3 +69,269 @@ def test_shape_privacy_never_persists_scalar_values(monkeypatch):
     assert "super-secret" not in rendered
     assert "42" not in rendered
     assert "__shape__" in rendered
+
+
+# ── value renderers (fact model v2) ───────────────────────────────────────────
+import datetime  # noqa: E402
+import decimal  # noqa: E402
+import enum  # noqa: E402
+import uuid  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _both(value):
+    return nz.normalize(value, _privacy="values"), nz.normalize(value, _privacy="shape")
+
+
+def test_datetime_family_renders_iso_and_hides_it_under_shape():
+    cases = [
+        (datetime.datetime(2020, 1, 2, 3, 4, 5), "2020-01-02T03:04:05", "datetime.datetime"),
+        (datetime.date(2020, 1, 2), "2020-01-02", "datetime.date"),
+        (datetime.time(3, 4), "03:04:00", "datetime.time"),
+    ]
+    for value, iso, tname in cases:
+        assert _both(value) == ({"__datetime__": iso}, {"__shape__": tname})
+
+
+def test_datetime_subclass_uses_the_base_formatter():
+    class Stamp(datetime.datetime):
+        def isoformat(self, *a, **kw):   # a subclass override never runs
+            raise AssertionError("user code ran")
+
+    assert nz.normalize(Stamp(2020, 1, 1)) == {"__datetime__": "2020-01-01T00:00:00"}
+
+
+def test_timedelta_decimal_uuid():
+    u = uuid.UUID(int=7)
+    assert _both(datetime.timedelta(minutes=1, microseconds=500000)) == (
+        {"__timedelta__": 60.5}, {"__shape__": "datetime.timedelta"})
+    assert _both(decimal.Decimal("1.10")) == (
+        {"__decimal__": "1.10"}, {"__shape__": "decimal.Decimal"})
+    assert _both(u) == ({"__uuid__": str(u)}, {"__shape__": "uuid.UUID"})
+
+
+class Color(enum.Enum):
+    RED = 1
+
+
+class Perm(enum.Flag if hasattr(enum, "Flag") else enum.Enum):
+    R = 1
+    W = 2
+
+
+def test_enum_members_are_structural():
+    expected = {"__enum__": __name__ + ".Color.RED"}
+    assert _both(Color.RED) == (expected, expected)
+
+
+@pytest.mark.skipif(not hasattr(enum, "Flag"), reason="enum.Flag is 3.6+")
+def test_composite_flag_without_a_name_is_named_by_value():
+    out = nz.normalize(Perm.R | Perm.W)
+    assert out["__enum__"].startswith(__name__ + ".Perm.")
+
+
+def test_classes_and_callables_are_named():
+    assert _both(Color) == ({"__type__": __name__ + ".Color"},) * 2
+    assert nz.normalize(int) == {"__type__": "int"}
+    assert nz.normalize(len) == {"__callable__": "len"}
+    assert nz.normalize(str.upper) == {"__callable__": "str.upper"}
+    assert nz.normalize(nz.normalize) == {
+        "__callable__": "pymolt.verify._normalize.normalize"}
+    assert nz.normalize(Response(1).__init__) == {
+        "__callable__": __name__ + ".Response.__init__"}     # bound method
+
+
+def test_dataclass_fields_render_in_order_and_at_shape():
+    dataclasses = pytest.importorskip("dataclasses")
+    ns = {"dataclasses": dataclasses, "__name__": "dcmod"}
+    exec(
+        "import typing\n"
+        "@dataclasses.dataclass\n"
+        "class Point:\n"
+        "    x: int\n"
+        "    y: str = 'a'\n"
+        "    tag: typing.ClassVar[str] = 'skip'\n",
+        ns,
+    )
+    values, shape = _both(ns["Point"](1, "b"))
+    assert values == {"__dataclass__": "dcmod.Point", "fields": [["x", 1], ["y", "b"]]}
+    assert shape == {"__dataclass__": "dcmod.Point",
+                     "fields": [["x", {"__shape__": "int"}], ["y", {"__shape__": "str"}]]}
+
+
+# Fakes of the allow-listed structures: recognised by defining module + class name only.
+class ndarray:  # noqa: N801
+    __module__ = "numpy"
+
+    def __init__(self, data, dtype="int64"):
+        self._data = list(data)
+        self.dtype = dtype
+
+    @property
+    def shape(self):
+        return (len(self._data),)
+
+    def tolist(self):
+        return list(self._data)
+
+
+class _Seq:
+    def __init__(self, items):
+        self._items = list(items)
+
+    def tolist(self):
+        return list(self._items)
+
+
+class DataFrame:
+    __module__ = "pandas.core.frame"
+
+    def __init__(self, columns):
+        self._cols = columns
+
+    @property
+    def shape(self):
+        rows = len(next(iter(self._cols.values()))) if self._cols else 0
+        return (rows, len(self._cols))
+
+    @property
+    def dtypes(self):
+        return _Seq("int64" for _ in self._cols)
+
+    @property
+    def columns(self):
+        return _Seq(self._cols)
+
+    def to_dict(self, orient):
+        assert orient == "list"
+        return {k: list(v) for k, v in self._cols.items()}
+
+
+class Index:
+    __module__ = "pandas.core.indexes.base"
+
+    def __init__(self, data):
+        self._data = list(data)
+        self.dtype = "int64"
+
+    @property
+    def shape(self):
+        return (len(self._data),)
+
+    def tolist(self):
+        return list(self._data)
+
+
+class RangeIndex(Index):
+    __module__ = "pandas.core.indexes.range"
+
+
+def test_allow_listed_array_renders_shape_dtype_and_small_values():
+    values, shape = _both(ndarray([1, 2, 3]))
+    assert values == {"__structure__": "numpy.ndarray", "shape": [3], "dtype": "int64",
+                      "values": {"__list__": [1, 2, 3]}}
+    assert shape == {"__structure__": "numpy.ndarray", "shape": [3], "dtype": "int64"}
+
+
+def test_large_structures_keep_shape_but_drop_values():
+    out = nz.normalize(ndarray(range(nz.MAX_STRUCTURE_VALUES + 1)))
+    assert out["shape"] == [nz.MAX_STRUCTURE_VALUES + 1] and "values" not in out
+
+
+def test_frame_renders_dtypes_columns_and_values():
+    values, shape = _both(DataFrame({"a": [1, 2], "b": [3, 4]}))
+    assert values == {
+        "__structure__": "pandas.core.frame.DataFrame", "shape": [2, 2],
+        "dtypes": ["int64", "int64"], "columns": ["a", "b"],
+        "values": {"__dict__": [["a", {"__list__": [1, 2]}], ["b", {"__list__": [3, 4]}]]},
+    }
+    assert "values" not in shape and shape["shape"] == [2, 2]
+    # column names are values too: under shape only their types survive
+    assert shape["columns"] == [{"__shape__": "str"}, {"__shape__": "str"}]
+
+
+def test_structure_subclasses_are_recognised_through_the_mro():
+    out = nz.normalize(RangeIndex([0, 1]))
+    assert out["__structure__"] == "pandas.core.indexes.range.RangeIndex"
+    assert out["values"] == {"__list__": [0, 1]}
+
+
+def test_a_failing_structure_accessor_falls_back_to_opaque():
+    class Broken(ndarray):
+        @property
+        def shape(self):
+            raise RuntimeError("boom")
+
+    out = nz.normalize(Broken([1]))
+    assert out == {"__opaque__": out["__opaque__"]} and out["__opaque__"].endswith("Broken")
+
+
+def test_real_numpy_and_pandas_when_available():
+    np = pytest.importorskip("numpy")
+    pd = pytest.importorskip("pandas")
+    arr = nz.normalize(np.arange(3))
+    assert arr["shape"] == [3] and arr["values"] == {"__list__": [0, 1, 2]}
+    frame = nz.normalize(pd.DataFrame({"a": [1, 2]}))
+    assert frame["shape"] == [2, 1] and frame["columns"] == ["a"]
+    assert frame["values"] == {"__dict__": [["a", {"__list__": [1, 2]}]]}
+    series = nz.normalize(pd.Series([1.5]), _privacy="shape")
+    assert series["dtype"] == "float64" and "values" not in series
+
+
+class Response:
+    def __init__(self, code):
+        self.status_code = code
+
+
+def test_status_code_objects_render_their_code_even_under_shape():
+    expected = {"__structure__": __name__ + ".Response", "status_code": 404}
+    assert _both(Response(404)) == (expected, expected)
+    assert nz.normalize(Response("404")) == {"__opaque__": __name__ + ".Response"}
+    assert nz.normalize(Response(True)) == {"__opaque__": __name__ + ".Response"}
+
+
+def test_werkzeug_status_property_is_read_but_other_properties_are_not():
+    ns = {"__name__": "werkzeug.sansio.response"}
+    exec(
+        "class Response:\n"
+        "    def __init__(self):\n"
+        "        self._status_code = 201\n"
+        "    @property\n"
+        "    def status_code(self):\n"
+        "        return self._status_code\n",
+        ns,
+    )
+    assert nz.normalize(ns["Response"]())["status_code"] == 201
+
+    calls = []
+
+    class Lazy:
+        @property
+        def status_code(self):          # arbitrary user code: must not run
+            calls.append(1)
+            return 200
+
+    assert nz.normalize(Lazy())["__opaque__"].endswith(".Lazy")
+    assert calls == []
+
+
+def test_rendering_never_runs_attribute_hooks():
+    touched = []
+
+    class Spy:
+        def __getattribute__(self, name):
+            touched.append(name)
+            return object.__getattribute__(self, name)
+
+        def __getattr__(self, name):
+            touched.append("getattr:" + name)
+            raise AttributeError(name)
+
+    class Slotted:
+        __slots__ = ("status_code",)
+
+    out = nz.normalize(Spy())
+    assert list(out) == ["__opaque__"] and out["__opaque__"].endswith(".Spy")
+    assert set(touched) <= {"__class__"}    # isinstance() probes only, no renderer access
+    assert nz.normalize(Slotted())["__opaque__"].endswith(".Slotted")

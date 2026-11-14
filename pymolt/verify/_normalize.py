@@ -19,10 +19,32 @@ Markers emitted:
     {"__nondeterministic__": true}    set by the sinks when identical inputs differ
     {"__opaque__": "<label>"}         an ``OutcomeMarker`` passed where a value is expected
                                       (e.g. "ambiguous:return-or-raise" on <=3.7 interpreters)
+
+Value renderers (fact model v2), tried before the opaque fallback — values / privacy=shape:
+    datetime/date/time  {"__datetime__": iso}           / {"__shape__": type}
+    timedelta           {"__timedelta__": seconds}      / {"__shape__": type}
+    Decimal             {"__decimal__": str}            / {"__shape__": type}
+    UUID                {"__uuid__": str}               / {"__shape__": type}
+    Enum member         {"__enum__": "mod.Cls.NAME"}    (structural: same under shape)
+    class / function    {"__type__": ..} / {"__callable__": ..}   (same under shape)
+    dataclass instance  {"__dataclass__": type, "fields": [[name, value], ...]}
+    numpy ndarray, pandas Series/DataFrame/Index (allow-listed by package + class name)
+                        {"__structure__": type, "shape", "dtype"|"dtypes"+"columns",
+                         "values" (only when size <= 200; never under shape)}
+    int ``status_code`` {"__structure__": type, "status_code": n}  (same under shape)
+Rendering is duck-typed and never imports anything: a stdlib type is recognised only if its
+module is already in ``sys.modules`` (no value of it can exist otherwise). It never runs user
+code beyond the allow-listed structures' cheap accessors (``shape``, ``dtype(s)``, ``columns``,
+``tolist()``/``to_dict("list")``) and werkzeug's ``status_code`` property: types are classified
+once per type through raw class namespaces, instance state is read through the type's own
+``__dict__`` slot, stdlib values are formatted through the BASE class methods, and every
+renderer is guarded (a failure falls back to the opaque marker).
 """
 import binascii
 import json
 import os
+import sys
+import types
 
 
 class OutcomeMarker(object):
@@ -126,7 +148,266 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
         )
         return {"__set__": norm}
 
+    try:
+        rendered = _render(value, depth, seen, _privacy)
+    except Exception:
+        rendered = None
+    if rendered is not None:
+        return rendered
     return {"__opaque__": typename(value)}
+
+
+# ── value renderers ──────────────────────────────────────────────────────────
+
+# Structures are rendered with values only up to this many elements (rows x columns).
+MAX_STRUCTURE_VALUES = 200
+
+# C-level accessors: never intercepted by a metaclass ``__getattribute__``.
+_TYPE_DICT = type.__dict__["__dict__"]
+_TYPE_MODULE = type.__dict__["__module__"]
+_TYPE_NAME = type.__dict__["__name__"]
+_TYPE_QUALNAME = type.__dict__["__qualname__"]
+_TYPE_MRO = type.__dict__["__mro__"]
+
+_CALLABLE_TYPES = frozenset((
+    types.FunctionType, types.MethodType, types.BuiltinFunctionType,
+    type(str.upper),            # method_descriptor
+    type(object.__init__),      # wrapper_descriptor
+    type((1).__add__),          # method-wrapper
+    type(dict.__dict__["fromkeys"]),  # classmethod_descriptor
+))
+
+# (top-level package, class name) -> structure kind, matched against every class in the MRO so
+# subclasses (RangeIndex, DatetimeIndex, np.matrix, GeoDataFrame, ...) are covered. The top-level
+# package, not the defining module: pandas moved these classes between modules over the years
+# and recent releases re-home ``__module__`` to plain ``pandas``.
+_STRUCTURES = {
+    ("numpy", "ndarray"): "array",
+    ("pandas", "Series"): "series",
+    ("pandas", "DataFrame"): "frame",
+    ("pandas", "Index"): "index",
+}
+
+# Packages whose ``status_code`` PROPERTY may be evaluated (a trivial attribute read there).
+# Any other property is user code and is not called.
+_STATUS_PROPERTY_PACKAGES = frozenset(("werkzeug",))
+
+_MISSING = object()
+_OPAQUE = ("opaque",)
+_KINDS = {}            # id(type) -> (type, kind): classification is once per type
+_KINDS_MAX = 4096
+
+
+def _class_dict(cls):
+    return _TYPE_DICT.__get__(cls, type)
+
+
+def _class_label(cls):
+    """``mod.Qual`` of a class (bare qualname for builtins), via C accessors only."""
+    mod = _TYPE_MODULE.__get__(cls, type)
+    qual = _TYPE_QUALNAME.__get__(cls, type)
+    if isinstance(mod, str) and mod and mod != "builtins":
+        return mod + "." + qual
+    return qual
+
+
+def _callable_label(fn):
+    mod = getattr(fn, "__module__", None)
+    if mod is None:
+        owner = getattr(fn, "__objclass__", None)
+        if owner is not None:
+            mod = _TYPE_MODULE.__get__(owner, type)
+    qual = getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None)
+    if not isinstance(qual, str) or not qual:
+        return None
+    if isinstance(mod, str) and mod and mod != "builtins":
+        return mod + "." + qual
+    return qual
+
+
+def _stdlib_class(modname, attr):
+    mod = sys.modules.get(modname)
+    return getattr(mod, attr, None) if mod is not None else None
+
+
+def _classify(t):
+    """The renderer kind for type ``t`` (computed once per type)."""
+    if issubclass(t, type):
+        return ("class",)
+    if t in _CALLABLE_TYPES:
+        return ("callable",)
+    dt = sys.modules.get("datetime")
+    if dt is not None:
+        # Base-class formatters: a subclass override (or pandas' own) never runs.
+        if issubclass(t, dt.datetime):
+            return ("datetime", dt.datetime.isoformat)
+        if issubclass(t, dt.date):
+            return ("datetime", dt.date.isoformat)
+        if issubclass(t, dt.time):
+            return ("datetime", dt.time.isoformat)
+        if issubclass(t, dt.timedelta):
+            return ("timedelta", dt.timedelta.total_seconds)
+    dec = _stdlib_class("decimal", "Decimal")
+    if dec is not None and issubclass(t, dec):
+        return ("decimal", dec.__str__)
+    uuid_cls = _stdlib_class("uuid", "UUID")
+    if uuid_cls is not None and issubclass(t, uuid_cls):
+        return ("uuid", uuid_cls.__str__)
+    enum_cls = _stdlib_class("enum", "Enum")
+    if enum_cls is not None and issubclass(t, enum_cls):
+        return ("enum",)
+    mro = _TYPE_MRO.__get__(t, type)
+    for cls in mro:
+        fields = _class_dict(cls).get("__dataclass_fields__")
+        if fields is not None:
+            names = []
+            for name, field in list(fields.items()):
+                ftype = getattr(field, "_field_type", None)
+                if getattr(ftype, "name", "_FIELD") in ("_FIELD_CLASSVAR", "_FIELD_INITVAR"):
+                    continue
+                names.append(name)
+            return ("dataclass", tuple(names[:MAX_SEQ]), _dict_slot(mro))
+    for cls in mro:
+        owner = _TYPE_MODULE.__get__(cls, type)
+        top = owner.split(".", 1)[0] if isinstance(owner, str) else None
+        kind = _STRUCTURES.get((top, _TYPE_NAME.__get__(cls, type)))
+        if kind is not None:
+            return ("structure", kind)
+    for cls in mro:
+        ns = _class_dict(cls)
+        if "status_code" in ns:
+            attr = ns["status_code"]
+            if issubclass(type(attr), property):
+                fget = attr.fget
+                owner = getattr(fget, "__module__", "") or ""
+                if (type(fget) is types.FunctionType
+                        and owner.split(".", 1)[0] in _STATUS_PROPERTY_PACKAGES):
+                    return ("status_prop", fget)
+                return _OPAQUE
+            slot = _dict_slot(mro)
+            return ("status_attr", attr, slot) if slot is not None else _OPAQUE
+    slot = _dict_slot(mro)
+    if slot is not None:
+        return ("status_attr", _MISSING, slot)
+    return _OPAQUE
+
+
+def _dict_slot(mro):
+    """The C ``__dict__`` getset of instances of this MRO, or None (slots-only, or a class
+    that redefines ``__dict__`` in Python — reading it would run user code)."""
+    for cls in mro:
+        ns = _class_dict(cls)
+        if "__dict__" in ns:
+            desc = ns["__dict__"]
+            if _TYPE_NAME.__get__(type(desc), type) == "getset_descriptor":
+                return desc
+            return None
+    return None
+
+
+def _kind_of(t):
+    ent = _KINDS.get(id(t))
+    if ent is not None and ent[0] is t:
+        return ent[1]
+    try:
+        kind = _classify(t)
+    except Exception:
+        kind = _OPAQUE
+    if len(_KINDS) >= _KINDS_MAX:
+        _KINDS.clear()
+    _KINDS[id(t)] = (t, kind)   # holds the type: its id cannot be recycled while cached
+    return kind
+
+
+def _render(value, depth, seen, privacy):
+    """Typed rendering of a known non-container value, or None (-> opaque)."""
+    kind = _kind_of(type(value))
+    k = kind[0]
+    if k == "opaque":
+        return None
+    shape = privacy == "shape"
+    if k == "class":
+        return {"__type__": _class_label(value)}
+    if k == "callable":
+        label = _callable_label(value)
+        return {"__callable__": label} if label else None
+    if k == "datetime":
+        return {"__shape__": typename(value)} if shape else {"__datetime__": kind[1](value)}
+    if k == "timedelta":
+        return {"__shape__": typename(value)} if shape else {"__timedelta__": kind[1](value)}
+    if k == "decimal":
+        return {"__shape__": typename(value)} if shape else {"__decimal__": kind[1](value)}
+    if k == "uuid":
+        return {"__shape__": typename(value)} if shape else {"__uuid__": kind[1](value)}
+    if k == "enum":
+        return _render_enum(value)
+    if k == "dataclass":
+        return _render_dataclass(value, kind, depth, seen, privacy)
+    if k == "structure":
+        return _render_structure(value, kind[1], depth, seen, privacy)
+    return _render_status(value, kind)
+
+
+def _render_enum(value):
+    state = object.__getattribute__(value, "__dict__")
+    name = state.get("_name_")
+    if not isinstance(name, str):
+        member = state.get("_value_")      # an unnamed composite Flag: name it by value
+        if type(member) is not int:
+            return None
+        name = "(" + str(member) + ")"
+    return {"__enum__": typename(value) + "." + name}
+
+
+def _render_dataclass(value, kind, depth, seen, privacy):
+    slot = kind[2]
+    state = slot.__get__(value, type(value)) if slot is not None else None
+    fields = []
+    for name in kind[1]:
+        if type(state) is dict and name in state:
+            item = state[name]
+        else:
+            try:
+                item = object.__getattribute__(value, name)   # __slots__ dataclasses
+            except Exception:
+                fields.append([name, {"__opaque__": "unset"}])
+                continue
+        fields.append([name, normalize(item, depth + 1, seen, privacy)])
+    return {"__dataclass__": typename(value), "fields": fields}
+
+
+def _render_structure(value, kind, depth, seen, privacy):
+    dims = [int(n) for n in value.shape]
+    out = {"__structure__": typename(value), "shape": dims}
+    size = 1
+    for n in dims:
+        size *= n
+    with_values = privacy != "shape" and size <= MAX_STRUCTURE_VALUES
+    if kind == "frame":
+        out["dtypes"] = [str(d) for d in value.dtypes.tolist()[:MAX_SEQ]]
+        out["columns"] = [normalize(c, depth + 1, seen, privacy)
+                          for c in value.columns.tolist()[:MAX_SEQ]]
+        if with_values:
+            out["values"] = normalize(value.to_dict("list"), depth + 1, seen, privacy)
+    else:
+        out["dtype"] = str(value.dtype)
+        if with_values:
+            out["values"] = normalize(value.tolist(), depth + 1, seen, privacy)
+    return out
+
+
+def _render_status(value, kind):
+    if kind[0] == "status_prop":
+        code = kind[1](value)
+    else:
+        state = kind[2].__get__(value, type(value))
+        code = state.get("status_code", _MISSING) if type(state) is dict else _MISSING
+        if code is _MISSING:
+            code = kind[1]
+    t = type(code)
+    if t is bool or not issubclass(t, int):
+        return None
+    return {"__structure__": typename(value), "status_code": int(code)}
 
 
 def _stable_key(obj):

@@ -1,4 +1,4 @@
-from pymolt.verify.contact_map import Contact, build_contact_map
+from pymolt.verify.contact_map import Contact, build_contact_map, contact_class
 
 
 def _project(tmp_path):
@@ -192,3 +192,10 @@ def test_contact_map_root_that_is_a_git_checkout_is_still_scanned(tmp_path):
     (root / ".git").mkdir()
 
     assert "flask" in build_contact_map(root).by_dep
+
+
+def test_contact_classes_split_trace_evidence_from_import_evidence():
+    for kind in ("call", "decorator", "context-manager", "protocol"):
+        assert contact_class(kind) == "behavioural"
+    for kind in ("attribute-read", "class-base", "imported-constant"):
+        assert contact_class(kind) == "existence"
