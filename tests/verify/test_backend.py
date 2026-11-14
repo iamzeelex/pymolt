@@ -50,7 +50,9 @@ def _trace(target_mod, body):
 def test_records_call_with_bound_args_and_normalized_return(target):
     sink, _ = _trace(target, lambda m: m.greet("ann", times=2))
     (rec,) = [r for r in sink.records.values() if r["qualname"] == PREFIX + ".greet"]
-    assert rec["inputs"] == {"bound": {"name": "ann", "times": 2}}
+    # v2: `defaulted` is present (empty) whenever the parameter defaults are known — it
+    # tells the host `bound` is in the caller-passed form.
+    assert rec["inputs"] == {"bound": {"name": "ann", "times": 2}, "defaulted": []}
     assert rec["result"] == "hi annhi ann"
 
 

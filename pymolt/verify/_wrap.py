@@ -25,6 +25,17 @@ import inspect
 import sys
 
 from ._backend import AppMatcher, SetProfileBackend, _split
+from ._identity import (
+    SYMQ_FALLBACK,
+    SYMQ_RECEIVER,
+    bind_inputs,
+    callable_identity,
+    callable_receiver,
+    class_member,
+    receiver_owner,
+    sink_identity_fields,
+    unwrap,
+)
 from ._normalize import normalize
 
 _WRAP_MARK = "__pymolt_wrapped__"
@@ -52,6 +63,9 @@ class WrapBackend(object):
 
     def __init__(self, symbols, sink, source=None, include_internal=False):
         self.sink = sink
+        fields = sink_identity_fields(sink)           # v1 sinks keep the v1 call
+        self._sym_kw = "sym" in fields
+        self._own_kw = "own" in fields
         self.near = None if include_internal else AppMatcher(_split(source))
         self._restore = []          # closures that undo each patch
         self._finder = None
@@ -144,15 +158,23 @@ class WrapBackend(object):
         else:
             inner, rebind = real_obj, None
         backend = self
+        # Canonical identity, once per wrapped symbol: the unwrapped callable's own name,
+        # plus its receiver parameter (self/cls) for the per-call ``own``.
+        ident = callable_identity(inner)
+        if ident[0] is None:
+            ident = (qualname, SYMQ_FALLBACK)
+        if isinstance(holder, type) and (ident[1] == SYMQ_FALLBACK or "<locals>" in ident[0]):
+            ident = self._class_identity(holder, inner, ident)
+        ident = ident + callable_receiver(inner, ident[0])
 
         @functools.wraps(inner)
         def wrapper(*a, **kw):
             try:
                 result = inner(*a, **kw)
             except BaseException as exc:
-                backend._safe_record(qualname, inner, a, kw, None, exc)
+                backend._safe_record(qualname, inner, a, kw, None, exc, ident)
                 raise
-            backend._safe_record(qualname, inner, a, kw, result, None)
+            backend._safe_record(qualname, inner, a, kw, result, None, ident)
             return result
 
         setattr(wrapper, _WRAP_MARK, True)
@@ -170,10 +192,34 @@ class WrapBackend(object):
         else:
             self._restore.append(_restore_delattr(holder, attr))
 
+    @staticmethod
+    def _class_identity(holder, inner, ident):
+        """A factory-made method attached to ``holder`` (``cls.mean = mean``): named after the
+        class that holds it, exactly as the setprofile backend names it via the receiver."""
+        try:
+            base = unwrap(inner)
+            code = getattr(base, "__code__", None)
+            if code is not None:
+                owner, _func = class_member(holder, code)
+                if owner is not None:
+                    return (owner + "." + code.co_name, SYMQ_RECEIVER)
+        except Exception:
+            pass
+        return ident
+
     def _wrap_class(self, cls, qualname):
         backend = self
         real_init = cls.__init__
         had_own = "__init__" in cls.__dict__
+        # The constructor that actually runs (possibly inherited) — the same identity the
+        # setprofile backend sees for this construction. A C-level __init__ has no frame;
+        # name it after the class.
+        ident = callable_identity(real_init)
+        if ident[0] is None:
+            ident = ("{0}.{1}.__init__".format(cls.__module__, cls.__qualname__),
+                     SYMQ_FALLBACK)
+        # The receiver is the instance under construction (``bound_args[0]``).
+        ident = ident + ("self", ident[0].rsplit(".", 1)[0])
 
         @functools.wraps(real_init)
         def init_wrapper(self_obj, *a, **kw):
@@ -181,10 +227,10 @@ class WrapBackend(object):
             try:
                 real_init(self_obj, *a, **kw)
             except BaseException as exc:
-                backend._safe_record(qualname, real_init, bound_args, kw, None, exc)
+                backend._safe_record(qualname, real_init, bound_args, kw, None, exc, ident)
                 raise
             # construction "result" is the instance -> shape becomes opaque:<Class>
-            backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None)
+            backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None, ident)
 
         setattr(init_wrapper, _WRAP_MARK, True)
         init_wrapper.__wrapped__ = real_init
@@ -199,10 +245,11 @@ class WrapBackend(object):
             self._restore.append(_restore_delattr(cls, "__init__"))
 
     # ── recording ──────────────────────────────────────────────────────────────
-    def _safe_record(self, qualname, real, args, kwargs, result, exc):
+    def _safe_record(self, qualname, real, args, kwargs, result, exc,
+                     ident=(None, None, None, None)):
         """Tracing must never alter the wrapped API's return/raise behavior."""
         try:
-            self._record(qualname, real, args, kwargs, result, exc)
+            self._record(qualname, real, args, kwargs, result, exc, ident)
         except Exception:
             note = getattr(self.sink, "note_failure", None)
             if note is not None:
@@ -211,7 +258,8 @@ class WrapBackend(object):
                 except Exception:
                     pass
 
-    def _record(self, qualname, real, args, kwargs, result, exc):
+    def _record(self, qualname, real, args, kwargs, result, exc,
+                ident=(None, None, None, None)):
         # caller frame: 0=_record, 1=_safe_record, 2=wrapper, 3=the code that
         # made the call (our boundary near side)
         try:
@@ -232,6 +280,13 @@ class WrapBackend(object):
             site = {"file": code.co_filename, "line": caller.f_lineno, "func": code.co_name}
         inputs = self._inputs(real, args, kwargs)
         extra = {"admitted": True} if admit is not None else {}
+        if self._sym_kw:
+            extra["sym"] = ident[0] or qualname
+            extra["symq"] = ident[1] if ident[0] else SYMQ_FALLBACK
+        if self._own_kw and ident[2] is not None and args:
+            own = receiver_owner(args[0], ident[2], ident[3])
+            if own is not None:
+                extra["own"] = own
         if exc is not None:
             self.sink.on_raise(qualname, inputs, type(exc).__qualname__, site, **extra)
         else:
@@ -253,13 +308,13 @@ class WrapBackend(object):
         return sig
 
     def _inputs(self, real, args, kwargs):
-        """Bind to the signature when possible (matches setprofile's {"bound": {...}})."""
+        """Bind to the signature when possible — the same v2 form as setprofile's: ``bound``
+        without arguments at their default, ``defaulted``, ``varargs``/``kwargs``."""
         try:
             sig = self._signature(real)
             if sig is self._SIG_FAILED:
                 raise TypeError("no signature")
-            bound = sig.bind_partial(*args, **kwargs)
-            return {"bound": {k: normalize(v) for k, v in bound.arguments.items()}}
+            return bind_inputs(sig, args, kwargs, normalize)
         except Exception:
             return {"args": [normalize(v) for v in args],
                     "kwargs": {k: normalize(v) for k, v in kwargs.items()}}

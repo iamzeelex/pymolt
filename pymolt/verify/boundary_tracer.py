@@ -41,6 +41,7 @@ Watcher environment:
 import atexit
 import json
 import os
+import sys
 
 from ._backend import select_backend
 from ._sinks import JsonlSink, MemorySink
@@ -187,6 +188,9 @@ def activate():
         "request_id": os.environ.get(ENV_REQUEST_ID),
         "correlation_id": os.environ.get(ENV_CORRELATION_ID),
         "requested_backend": backend_pref,
+        # The interpreter that ran the capture: the host resolves static symbols in it.
+        "python": "{0}.{1}.{2}".format(*sys.version_info[:3]),
+        "executable": sys.executable,
     })
     backend = _select_runtime_backend(
         target, impact_targets, sink, backend_pref, exclude, source, include_internal,
