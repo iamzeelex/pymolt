@@ -277,12 +277,30 @@ class TestBaselineIsJudgedAgainstTheMigrationStart:
         assert f"migration run {receipt.run_id[:8]} started from" in stale[0]
         assert STALE in report.verdict_reasons
 
-    def test_no_recorded_migration_is_unknown_never_fresh(self, tmp_path):
-        """Without a receipt the manifest may have drifted before migrating or moved
-        as part of it — the evidence cannot tell those apart, so it says neither."""
+    def test_no_receipt_and_only_manifest_contents_moved_keeps_the_baseline(self, tmp_path):
+        """A migration done by hand (or by an agent) never runs `pymolt apply`. When only
+        the contents of the same manifest moved — same file, base Python, toolset and
+        container — that move is the migration (bumped pins): the baseline is still its
+        starting point."""
         self._project(tmp_path)
         self._capture(tmp_path, "baseline")
         self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is False
+        assert UNKNOWN not in report.verdict_reasons
+        assert STALE not in report.verdict_reasons
+        assert any("taken as the migration's starting point" in n for n in report.notes)
+
+    def test_no_recorded_migration_with_a_moved_setup_is_unknown_never_fresh(self, tmp_path):
+        """Without a receipt, a changed setup (here: the base Python) may be drift before
+        migrating or part of it — the evidence cannot tell those apart, so it says
+        neither."""
+        self._project(tmp_path)
+        self._capture(tmp_path, "baseline")
+        _configure(tmp_path, base="3.12", contents="flask==3.0.0\n")
         self._capture(tmp_path, "post_migration")
 
         report = service.build_contract_report_from_state(tmp_path)
@@ -299,7 +317,7 @@ class TestBaselineIsJudgedAgainstTheMigrationStart:
         self._project(tmp_path)
         baseline = self._capture(tmp_path, "baseline")
         self._record_migration(tmp_path, baseline, status="rolled_back")
-        self._upgrade(tmp_path)
+        _configure(tmp_path, base="3.12", contents="flask==3.0.0\n")
         self._capture(tmp_path, "post_migration")
 
         report = service.build_contract_report_from_state(tmp_path)
@@ -311,7 +329,7 @@ class TestBaselineIsJudgedAgainstTheMigrationStart:
         self._project(tmp_path)
         baseline = self._capture(tmp_path, "baseline")
         receipt = self._record_migration(tmp_path, baseline, environment_fingerprint=None)
-        self._upgrade(tmp_path)
+        _configure(tmp_path, base="3.12", contents="flask==3.0.0\n")
         self._capture(tmp_path, "post_migration")
 
         report = service.build_contract_report_from_state(tmp_path)
@@ -321,6 +339,34 @@ class TestBaselineIsJudgedAgainstTheMigrationStart:
             f"migration run {receipt.run_id[:8]} predates recording" in n
             for n in report.notes
         )
+
+    def test_baseline_without_a_setup_fingerprint_is_unknown(self, tmp_path):
+        """State written before setup fingerprints existed: a moved manifest cannot be
+        attributed to its contents alone, so it is unknown — never fresh."""
+        self._project(tmp_path)
+        self._capture(tmp_path, "baseline")
+        state_path = tmp_path / ".pymolt" / "contract_state.json"
+        state = ContractState.load(state_path)
+        state.baseline.env_setup_fingerprint = None
+        state.save(state_path)
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is None
+        assert UNKNOWN in report.verdict_reasons
+
+    def test_setup_fingerprint_ignores_manifest_contents_only(self, tmp_path):
+        _configure(tmp_path)
+        full, setup = (service.environment_fingerprint(tmp_path),
+                       service.environment_setup_fingerprint(tmp_path))
+        (tmp_path / "requirements.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        assert service.environment_fingerprint(tmp_path) != full
+        assert service.environment_setup_fingerprint(tmp_path) == setup
+        _configure(tmp_path, manifest="requirements-dev.txt")
+        assert service.environment_setup_fingerprint(tmp_path) != setup
+        assert setup != full
 
     def test_older_receipt_falls_back_to_the_frozen_plan(self, tmp_path):
         """Receipts written before the field existed: apply only ever accepted a plan
