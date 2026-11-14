@@ -205,6 +205,11 @@ class ContractSlot(BaseModel):
     # re-check them at report time. None on old state files, and on projects
     # with no config to fingerprint — absence is "unknown", never "fresh".
     env_fingerprint: str | None = None
+    # The same without the manifest's contents: which manifest file, base Python,
+    # toolset and container. A baseline whose setup is unchanged while only the
+    # manifest's contents moved is still the starting point of a migration that
+    # bumped pins (see ``service.environment_setup_fingerprint``). None = unknown.
+    env_setup_fingerprint: str | None = None
     # The previous recording this one displaced, if any: overwriting a capture
     # archives it instead of deleting it, and this is where it went.
     archived_previous: str | None = None
