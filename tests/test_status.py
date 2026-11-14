@@ -229,6 +229,64 @@ class TestWorseThanNotDone:
         assert "no longer describes" in status.next_reason
 
 
+class TestBaselineAfterAMigration:
+    """Once a migration is recorded the baseline describes where it started, not the
+    project as it is now — an upgraded manifest is the migration, not staleness."""
+
+    def _migrated(self, project, **receipt):
+        _manifest(project)
+        _configure(project)
+        (project / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(project, "baseline")
+        receipt.setdefault("environment_fingerprint", service.environment_fingerprint(project))
+        return _receipt(project, baseline, **receipt)
+
+    def test_manifest_upgraded_by_the_migration_keeps_the_baseline_done(self, tmp_path):
+        self._migrated(tmp_path)
+        _manifest(tmp_path, "flask==3.0.0\n")   # the migration's own upgrade
+        _capture(tmp_path, "post_migration")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "baseline") == "done"
+        assert _state(status, "migration") == "done"
+        assert _state(status, "post-migration") == "done"
+        assert status.next_command == "pymolt verify ."
+
+    def test_post_capture_older_than_the_manifest_is_stale(self, tmp_path):
+        self._migrated(tmp_path)
+        _manifest(tmp_path, "flask==3.0.0\n")
+        _capture(tmp_path, "post_migration")
+        _manifest(tmp_path, "flask==3.1.0\n")   # moved again after the post capture
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "baseline") == "done"
+        assert _state(status, "post-migration") == "stale"
+        assert "capture --when post-migration" in status.next_command
+
+    def test_baseline_from_another_starting_point_is_stale(self, tmp_path):
+        receipt = self._migrated(tmp_path, environment_fingerprint="0" * 16)
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        assert baseline.state == "stale"
+        assert f"migration run {receipt.run_id[:8]} started from" in baseline.detail
+
+    def test_unrecorded_starting_point_is_not_vouched_for(self, tmp_path):
+        self._migrated(tmp_path, environment_fingerprint=None)
+        _manifest(tmp_path, "flask==3.0.0\n")
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        # Not stale on the evidence — re-capturing now would record the migrated
+        # world — but the detail must not read as a clean bill of health.
+        assert baseline.state == "done"
+        assert "cannot be confirmed" in baseline.detail
+
+
 class TestStatusCommand:
     def test_json_is_the_whole_projection(self, tmp_path):
         _manifest(tmp_path)

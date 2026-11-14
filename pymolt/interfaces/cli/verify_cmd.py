@@ -620,9 +620,11 @@ def _render_contract_report(rep) -> None:
         # Above the report, not inside it: every number below describes the old
         # world, and that has to be read first or not at all.
         console.print(Panel(
-            "[bold yellow]The evidence below predates the project's current state.[/bold yellow]\n"
-            "A capture was taken against a different manifest/environment, so this verdict "
-            "describes the world as it was then — not the code you have now.\n"
+            "[bold yellow]The evidence below does not describe the world it stands "
+            "for.[/bold yellow]\n"
+            "A capture was taken against a different manifest/environment than the one it "
+            "must describe — the project on disk now, or, for the baseline of a before/after "
+            "diff, the one the migration started from. The notes below say which.\n"
             "[dim]Re-capture (pymolt contract capture) to judge the current code.[/dim]",
             title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
         ))

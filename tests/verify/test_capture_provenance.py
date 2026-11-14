@@ -15,6 +15,8 @@ import json
 import sys
 
 from pymolt.ingestion.config import EnvConfig, ToolChoice
+from pymolt.migration_plan import MigrationPlan, apply_migration_plan, create_migration_plan
+from pymolt.migration_state import MigrationReceipt
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, ContractSlot, ContractState
 
@@ -177,3 +179,180 @@ class TestStalenessInTheReport:
         report = service.build_contract_report_from_state(tmp_path)
 
         assert any("dropped 3 event" in reason for reason in report.verdict_reasons)
+
+
+# ── the baseline is judged against where the migration started ───────────────
+
+STALE = "capture evidence is stale"
+UNKNOWN = "capture freshness could not be established"
+
+
+class TestBaselineIsJudgedAgainstTheMigrationStart:
+    """A migration that upgrades the manifest moves "now" away from the baseline by
+    design. The baseline must describe the starting point; only the post-migration
+    capture must describe the project as it is now."""
+
+    def _project(self, tmp_path):
+        (tmp_path / "app.py").write_text("import json\njson.loads('{}')\n", encoding="utf-8")
+        _configure(tmp_path)
+
+    def _capture(self, tmp_path, when):
+        # One workload for both sides, so only freshness can make them incomparable.
+        script = tmp_path / "workload.py"
+        script.write_text("import json\njson.loads('{}')\n", encoding="utf-8")
+        return service.capture_named_trace(
+            tmp_path, when, CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json",
+        )
+
+    def _record_migration(self, tmp_path, baseline, **overrides):
+        """The receipt `pymolt apply` leaves, started from the world as it is now."""
+        payload = {
+            "target_python": "3.12",
+            "source_manifest": "requirements.txt",
+            "baseline_trace_path": baseline.trace_path,
+            "baseline_captured_at": baseline.captured_at,
+            "environment_fingerprint": service.environment_fingerprint(tmp_path),
+        }
+        payload.update(overrides)
+        receipt = MigrationReceipt(**payload)
+        receipt.save(tmp_path)
+        return receipt
+
+    def _upgrade(self, tmp_path, contents="flask==3.0.0\n", manifest="requirements.txt"):
+        (tmp_path / manifest).write_text(contents, encoding="utf-8")
+
+    def test_manifest_upgraded_by_the_migration_leaves_the_baseline_fresh(self, tmp_path):
+        """The reported bug, through the real plan → apply path."""
+        self._project(tmp_path)
+        self._capture(tmp_path, "baseline")
+        plan = create_migration_plan(
+            tmp_path, [], [], target_python="3.12", source_manifest="requirements.txt",
+            target_manifest_path=None, files_scanned=0,
+        )
+        apply_migration_plan(tmp_path, plan)
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is False
+        assert not any("STALE" in n or "staleness unknown" in n for n in report.notes)
+        assert STALE not in report.verdict_reasons
+        assert UNKNOWN not in report.verdict_reasons
+
+    def test_post_migration_older_than_the_current_manifest_is_stale(self, tmp_path):
+        self._project(tmp_path)
+        baseline = self._capture(tmp_path, "baseline")
+        self._record_migration(tmp_path, baseline)
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+        self._upgrade(tmp_path, "flask==3.1.0\n")  # the world moved after the post capture
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is True
+        stale = [n for n in report.notes if "STALE EVIDENCE" in n]
+        assert len(stale) == 1
+        assert "post-migration capture" in stale[0]
+        assert "baseline" not in stale[0]  # the baseline is still the right starting point
+        assert STALE in report.verdict_reasons
+
+    def test_baseline_from_another_starting_point_is_stale(self, tmp_path):
+        """Setup re-run with another manifest before migrating: the baseline recorded a
+        world the migration never started from."""
+        self._project(tmp_path)
+        baseline = self._capture(tmp_path, "baseline")
+        _configure(tmp_path, manifest="requirements-prod.txt", contents="flask==2.0.3\nrequests\n")
+        receipt = self._record_migration(tmp_path, baseline)
+        self._upgrade(tmp_path, "flask==3.0.0\nrequests\n", manifest="requirements-prod.txt")
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is True
+        stale = [n for n in report.notes if "STALE EVIDENCE" in n]
+        assert len(stale) == 1
+        assert "baseline capture" in stale[0]
+        assert f"migration run {receipt.run_id[:8]} started from" in stale[0]
+        assert STALE in report.verdict_reasons
+
+    def test_no_recorded_migration_is_unknown_never_fresh(self, tmp_path):
+        """Without a receipt the manifest may have drifted before migrating or moved
+        as part of it — the evidence cannot tell those apart, so it says neither."""
+        self._project(tmp_path)
+        self._capture(tmp_path, "baseline")
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is None
+        assert not any("STALE EVIDENCE" in n for n in report.notes)
+        assert any(
+            "staleness unknown for the baseline" in n and "pymolt apply" in n
+            for n in report.notes
+        )
+        assert UNKNOWN in report.verdict_reasons
+
+    def test_a_rolled_back_migration_pins_nothing(self, tmp_path):
+        self._project(tmp_path)
+        baseline = self._capture(tmp_path, "baseline")
+        self._record_migration(tmp_path, baseline, status="rolled_back")
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is None
+        assert UNKNOWN in report.verdict_reasons
+
+    def test_receipt_without_a_starting_point_is_unknown(self, tmp_path):
+        self._project(tmp_path)
+        baseline = self._capture(tmp_path, "baseline")
+        receipt = self._record_migration(tmp_path, baseline, environment_fingerprint=None)
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is None
+        assert any(
+            f"migration run {receipt.run_id[:8]} predates recording" in n
+            for n in report.notes
+        )
+
+    def test_older_receipt_falls_back_to_the_frozen_plan(self, tmp_path):
+        """Receipts written before the field existed: apply only ever accepted a plan
+        whose fingerprint matched the project, so the frozen plan pins the start."""
+        self._project(tmp_path)
+        baseline = self._capture(tmp_path, "baseline")
+        plan = MigrationPlan(
+            target_python="3.12", source_manifest="requirements.txt",
+            environment_fingerprint=service.environment_fingerprint(tmp_path),
+        )
+        run_dir = tmp_path / ".pymolt" / "migrations" / plan.plan_id
+        frozen = plan.save(tmp_path, run_dir / "plan.json")
+        self._record_migration(
+            tmp_path, baseline, run_id=plan.plan_id, plan_path=str(frozen),
+            environment_fingerprint=None,
+        )
+        self._upgrade(tmp_path)
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is False
+
+    def test_unchanged_manifest_needs_no_receipt(self, tmp_path):
+        """Nothing moved since the baseline, so it describes the start whenever that was:
+        a code-only migration stays judgeable without `pymolt apply`."""
+        self._project(tmp_path)
+        self._capture(tmp_path, "baseline")
+        self._capture(tmp_path, "post_migration")
+
+        report = service.build_contract_report_from_state(tmp_path)
+
+        assert report.baseline_stale is False
+        assert STALE not in report.verdict_reasons
+        assert UNKNOWN not in report.verdict_reasons

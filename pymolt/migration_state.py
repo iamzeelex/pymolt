@@ -38,12 +38,33 @@ class MigrationReceipt(BaseModel):
     target_manifest_path: str | None = None
     baseline_trace_path: str | None = None
     baseline_captured_at: str | None = None
+    # The environment fingerprint the migration started from, stamped before any
+    # source write. A baseline is judged against this, not against the project
+    # as it is now: a migration that upgrades the manifest moves "now" away from
+    # the baseline by design.
+    environment_fingerprint: str | None = None
     allow_no_baseline: bool = False
     files_changed: list[str] = Field(default_factory=list)
     patterns_applied: int = 0
     no_codemods_required: bool = False
     plan_path: str | None = None
     rolled_back_at: str | None = None
+
+    def starting_fingerprint(self, project_dir: str | Path) -> str | None:
+        """The environment fingerprint this migration started from; None if unrecorded.
+
+        Receipts written before the field existed fall back to the frozen plan:
+        apply refuses a plan whose fingerprint differs from the project's at
+        apply time, so for an applied run the two are the same value.
+        """
+        if self.environment_fingerprint is not None:
+            return self.environment_fingerprint
+        if not self.plan_path:
+            return None
+        from pymolt.migration_plan import MigrationPlan
+
+        plan = MigrationPlan.load(project_dir, self.plan_path)
+        return plan.environment_fingerprint if plan is not None else None
 
     @classmethod
     def load(cls, project_dir: str | Path) -> MigrationReceipt | None:
