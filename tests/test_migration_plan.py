@@ -139,6 +139,21 @@ def test_apply_uses_exact_plan_and_rollback_restores_it(tmp_path):
     assert restored_receipt.status == "rolled_back"
 
 
+def test_apply_records_the_environment_the_migration_started_from(tmp_path):
+    """The baseline is later judged against this, not against the upgraded manifest."""
+    plan = _plan(tmp_path)
+    started_from = service.environment_fingerprint(tmp_path)
+
+    receipt = apply_migration_plan(tmp_path, plan)
+
+    assert started_from is not None
+    assert receipt.environment_fingerprint == started_from
+    (tmp_path / "requirements.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+    saved = MigrationReceipt.load(tmp_path)
+    assert saved is not None
+    assert saved.starting_fingerprint(tmp_path) == started_from
+
+
 def test_rollback_invalidates_post_migration_capture(tmp_path):
     plan = _plan(tmp_path)
     apply_migration_plan(tmp_path, plan)

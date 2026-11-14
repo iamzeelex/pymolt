@@ -68,8 +68,14 @@ def _age(iso_timestamp: str | None) -> str:
     return f"{max(delta.seconds // 60, 1)}m ago"
 
 
-def _capture_phase(name: str, slot, current_fingerprint: str | None) -> PhaseState:
-    """Project one capture slot, including whether its evidence still applies."""
+def _capture_phase(
+    name: str, slot, current_fingerprint: str | None, *, world: str = ""
+) -> PhaseState:
+    """Project one capture slot, including whether its evidence still applies.
+
+    ``current_fingerprint`` is the environment the capture must describe;
+    ``world`` names it in the stale detail when it is not the project as it is now.
+    """
     label = "baseline" if name == "baseline" else "post-migration"
     if slot is None:
         return PhaseState(
@@ -103,11 +109,45 @@ def _capture_phase(name: str, slot, current_fingerprint: str | None) -> PhaseSta
         )
     if (current_fingerprint is not None and slot.env_fingerprint is not None
             and slot.env_fingerprint != current_fingerprint):
+        than = f" than {world}" if world else ""
         return PhaseState(
             phase=label, state=STALE,
-            detail=f"{detail} — taken against a different manifest/environment",
+            detail=f"{detail} — taken against a different manifest/environment{than}",
         )
     return PhaseState(phase=label, state=DONE, detail=detail)
+
+
+def _baseline_phase(
+    slot, current_fingerprint: str | None, receipt, project_path: Path
+) -> PhaseState:
+    """Project the baseline against the world it must describe.
+
+    Before a recorded migration that is the project as it is now. After one it is
+    the environment the migration started from: a migration that upgrades the
+    manifest moves "now" away from the baseline by design, and re-capturing it
+    then would record the migrated world, not the starting point.
+    """
+    if receipt is None or receipt.status != "applied":
+        return _capture_phase("baseline", slot, current_fingerprint)
+    run = receipt.run_id[:8]
+    start = receipt.starting_fingerprint(project_path)
+    if start is not None:
+        return _capture_phase(
+            "baseline", slot, start, world=f"the one migration run {run} started from",
+        )
+    phase = _capture_phase("baseline", slot, None)
+    if (
+        phase.state == DONE
+        and current_fingerprint is not None
+        and slot.env_fingerprint is not None
+        and slot.env_fingerprint != current_fingerprint
+    ):
+        # Not stale on the evidence, but not vouched for either: say so.
+        phase.detail += (
+            f" — environment changed since; run {run} did not record where it started, "
+            "so this cannot be confirmed as its starting point"
+        )
+    return phase
 
 
 def _migration_phase(receipt, baseline: PhaseState, baseline_slot) -> PhaseState:
@@ -276,8 +316,8 @@ def build_status(project_dir: str | Path) -> FunnelStatus:
     fingerprint = environment_fingerprint(project_path)
     baseline_slot = contract.baseline
     post_slot = contract.post_migration
-    baseline = _capture_phase("baseline", baseline_slot, fingerprint)
     receipt = MigrationReceipt.load(project_path)
+    baseline = _baseline_phase(baseline_slot, fingerprint, receipt, project_path)
     assess_phase = status.phase("assess")
     assert assess_phase is not None
     plan = _plan_phase(project_path, assess_phase, receipt)
