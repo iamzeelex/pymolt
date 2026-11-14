@@ -118,7 +118,8 @@ def _capture_phase(
 
 
 def _baseline_phase(
-    slot, current_fingerprint: str | None, receipt, project_path: Path
+    slot, current_fingerprint: str | None, receipt, project_path: Path,
+    current_setup: str | None = None,
 ) -> PhaseState:
     """Project the baseline against the world it must describe.
 
@@ -128,7 +129,8 @@ def _baseline_phase(
     then would record the migrated world, not the starting point.
     """
     if receipt is None or receipt.status != "applied":
-        return _capture_phase("baseline", slot, current_fingerprint)
+        phase = _capture_phase("baseline", slot, current_fingerprint)
+        return _content_only_move(phase, slot, current_setup)
     run = receipt.run_id[:8]
     start = receipt.starting_fingerprint(project_path)
     if start is not None:
@@ -142,11 +144,43 @@ def _baseline_phase(
         and slot.env_fingerprint is not None
         and slot.env_fingerprint != current_fingerprint
     ):
+        if _setup_unchanged(slot, current_setup):
+            phase.detail += _CONTENT_ONLY_NOTE
+            return phase
         # Not stale on the evidence, but not vouched for either: say so.
         phase.detail += (
             f" — environment changed since; run {run} did not record where it started, "
             "so this cannot be confirmed as its starting point"
         )
+    return phase
+
+
+def _setup_unchanged(slot, current_setup: str | None) -> bool:
+    """Same rule as ``service.baseline_setup_unchanged`` (kept import-free here)."""
+    recorded = getattr(slot, "env_setup_fingerprint", None)
+    return recorded is not None and current_setup is not None and recorded == current_setup
+
+
+_CONTENT_ONLY_NOTE = (
+    " — the manifest's contents changed since (same file, base Python, toolset and "
+    "container): taken as the migration's starting point"
+)
+
+
+def _content_only_move(phase: PhaseState, slot, current_setup: str | None) -> PhaseState:
+    """A baseline is not stale when only the contents of the same manifest moved.
+
+    Bumping pins in the selected manifest is the migration itself; re-capturing the
+    baseline then would record the migrated world, not the starting point. Only the
+    fingerprint mismatch is forgiven — empty or invalid captures stay stale.
+    """
+    if (
+        phase.state == STALE
+        and phase.detail.endswith("taken against a different manifest/environment")
+        and _setup_unchanged(slot, current_setup)
+    ):
+        detail = phase.detail.removesuffix(" — taken against a different manifest/environment")
+        return PhaseState(phase=phase.phase, state=DONE, detail=detail + _CONTENT_ONLY_NOTE)
     return phase
 
 
@@ -259,7 +293,11 @@ def build_status(project_dir: str | Path) -> FunnelStatus:
     from pymolt.ingestion.config import EnvConfig
     from pymolt.ingestion.detect import detect_sources
     from pymolt.migration_state import MigrationReceipt
-    from pymolt.verify.service import environment_fingerprint, load_contract_state
+    from pymolt.verify.service import (
+        environment_fingerprint,
+        environment_setup_fingerprint,
+        load_contract_state,
+    )
 
     project_path = Path(project_dir)
     status = FunnelStatus(project_dir=str(project_path))
@@ -314,10 +352,13 @@ def build_status(project_dir: str | Path) -> FunnelStatus:
     # ── contract: the two captures, then the report they enable ──────────────
     contract = load_contract_state(project_path)
     fingerprint = environment_fingerprint(project_path)
+    setup_fingerprint = environment_setup_fingerprint(project_path)
     baseline_slot = contract.baseline
     post_slot = contract.post_migration
     receipt = MigrationReceipt.load(project_path)
-    baseline = _baseline_phase(baseline_slot, fingerprint, receipt, project_path)
+    baseline = _baseline_phase(
+        baseline_slot, fingerprint, receipt, project_path, current_setup=setup_fingerprint,
+    )
     assess_phase = status.phase("assess")
     assert assess_phase is not None
     plan = _plan_phase(project_path, assess_phase, receipt)

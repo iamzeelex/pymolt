@@ -30,10 +30,10 @@ def _manifest(project, contents="flask==2.0.3\n"):
     (project / "requirements.txt").write_text(contents, encoding="utf-8")
 
 
-def _configure(project, *, target="3.12"):
+def _configure(project, *, target="3.12", base="3.11"):
     EnvConfig(
         selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
-        base_python="3.11", target_python=target,
+        base_python=base, target_python=target,
     ).save(project / ".pymolt" / "env_config.json")
 
 
@@ -220,13 +220,32 @@ class TestWorseThanNotDone:
         _configure(tmp_path)
         (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
         _capture(tmp_path, "baseline")
-        _manifest(tmp_path, "flask==3.0.0\n")   # the world moved
+        _configure(tmp_path, base="3.10")   # the setup moved: another base Python
 
         status = build_status(tmp_path)
 
         assert _state(status, "baseline") == "stale"
         assert "capture --when baseline" in status.next_command
         assert "no longer describes" in status.next_reason
+
+
+class TestManualMigration:
+    """No `pymolt apply` (a migration done by hand or by an agent): bumping pins in the
+    same manifest is the migration, so the baseline stays its starting point."""
+
+    def test_only_manifest_contents_moved_keeps_the_baseline_done(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        _capture(tmp_path, "baseline")
+        _manifest(tmp_path, "flask==3.0.0\n")   # pins bumped in the same file
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        assert baseline.state == "done"
+        assert "taken as the migration's starting point" in baseline.detail
+        assert "capture --when baseline" not in status.next_command
 
 
 class TestBaselineAfterAMigration:
@@ -277,6 +296,7 @@ class TestBaselineAfterAMigration:
     def test_unrecorded_starting_point_is_not_vouched_for(self, tmp_path):
         self._migrated(tmp_path, environment_fingerprint=None)
         _manifest(tmp_path, "flask==3.0.0\n")
+        _configure(tmp_path, base="3.10")   # the setup moved too, not only the pins
 
         status = build_status(tmp_path)
 
