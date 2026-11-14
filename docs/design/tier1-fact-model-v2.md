@@ -143,6 +143,15 @@ previous all-contacts number stays available as `all_*`.
 Comparison level is reported per fact (`exact` / `type`). The verdict and `contract report` list
 every non-equal fact with symbol, site, and old → new.
 
+### Dynamic-only symbols and PASS
+A symbol the trace observed but the static map missed (dynamic-only — typically a method on an
+object a dependency returned, `df.groupby("k")["v"].sum()`) does **not** block PASS when every one
+of its facts compared equal on both sides (equal, DRIFT, or REWRITTEN with an equal outcome): it was
+observed and verified, so its absence from the static map is an under-approximation of the
+denominator, reported as a note. It still blocks PASS when any of its facts changed, vanished,
+appeared or could not be compared, and whenever there is no fact diff (custom comparator, a single
+trace).
+
 ## Out of scope for phase 1
 Value-class lens and saturation (phase 3), basins and statistical verdict (phase 3), sys.monitoring /
 code-swap backends and in-process aggregation (phase 2), HMAC privacy profile, C-call identity facts.
