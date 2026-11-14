@@ -89,10 +89,25 @@ class ContactMap(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+def prune_walk_dirs(dirpath: str, dirnames: list[str], ignore: set[str] | None = None) -> list[str]:
+    """Subdirectories of ``dirpath`` worth descending into.
+
+    Skips hidden dirs, ``ignore`` names (default ``_IGNORE_DIRS``), ``*.egg-info`` and any
+    NESTED git checkout (a child holding ``.git``, e.g. ``.claude/worktrees/*``). The walk
+    root itself is never pruned because only children are filtered.
+    """
+    skip = _IGNORE_DIRS if ignore is None else ignore
+    return [
+        d for d in dirnames
+        if d not in skip and not d.startswith(".") and not d.endswith(".egg-info")
+        and not os.path.exists(os.path.join(dirpath, d, ".git"))
+    ]
+
+
 def _python_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS and not d.endswith(".egg-info")]
+        dirnames[:] = prune_walk_dirs(dirpath, dirnames)
         for name in filenames:
             if name.endswith(".py"):
                 files.append(Path(dirpath) / name)
