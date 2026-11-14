@@ -66,6 +66,9 @@ class TestCaptureTrace:
         """No cancel_event (the MCP server's contract_capture path) + a command that
         never exits used to hang forever — _CAPTURE_TIMEOUT bounds it instead."""
         monkeypatch.setattr(service, "_CAPTURE_TIMEOUT", 0.2)
+        # A timed-out capture deliberately keeps raw traces it could not merge; keep that
+        # work dir inside tmp_path instead of leaking it into the real $TMPDIR.
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
         script = _write_script(tmp_path, "import time\ntime.sleep(30)\n")
         out = tmp_path / "trace.jsonl"
         start = time.monotonic()
