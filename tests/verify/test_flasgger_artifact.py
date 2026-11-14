@@ -63,5 +63,10 @@ def test_fold_invariants_over_local_capture():
     assert rep.confirmed + rep.blind == rep.static_targets
     assert rep.dynamic_only >= 0
     assert 0.0 <= rep.trust <= 1.0
-    if rep.static_targets:
-        assert rep.trust == pytest.approx(rep.confirmed / rep.static_targets)
+    # The headline trust is over behavioural contacts in executed files (``trust_basis``);
+    # every tier is its own confirmed / static ratio, and the headline is the last tier.
+    for tier in rep.trust_tiers:
+        if tier.static:
+            assert tier.trust == pytest.approx(tier.confirmed / tier.static)
+    if rep.trust_tiers:
+        assert rep.trust == pytest.approx(rep.trust_tiers[-1].trust)

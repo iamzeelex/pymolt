@@ -71,6 +71,18 @@ ContactKind = Literal[
 ]
 
 
+# Behavioural contacts run dependency code at our call site, so a trace can
+# witness them. Existence contacts are proven by an import that resolves; they
+# are not trace evidence and do not belong in the trust denominator.
+BEHAVIOURAL_KINDS: frozenset[str] = frozenset({"call", "decorator", "context-manager", "protocol"})
+EXISTENCE_KINDS: frozenset[str] = frozenset({"attribute-read", "class-base", "imported-constant"})
+
+
+def contact_class(kind: str) -> Literal["behavioural", "existence"]:
+    """``behavioural`` (trace evidence possible) or ``existence`` (import proves it)."""
+    return "behavioural" if kind in BEHAVIOURAL_KINDS else "existence"
+
+
 class Contact(BaseModel):
     caller: str  # our qualname, e.g. "myapp.views.handler"
     target: str  # dependency qualname, e.g. "flask.cli.with_appcontext"
