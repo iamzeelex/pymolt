@@ -3,7 +3,7 @@
 A TRANSPLANT edge (e.g. keras → torch/torchvision) is NOT auto-rewritten: the
 abstraction shift is a design task. pymolt turns the edge into an ordered, honest
 PLAN — scaffold the modern model, map the layers, port the weights, then *prove*
-behavioural equivalence with `pymolt contract`. We guide and verify; we never
+behavioural equivalence with `pymolt capture` + `pymolt verify`. We guide and verify; we never
 silently rewrite and claim the math survived.
 
 Pure/read-only: builds a structured plan from the edge, writes and runs nothing.
@@ -66,19 +66,19 @@ def build_transplant_plan(edge: SuccessionEdge, project_dir: str | Path = ".") -
         ))
 
     steps.append(TransplantStep(
-        n=len(steps) + 1, title="Verify behavioural equivalence with pymolt contract",
+        n=len(steps) + 1, title="Verify behavioural equivalence with pymolt capture and verify",
         detail="The honest gate for a transplant: the ported model must match the original on "
                "the same inputs. Capture the original's behaviour BEFORE you port, the ported "
                "model's after, then diff — replace the placeholder inference commands with yours.",
         commands=[
             "# 1) BEFORE porting — capture the original model on a fixture input:",
-            "pymolt contract capture --when baseline --mode command -- "
+            "pymolt capture baseline --mode command -- "
             "python infer_original.py --input fixture",
             "# 2) after steps 1–3, run the PORTED model on the SAME input:",
-            "pymolt contract capture --when post-migration --mode command -- "
+            "pymolt capture post-migration --mode command -- "
             "python infer_ported.py --input fixture",
             "# 3) diff — the outputs must agree:",
-            "pymolt contract report",
+            "pymolt verify",
         ],
     ))
 

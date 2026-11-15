@@ -151,51 +151,65 @@ def test_client_local_cache_hit_bypasses_http() -> None:
     assert res["pandas"].patterns[0].new_qualname == "pandas.concat"
 
 
-def test_cli_config_commands() -> None:
-    # 1. Config show
-    result = runner.invoke(app, ["config", "show", "--json"])
+def test_cli_axiom_endpoint_and_cache(monkeypatch) -> None:
+    from pymolt.codemods.client import AxiomGraphClient
+
+    monkeypatch.setattr(AxiomGraphClient, "health", lambda self: False)
+    result = runner.invoke(app, ["axiom", "status", "--json"])
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["endpoint"] == DEFAULT_ENDPOINT
     assert data["token_configured"] is False
+    assert data["online"] is False
 
-    # 2. Config set-endpoint
-    result = runner.invoke(app, ["config", "set-endpoint", "http://localhost:8000"])
+    result = runner.invoke(app, ["axiom", "endpoint", "http://localhost:8000"])
     assert result.exit_code == 0
-    assert "Set Axiom endpoint to http://localhost:8000" in result.output
+    assert "Endpoint set to http://localhost:8000" in result.output
     assert load_endpoint() == "http://localhost:8000"
+    assert runner.invoke(app, ["axiom", "endpoint"]).output.strip() == "http://localhost:8000"
 
-    # 3. Config reset-endpoint
-    result = runner.invoke(app, ["config", "reset-endpoint"])
+    result = runner.invoke(app, ["axiom", "endpoint", "--reset"])
     assert result.exit_code == 0
     assert DEFAULT_ENDPOINT in result.output
     assert load_endpoint() == DEFAULT_ENDPOINT
 
-    # 4. Config clear-cache
-    result = runner.invoke(app, ["config", "clear-cache"])
+    assert runner.invoke(app, ["axiom", "endpoint", "ftp://x"]).exit_code == 2
+
+    result = runner.invoke(app, ["axiom", "clear-cache"])
     assert result.exit_code == 0
-    assert "Cleared local delta cache" in result.output
+    assert "Cleared the local cache" in result.output
 
 
-def test_cli_auth_commands() -> None:
-    # 1. Status when logged out
-    result = runner.invoke(app, ["auth", "status"])
+def test_cli_axiom_login_status_logout(monkeypatch) -> None:
+    from pymolt.codemods.client import AxiomGraphClient
+
+    monkeypatch.setattr(AxiomGraphClient, "health", lambda self: True)
+    result = runner.invoke(app, ["axiom", "status"])
     assert result.exit_code == 0
-    assert "Anonymous / Community" in result.output
+    assert "not logged in" in result.output and "online" in result.output
 
-    # 2. Login with token
-    result = runner.invoke(app, ["auth", "login", "--token", "pmk_test_auth_123456789"])
-    assert result.exit_code == 0
-    assert "Successfully authenticated" in result.output
-    assert load_token() == "pmk_test_auth_123456789"
-
-    # 3. Status when logged in
-    result = runner.invoke(app, ["auth", "status"])
+    result = runner.invoke(app, ["axiom", "login", "--token", "pmk_test_auth_123456789"])
     assert result.exit_code == 0
     assert "Logged in" in result.output
+    assert load_token() == "pmk_test_auth_123456789"
 
-    # 4. Logout
-    result = runner.invoke(app, ["auth", "logout"])
+    assert "logged in (" in runner.invoke(app, ["axiom", "status"]).output
+
+    result = runner.invoke(app, ["axiom", "logout"])
     assert result.exit_code == 0
     assert "Logged out" in result.output
+    assert load_token() is None
+
+
+def test_old_config_and_auth_commands_name_the_axiom_ones() -> None:
+    for argv, new in (
+        (["config", "set-endpoint", "http://x"], "pymolt axiom endpoint URL"),
+        (["config", "show"], "pymolt axiom status"),
+        (["auth", "login", "--token", "pmk_x"], "pymolt axiom login"),
+        (["login", "--token", "pmk_x"], "pymolt axiom login"),
+        (["logout"], "pymolt axiom logout"),
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 2, argv
+        assert new in result.output, argv
     assert load_token() is None

@@ -49,11 +49,11 @@ def test_static_only_report_is_all_blind():
 
 
 def test_fold_invariants_over_local_capture():
-    """When a named capture exists (pymolt contract capture), fold it and hold
+    """When a named capture exists (pymolt capture), fold it and hold
     the report's arithmetic to its own definitions."""
     trace = _FLASGGER / ".pymolt" / "contract_traces" / "baseline.jsonl"
     if not trace.is_file():
-        pytest.skip("no local capture present (pymolt contract capture --when baseline …)")
+        pytest.skip("no local capture present (pymolt capture baseline …)")
 
     from pymolt.verify.report import build_contract_report
 

@@ -85,12 +85,12 @@ def test_verdict_bronze_is_amber_with_upgrade_path():
 
 def test_verdict_silver_is_green_but_scoped():
     title, body, style = compatibility_verdict("3.12", None, BaselineTier.SILVER)
-    assert style == "green" and "SILVER" in title and "pymolt contract" in body
+    assert style == "green" and "SILVER" in title and "capture and verify" in body
 
 
 def test_verdict_gold_is_green():
     title, body, style = compatibility_verdict("3.12", None, BaselineTier.GOLD)
-    assert style == "green" and "GOLD" in title and "pymolt contract" in body
+    assert style == "green" and "GOLD" in title and "pymolt verify" in body
 
 
 # ── degrade + hint ────────────────────────────────────────────────────────────

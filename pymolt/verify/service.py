@@ -81,7 +81,7 @@ CONTRACT_STATE_PATH = Path(".pymolt") / "contract_state.json"
 ENV_CONFIG_PATH = Path(".pymolt") / "env_config.json"
 
 # Hard ceiling on an un-cancellable local capture (e.g. the MCP server's
-# contract_capture, which never passes cancel_event) so a command that never
+# capture tool, which never passes cancel_event) so a command that never
 # exits (a dev server, a hung test) can't hang the caller forever.
 _CAPTURE_TIMEOUT = int(os.environ.get("PYMOLT_CAPTURE_TIMEOUT", "1800"))
 
@@ -371,7 +371,7 @@ def capture_trace_local(
     kept. This is what powers the guided flow's "Stop & Collect" for a
     long-running app (a dev server that never exits on its own).
 
-    When ``cancel_event`` is ``None`` (e.g. the MCP server's ``contract_capture``,
+    When ``cancel_event`` is ``None`` (e.g. the MCP server's ``capture`` tool,
     which never passes one) there is no other thread able to cancel a command
     that never exits on its own — so this still enforces ``_CAPTURE_TIMEOUT``
     (``PYMOLT_CAPTURE_TIMEOUT`` env var, default 1800s): on expiry the process is
