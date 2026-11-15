@@ -609,6 +609,8 @@ def plan(
         "api_impacts": len(migration_plan.impacts),
         "patch_path": str(patch_path) if patch_path else None,
         "risks": _risks_payload(migration_plan.risks),
+        "python": migration_plan.python,
+        "compile_findings": migration_plan.compile_findings,
     }
     if agent:
         from pymolt.interfaces import views
@@ -631,11 +633,43 @@ def plan(
         title="Migration plan", border_style="cyan", expand=False,
     ))
     _render_recipes(by_pkg, previews, migration_plan.files_scanned, migration_plan.risks)
-    _render_risks(migration_plan.risks)
+    from pymolt.interfaces.views import dependency_risks
+
+    deps = dependency_risks(migration_plan.risks)
+    _render_risks(deps if deps is not None and (
+        migration_plan.baseline_trace_path or deps.risks or deps.deltas) else None)
+    _render_python(migration_plan)
     _render_or_write_patches(previews, project_path, None)
     console.print(
         f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
     )
+
+
+def _render_python(plan) -> None:
+    """The python move's risks: one summary line, the sites, and what is listed unrated."""
+    from pymolt.interfaces.views import python_summary_line
+
+    line = python_summary_line(plan)
+    if line is None:
+        return
+    risks = [r for r in plan.risks.risks if r.scope == "python"] if plan.risks else []
+    if risks:
+        table = Table(title="Python risks", title_justify="left", border_style="yellow")
+        for column in ("risk", "site", "symbol", "why"):
+            table.add_column(column)
+        for risk in risks:
+            style = _TIER_STYLE.get(risk.tier.value, "")
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
+                          risk.symbol, risk.reason + (" (manual)" if risk.fix == "advisory"
+                                                      else ""))
+        console.print(table)
+    console.print(f"\n[bold]{line}[/bold]")
+    for listed in (plan.risks.guarded if plan.risks else []):
+        console.print(f"[dim]  listed, not rated: {listed.site.label()} {listed.symbol} "
+                      f"({listed.kind})[/dim]")
+    if plan.compile_findings:
+        console.print(f"[dim]  compile check: {len(plan.compile_findings)} finding(s) on "
+                      f"Python {plan.python.get('to')} (see the saved plan)[/dim]")
 
 
 def _risks_payload(risks) -> dict | None:
@@ -927,11 +961,32 @@ def scan(
 
     if report.contact_map is not None:
         _render_contact_map(report.contact_map)
+    if report.python_exposure is not None:
+        _render_python_exposure(report.python_exposure, report.contact_map)
 
     next_step(project_path)
 
 
 _CONTACT_ROWS = 15
+
+
+def _render_python_exposure(exposure: dict, cmap) -> None:
+    """Stdlib names the data says are gone, and how far up the code runs unchanged."""
+    from pymolt.interfaces import views
+
+    summary = views.exposure_summary(exposure)
+    if summary:
+        console.print(f"\n[bold]Python exposure[/bold] — {summary}")
+        for row in exposure["unguarded_sites"][:_CONTACT_ROWS]:
+            console.print(f"  [dim]{row}[/dim]")
+        extra = len(exposure["unguarded_sites"]) - _CONTACT_ROWS
+        if extra > 0:
+            console.print(f"  [dim]… {extra} more (pymolt scan --json)[/dim]")
+    if cmap is not None and cmap.unparsed_cython:
+        console.print(
+            f"[dim]{len(cmap.unparsed_cython)} .pyx/.pxd/.pxi file(s) are not parsed; names "
+            "used only inside them are not counted.[/dim]"
+        )
 
 
 def _render_contact_map(cmap) -> None:

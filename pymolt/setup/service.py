@@ -428,6 +428,7 @@ def apply_setup(
         base_python=choices.base_python,
         base_python_source=choices.base_python_source,
         container_id=choices.container_id,
+        runner=_container_runner(choices),
         system_python=choices.system_python,
         target_python=choices.target_python,
         target_env_created=choices.target_env_created,
@@ -435,6 +436,15 @@ def apply_setup(
     )
     config.save(pymolt_dir / "env_config.json")
     return config
+
+
+def _container_runner(choices: SetupChoices):
+    """How to reach the chosen container again (name, mounts, platform); None if unreadable."""
+    from pymolt.adapters.python_runner import inspect_container
+
+    if choices.selected_tool != ToolChoice.CONTAINER or not choices.container_id:
+        return None
+    return inspect_container(choices.container_id)
 
 
 _GITIGNORE_ENTRY = ".pymolt/env_config.json"

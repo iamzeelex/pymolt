@@ -115,7 +115,7 @@ def test_scan_keeps_excluded_roots_and_notes(tmp_path):
     )
     view = views.scan_view(report, tmp_path)
     data = _assert_envelope(view, {"root_count", "roots", "excluded_roots", "edge_totals",
-                                   "divergences", "contacts"})
+                                   "divergences", "contacts", "python_exposure"})
     assert data["excluded_roots"] == ["vendor/lib: vendored tree"]
     assert "could not parse broken.py" in data["warnings"]
     assert "Dockerfile ARG PY_VERSION has no default" in data["warnings"]
@@ -378,6 +378,7 @@ _PLAN_KEYS = {
     "api_impacts_total", "baseline_bound", "api_deltas_inconclusive", "api_deltas_total",
     "risks_status", "risks_attention",
     "risks_attention_total", "risks_fixed", "risks_fixed_total",
+    "python", "compile_findings", "compile_findings_total",
 }
 
 
@@ -520,6 +521,16 @@ def test_plan_counts_risks_beside_the_unknown_api_changes():
     summary = views.plan_view(plan, {}, "t.txt", plan_path="/p/plan.json")["summary"]
     assert ("Predicted risks: 0 need attention, 0 fixed by the plan; API changes unknown "
             "for 1 of 2 package(s) (inconclusive)") in summary
+
+
+def test_plan_labels_dependency_risks_beside_a_python_line():
+    # "0 need attention" under "8 certain" python risks read as a contradiction.
+    plan = _plan_with_risks(["complete"], changes=False)
+    plan.python = {"from": "3.6", "to": "3.12", "quality": "complete", "sides": {}}
+    summary = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")["summary"]
+    assert "Python 3.6→3.12:" in summary
+    assert "Dependency risks: 0 need attention, 0 fixed by the plan (" in summary
+    assert "Predicted risks:" not in summary
 
 
 def test_plan_keeps_the_plain_risk_line_when_every_delta_is_conclusive():
