@@ -91,3 +91,8 @@ EDITIONS.md
 services/
 bench/e2e_pandas/.envs/
 bench/e2e_pandas/results/
+
+# legacy evaluation runs: keep the scorecards, not the per-project logs and build envs
+bench/legacy_eval/results/*/*
+!bench/legacy_eval/results/*/scorecard.json
+!bench/legacy_eval/results/*/scorecard.md
