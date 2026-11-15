@@ -1,26 +1,19 @@
-"""CLI for verify/ — the external boundary tracer + diff (Component 6, interfaces layer).
+"""CLI for verify/ — `pymolt capture`, and the contract report `pymolt verify` renders.
 
 Everything here runs *outside* the target project: the watcher is injected via PYTHONPATH +
 PYMOLT_TRACE_* env (zero edits to the target), and rendering of the structured reports
 lives here in interfaces/, not in the non-interactive core (spec: render is not the core's job).
 
-Commands:
-  pymolt capture baseline|post-migration -- CMD...   run CMD, keep it as that side's capture
-  pymolt contract diff OLD NEW [--json]               fold two recordings into a BoundaryDiff
-  pymolt contract report DIR                          unified report (auto-sources the captures)
-
 Capture/injection itself lives in ``pymolt.verify.service`` (so callers can drive the same
 mechanism) — this file is CLI rendering + interactive prompting only.
 """
 import json
-import os
 
 import typer
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from pymolt.core.enums import Verdict
 from pymolt.interfaces.cli.output import (
     EXIT_FINDING,
     EXIT_INCONCLUSIVE,
@@ -29,31 +22,14 @@ from pymolt.interfaces.cli.output import (
     err,
     fail,
     next_step,
-    require_file,
     require_project_dir,
 )
 from pymolt.verify import service
-from pymolt.verify.cascade import _verdict_from_boundary
-from pymolt.verify.comparators import (
-    ComparatorError,
-    ComparatorProfile,
-    compare_traces,
-    load_custom_comparator,
-)
 from pymolt.verify.models import (
-    BoundaryDiff,
     CaptureMode,
     CaptureValidity,
     VerificationVerdict,
 )
-
-app = typer.Typer(help="Behavioral boundary tracing & diff (runs entirely outside the target).")
-
-_VERDICT_STYLE = {
-    Verdict.BEHAVIOR_STABLE: "bold green",
-    Verdict.BEHAVIOR_CHANGED: "bold red",
-    Verdict.NEEDS_ACTION: "bold yellow",
-}
 
 
 def _verification_exit(verdict: VerificationVerdict) -> int:
@@ -62,50 +38,6 @@ def _verification_exit(verdict: VerificationVerdict) -> int:
         VerificationVerdict.FAIL: EXIT_FINDING,
         VerificationVerdict.INCONCLUSIVE: EXIT_INCONCLUSIVE,
     }[verdict]
-
-
-# ── shared helpers ────────────────────────────────────────────────────────────
-def render_boundary_diff(diff: BoundaryDiff, full: bool = False) -> None:
-    """Render a BoundaryDiff for humans (the formatting the core deliberately omits)."""
-    verdict = _verdict_from_boundary(diff)
-    counts = diff.counts()
-    console.print(Panel(
-        f"verdict: [{_VERDICT_STYLE[verdict]}]{verdict.value}[/]\n"
-        f"comparable behavior changed: "
-        f"{'[red]yes[/]' if not diff.is_clean() else '[green]no[/]'}\n"
-        f"disappeared={counts['disappeared']}  result_changed={counts['result_changed']}  "
-        f"raise_changed={counts['raise_changed']}  appeared={counts['appeared']}  "
-        f"[yellow]skipped_opaque={counts['skipped_opaque']}[/]",
-        title="Boundary diff", expand=False,
-    ))
-
-    def _cell(r, c):
-        if c == "where":
-            w = r.get("where")
-            return f"{os.path.basename(w['file'])}:{w['line']}" if isinstance(w, dict) else ""
-        return str(r.get(c, ""))
-
-    def _table(title, rows, cols, style):
-        if not rows:
-            return
-        shown = rows if full else rows[:15]
-        t = Table(title=f"{title} ({len(rows)})", header_style=style)
-        for c in cols:
-            t.add_column("call site" if c == "where" else c)
-        for r in shown:
-            t.add_row(*[_cell(r, c) for c in cols])
-        if not full and len(rows) > len(shown):
-            t.caption = f"… {len(rows) - len(shown)} more (use --full)"
-        console.print(t)
-
-    _table("BREAKING — disappeared", diff.disappeared, ["qualname", "where"], "red")
-    _table("BREAKING — result_changed", diff.result_changed,
-           ["qualname", "where", "old", "new"], "red")
-    _table("BREAKING — raise_changed", diff.raise_changed,
-           ["qualname", "where", "old_raised", "new_raised"], "red")
-    _table("NEEDS-ACTION — skipped_opaque", diff.skipped_opaque, ["qualname", "where", "reason"],
-           "yellow")
-    _table("INFO — appeared", diff.appeared, ["qualname", "where"], "cyan")
 
 
 # ── capture ───────────────────────────────────────────────────────────────────
@@ -285,52 +217,6 @@ def capture_cmd(
     if slot.archived_previous:
         err.print(f"[dim]previous {when} recording kept at {slot.archived_previous}[/dim]")
     next_step(project_dir)
-
-
-@app.command("diff")
-def diff_cmd(
-    old: str = typer.Argument(..., help="OLD recording (JSON or JSONL)"),
-    new: str = typer.Argument(..., help="NEW recording (JSON or JSONL)"),
-    contract: bool = typer.Option(
-        False, "--contract", "-C",
-        help="Compare by interaction SHAPE (type/structure), ignoring concrete data values"),
-    profile: str = typer.Option(
-        "exact", "--profile", help="Comparator: exact | shape | custom"
-    ),
-    comparator: str | None = typer.Option(
-        None, "--comparator", help="Custom comparator as module:callable"
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Emit the BoundaryDiff as JSON"),
-    full: bool = typer.Option(False, "--full", help="Show all entries, not just the first 15"),
-):
-    """Fold two boundary recordings into a BoundaryDiff and report it.
-
-    Default compares concrete values; ``--contract`` compares only the interaction shape
-    (returned-vs-raised, result type/structure) — robust to volatile data (paths, timestamps).
-    """
-    # A missing recording used to fold into an empty diff and report "no behavior
-    # change" — a false all-clear, the one answer this command must never invent.
-    require_file(old, what="OLD recording", json_output=as_json)
-    require_file(new, what="NEW recording", json_output=as_json)
-
-    if contract:
-        if profile != "exact":
-            fail("--contract cannot be combined with --profile", json_output=as_json)
-        profile = "shape"
-    try:
-        selected = ComparatorProfile(profile)
-        if selected is ComparatorProfile.CUSTOM:
-            if comparator is None:
-                raise ComparatorError("--profile custom requires --comparator module:callable")
-            load_custom_comparator(comparator)
-        diff = compare_traces(old, new, profile=selected, custom=comparator)
-    except ComparatorError as exc:
-        fail(str(exc), json_output=as_json)
-    if as_json:
-        console.print_json(diff.model_dump_json())
-    else:
-        render_boundary_diff(diff, full=full)
-    raise typer.Exit(code=_verification_exit(diff.verdict))
 
 
 _TRUST_TIER_LABELS = {
@@ -523,53 +409,3 @@ def _render_contract_report(rep) -> None:
 
     for note in rep.notes:
         console.print(f"[dim]Note: {note}[/dim]")
-
-
-@app.command("report")
-def report_cmd(
-    project_dir: str = typer.Argument(".", help="Project root to analyze"),
-    trace: str = typer.Option(None, "--trace", help="Observed trace JSONL (the dynamic numerator)"),
-    against: str = typer.Option(None, "--against", help="Older trace to diff the --trace against (version diff)"),
-    probe_python: str = typer.Option(None, "--probe-python", help="Target venv interpreter: sandbox-probe captured contacts under it"),
-    profile: str = typer.Option(
-        "exact", "--profile", help="Comparator: exact | shape | custom"
-    ),
-    comparator: str | None = typer.Option(
-        None, "--comparator", help="Custom comparator as module:callable"
-    ),
-    json_output: bool = typer.Option(False, "--json", help="Emit the report as JSON"),
-):
-    """Unified contract report: static map × dynamic trace → confirmed / BLIND / dynamic-only
-    (+ sandbox probe, version diff).
-
-    When --trace is omitted, auto-sources from .pymolt/contract_state.json (baseline/
-    post-migration captured via `capture`) — explicit --trace/--against always override.
-    """
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    if trace:
-        require_file(trace, what="--trace recording", json_output=json_output)
-    if against:
-        require_file(against, what="--against recording", json_output=json_output)
-
-    try:
-        selected = ComparatorProfile(profile)
-        if selected is ComparatorProfile.CUSTOM:
-            if comparator is None:
-                raise ComparatorError("--profile custom requires --comparator module:callable")
-            load_custom_comparator(comparator)
-        rep = service.build_contract_report_from_state(
-            project_path,
-            trace_override=trace,
-            against_override=against,
-            probe_python=probe_python,
-            comparator_profile=selected.value,
-            custom_comparator=comparator,
-        )
-    except (ComparatorError, ValueError) as exc:
-        fail(str(exc), json_output=json_output)
-    if json_output:
-        typer.echo(json.dumps(rep.model_dump(mode="json"), indent=2))
-        raise typer.Exit(code=_verification_exit(rep.verdict))
-    _render_contract_report(rep)
-    next_step(project_path)
-    raise typer.Exit(code=_verification_exit(rep.verdict))

@@ -20,6 +20,7 @@ from pymolt.interfaces.cli.commands import app
 from pymolt.interfaces.cli.output import (
     EXIT_ENVIRONMENT,
     EXIT_FINDING,
+    EXIT_INCONCLUSIVE,
     EXIT_OK,
     EXIT_USAGE,
 )
@@ -130,7 +131,7 @@ class TestExitCodes:
             ["setup", missing],
             ["codemods", missing, "-p", "flask", "--from", "1", "--to", "2"],
             ["succession", missing],
-            ["contract", "report", missing],
+            ["verify", missing],
         ):
             result = runner.invoke(app, argv)
             assert result.exit_code == EXIT_USAGE, f"{argv} -> {result.exit_code}"
@@ -140,11 +141,18 @@ class TestExitCodes:
         exit 0 — a false 'no behavior change'."""
         real = tmp_path / "old.jsonl"
         real.write_text('{"t": "return", "q": "dep.f", "in": {"bound": {}}, "result": 1}\n')
-        result = runner.invoke(app, ["contract", "diff", str(real), str(tmp_path / "typo.jsonl")])
+        result = runner.invoke(app, [
+            "verify", str(tmp_path), "--baseline", str(real),
+            "--post-migration", str(tmp_path / "typo.jsonl"),
+        ])
         assert result.exit_code == EXIT_USAGE
-        assert "no such NEW recording" in result.stderr
+        assert "no such --post-migration recording" in result.stderr
 
-    def test_clean_diff_is_ok_and_changed_diff_is_a_finding(self, tmp_path):
+    def test_changed_recordings_are_a_finding_and_equal_ones_need_a_static_surface(
+        self, tmp_path,
+    ):
+        """Equal recordings are not a PASS on their own: with no code calling the
+        dependency there is no static surface to vouch for (`contract diff` said OK)."""
         def rec(path, result_value):
             path.write_text(
                 json.dumps({"t": "return", "q": "dep.f", "in": {"bound": {}},
@@ -156,8 +164,15 @@ class TestExitCodes:
         same = rec(tmp_path / "same.jsonl", 1)
         changed = rec(tmp_path / "new.jsonl", 2)
 
-        assert runner.invoke(app, ["contract", "diff", old, same]).exit_code == EXIT_OK
-        assert runner.invoke(app, ["contract", "diff", old, changed]).exit_code == EXIT_FINDING
+        def verify(new):
+            return runner.invoke(app, [
+                "verify", str(tmp_path), "--baseline", old, "--post-migration", new, "--json",
+            ])
+
+        unchanged = verify(same)
+        assert unchanged.exit_code == EXIT_INCONCLUSIVE
+        assert "static contract surface is empty" in unchanged.stdout
+        assert verify(changed).exit_code == EXIT_FINDING
 
     def test_dead_service_is_environment_not_usage(self, project, monkeypatch):
         from pymolt.codemods import service as codemods_service
@@ -230,9 +245,9 @@ class TestRendering:
         # Match the panel border, not the phrase — the help text names the panel too.
         assert "╭─ Behavioural proof" in result.output
         proof = result.output.split("╭─ Behavioural proof")[1].split("╰")[0]
-        assert "contract" in proof
+        assert "capture" in proof and "verify" in proof
         prep = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
-        assert "contract" not in prep
+        assert "capture" not in prep and "verify" not in prep
 
     def test_help_leads_with_capturing_a_baseline_first(self):
         """The one instruction a user cannot act on retroactively goes up top."""

@@ -132,7 +132,7 @@ results/<UTC stamp>-<label>/          # one session (gate, or a standalone nocap
   <run>/run.json                      # config, provenance, host load, timings, loadgen result, capture facts
   <run>/report.json, summary.md       # written by `report` / `gate`
   <run>/loadgen.json, *.log           # raw load result, service/capture/stub logs
-  <run>/fold.json, fold.time          # capture runs: `contract report --json` output + /usr/bin/time -l
+  <run>/fold.json, fold.time          # capture runs: `verify --json` output + /usr/bin/time -l
   <run>/svc/                          # the run's project dir (app.py, orders.db, .pymolt/)
 ```
 
@@ -162,7 +162,7 @@ A 60 s phase-1 saturated capture leaves ~20-60 MB of trace; delete old sessions 
 | `bytes_per_day` | `bytes at window start + in_window x 86400 / window_seconds + at_exit`: what the steady state writes scales with time, startup, discover and exit output happen once. A rewritten facts snapshot counts by its growth. Gate criterion 3a |
 | `bytes_per_day_linear` | `out_bytes x 86400 / load_seconds`, the naive upper bound |
 | `capture_wall_s` / `capture_finalize_s` | pymolt capture process lifetime / from service exit to pymolt exit (merge + metadata + site text) |
-| `fold` | `/usr/bin/time -l pymolt contract report <svc> --json`: `max_rss_bytes` (gate 3b), `seconds`, exit code (non-zero exit codes are findings, not harness errors), whether the JSON parsed |
+| `fold` | `/usr/bin/time -l pymolt verify <svc> --json`: `max_rss_bytes` (gate 3b), `seconds`, exit code (non-zero exit codes are findings, not harness errors), whether the JSON parsed |
 | `host_load` | load average and the other processes' summed %CPU right before the run, top consumers |
 
 ### Gate thresholds (`GATE` in run.py)

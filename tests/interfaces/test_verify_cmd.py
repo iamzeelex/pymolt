@@ -1,4 +1,4 @@
-"""CLI tests for pymolt/interfaces/cli/verify_cmd.py (the `contract` sub-app).
+"""CLI tests for `pymolt capture` and the report `pymolt verify` renders.
 
 Drives the actual Typer CliRunner invocation, not just the underlying
 service/report functions — an import or wiring bug in the CLI's own
@@ -18,7 +18,6 @@ from typer.testing import CliRunner
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app as cli
 from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE, EXIT_USAGE
-from pymolt.interfaces.cli.verify_cmd import app
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
 
@@ -175,9 +174,9 @@ def test_report_auto_sources_from_captured_state_and_explicit_override_wins(tmp_
     ])
     assert cap.exit_code == 0, cap.output
 
-    rep = runner.invoke(app, ["report", str(tmp_path), "--json"])
+    rep = runner.invoke(cli, ["verify", str(tmp_path), "--json"])
     assert rep.exit_code == EXIT_INCONCLUSIVE, rep.output
-    data = json.loads(rep.output)
+    data = json.loads(rep.output)["contract"]
     assert data["static_targets"] >= 1
     # the captured baseline trace was picked up (auto-sourced from state, no --trace given):
     assert data["observed_targets"] >= 1
@@ -186,30 +185,31 @@ def test_report_auto_sources_from_captured_state_and_explicit_override_wins(tmp_
     empty_trace = tmp_path / "empty.jsonl"
     empty_trace.write_text("")
     overridden = runner.invoke(
-        app, ["report", str(tmp_path), "--trace", str(empty_trace), "--json"]
+        cli, ["verify", str(tmp_path), "--post-migration", str(empty_trace), "--json"]
     )
-    overridden_data = json.loads(overridden.output)
+    overridden_data = json.loads(overridden.output)["contract"]
     assert overridden_data["observed_targets"] == 0  # explicit (empty) trace wins over state
 
 
-def test_diff_human_rendering_does_not_crash_on_skipped_opaque_rows(tmp_path):
-    """Regression: render_boundary_diff's _cell() calls os.path.basename — this
-    only crashes when the CLI actually renders (not --json), which is why a
-    prior refactor that dropped `import os` from verify_cmd.py slipped past
-    every test that called build_boundary_diff() directly."""
+def test_verify_on_explicit_recordings_renders_and_is_not_saved(tmp_path):
+    """Two recordings from elsewhere (what `contract diff` took): rendered in
+    human mode without crashing, and never saved as this project's verdict."""
     app_py = _write_app(tmp_path, third_party=True)
     old = tmp_path / "old.jsonl"
     new = tmp_path / "new.jsonl"
     for out in (old, new):
         service.capture_trace("requests", [sys.executable, str(app_py)], out, "auto")
 
-    result = runner.invoke(app, ["diff", str(old), str(new)])
-    assert result.exit_code in (0, 1)
+    result = runner.invoke(cli, [
+        "verify", str(tmp_path), "--baseline", str(old), "--post-migration", str(new),
+    ])
+    assert result.exit_code in (0, 1, EXIT_INCONCLUSIVE)
     assert "Traceback" not in result.output
-    assert "NameError" not in result.output
+    assert "not saved" in result.output
+    assert not (tmp_path / ".pymolt" / "verification.json").exists()
 
 
-def test_diff_with_opaque_values_is_inconclusive(tmp_path):
+def test_verify_with_opaque_values_is_inconclusive(tmp_path):
     event = {
         "q": "pkg.call", "in": {"bound": {}}, "t": "return",
         "result": {"__opaque__": "Thing"},
@@ -219,28 +219,35 @@ def test_diff_with_opaque_values_is_inconclusive(tmp_path):
     old.write_text(json.dumps(event) + "\n")
     new.write_text(json.dumps(event) + "\n")
 
-    result = runner.invoke(app, ["diff", str(old), str(new), "--json"])
+    result = runner.invoke(cli, [
+        "verify", str(tmp_path), "--baseline", str(old), "--post-migration", str(new), "--json",
+    ])
 
     assert result.exit_code == EXIT_INCONCLUSIVE
     assert json.loads(result.output)["verdict"] == "inconclusive"
 
 
-def test_report_without_comparable_pair_is_inconclusive(tmp_path):
+def test_verify_without_comparable_pair_is_inconclusive(tmp_path):
     _write_app(tmp_path, third_party=True)
 
-    result = runner.invoke(app, ["report", str(tmp_path), "--json"])
+    result = runner.invoke(cli, ["verify", str(tmp_path), "--json"])
 
     assert result.exit_code == EXIT_INCONCLUSIVE
     payload = json.loads(result.output)
     assert payload["verdict"] == "inconclusive"
-    assert payload["verdict_reasons"]
+    assert payload["contract"]["verdict_reasons"]
 
 
-@pytest.mark.parametrize("old", ["capture", "trace", "export-watcher", "boundary"])
-def test_removed_contract_commands_point_at_capture(old):
+@pytest.mark.parametrize("old, new", [
+    ("capture", "pymolt capture"), ("trace", "pymolt capture"),
+    ("export-watcher", "pymolt capture"), ("boundary", "pymolt capture"),
+    ("report", "pymolt verify"), ("diff", "pymolt verify --baseline"), ("map", "pymolt scan"),
+])
+def test_removed_contract_commands_name_their_replacement(old, new):
     result = runner.invoke(cli, ["contract", old, "--when", "baseline"])
     assert result.exit_code == EXIT_USAGE
-    assert "pymolt capture" in result.output
+    assert f"pymolt contract {old}` was removed" in result.output
+    assert new in result.output
 
 
 def test_report_renders_trust_basis_and_tiers(tmp_path, monkeypatch):
@@ -260,7 +267,7 @@ def test_report_renders_trust_basis_and_tiers(tmp_path, monkeypatch):
         "where": {"file": str(project / "app.py"), "line": 4, "func": "run"},
     }) + "\n")
 
-    result = runner.invoke(app, ["report", str(project), "--trace", str(trace)])
+    result = runner.invoke(cli, ["verify", str(project), "--post-migration", str(trace)])
     assert "Traceback" not in result.output
     text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", result.output).split())
     assert "Contract trust: 100% (1/1 behavioural contacts in executed files)" in text
@@ -268,8 +275,8 @@ def test_report_renders_trust_basis_and_tiers(tmp_path, monkeypatch):
     assert "executed files 100% (1/1)" in text
 
     data = json.loads(runner.invoke(
-        app, ["report", str(project), "--trace", str(trace), "--json"]
-    ).output)
+        cli, ["verify", str(project), "--post-migration", str(trace), "--json"]
+    ).output)["contract"]
     assert [tier["name"] for tier in data["trust_tiers"]] == [
         "exact", "canonical", "behavioural", "executed",
     ]

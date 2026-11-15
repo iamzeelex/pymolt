@@ -163,11 +163,11 @@ def test_build_transplant_plan_orders_steps_and_ends_in_contract():
     plan = build_transplant_plan(_transplant())
     assert [s.n for s in plan.steps] == list(range(1, len(plan.steps) + 1))  # 1..N
     last = plan.steps[-1]
-    assert "contract" in last.title.lower()
+    assert "verify" in last.title.lower()
     joined = "\n".join(last.commands)
     assert "pymolt capture baseline" in joined
     assert "pymolt capture post-migration" in joined
-    assert "pymolt contract report" in joined
+    assert "pymolt verify" in joined
 
 
 def test_build_transplant_plan_carries_scaffold_and_weights():
@@ -186,4 +186,4 @@ def test_cli_succession_renders_transplant_plan(tmp_path, monkeypatch):
     result = runner.invoke(commands.app, ["succession", str(tmp_path)])
     assert result.exit_code == 0
     assert "transplant" in result.output
-    assert "Scaffold" in result.output and "pymolt contract" in result.output
+    assert "Scaffold" in result.output and "pymolt capture" in result.output

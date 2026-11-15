@@ -28,7 +28,6 @@ from pymolt.interfaces.cli.output import (
     require_project_dir,
     warn,
 )
-from pymolt.interfaces.cli.verify_cmd import app as verify_app
 from pymolt.interfaces.cli.verify_cmd import capture_cmd
 from pymolt.setup.pythons import (
     classify_eol,
@@ -169,9 +168,8 @@ def _select_target_python_interactive(
         f"Enter a number 1-{len(versions)} or a version like 3.12.",
     )
 
-# The behavioral contract — static contact map + dynamic capture + diff, all outside the
-# target. Its own help panel: this is the evidence the rest of the funnel exists to produce.
-app.add_typer(verify_app, name="contract", rich_help_panel="Behavioural proof")
+# The behavioural proof — capture both sides, then verify. Its own help panel: this is the
+# evidence the rest of the funnel exists to produce.
 app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
 config_app = typer.Typer(
@@ -263,6 +261,15 @@ def verify_migration(
     probe_python: str | None = typer.Option(
         None, "--probe-python", help="Target interpreter for differential replay"
     ),
+    baseline_file: str | None = typer.Option(
+        None, "--baseline",
+        help="Use this recording as the baseline instead of the captured one (not saved)",
+    ),
+    post_file: str | None = typer.Option(
+        None, "--post-migration",
+        help="Use this recording as the post-migration side instead of the captured one "
+             "(not saved)",
+    ),
     golden_before: str | None = typer.Option(
         None, "--golden-before", help="Old golden snapshot JSON"
     ),
@@ -288,9 +295,16 @@ def verify_migration(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit the unified verdict as JSON"),
 ):
-    """Fold tests/traces, golden snapshots, replay and canary gates into one verdict."""
+    """Compare the baseline and post-migration captures. Prints PASS, FAIL or INCONCLUSIVE.
+
+    The verdict is saved to .pymolt/ for `pymolt status`. Golden snapshots, a
+    cascade report and canary metrics, when given, are folded into the same
+    verdict. --baseline/--post-migration compare other recordings instead of the
+    captures; that verdict is not saved.
+    """
     import json
 
+    from pymolt.interfaces.cli.output import require_file
     from pymolt.interfaces.cli.verify_cmd import (
         _render_contract_report,
         _verification_exit,
@@ -320,6 +334,17 @@ def verify_migration(
     from pymolt.verify.unified import build_unified_verification
 
     project_path = require_project_dir(project_dir, json_output=json_output)
+    explicit = bool(baseline_file or post_file)
+    for path_value, what in ((baseline_file, "--baseline recording"),
+                             (post_file, "--post-migration recording")):
+        if path_value:
+            require_file(path_value, what=what, json_output=json_output)
+    if post_file and not baseline_file:
+        # The other side still comes from the captures.
+        slot = service.load_contract_state(project_path).baseline
+        if slot is not None and slot.trace_path:
+            captured = Path(slot.trace_path)
+            baseline_file = str(captured if captured.is_absolute() else project_path / captured)
 
     def load_json(path_value: str, label: str):
         path = Path(path_value)
@@ -338,6 +363,8 @@ def verify_migration(
             load_custom_comparator(comparator)
         contract_report = service.build_contract_report_from_state(
             project_path,
+            trace_override=post_file,
+            against_override=baseline_file,
             probe_python=probe_python,
             comparator_profile=selected.value,
             custom_comparator=comparator,
@@ -407,7 +434,8 @@ def verify_migration(
         if rollback_decision is not None and rollback_decision.should_rollback:
             rollback_migration(project_path, run_id=rollback_decision.run_id)
             unified.rollback_executed = True
-        saved_path = unified.save(project_path)
+        # A verdict on recordings other than the captures is not this migration's.
+        saved_path = None if explicit else unified.save(project_path)
     except (ComparatorError, ValueError) as exc:
         fail(
             f"verification input is invalid: {exc}",
@@ -456,7 +484,10 @@ def verify_migration(
     )
     console.print(Panel(
         f"[bold {border}]{unified.verdict.value.upper()}[/bold {border}]"
-        f"{rollback_note}\n[dim]saved: {saved_path}[/dim]",
+        f"{rollback_note}\n[dim]"
+        + (f"saved: {saved_path}" if saved_path else
+           "not saved: compared recordings other than the captures")
+        + "[/dim]",
         title="Unified verification", border_style=border, expand=False,
     ))
     raise typer.Exit(code=_verification_exit(unified.verdict))
@@ -2664,9 +2695,9 @@ def _render_transplant_plan(plan) -> None:
     """Render an organ-transplant plan: scaffold → map → port weights → contract-verify.
 
     A transplant is guidance, never auto-applied — the last step is the honest gate
-    (`pymolt contract` proving the ported model matches the original). Edge-supplied
-    text (scaffold code, mappings, notes) is markup-escaped: it may contain brackets
-    (e.g. `x[0]`) that would otherwise be parsed as Rich markup."""
+    (`pymolt capture` + `pymolt verify` proving the ported model matches the original).
+    Edge-supplied text (scaffold code, mappings, notes) is markup-escaped: it may contain
+    brackets (e.g. `x[0]`) that would otherwise be parsed as Rich markup."""
     from rich.markup import escape
 
     console.print(Panel(
@@ -2910,18 +2941,11 @@ def forks(
 # of "No such command". Hidden from --help; any arguments are accepted.
 
 
-def _removed(
-    name: str,
-    replacement: str | dict[str, str],
-    *,
-    group: typer.Typer = app,
-    prefix: str = "",
-) -> None:
-    """Register ``pymolt [PREFIX]NAME`` as removed: print what replaces it, exit 2.
+def _removed(name: str, replacement: str | dict[str, str]) -> None:
+    """Register ``pymolt NAME`` as removed: print what replaces it and exit 2.
 
     ``replacement`` is the new command, or, for a removed group, a map from each
-    old subcommand to its replacement. ``group`` is the Typer app the old name
-    lived in (``prefix`` is its name, for the message).
+    old subcommand to its replacement.
     """
 
     def stub(ctx: typer.Context) -> None:
@@ -2934,10 +2958,10 @@ def _removed(
                 sub = ""
         else:
             use = replacement
-        old = f"pymolt {prefix}{name}{' ' + sub if sub else ''}"
+        old = f"pymolt {name}{' ' + sub if sub else ''}"
         fail(f"`{old}` was removed", hint=f"Use {use}.")
 
-    group.command(
+    app.command(
         name,
         hidden=True,
         add_help_option=False,
@@ -2946,13 +2970,14 @@ def _removed(
 
 
 _removed("doctor", "`pymolt status`")
-_removed("map", "`pymolt scan`", group=verify_app, prefix="contract ")
-_removed("capture", "`pymolt capture baseline|post-migration`", group=verify_app,
-         prefix="contract ")
-_removed("trace", "`pymolt capture baseline|post-migration`", group=verify_app,
-         prefix="contract ")
-_removed("export-watcher", "`pymolt capture … --mode attach` (it writes the watcher bundle)",
-         group=verify_app, prefix="contract ")
-_removed("boundary", "`pymolt capture baseline`, `pymolt capture post-migration`, then "
-         "`pymolt verify`", group=verify_app, prefix="contract ")
+_removed("contract", {
+    "capture": "`pymolt capture baseline|post-migration`",
+    "trace": "`pymolt capture baseline|post-migration`",
+    "export-watcher": "`pymolt capture … --mode attach` (it writes the watcher bundle)",
+    "boundary": "`pymolt capture baseline`, `pymolt capture post-migration`, then "
+                "`pymolt verify`",
+    "map": "`pymolt scan`",
+    "report": "`pymolt verify`",
+    "diff": "`pymolt verify --baseline OLD --post-migration NEW`",
+})
 _removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})
