@@ -44,9 +44,18 @@ from pydantic import BaseModel, Field
 from pymolt.verify import identity_resolver
 from pymolt.verify.comparators import ComparatorProfile, TraceComparator, compare_traces
 from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map, contact_class
-from pymolt.verify.facts import Comparison, DiffProfile, FactCategory, FactDiff, diff_traces
+from pymolt.verify.facts import (
+    Comparison,
+    DiffProfile,
+    FactCategory,
+    FactDiff,
+    FactSet,
+    diff_facts,
+    load_facts,
+)
 from pymolt.verify.identity_resolver import ResolvedIdentity
 from pymolt.verify.models import BoundaryDiff, VerificationVerdict
+from pymolt.verify.predict import Calibration, calibrate, predict_risks
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +183,10 @@ class ContractReport(BaseModel):
     # or REWRITTEN with an equal outcome) in the scoped fact diff. A dynamic-only symbol
     # in this set was observed AND verified, so it does not block PASS.
     fact_equal_symbols: list[str] = Field(default_factory=list)
+    # Predicted vs observed (schema ``pymolt.calibration/1``): each predicted risk is a hit,
+    # miss or not exercised against the whole-surface fact diff, plus the failing changes no
+    # prediction covered. Evidence about the predictions, never a verdict input.
+    calibration: Calibration | None = None
 
 
 _IMPACT_PATH_FIELDS = (
@@ -435,8 +448,12 @@ def build_contract_report(
     comparator_profile: ComparatorProfile | str = ComparatorProfile.EXACT,
     custom_comparator: TraceComparator | str | None = None,
     resolve_identities: bool = True,
+    predictions: Mapping[str, Any] | None = None,
 ) -> ContractReport:
     """Build the unified report.
+
+    ``predictions`` (``{"risks", "source", "plan_id", "notes"}``) are the predicted risks to
+    calibrate against the fact diff (``calibration``); only a fact diff can score them.
 
     ``trace`` is the observed dynamic recording (current/new version) used for
     coverage. ``against`` is an older recording; when both are given, the version
@@ -788,16 +805,36 @@ def build_contract_report(
                     impact_filter_active, impact_paths,
                 )
             else:
-                fdiff = diff_traces(
-                    against, trace, root=root,
+                old_facts = load_facts(against, root=root)
+                fdiff = diff_facts(
+                    old_facts, load_facts(trace, root=root),
                     profile=DiffProfile.SHAPE if profile is ComparatorProfile.SHAPE
                     else DiffProfile.EXACT,
                 )
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
+                if predictions is not None:
+                    report.calibration = _calibration(predictions, old_facts, fdiff, root)
         except (OSError, ValueError) as e:
             report.notes.append(f"version diff failed: {e}")
 
     return report
+
+
+def _calibration(predictions: Mapping[str, Any], old_facts: FactSet, fdiff: FactDiff,
+                 root: Path) -> Calibration:
+    """Score the predictions; ``risks: None`` means "predict from the baseline side now"
+    (its runtime warnings, no delta facts), with ``changes`` for fixed-by-plan."""
+    risks = predictions.get("risks")
+    notes = list(predictions.get("notes") or ())
+    if risks is None:
+        made = predict_risks(old_facts, (), changes=predictions.get("changes") or (),
+                             root=root)
+        risks = made.risks
+        notes.extend(made.notes)
+    cal = calibrate(risks, fdiff, source=predictions.get("source") or "plan",
+                    plan_id=predictions.get("plan_id"))
+    cal.notes[:0] = notes
+    return cal
 
 
 def _attach_boundary_diff(

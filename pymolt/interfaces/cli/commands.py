@@ -579,6 +579,7 @@ def plan(
         "advisories": len(migration_plan.advisories),
         "api_impacts": len(migration_plan.impacts),
         "patch_path": str(patch_path) if patch_path else None,
+        "risks": _risks_payload(migration_plan.risks),
     }
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
@@ -595,10 +596,60 @@ def plan(
         title="Migration plan", border_style="cyan", expand=False,
     ))
     _render_recipes(by_pkg, previews, migration_plan.files_scanned)
+    _render_risks(migration_plan.risks)
     _render_or_write_patches(previews, project_path, None)
     console.print(
         f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
     )
+
+
+def _risks_payload(risks) -> dict | None:
+    """The plan's predicted risks for --json: counts, then both groups in full."""
+    if risks is None:
+        return None
+    dump = risks.model_dump(mode="json")
+    return {
+        "status": risks.status,
+        "counts": risks.counts(),
+        "fixed_by_plan": [r for r in dump["risks"] if r["fixed_by_plan"]],
+        "needs_attention": [r for r in dump["risks"] if not r["fixed_by_plan"]],
+        "deltas": dump["deltas"],
+        "notes": dump["notes"],
+    }
+
+
+_TIER_STYLE = {"certain": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
+
+
+def _render_risks(risks) -> None:
+    """Predicted risks per call site, split into what the plan fixes and what it does not."""
+    if risks is None:
+        console.print("\n[dim]No predicted risks: there is no baseline capture to predict "
+                      "from (`pymolt capture baseline`).[/dim]")
+        return
+    for title, group, border in (
+        ("Needs attention", risks.needs_attention, "yellow"),
+        ("Fixed by the plan", risks.fixed, "green"),
+    ):
+        if not group:
+            continue
+        table = Table(title=f"Predicted risks — {title.lower()}", title_justify="left",
+                      border_style=border)
+        table.add_column("risk")
+        table.add_column("site")
+        table.add_column("symbol")
+        table.add_column("why")
+        for risk in group:
+            style = _TIER_STYLE.get(risk.tier.value, "")
+            why = risk.reason + ("" if risk.basis == "trace" else " (static only)")
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
+                          risk.symbol, why)
+        console.print(table)
+    if not risks.risks:
+        console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
+                      "exercised.")
+    for note in risks.notes:
+        console.print(f"[dim]  note: {note}[/dim]")
 
 
 def _render_recipes(by_pkg, previews, files_scanned: int) -> None:
