@@ -836,13 +836,43 @@ def fetch_pypi_versions(package_name: str) -> list[str]:
 @app.command(rich_help_panel="Migration workflow (preparation)")
 def setup(
     project_dir: str = typer.Argument(".", help="The target project directory"),
+    manifest: str | None = typer.Option(
+        None, "--manifest", help="Manifest to migrate, e.g. requirements.txt"
+    ),
+    tool: str | None = typer.Option(
+        None, "--tool", help="Resolution tool: uv | conda | poetry | container | system"
+    ),
+    base_python: str | None = typer.Option(
+        None, "--base-python", help="The project's current Python, e.g. 3.8"
+    ),
+    target_python: str | None = typer.Option(
+        None, "--target-python", help="The Python to migrate to, e.g. 3.12"
+    ),
+    container: str | None = typer.Option(
+        None, "--container", help="Running container to resolve in (with --tool container)"
+    ),
+    target_env: str | None = typer.Option(
+        None, "--target-env", help="Existing target environment, e.g. .venv-target"
+    ),
 ):
-    """Configure the migration: pick manifest, toolset, and base/target Python (writes .pymolt/env_config.json)."""
+    """Choose the manifest, tool and Python versions. Writes .pymolt/env_config.json.
+
+    Values not given as options are asked for in a terminal; with --manifest,
+    --tool, --base-python and --target-python given, nothing is asked. Without a
+    terminal, values not given take the detected defaults, and the output says
+    which ones did.
+    """
     import sys
 
     from pymolt.ingestion.config import ToolChoice
     from pymolt.ingestion.detect import detect_local_environments
-    from pymolt.setup import SetupChoices, apply_setup, gather_setup_options
+    from pymolt.setup import (
+        SetupChoices,
+        SetupError,
+        apply_setup,
+        check_setup_values,
+        gather_setup_options,
+    )
 
     project_path = require_project_dir(project_dir)
     try:
@@ -856,6 +886,13 @@ def setup(
             hint="pymolt needs a manifest (requirements*.txt, pyproject.toml, "
                  "Pipfile, environment.yml, …) to configure a migration.",
         )
+    try:
+        check_setup_values(
+            options, manifest=manifest, tool=tool, base_python=base_python,
+            target_python=target_python, container_id=container,
+        )
+    except SetupError as exc:
+        fail(str(exc), hint=exc.hint)
 
     # ── Display findings (CLI owns its rendering; the data is the shared model) ──
     console.print("[bold blue]pymolt setup - Initializing local configuration[/bold blue]")
@@ -887,29 +924,35 @@ def setup(
         console.print()
 
     tool_names = [t.name for t in options.tools]
-    container_id = None
+    container_id = container
+    defaulted: list[str] = []
+    given_base, given_target = base_python, target_python
 
-    if sys.stdout.isatty():
+    # Every required value given: nothing to ask, even in a terminal.
+    if sys.stdout.isatty() and not (manifest and tool and base_python and target_python):
         # 1. Manifest selection
         manifest_names = [m.name for m in options.manifests]
         default_manifest = options.default_manifest or manifest_names[0]
-        selected_manifest = _ask_from_list(
+        selected_manifest = manifest or _ask_from_list(
             "Select manifest number or name as source of truth",
             manifest_names, str(manifest_names.index(default_manifest) + 1),
         )
 
         # 2. Tool selection
-        console.print("\n[bold yellow]Available resolution tools/environments:[/bold yellow]")
-        for i, t in enumerate(options.tools, 1):
-            default_marker = " [green][default][/green]" if t.is_default else ""
-            console.print(f"  {i}. {t.name} ({t.detail}){default_marker}")
-        selected_tool = _ask_from_list(
-            "Select resolution tool", tool_names,
-            str(tool_names.index(options.default_tool) + 1),
-        )
+        if tool:
+            selected_tool = tool
+        else:
+            console.print("\n[bold yellow]Available resolution tools/environments:[/bold yellow]")
+            for i, t in enumerate(options.tools, 1):
+                default_marker = " [green][default][/green]" if t.is_default else ""
+                console.print(f"  {i}. {t.name} ({t.detail}){default_marker}")
+            selected_tool = _ask_from_list(
+                "Select resolution tool", tool_names,
+                str(tool_names.index(options.default_tool) + 1),
+            )
 
         # Container selection if "container" chosen
-        if selected_tool == "container":
+        if selected_tool == "container" and not container_id:
             if options.containers:
                 console.print("\n[bold yellow]Select a running Docker container:[/bold yellow]")
                 for idx, c in enumerate(options.containers, 1):
@@ -924,22 +967,22 @@ def setup(
                 container_id = typer.prompt("Enter Docker container ID or name")
 
         # 3. Base Python version
-        base_python = _ask_python_version(
+        base_python = base_python or _ask_python_version(
             "Confirm or enter base Python version (e.g. 3.6)",
             options.base_python_default,
         )
 
         # 4. Target Python version — recompute the list against the chosen base.
-        target_python = _select_target_python_interactive(
+        target_python = target_python or _select_target_python_interactive(
             version_floor(base_python), base_python, get_eol_versions()
         )
 
         # 5. Target environment status
-        target_env_created = typer.confirm(
+        target_env_path = target_env
+        target_env_created = bool(target_env) or typer.confirm(
             "\nHave you already created the new target environment?", default=False
         )
-        target_env_path = None
-        if target_env_created:
+        if target_env_created and not target_env_path:
             scanned_envs = detect_local_environments(project_path)
             if scanned_envs:
                 console.print("\n[bold yellow]Select your target environment folder:[/bold yellow]")
@@ -956,15 +999,32 @@ def setup(
                     "Enter the path/name of your target environment (e.g. .venv_target)"
                 )
     else:
-        # Non-interactive fallback: take the service's defaults.
-        selected_manifest = options.default_manifest
-        selected_tool = options.default_tool
-        if selected_tool == "container" and options.containers:
+        # No terminal: what was not given takes the detected default, and is named.
+        def pick(given, label, default):
+            if given:
+                return given
+            defaulted.append(label)
+            return default
+
+        selected_manifest = pick(manifest, "manifest", options.default_manifest)
+        selected_tool = pick(tool, "tool", options.default_tool)
+        if selected_tool == "container" and not container_id and options.containers:
             container_id = options.containers[0].id
-        base_python = options.base_python_default
-        target_python = f"{sys.version_info.major}.{sys.version_info.minor}"
-        target_env_created = False
-        target_env_path = None
+        base_python = pick(base_python, "base Python", options.base_python_default)
+        target_python = pick(
+            target_python, "target Python",
+            options.default_target or f"{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        target_env_path = target_env
+        target_env_created = bool(target_env)
+
+    if selected_tool == "container" and not container_id:
+        fail("a container is required with the container tool",
+             hint="Start one, or pass --container.")
+    offered = [v.version for v in options.target_versions]
+    if given_target and offered and target_python not in offered:
+        warn(f"Python {target_python} is not in the available list — "
+             "assess will fail if it cannot be provisioned.")
 
     choices = SetupChoices(
         selected_manifest=selected_manifest,
@@ -973,7 +1033,8 @@ def setup(
         # Only a value the user left at the detected default keeps its provenance;
         # anything they typed is a stated fact about the project.
         base_python_source=(
-            options.base_python_source if base_python == options.base_python_default
+            options.base_python_source
+            if base_python == options.base_python_default and not given_base
             else "declared"
         ),
         target_python=target_python,
@@ -996,6 +1057,9 @@ def setup(
         title="Saved Configuration",
         expand=False
     ))
+    if defaulted:
+        console.print(f"[dim]Detected defaults used for: {', '.join(defaulted)}. "
+                      "Pass them as options to choose.[/dim]")
     next_step(project_path)
 
 

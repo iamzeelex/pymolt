@@ -11,11 +11,14 @@ from pymolt.setup.service import (
     ManifestOption,
     PythonTargetOption,
     SetupChoices,
+    SetupError,
     SetupOptions,
     ToolOption,
     apply_setup,
     build_target_options,
+    check_setup_values,
     gather_setup_options,
+    is_python_version,
 )
 
 __all__ = [
@@ -23,9 +26,12 @@ __all__ = [
     "ManifestOption",
     "PythonTargetOption",
     "SetupChoices",
+    "SetupError",
     "SetupOptions",
     "ToolOption",
     "apply_setup",
     "build_target_options",
+    "check_setup_values",
     "gather_setup_options",
+    "is_python_version",
 ]
