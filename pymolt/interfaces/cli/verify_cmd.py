@@ -90,9 +90,12 @@ def capture_cmd(
         None, "--impact-targets",
         help="Affected API symbols; post-migration defaults to the applied Axiom plan",
     ),
-    deployment_id: str | None = typer.Option(None, "--deployment-id"),
-    request_id: str | None = typer.Option(None, "--request-id"),
-    correlation_id: str | None = typer.Option(None, "--correlation-id"),
+    deployment_id: str | None = typer.Option(
+        None, "--deployment-id", help="Deployment id to store with the capture (stage/canary)"),
+    request_id: str | None = typer.Option(
+        None, "--request-id", help="Request id to store with the capture"),
+    correlation_id: str | None = typer.Option(
+        None, "--correlation-id", help="Correlation id to store with the capture"),
 ):
     """Record the calls your code makes into its dependencies while CMD runs.
 
