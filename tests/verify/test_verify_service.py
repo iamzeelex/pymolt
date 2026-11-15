@@ -141,6 +141,42 @@ class TestCaptureNamedTrace:
         assert state.diagnostic_captures == [slot]
         assert "diagnostics" in slot.trace_path
 
+    def test_slot_paths_are_stored_relative_and_survive_a_changed_cwd(
+            self, tmp_path, monkeypatch):
+        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
+        monkeypatch.chdir(tmp_path.parent)
+        slot = service.capture_named_trace(
+            Path(tmp_path.name), "baseline", CaptureMode.TEST_SUITE,
+            command=[sys.executable, str(script)], target="json",
+        )
+        assert Path(slot.trace_path).is_absolute()
+        raw = json.loads((tmp_path / ".pymolt" / "contract_state.json").read_text())
+        assert raw["baseline"]["trace_path"] == ".pymolt/contract_traces/baseline.jsonl"
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        loaded = service.load_contract_state(tmp_path).baseline
+        assert Path(loaded.trace_path).is_file()
+
+    def test_legacy_cwd_relative_path_is_accepted_with_a_warning(
+            self, tmp_path, monkeypatch, caplog):
+        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
+        service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.TEST_SUITE,
+            command=[sys.executable, str(script)], target="json",
+        )
+        state_file = tmp_path / ".pymolt" / "contract_state.json"
+        raw = json.loads(state_file.read_text())
+        raw["baseline"]["trace_path"] = "proj/.pymolt/contract_traces/baseline.jsonl"
+        state_file.write_text(json.dumps(raw))
+        (tmp_path.parent / "proj").symlink_to(tmp_path)
+        monkeypatch.chdir(tmp_path.parent)
+        with caplog.at_level("WARNING"):
+            loaded = service.load_contract_state(tmp_path).baseline
+        assert Path(loaded.trace_path).is_file()
+        assert "relative to the current directory" in caplog.text
+
     def test_invalid_recapture_preserves_the_active_baseline(self, tmp_path):
         good = _write_script(tmp_path, "import json\njson.loads('{}')\n", "good.py")
         active = service.capture_named_trace(

@@ -574,11 +574,15 @@ def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
     # this is the fallback when the caller left it unset.
     if when == "post_migration" and config.target_env_path:
         venv = Path(config.target_env_path)
+        if not venv.is_absolute():
+            venv = Path(os.path.abspath(project_dir)) / venv
         for candidate in (venv / "bin" / "python", venv / "Scripts" / "python.exe"):
             if candidate.exists():
+                # Absolute, never resolved: a venv's bin/python is a symlink to the base
+                # interpreter, and running the link target loses the venv (and its pytest).
                 return {
                     "container": None, "workdir": None,
-                    "command_prefix": [str(candidate.resolve()), "-m"],
+                    "command_prefix": [os.path.abspath(candidate), "-m"],
                     "note": f"post-migration → target env {config.target_env_path}",
                 }
 
@@ -1006,9 +1010,42 @@ def _state_path(project_dir: str | Path) -> Path:
     return Path(project_dir) / CONTRACT_STATE_PATH
 
 
+def _anchor_slot_path(root: Path, value: str | None) -> str | None:
+    """A stored slot path as an absolute one, anchored to the project ``root``.
+
+    Slot paths are stored relative to the project root. A legacy relative path that only
+    resolves from the current directory (written by an older pymolt run with a relative
+    ``--project-dir``) is still accepted, with a warning.
+    """
+    if not value:
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    anchored = root / path
+    if anchored.exists():
+        return str(anchored)
+    if path.exists():
+        logger.warning(
+            "contract state path %r only resolves relative to the current directory; "
+            "using it, but capture again to store it relative to the project", value)
+        return os.path.abspath(path)
+    return str(anchored)
+
+
 def load_contract_state(project_dir: str | Path) -> ContractState:
-    """The current capture state, or a fresh empty one if none is persisted yet."""
-    return ContractState.load(_state_path(project_dir)) or ContractState()
+    """The current capture state, or a fresh empty one if none is persisted yet.
+
+    Every slot path comes back absolute (anchored to the project root), whatever the
+    current directory is; they are stored relative (see ``ContractState.save``).
+    """
+    state = ContractState.load(_state_path(project_dir)) or ContractState()
+    root = Path(os.path.abspath(project_dir))
+    for slot in (state.baseline, state.post_migration, *state.diagnostic_captures):
+        if slot is not None:
+            for field in ("trace_path", "metadata_path", "command_log"):
+                setattr(slot, field, _anchor_slot_path(root, getattr(slot, field)))
+    return state
 
 
 def witnessed_distributions(
@@ -1266,7 +1303,9 @@ def capture_named_trace(
     if not command:
         raise ValueError("command is required for TEST_SUITE/LIVE_COMMAND capture")
 
-    project_dir = Path(project_dir)
+    # Anchor everything to the project root: a relative project dir would otherwise put
+    # stored paths (and the target env lookup) relative to whichever directory pymolt ran in.
+    project_dir = Path(os.path.abspath(project_dir))
     if privacy is None:
         privacy = "values" if mode is CaptureMode.TEST_SUITE else "shape"
     sampling_source = "caller"
@@ -1602,7 +1641,7 @@ def start_attached_capture(
     if when not in ("baseline", "post_migration"):
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
 
-    project_dir = Path(project_dir)
+    project_dir = Path(os.path.abspath(project_dir))
     if sample_rate is None:
         sample_rate = default_sample_rate(CaptureMode.LIVE_ATTACH)
     watcher_env = trace_env(
@@ -1707,7 +1746,7 @@ def finalize_attached_capture(
 
     The slot's sample rate is the one the watcher ran with (its sidecar), else
     ``sample_rate``, else the attach default."""
-    project_dir = Path(project_dir)
+    project_dir = Path(os.path.abspath(project_dir))
     out_path = Path(out_path)
     _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
