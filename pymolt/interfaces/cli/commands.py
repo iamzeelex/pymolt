@@ -29,6 +29,7 @@ from pymolt.interfaces.cli.output import (
     warn,
 )
 from pymolt.interfaces.cli.verify_cmd import app as verify_app
+from pymolt.interfaces.cli.verify_cmd import capture_cmd
 from pymolt.setup.pythons import (
     classify_eol,
     get_available_python_versions,
@@ -42,9 +43,9 @@ from pymolt.setup.pythons import (
 app = typer.Typer(
     help=(
         "pymolt: prove a Python migration didn't change what your code does.\n\n"
-        "Record the contract BEFORE you edit anything — it cannot be recreated afterwards:\n"
-        "  pymolt contract capture --when baseline --mode tests -- pytest tests/\n"
-        "Plan/apply, then capture --when post-migration and run 'pymolt verify'.\n"
+        "Record the baseline BEFORE you change any code — it cannot be recreated afterwards:\n"
+        "  pymolt capture baseline --mode tests -- pytest tests/\n"
+        "Plan/apply, then capture post-migration and run 'pymolt verify'.\n"
         "See the 'Behavioural proof' panel below; the other panels prepare the migration."
     ),
     invoke_without_command=True,
@@ -171,6 +172,7 @@ def _select_target_python_interactive(
 # The behavioral contract — static contact map + dynamic capture + diff, all outside the
 # target. Its own help panel: this is the evidence the rest of the funnel exists to produce.
 app.add_typer(verify_app, name="contract", rich_help_panel="Behavioural proof")
+app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
 config_app = typer.Typer(
     help="Manage pymolt configuration and local offline delta cache."
@@ -2064,7 +2066,7 @@ def migrate(
                 f"cannot apply migration without a valid baseline: {detail}",
                 hint=(
                     "Capture the original behavior first with "
-                    "'pymolt contract capture --when baseline --mode tests -- <test command>'. "
+                    "'pymolt capture baseline --mode tests -- <test command>'. "
                     "Use --allow-no-baseline only when you accept an inconclusive migration."
                 ),
             )
@@ -2945,4 +2947,12 @@ def _removed(
 
 _removed("doctor", "`pymolt status`")
 _removed("map", "`pymolt scan`", group=verify_app, prefix="contract ")
+_removed("capture", "`pymolt capture baseline|post-migration`", group=verify_app,
+         prefix="contract ")
+_removed("trace", "`pymolt capture baseline|post-migration`", group=verify_app,
+         prefix="contract ")
+_removed("export-watcher", "`pymolt capture … --mode attach` (it writes the watcher bundle)",
+         group=verify_app, prefix="contract ")
+_removed("boundary", "`pymolt capture baseline`, `pymolt capture post-migration`, then "
+         "`pymolt verify`", group=verify_app, prefix="contract ")
 _removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})

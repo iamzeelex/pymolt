@@ -552,7 +552,7 @@ def _decide_next(
     migrated_without_baseline = receipt is not None and receipt.allow_no_baseline
     if baseline.state == TODO and not migrated_without_baseline:
         status.next_command = (
-            f"pymolt contract capture --when baseline --mode tests -- {workload_text}"
+            f"pymolt capture baseline --mode tests -- {workload_text}"
         )
         status.next_reason = (
             "Record how the code behaves BEFORE migrating — this is the one step that "
@@ -561,7 +561,7 @@ def _decide_next(
         return
     if baseline.state == STALE and not migrated_without_baseline:
         status.next_command = (
-            f"pymolt contract capture --when baseline --mode tests -- {workload_text}"
+            f"pymolt capture baseline --mode tests -- {workload_text}"
         )
         status.next_reason = (
             "The baseline no longer describes this project — re-capture before trusting "
@@ -582,7 +582,7 @@ def _decide_next(
         return
     if post.state in {TODO, STALE}:
         status.next_command = (
-            f"pymolt contract capture --when post-migration --mode tests -- {workload_text}"
+            f"pymolt capture post-migration --mode tests -- {workload_text}"
         )
         status.next_reason = "Record the new behavior after the recorded migration."
         return

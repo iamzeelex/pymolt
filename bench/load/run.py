@@ -4,7 +4,7 @@
     python3 bench/load/run.py setup
     python3 bench/load/run.py nocap   --duration 60 --rate 0
     python3 bench/load/run.py capture --duration 60 --rate 0 [--env K=V ...]
-                                      [-- <extra pymolt contract capture args>]
+                                      [-- <extra pymolt capture args>]
     python3 bench/load/run.py report  <run-dir | session-dir> [--nocap RUN_DIR] [--no-fold]
     python3 bench/load/run.py gate    [--duration 60] [--paced-rate 200]
 
@@ -476,7 +476,7 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
             mix: str | None = None, wait_quiet: float = 0.0,
             steady: str | None = None) -> Path:
     """Run the service bare (nocap), under a no-op profile hook (hook, a control) or under
-    `pymolt contract capture` (capture), and drive load.
+    `pymolt capture` (capture), and drive load.
 
     ``steady`` (capture only): None/"off" measures right after the short warmup; "auto"
     keeps the load running until the watcher has switched discover -> watch (live sidecar
@@ -507,7 +507,7 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
     svc_dir.mkdir()
     shutil.copy2(SERVICE_SRC / "app.py", svc_dir / "app.py")
     shutil.copy2(HERE / "requirements.in", svc_dir / "requirements.txt")
-    # `pymolt contract capture` refuses to run before setup: the capture records the
+    # `pymolt capture` refuses to run before setup: the capture records the
     # environment it was taken in.
     (svc_dir / ".pymolt").mkdir()
     (svc_dir / ".pymolt" / "env_config.json").write_text(json.dumps({
@@ -564,7 +564,7 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
             cmd = [SVC_PY, "app.py"]
         else:
             log = run_dir / "capture.log"
-            cmd = [PYMOLT, "contract", "capture", "--when", "baseline", "--mode", "command",
+            cmd = [PYMOLT, "capture", "baseline", "--mode", "command",
                    "--project-dir", svc_dir, "--force", *capture_args, "--", SVC_PY, "app.py"]
         record["command"] = [str(c) for c in cmd]
         # The load generator starts together with the service: it builds its request
@@ -1615,7 +1615,7 @@ def main(argv: list[str] | None = None) -> int:
     load_opts(p)
     p = sub.add_parser("hook", help="control: the service under a no-op sys.setprofile hook")
     load_opts(p)
-    p = sub.add_parser("capture", help="run the service under `pymolt contract capture`")
+    p = sub.add_parser("capture", help="run the service under `pymolt capture`")
     load_opts(p)
     p.add_argument("--steady-warmup", default="off", metavar="auto|S|off", type=_steady_arg,
                    help="measure steady state: auto = keep the load running until the watcher "

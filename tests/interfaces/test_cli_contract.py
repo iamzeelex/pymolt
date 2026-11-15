@@ -238,7 +238,7 @@ class TestRendering:
         """The one instruction a user cannot act on retroactively goes up top."""
         result = runner.invoke(app, ["--help"])
         lead = result.output.split("╭─ Options")[0]
-        assert "contract capture" in lead
+        assert "pymolt capture baseline" in lead
         assert "BEFORE" in lead
 
     def test_version_diff_is_prose_not_a_python_dict(self, tmp_path):

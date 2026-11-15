@@ -72,10 +72,10 @@ def build_transplant_plan(edge: SuccessionEdge, project_dir: str | Path = ".") -
                "model's after, then diff — replace the placeholder inference commands with yours.",
         commands=[
             "# 1) BEFORE porting — capture the original model on a fixture input:",
-            "pymolt contract capture --when baseline --mode command -- "
+            "pymolt capture baseline --mode command -- "
             "python infer_original.py --input fixture",
             "# 2) after steps 1–3, run the PORTED model on the SAME input:",
-            "pymolt contract capture --when post-migration --mode command -- "
+            "pymolt capture post-migration --mode command -- "
             "python infer_ported.py --input fixture",
             "# 3) diff — the outputs must agree:",
             "pymolt contract report",

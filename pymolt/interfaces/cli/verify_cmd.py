@@ -1,26 +1,19 @@
 """CLI for verify/ — the external boundary tracer + diff (Component 6, interfaces layer).
 
 Everything here runs *outside* the target project: the watcher is injected via PYTHONPATH +
-PYMOLT_TRACE_* env (zero edits to the target), and rendering of the structured BoundaryDiff
+PYMOLT_TRACE_* env (zero edits to the target), and rendering of the structured reports
 lives here in interfaces/, not in the non-interactive core (spec: render is not the core's job).
 
 Commands:
-  pymolt contract export-watcher DEST          write the standalone stdlib bundle (no deps)
-  pymolt contract trace --target P --out F -- CMD...   run CMD with the watcher injected
-  pymolt contract capture --when W --mode M -- CMD...  run CMD, name it baseline/post-mig.
-  pymolt contract diff OLD NEW [--json]        fold two recordings into a BoundaryDiff
-  pymolt contract boundary                     interactive orchestrator (both ends + diff)
-  pymolt contract report DIR                   unified report (auto-sources the named slots)
+  pymolt capture baseline|post-migration -- CMD...   run CMD, keep it as that side's capture
+  pymolt contract diff OLD NEW [--json]               fold two recordings into a BoundaryDiff
+  pymolt contract report DIR                          unified report (auto-sources the captures)
 
 Capture/injection itself lives in ``pymolt.verify.service`` (so callers can drive the same
 mechanism) — this file is CLI rendering + interactive prompting only.
 """
 import json
 import os
-import shlex
-import shutil
-import tempfile
-from pathlib import Path
 
 import typer
 from rich.markup import escape
@@ -47,8 +40,6 @@ from pymolt.verify.comparators import (
     compare_traces,
     load_custom_comparator,
 )
-from pymolt.verify.diff import build_boundary_diff
-from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.models import (
     BoundaryDiff,
     CaptureMode,
@@ -74,32 +65,6 @@ def _verification_exit(verdict: VerificationVerdict) -> int:
 
 
 # ── shared helpers ────────────────────────────────────────────────────────────
-def _trace_command(target: str, command: list[str], out_path: Path, backend: str,
-                   container: str | None = None, workdir: str | None = None,
-                   exclude: str = "", source: str = "", include_internal: bool = False,
-                   privacy: str = "shape", sample_rate: float = 1.0,
-                   impact_targets: list[str] | None = None,
-                   deployment_id: str | None = None,
-                   request_id: str | None = None,
-                   correlation_id: str | None = None) -> int:
-    """Render-and-run wrapper over ``service.capture_trace``: prints progress/result, returns
-    the number of events captured (the CLI commands below all key off this)."""
-    where = f"container [cyan]{container}[/cyan]" if container else "local"
-    scope = "internal+boundary" if include_internal else "boundary"
-    err.print(f"[dim]tracing[/dim] target=[cyan]{target}[/cyan] ({scope}) in {where} "
-              f"cmd=[white]{' '.join(command)}[/white]")
-    result = service.capture_trace(
-        target, command, out_path, backend, container=container, workdir=workdir,
-        exclude=exclude, source=source, include_internal=include_internal,
-        privacy=privacy, sample_rate=sample_rate,
-        impact_targets=impact_targets, deployment_id=deployment_id,
-        request_id=request_id, correlation_id=correlation_id,
-    )
-    err.print(f"[green]captured[/green] {result.events} events from "
-              f"{result.processes} process(es) -> {result.out_path}")
-    return result.events
-
-
 def render_boundary_diff(diff: BoundaryDiff, full: bool = False) -> None:
     """Render a BoundaryDiff for humans (the formatting the core deliberately omits)."""
     verdict = _verdict_from_boundary(diff)
@@ -143,89 +108,7 @@ def render_boundary_diff(diff: BoundaryDiff, full: bool = False) -> None:
     _table("INFO — appeared", diff.appeared, ["qualname", "where"], "cyan")
 
 
-# ── composable subcommands ────────────────────────────────────────────────────
-@app.command("export-watcher")
-def export_watcher_cmd(
-    dest: str = typer.Argument(..., help="Directory to write the standalone bundle into"),
-):
-    """Write the pure-stdlib watcher bundle to drop onto PYTHONPATH (no pymolt/pydantic needed)."""
-    out = export_watcher(dest)
-    console.print(Panel(
-        f"Bundle written to [cyan]{out}[/cyan]\n\n"
-        f"Use it anywhere (venv, Docker image, the 3.6 devcontainer):\n"
-        f"  [white]PYTHONPATH={out} PYMOLT_TRACE_TARGET=flask \\\n"
-        f"  PYMOLT_TRACE_OUT=/tmp/trace-{{pid}}.jsonl  <your command>[/white]\n\n"
-        f"Pure stdlib, Python 3.6+; the target app is never modified.",
-        title="export-watcher", expand=False, border_style="green",
-    ))
-
-
-@app.command("trace")
-def trace_cmd(
-    command: list[str] = typer.Argument(..., help="Command to run after --, e.g. -- python app.py"),
-    target: str = typer.Option(
-        "all", "--target", "-t",
-        help="Dependency to trace: 'all'/'*' (every installed dep), 'flask', or 'flask,werkzeug'"),
-    out: str = typer.Option(..., "--out", "-o", help="Output JSONL artifact path"),
-    backend: str = typer.Option(
-        "auto", "--backend", help="auto | setprofile | monitoring | wrap | hybrid"),
-    wrap: str = typer.Option(
-        "", "--wrap",
-        help="Targeted-wrap mode: comma-list of dependency symbols to wrap "
-             "(e.g. flask.jsonify,flask.views.MethodView,flask.app.Flask.add_url_rule). Implies "
-             "--backend wrap (low overhead). Add --backend hybrid to also run setprofile for "
-             "completeness (the C-remainder + dynamic usage)."),
-    impact_targets: str | None = typer.Option(
-        None, "--impact-targets",
-        help="Comma-separated affected API symbols; exact paths use low-overhead wrapping",
-    ),
-    exclude: str = typer.Option(
-        "", "--exclude", "-x", help="Comma-separated top-levels to skip (e.g. your own package)"),
-    source: str = typer.Option(
-        "", "--source", "-s",
-        help="YOUR code (near side, caller). Default: auto-detect. Records only 'source -> dep'"),
-    include_internal: bool = typer.Option(
-        False, "--include-internal",
-        help="Also record internal dependency<->dependency calls (full audit; default off)"),
-    container: str | None = typer.Option(
-        None, "--container", "-c",
-        help="Run CMD inside an ALREADY-RUNNING container (docker exec), not locally"),
-    workdir: str | None = typer.Option(
-        None, "--workdir", "-w", help="Working dir inside the container (default: image WORKDIR)"),
-    privacy: str = typer.Option(
-        "shape", "--privacy", help="shape (safe default) | values (exact, may contain sensitive data)"
-    ),
-    sample_rate: float = typer.Option(
-        1.0, "--sample-rate", min=0.000001, max=1.0,
-        help="Fraction of completed calls to retain",
-    ),
-    deployment_id: str | None = typer.Option(None, "--deployment-id"),
-    request_id: str | None = typer.Option(None, "--request-id"),
-    correlation_id: str | None = typer.Option(None, "--correlation-id"),
-):
-    """Run a command with the watcher injected externally; write a JSONL recording.
-
-    Records the boundary YOUR code -> dependency. By default --target (the dependency side, 'all')
-    is observed via sys.setprofile. With --wrap, only the listed symbols are wrapped (low,
-    targeted overhead — fit for prod). With --container the command runs via `docker exec` in a
-    running container (bundle copied in and removed; no `docker run`).
-    """
-    if privacy not in {"values", "shape"}:
-        fail(f"--privacy must be 'values' or 'shape' (got {privacy!r})")
-    if wrap:
-        target = wrap                       # wrap list goes through PYMOLT_TRACE_TARGET
-        backend = "hybrid" if backend == "hybrid" else "wrap"
-    parsed_impacts = (
-        [item.strip() for item in impact_targets.split(",") if item.strip()]
-        if impact_targets else None
-    )
-    _trace_command(target, command, Path(out), backend, container=container, workdir=workdir,
-                   exclude=exclude, source=source, include_internal=include_internal,
-                   privacy=privacy, sample_rate=sample_rate,
-                   impact_targets=parsed_impacts, deployment_id=deployment_id,
-                   request_id=request_id, correlation_id=correlation_id)
-
-
+# ── capture ───────────────────────────────────────────────────────────────────
 _CAPTURE_WHEN = {"baseline": "baseline", "post-migration": "post_migration"}
 _CAPTURE_MODE = {
     "tests": CaptureMode.TEST_SUITE,
@@ -234,18 +117,18 @@ _CAPTURE_MODE = {
 }
 
 
-@app.command("capture")
 def capture_cmd(
+    when: str = typer.Argument(..., help="baseline (before the migration) | post-migration"),
     command: list[str] = typer.Argument(
         None, help="Command to run after --, e.g. -- pytest tests/ (omit for --mode attach)"),
-    when: str = typer.Option(..., "--when", help="'baseline' (pre-migration) or 'post-migration'"),
     mode: str = typer.Option(
         "command", "--mode", help="tests (run your suite) | command (run your app) | attach "
                                    "(you run it yourself, pymolt just watches)"),
     project_dir: str = typer.Option(
         ".", "--project-dir", help="Project root (state lives in .pymolt/)"),
     target: str = typer.Option(
-        "all", "--target", "-t", help="Dependency to trace (see `trace --help`)"),
+        "all", "--target", "-t",
+        help="Dependencies to record: all (default), or a list such as flask,werkzeug"),
     backend: str = typer.Option(
         "auto", "--backend", help="auto | setprofile | monitoring | wrap | hybrid"),
     exclude: str = typer.Option("", "--exclude", "-x", help="Comma-separated top-levels to skip"),
@@ -279,20 +162,18 @@ def capture_cmd(
     request_id: str | None = typer.Option(None, "--request-id"),
     correlation_id: str | None = typer.Option(None, "--correlation-id"),
 ):
-    """Capture a dynamic trace and name it 'baseline' or 'post-migration' — the same watcher
-    injection `trace` uses, but persisted to .pymolt/contract_state.json so `report` (run with
-    no flags) can auto-diff baseline against post-migration without you tracking file paths.
+    """Record the calls your code makes into its dependencies while CMD runs.
 
-    Three ways to capture: --mode tests/command run CMD yourself here and block until it exits
-    (a test suite naturally exits on its own; for a long-running app, Ctrl+C ends it and whatever
-    was captured up to that point is kept). --mode attach instead prints a command for YOU to run
-    in your own terminal/devcontainer/server — call `capture --when W --mode attach --collect`
-    afterwards to finalize whatever it wrote.
+    `baseline` is recorded before the migration, `post-migration` after it;
+    `pymolt verify` compares the two. --mode tests and --mode command run CMD here
+    and wait for it to exit (Ctrl+C ends a long-running app and keeps what was
+    recorded). --mode attach prints a command to run yourself, for example in a
+    container or on a server; finish it with --mode attach --collect.
     """
     require_project_dir(project_dir)
     when_key = _CAPTURE_WHEN.get(when)
     if when_key is None:
-        fail(f"--when must be 'baseline' or 'post-migration' (got {when!r})")
+        fail(f"capture what: 'baseline' or 'post-migration' (got {when!r})")
     capture_mode = _CAPTURE_MODE.get(mode)
     if capture_mode is None:
         fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})")
@@ -315,7 +196,7 @@ def capture_cmd(
         if not out_path.is_file():
             fail(
                 f"no pending attach capture at {out_path}",
-                hint=f"Start one first: pymolt contract capture --when {when} --mode attach",
+                hint=f"Start one first: pymolt capture {when} --mode attach",
             )
         slot = service.finalize_attached_capture(
             project_dir, when_key, out_path, target=target,
@@ -351,7 +232,7 @@ def capture_cmd(
         )
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
-            f"  [white]pymolt contract capture --when {when} --mode attach --collect "
+            f"  [white]pymolt capture {when} --mode attach --collect "
             f"--privacy {effective_privacy}"
             f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}[/white]\n\n"
             f"  [white]{instr.command_hint}[/white]",
@@ -450,57 +331,6 @@ def diff_cmd(
     else:
         render_boundary_diff(diff, full=full)
     raise typer.Exit(code=_verification_exit(diff.verdict))
-
-
-# ── interactive orchestrator ──────────────────────────────────────────────────
-def _obtain_recording(side, target, work, backend, exclude, source):
-    """Interactively get one side's recording: an existing artifact, or a command to trace
-    (locally or inside an already-running container — old/new can even be different containers)."""
-    mode = typer.prompt(
-        f"[{side}] (p)ath to an existing recording or (c)ommand to run",
-        default="c",
-    ).strip().lower()
-    if mode.startswith("p"):
-        return Path(typer.prompt(f"[{side}] path to recording"))
-    cmd = shlex.split(typer.prompt(f"[{side}] command to run (e.g. /venv/bin/python app.py)"))
-    container = typer.prompt(f"[{side}] container id/name (blank = local)", default="").strip()
-    workdir = None
-    if container:
-        workdir = typer.prompt(f"[{side}] workdir in container (blank = image default)",
-                               default="").strip() or None
-    out = work / f"{side}.jsonl"
-    _trace_command(target, cmd, out, backend, container=container or None,
-                   workdir=workdir, exclude=exclude, source=source)
-    return out
-
-
-@app.command("boundary")
-def boundary_cmd(
-    backend: str = typer.Option("auto", "--backend", help="auto | setprofile | monitoring"),
-    full: bool = typer.Option(False, "--full", help="Show all diff entries"),
-):
-    """Interactive: capture (or load) both versions and show the boundary diff in one flow."""
-    console.print(Panel(
-        "Captures the dependency boundary under two versions and diffs them.\n"
-        "Each side is either an existing recording or a command this runs with the watcher "
-        "injected externally (zero edits to the target).",
-        title="verify boundary", expand=False,
-    ))
-    target = typer.prompt("Dependency side ('all'/'*' or 'flask')", default="all")
-    source = typer.prompt("Your code (caller) — blank = auto-detect", default="").strip()
-    exclude = typer.prompt("Top-levels to exclude (blank = none)", default="").strip()
-    work = Path(tempfile.mkdtemp(prefix="pymolt-boundary-"))
-    try:
-        old = _obtain_recording("old", target, work, backend, exclude, source)
-        new = _obtain_recording("new", target, work, backend, exclude, source)
-        console.print()
-        diff = build_boundary_diff(str(old), str(new))
-    finally:
-        # The recordings only feed the diff above; nothing durable lives here.
-        shutil.rmtree(work, ignore_errors=True)
-    render_boundary_diff(diff, full=full)
-    raise typer.Exit(code=_verification_exit(diff.verdict))
-
 
 
 _TRUST_TIER_LABELS = {
@@ -602,7 +432,7 @@ def _render_contract_report(rep) -> None:
             "A capture was taken against a different manifest/environment than the one it "
             "must describe — the project on disk now, or, for the baseline of a before/after "
             "diff, the one the migration started from. The notes below say which.\n"
-            "[dim]Re-capture (pymolt contract capture) to judge the current code.[/dim]",
+            "[dim]Re-capture (pymolt capture) to judge the current code.[/dim]",
             title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
         ))
         border = "yellow"

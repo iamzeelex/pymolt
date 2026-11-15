@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 from pymolt.ingestion.config import EnvConfig, ToolChoice
+from pymolt.interfaces.cli.commands import app as cli
 from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE, EXIT_USAGE
 from pymolt.interfaces.cli.verify_cmd import app
 from pymolt.verify import service
@@ -38,8 +39,8 @@ def test_capture_before_setup_is_refused(tmp_path):
     (tmp_path / ".pymolt" / "env_config.json").unlink()
     app_py = _write_app(tmp_path, third_party=False)
 
-    result = runner.invoke(app, [
-        "capture", "--when", "baseline", "--mode", "tests",
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests",
         "--project-dir", str(tmp_path), "--target", "json",
         "--", sys.executable, str(app_py),
     ])
@@ -69,8 +70,8 @@ def _write_app(tmp_path, *, third_party: bool):
 
 def test_capture_writes_named_state(tmp_path):
     app_py = _write_app(tmp_path, third_party=False)
-    result = runner.invoke(app, [
-        "capture", "--when", "baseline", "--mode", "tests",
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests",
         "--project-dir", str(tmp_path), "--target", "json",
         "--", sys.executable, str(app_py),
     ])
@@ -87,8 +88,8 @@ def test_failed_test_capture_is_diagnostic_and_fails_cli(tmp_path):
     app_py = tmp_path / "fails.py"
     app_py.write_text("import json\njson.loads('{}')\nraise SystemExit(5)\n")
 
-    result = runner.invoke(app, [
-        "capture", "--when", "baseline", "--mode", "tests",
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests",
         "--project-dir", str(tmp_path), "--target", "json",
         "--", sys.executable, str(app_py),
     ])
@@ -101,8 +102,8 @@ def test_failed_test_capture_is_diagnostic_and_fails_cli(tmp_path):
 
 def test_zero_event_capture_is_inconclusive_and_not_active(tmp_path):
     app_py = _write_app(tmp_path, third_party=False)
-    result = runner.invoke(app, [
-        "capture", "--when", "baseline", "--mode", "command",
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "command",
         "--project-dir", str(tmp_path), "--target", "definitely_missing_dependency",
         "--", sys.executable, str(app_py),
     ])
@@ -115,26 +116,26 @@ def test_zero_event_capture_is_inconclusive_and_not_active(tmp_path):
 
 def test_capture_overwrite_requires_confirmation_unless_forced(tmp_path):
     app_py = _write_app(tmp_path, third_party=False)
-    args = ["capture", "--when", "baseline", "--mode", "tests",
+    args = ["capture", "baseline", "--mode", "tests",
             "--project-dir", str(tmp_path), "--target", "json",
             "--", sys.executable, str(app_py)]
 
-    first = runner.invoke(app, args)
+    first = runner.invoke(cli, args)
     assert first.exit_code == 0, first.output
 
-    declined = runner.invoke(app, args, input="n\n")
+    declined = runner.invoke(cli, args, input="n\n")
     assert declined.exit_code == 1
 
-    forced_args = ["capture", "--when", "baseline", "--mode", "tests",
+    forced_args = ["capture", "baseline", "--mode", "tests",
                    "--project-dir", str(tmp_path), "--target", "json", "--force",
                    "--", sys.executable, str(app_py)]
-    forced = runner.invoke(app, forced_args)
+    forced = runner.invoke(cli, forced_args)
     assert forced.exit_code == 0, forced.output
 
 
 def test_capture_attach_then_collect(tmp_path):
-    started = runner.invoke(app, [
-        "capture", "--when", "post-migration", "--mode", "attach",
+    started = runner.invoke(cli, [
+        "capture", "post-migration", "--mode", "attach",
         "--project-dir", str(tmp_path), "--target", "requests",
     ])
     assert started.exit_code == 0, started.output
@@ -144,8 +145,8 @@ def test_capture_attach_then_collect(tmp_path):
     assert out_path.parent.is_dir()
     out_path.write_text('{"q": "requests.get"}\n')
 
-    collected = runner.invoke(app, [
-        "capture", "--when", "post-migration", "--mode", "attach",
+    collected = runner.invoke(cli, [
+        "capture", "post-migration", "--mode", "attach",
         "--project-dir", str(tmp_path), "--collect",
     ])
     assert collected.exit_code == 0, collected.output
@@ -157,8 +158,8 @@ def test_capture_attach_then_collect(tmp_path):
 
 
 def test_collect_without_a_pending_capture_errors(tmp_path):
-    result = runner.invoke(app, [
-        "capture", "--when", "baseline", "--mode", "attach",
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "attach",
         "--project-dir", str(tmp_path), "--collect",
     ])
     assert result.exit_code == 2
@@ -167,8 +168,8 @@ def test_collect_without_a_pending_capture_errors(tmp_path):
 
 def test_report_auto_sources_from_captured_state_and_explicit_override_wins(tmp_path):
     app_py = _write_app(tmp_path, third_party=True)
-    cap = runner.invoke(app, [
-        "capture", "--when", "baseline", "--mode", "tests",
+    cap = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests",
         "--project-dir", str(tmp_path), "--target", "requests",
         "--", sys.executable, str(app_py),
     ])
@@ -200,10 +201,7 @@ def test_diff_human_rendering_does_not_crash_on_skipped_opaque_rows(tmp_path):
     old = tmp_path / "old.jsonl"
     new = tmp_path / "new.jsonl"
     for out in (old, new):
-        traced = runner.invoke(app, [
-            "trace", "--target", "requests", "--out", str(out), "--", sys.executable, str(app_py),
-        ])
-        assert traced.exit_code == 0, traced.output
+        service.capture_trace("requests", [sys.executable, str(app_py)], out, "auto")
 
     result = runner.invoke(app, ["diff", str(old), str(new)])
     assert result.exit_code in (0, 1)
@@ -238,19 +236,11 @@ def test_report_without_comparable_pair_is_inconclusive(tmp_path):
     assert payload["verdict_reasons"]
 
 
-def test_boundary_interactive_flow_does_not_crash(tmp_path):
-    """Regression: boundary_cmd's work directory uses `tempfile.mkdtemp` — the
-    same class of missing-import bug as the diff test above, on a different
-    code path (interactive prompting, not `--out`/`--json`)."""
-    old = tmp_path / "old.jsonl"
-    old.write_text('{"q": "requests.get"}\n')
-    new = tmp_path / "new.jsonl"
-    new.write_text('{"q": "requests.get"}\n')
-
-    stdin = f"requests\n\n\np\n{old}\np\n{new}\n"
-    result = runner.invoke(app, ["boundary"], input=stdin)
-    assert result.exit_code == 0, result.output
-    assert "Traceback" not in result.output
+@pytest.mark.parametrize("old", ["capture", "trace", "export-watcher", "boundary"])
+def test_removed_contract_commands_point_at_capture(old):
+    result = runner.invoke(cli, ["contract", old, "--when", "baseline"])
+    assert result.exit_code == EXIT_USAGE
+    assert "pymolt capture" in result.output
 
 
 def test_report_renders_trust_basis_and_tiers(tmp_path, monkeypatch):

@@ -56,7 +56,7 @@ _IGNORE_DIRS = {
     ".eggs",
 }
 
-# pymolt's own injected tooling — if the watcher bundle (export-watcher) was written
+# pymolt's own injected tooling — if the watcher bundle (capture --mode attach) was written
 # into the project, its `pymolt_trace` package is *not* a real dependency.
 _IGNORE_DEPS = {"pymolt", "pymolt_trace"}
 

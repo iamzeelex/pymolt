@@ -110,7 +110,7 @@ class TestProgression:
         status = build_status(tmp_path)
         assert _state(status, "assess") == "done"
         assert _state(status, "baseline") == "todo"
-        assert "capture --when baseline" in status.next_command
+        assert "capture baseline" in status.next_command
         assert "cannot be done later" in status.next_reason
 
     def test_baseline_captured_points_at_plan(self, tmp_path):
@@ -145,7 +145,7 @@ class TestProgression:
         status = build_status(tmp_path)
 
         assert _state(status, "migration") == "done"
-        assert "capture --when post-migration" in status.next_command
+        assert "capture post-migration" in status.next_command
 
     def test_both_captured_points_at_the_report(self, tmp_path):
         _manifest(tmp_path)
@@ -225,7 +225,7 @@ class TestWorseThanNotDone:
         status = build_status(tmp_path)
 
         assert _state(status, "baseline") == "stale"
-        assert "capture --when baseline" in status.next_command
+        assert "capture baseline" in status.next_command
         assert "no longer describes" in status.next_reason
 
     def test_a_capture_taken_before_setup_is_stale(self, tmp_path):
@@ -240,7 +240,7 @@ class TestWorseThanNotDone:
         baseline = status.phase("baseline")
         assert baseline.state == "stale"
         assert "before setup" in baseline.detail
-        assert "capture --when baseline" in status.next_command
+        assert "capture baseline" in status.next_command
 
 
 class TestManualMigration:
@@ -259,7 +259,7 @@ class TestManualMigration:
         baseline = status.phase("baseline")
         assert baseline.state == "done"
         assert "taken as the migration's starting point" in baseline.detail
-        assert "capture --when baseline" not in status.next_command
+        assert "capture baseline" not in status.next_command
 
 
 class TestBaselineAfterAMigration:
@@ -296,7 +296,7 @@ class TestBaselineAfterAMigration:
 
         assert _state(status, "baseline") == "done"
         assert _state(status, "post-migration") == "stale"
-        assert "capture --when post-migration" in status.next_command
+        assert "capture post-migration" in status.next_command
 
     def test_baseline_from_another_starting_point_is_stale(self, tmp_path):
         receipt = self._migrated(tmp_path, environment_fingerprint="0" * 16)
