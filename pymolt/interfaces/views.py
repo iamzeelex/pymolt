@@ -204,6 +204,26 @@ def status_view(report) -> dict:
 # ── scan ─────────────────────────────────────────────────────────────────────
 
 
+def exposure_summary(exposure: dict) -> str | None:
+    """One line for ``python_exposure``: what the data says is gone, and how far up it runs."""
+    total = exposure["sites_total"]
+    guarded = exposure["guarded_total"]
+    if not total and not guarded:
+        return None
+    parts: list[str] = []
+    if total:
+        by = max(exposure["by_version"], key=lambda v: tuple(int(p) for p in v.split(".")))
+        parts.append(
+            f"{total} site(s) use stdlib names removed by {by} (data only; `pymolt plan` confirms)"
+            f" - runs unchanged up to {exposure['ceiling']}"
+        )
+    else:
+        parts.append("No unguarded use of stdlib names the data says were removed")
+    if guarded:
+        parts.append(f"{guarded} more guarded by a fallback or version check")
+    return "; ".join(parts) + "."
+
+
 def scan_view(report, project_dir: str | Path) -> dict:
     """``ScanReport`` -> view. The full report is the ``scan --json`` payload."""
     full_path = write_full_report(project_dir, "scan", report.model_dump(mode="json"))
@@ -243,6 +263,7 @@ def scan_view(report, project_dir: str | Path) -> dict:
         "edge_totals": {"total": total_edges, "by_group": by_group, "by_kind": by_kind},
         "divergences": lists.cap("divergences", divergences),
         "contacts": None,
+        "python_exposure": None,
     }
     lines = [f"{len(roots)} project root(s), {total_edges} dependency edge(s)."]
     if "roots" in lists.truncated:
@@ -272,6 +293,20 @@ def scan_view(report, project_dir: str | Path) -> dict:
             f"{distinct} distinct symbol(s), {cmap.files_scanned} file(s) scanned. "
             + _note(lists, "per_dependency", len(shown), full_path)
         )
+    exposure = report.python_exposure
+    if exposure is not None:
+        rows = lists.fit("python_exposure_sites", list(exposure["unguarded_sites"]))
+        data["python_exposure"] = {**exposure, "unguarded_sites": rows}
+        summary = exposure_summary(exposure)
+        if summary:
+            lines.append(summary)
+            if lists.truncated.get("python_exposure_sites"):
+                lines.append("Exposed sites: "
+                             + _note(lists, "python_exposure_sites", len(rows), full_path))
+    if cmap is not None and cmap.unparsed_cython:
+        data["unparsed_cython"] = lists.cap("unparsed_cython", list(cmap.unparsed_cython))
+        lines.append(f"{len(cmap.unparsed_cython)} .pyx/.pxd/.pxi file(s) are not parsed; "
+                     "names used only inside them are not counted.")
     lines.append(f"{len(divergences)} root(s) with Python-version divergence."
                  if divergences else "No Python-version divergence detected.")
     if by_kind:
