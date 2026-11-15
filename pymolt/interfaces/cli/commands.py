@@ -2278,7 +2278,11 @@ def succession(
     """
     from pymolt.config import load_endpoint
     from pymolt.strategic.succession.client import SuccessionError
-    from pymolt.strategic.succession.detect import detect_frameworks
+    from pymolt.strategic.succession.detect import (
+        detect_frameworks,
+        knowledge_coverage,
+        plausible_frameworks,
+    )
     from pymolt.strategic.succession.service import run_succession
 
     require_project_dir(project_dir, json_output=json_output)
@@ -2299,8 +2303,15 @@ def succession(
         else:
             err.print("[yellow]No dependency manifest found — nothing to detect.[/yellow]")
         raise typer.Exit(code=0)
+    declared = frameworks
+    frameworks = plausible_frameworks(declared)
+    covered = knowledge_coverage()
     if not json_output:
-        console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+        if frameworks:
+            console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+        else:
+            console.print(f"[bold]No framework among the {len(declared)} declared "
+                          "dependencies[/bold] (all were checked).")
 
     try:
         with err.status("Looking up framework succession…", spinner="dots") as status:
@@ -2329,6 +2340,8 @@ def succession(
         import json as _json
         payload = {
             "frameworks": frameworks,
+            "checked_dependencies": len(declared),
+            "knowledge_covers": covered,
             "edges": [e.model_dump(mode="json") for e in edges],
             "transplant_plans": [
                 build_transplant_plan(e, project_dir).model_dump(mode="json")
@@ -2343,7 +2356,20 @@ def succession(
         return
 
     if not edges:
-        console.print("[yellow]No known succession path for these frameworks.[/yellow]")
+        named = ", ".join(frameworks) if frameworks else None
+        source = ("Axiom Graph" if load_endpoint(endpoint) else "pymolt's succession knowledge")
+        if named:
+            console.print(
+                f"[yellow]{named}: not in {source}, which covers {', '.join(covered)}.[/yellow]\n"
+                "[dim]That is a gap in what pymolt knows, not a finding that no successor "
+                "exists.[/dim]"
+            )
+        else:
+            console.print(
+                f"[yellow]Checked all {len(declared)} declared dependencies: none is a "
+                f"framework {source} has a succession path for (it covers "
+                f"{', '.join(covered)}).[/yellow]"
+            )
         return
 
     for e in edges:
