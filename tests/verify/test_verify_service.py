@@ -401,3 +401,269 @@ class TestBuildContractReportFromState:
         empty.write_text("")
         rep = service.build_contract_report_from_state(tmp_path, trace_override=str(empty))
         assert rep.confirmed == 0  # explicit (empty) trace used, not the captured baseline
+
+
+# ── facts sink (phase 2): defaults, host merge, sidecars ─────────────────────────────────
+
+from pymolt.verify._sinks import FactSink  # noqa: E402
+from pymolt.verify.facts import iter_snapshot, load_facts, snapshot_path  # noqa: E402
+
+_SITE = {"file": "/proj/app.py", "line": 3, "func": "main"}
+
+
+def _fake_process(work, pid, calls, backend="monitoring"):
+    """What one traced process with PYMOLT_TRACE_SINK=facts leaves in the work dir."""
+    sink = FactSink(str(work / f"trace-{pid}.facts.json"), flush_seconds=0,
+                    metadata={"target": "m", "python": "3.12.1"})
+    sink.set_metadata(backend=backend, mode="auto")
+    for sym, result in calls:
+        sink.on_return(sym, {"bound": {}}, result, site=_SITE, sym=sym, dur=0.001)
+    sink.close()
+
+
+def _fake_local(processes):
+    def fake(target, command, backend, bundle, work, *args, **kwargs):
+        for pid, calls in processes.items():
+            _fake_process(work, pid, calls)
+        return service._process_traces(work), 0
+    return fake
+
+
+class TestFactsCapture:
+    def test_trace_env_defaults_and_caller_overrides(self, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_SINK", raising=False)
+        monkeypatch.delenv("PYMOLT_TRACE_MODE", raising=False)
+        env = service.trace_env("m", "auto", "", "", False, sink="facts", trace_mode="auto")
+        assert (env["PYMOLT_TRACE_SINK"], env["PYMOLT_TRACE_MODE"]) == ("facts", "auto")
+        assert "PYMOLT_TRACE_SINK" not in service.trace_env("m", "auto", "", "", False)
+        # Impact targets without an explicit mode keep the targeted capture.
+        env = service.trace_env("m", "auto", "", "", False, impact_targets=["m.f"],
+                                sink="facts", trace_mode="auto")
+        assert "PYMOLT_TRACE_MODE" not in env and env["PYMOLT_TRACE_SINK"] == "facts"
+        monkeypatch.setenv("PYMOLT_TRACE_SINK", "jsonl")
+        monkeypatch.setenv("PYMOLT_TRACE_MODE", "watch")
+        monkeypatch.setenv("PYMOLT_TRACE_MAX_FACTS", "1000")
+        env = service.trace_env("m", "auto", "", "", False, sink="facts", trace_mode="auto")
+        assert (env["PYMOLT_TRACE_SINK"], env["PYMOLT_TRACE_MODE"]) == ("jsonl", "watch")
+        assert env["PYMOLT_TRACE_MAX_FACTS"] == "1000"  # forwarded into a container too
+
+    def test_capture_modes_pick_their_sink(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_capture(target, command, out_path, backend, **kwargs):
+            calls.append(kwargs)
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_text('{"q": "m.f"}\n')
+            return service.TraceCaptureResult(out_path=str(out_path), events=1, processes=1,
+                                              where="local")
+
+        monkeypatch.setattr(service, "capture_trace", fake_capture)
+        service.capture_named_trace(tmp_path, "baseline", CaptureMode.TEST_SUITE,
+                                    command=["pytest"])
+        service.capture_named_trace(tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
+                                    command=["python", "app.py"])
+        assert "sink" not in calls[0] and "trace_mode" not in calls[0]  # jsonl + discover
+        assert (calls[1]["sink"], calls[1]["trace_mode"]) == ("facts", "auto")
+
+    def test_local_test_capture_defaults_to_jsonl_discover(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_SINK", raising=False)
+        monkeypatch.delenv("PYMOLT_TRACE_MODE", raising=False)
+        script = _write_script(tmp_path, (
+            "import json, os\n"
+            "json.loads('{}')\n"
+            "print(os.environ.get('PYMOLT_TRACE_SINK'), os.environ.get('PYMOLT_TRACE_MODE'))\n"
+        ))
+        out = tmp_path / "trace.jsonl"
+        result = service.capture_trace("json", [sys.executable, str(script)], out, "auto")
+        assert "jsonl discover" in Path(result.command_log).read_text()
+        assert result.facts_path is None and not snapshot_path(out).exists()
+
+    def test_capture_merges_process_snapshots_before_the_work_dir_goes(self, tmp_path,
+                                                                        monkeypatch):
+        monkeypatch.setattr(service, "capture_trace_local", _fake_local({
+            1001: [("m.f", 1)] * 3 + [("m.g", "x")],
+            1002: [("m.f", 1), ("m.f", 2)],
+        }))
+        out = tmp_path / "trace.jsonl"
+        result = service.capture_trace("m", ["app"], out, "auto", sink="facts",
+                                       trace_mode="auto")
+        assert result.processes == 2
+        assert result.events == 6 and result.events_seen == 6 and result.dropped_events == 0
+        assert result.backend == "monitoring"
+        merged = snapshot_path(out)
+        assert result.facts_path == str(merged) and merged.is_file()
+        header = next(obj for kind, obj in iter_snapshot(merged) if kind == "header")
+        assert header["merged"] is True and header["counters"]["calls"] == 6
+        meta = json.loads(Path(result.metadata_path).read_text())
+        assert meta["facts_path"] == str(merged)
+        assert meta["facts"]["processes"] == 2 and meta["facts"]["evicted"] == 0
+        assert meta["runtime_metadata_complete"] is True
+        # The JSONL holds the projection: every JSONL reader sees the calls.
+        projected = [json.loads(line) for line in out.read_text().splitlines()]
+        assert {(r["sym"], r["result"], r["count"]) for r in projected} == {
+            ("m.f", 1, 4), ("m.f", 2, 1), ("m.g", "x", 1)}
+        assert service.inspect_trace_artifact(out).validity is CaptureValidity.VALID
+        fs = load_facts(out)
+        assert fs.snapshot and fs.calls == 6
+        assert not list(tmp_path.parent.glob("pymolt-trace-*/trace-*.facts.json"))
+
+    def test_named_capture_promotes_and_archives_the_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(service, "capture_trace_local",
+                            _fake_local({7: [("m.f", 1), ("m.f", 1)]}))
+        first = service.capture_named_trace(tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+                                            command=["python", "app.py"])
+        traces = tmp_path / ".pymolt" / "contract_traces"
+        assert first.validity is CaptureValidity.VALID and first.events == 2
+        final = snapshot_path(traces / "baseline.jsonl")
+        assert final.is_file()
+        meta = json.loads(Path(first.metadata_path).read_text())
+        assert meta["facts_path"] == str(final)  # retargeted from the staged name
+        assert not list(traces.glob(".*pending*"))
+        second = service.capture_named_trace(tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+                                             command=["python", "app.py"])
+        archived = Path(second.archived_previous)
+        assert snapshot_path(archived).is_file() and final.is_file()
+
+    def test_snapshot_only_trace_is_valid_and_an_empty_one_is_not(self, tmp_path):
+        trace = tmp_path / "t.jsonl"
+        trace.write_text("")
+        sink = FactSink(str(trace), flush_seconds=0)
+        sink.close()
+        assert service.inspect_trace_artifact(trace).validity is CaptureValidity.EMPTY
+        sink = FactSink(str(trace), flush_seconds=0)
+        sink.on_return("m.f", {"bound": {}}, 1, site=_SITE, sym="m.f")
+        sink.close()
+        quality = service.inspect_trace_artifact(trace)
+        assert quality.validity is CaptureValidity.VALID and quality.events == 1
+
+    def test_attach_with_the_facts_sink_round_trips(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_SINK", raising=False)
+        monkeypatch.delenv("PYMOLT_TRACE_MODE", raising=False)
+        instr = service.start_attached_capture(tmp_path, "baseline", target="m")
+        assert "PYMOLT_TRACE_SINK=facts" in instr.command_hint
+        assert "PYMOLT_TRACE_MODE=auto" in instr.command_hint
+        pending = Path(instr.out_path)
+        assert pending.is_file()  # what --collect looks for; the sink writes no JSONL
+        # The engineer's process: FactSink on PYMOLT_TRACE_OUT (no {pid} in an attach path).
+        sink = FactSink(str(pending), flush_seconds=0, metadata={"target": "m"})
+        for _ in range(5):
+            sink.on_return("m.f", {"bound": {}}, 1, site=_SITE, sym="m.f")
+        sink.close()
+        assert service.poll_attached_capture(pending) == 5
+        slot = service.finalize_attached_capture(tmp_path, "baseline", pending, target="m")
+        assert slot.validity is CaptureValidity.VALID
+        assert slot.events == 5 and slot.events_seen == 5 and slot.dropped_events == 0
+        final = Path(slot.trace_path)
+        assert snapshot_path(final).is_file()
+        assert not list(final.parent.glob(".baseline.attach-pending*"))
+        fs = load_facts(final)
+        assert fs.snapshot and [f.count for f in fs.facts] == [5]
+
+
+def test_attach_collects_forked_worker_snapshots(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYMOLT_TRACE_SINK", raising=False)
+    instr = service.start_attached_capture(tmp_path, "baseline", target="m")
+    pending = Path(instr.out_path)
+    stem = pending.name[:-len(".jsonl")]
+    for name, n in ((f"{stem}.facts.json", 2), (f"{stem}.4242.facts.json", 3)):
+        sink = FactSink(str(pending.with_name(name)), flush_seconds=0)
+        for _ in range(n):
+            sink.on_return("m.f", {"bound": {}}, 1, site=_SITE, sym="m.f")
+        sink.close()
+    slot = service.finalize_attached_capture(tmp_path, "baseline", pending, target="m")
+    assert slot.validity is CaptureValidity.VALID
+    assert [f.count for f in load_facts(slot.trace_path).facts] == [5]
+    assert not list(pending.parent.glob(f"{stem}*.facts.json"))
+
+
+class TestLongRunSampling:
+    def _stub(self, monkeypatch):
+        calls = []
+
+        def fake_capture(target, command, out_path, backend, **kwargs):
+            calls.append(kwargs)
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_text('{"q": "m.f"}\n')
+            service._write_trace_metadata(out_path, {"sample_rate": kwargs["sample_rate"]})
+            return service.TraceCaptureResult(out_path=str(out_path), events=1, processes=1,
+                                              where="local")
+
+        monkeypatch.setattr(service, "capture_trace", fake_capture)
+        return calls
+
+    def test_long_runs_default_to_novelty_first_sampling(self, tmp_path, monkeypatch):
+        calls = self._stub(monkeypatch)
+        tests = service.capture_named_trace(tmp_path, "baseline", CaptureMode.TEST_SUITE,
+                                            command=["pytest"])
+        run = service.capture_named_trace(tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
+                                          command=["python", "app.py"])
+        assert (calls[0]["sample_rate"], tests.sample_rate) == (1.0, 1.0)
+        assert "sample_first" not in calls[0]
+        assert (calls[1]["sample_rate"], calls[1]["sample_first"]) == (0.1, 32)
+        assert run.sample_rate == 0.1
+        meta = json.loads(Path(run.metadata_path).read_text())
+        assert meta["sampling"] == {"rate": 0.1, "first": 32, "source": "default"}
+
+    def test_an_explicit_rate_is_the_callers(self, tmp_path, monkeypatch):
+        calls = self._stub(monkeypatch)
+        slot = service.capture_named_trace(tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+                                           command=["python", "app.py"], sample_rate=1.0)
+        assert calls[0]["sample_rate"] == 1.0 and "sample_first" not in calls[0]
+        meta = json.loads(Path(slot.metadata_path).read_text())
+        assert meta["sampling"] == {"rate": 1.0, "first": 0, "source": "caller"}
+
+    def test_trace_env_sets_the_novelty_count_below_rate_one(self, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_SAMPLE_FIRST", raising=False)
+        env = service.trace_env("m", "auto", "", "", False, sample_rate=0.1)
+        assert env["PYMOLT_TRACE_SAMPLE_FIRST"] == "32"
+        assert "PYMOLT_TRACE_SAMPLE_FIRST" not in service.trace_env("m", "auto", "", "", False)
+        monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_FIRST", "8")
+        env = service.trace_env("m", "auto", "", "", False, sample_rate=0.1, sample_first=16)
+        assert env["PYMOLT_TRACE_SAMPLE_FIRST"] == "8"
+
+    def test_attach_defaults_to_long_run_sampling_and_records_what_ran(self, tmp_path,
+                                                                       monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_SAMPLE_FIRST", raising=False)
+        instr = service.start_attached_capture(tmp_path, "baseline", target="m")
+        assert "PYMOLT_TRACE_SAMPLE_RATE=0.1" in instr.command_hint
+        assert "PYMOLT_TRACE_SAMPLE_FIRST=32" in instr.command_hint
+        pending = Path(instr.out_path)
+        monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0.1")
+        sink = FactSink(str(pending), flush_seconds=0)
+        sink.on_raise("m.f", {"bound": {}}, "E", site=_SITE, sym="m.f")
+        sink.close()
+        # The CLI's --collect passes its own default; the watcher's sidecar is what ran.
+        slot = service.finalize_attached_capture(tmp_path, "baseline", pending, target="m",
+                                                 sample_rate=1.0)
+        assert slot.sample_rate == 0.1
+
+
+class TestSampledVerdict:
+    def _slot(self, rate):
+        from pymolt.verify.models import ContractSlot
+
+        return ContractSlot(trace_path="/x.jsonl", captured_at="2026-11-14T00:00:00+00:00",
+                            mode=CaptureMode.LIVE_COMMAND, command=["python", "app.py"],
+                            sample_rate=rate, validity=CaptureValidity.VALID, dropped_events=0)
+
+    def _verdict(self, tmp_path, complete):
+        from pymolt.verify.report import ContractReport
+
+        trace = tmp_path / "t.jsonl"
+        trace.write_text('{"t": "return", "q": "m.f", "result": 1}\n')
+        summary = {"tallies_complete": complete}
+        report = ContractReport(root=".", diff={"disappeared": 0}, diff_clean=True,
+                                static_targets=1, confirmed=1, baseline_stale=False,
+                                fact_diff={"verdict": "pass", "counts": {"equal": 1},
+                                           "old": summary, "new": dict(summary)})
+        slots = [("baseline", self._slot(0.1)), ("post-migration", self._slot(0.1))]
+        service._stamp_verdict(report, str(trace), str(trace), slots)
+        return report
+
+    def test_complete_tallies_on_both_sides_lift_the_sampling_caveat(self, tmp_path):
+        report = self._verdict(tmp_path, complete=True)
+        assert not any("sampled captures" in r for r in report.verdict_reasons)
+
+    def test_without_complete_tallies_sampling_still_blocks(self, tmp_path):
+        report = self._verdict(tmp_path, complete=False)
+        assert any("sampled captures" in r for r in report.verdict_reasons)

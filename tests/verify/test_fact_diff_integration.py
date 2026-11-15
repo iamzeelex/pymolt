@@ -169,3 +169,91 @@ def test_dynamic_only_blocks_pass_without_a_fact_diff(tmp_path):
     _stamp_verdict(report, str(trace), str(trace), [])
     assert report.verdict is VerificationVerdict.INCONCLUSIVE
     assert "1 observed symbol(s) are missing from the static map" in report.verdict_reasons
+
+
+# ── facts snapshots through report and verdict (phase 2) ─────────────────────────────────
+
+def _facts_trace(tmp_path, name, calls, **kw):
+    """A trace the way a facts capture leaves it: snapshot + its projection in the JSONL."""
+    from pymolt.verify._sinks import FactSink
+    from pymolt.verify.facts import merge_fact_snapshots, project_snapshot, snapshot_path
+
+    trace = tmp_path / f"{name}.jsonl"
+    sink = FactSink(str(tmp_path / f"raw-{name}.jsonl"), flush_seconds=0, **kw)
+    for line, n in calls:
+        sink.on_return("dep.compute", {"bound": {"n": n}}, n,
+                       site={"file": str(tmp_path / "app.py"), "line": line, "func": "main"},
+                       sym="dep.compute")
+    sink.close()
+    merge_fact_snapshots([sink.path], snapshot_path(trace))
+    trace.write_text("")
+    project_snapshot(snapshot_path(trace), trace)
+    return trace
+
+
+def test_an_evicting_snapshot_blocks_pass_with_a_reason(tmp_path):
+    from pymolt.verify.report import build_contract_report
+
+    (tmp_path / "app.py").write_text("import dep\n\ndep.compute()\n")
+    calls = [(3, 0)] * 5 + [(3, n) for n in range(1, 30)]
+    old = _facts_trace(tmp_path, "old", calls, max_facts=8)
+    new = _facts_trace(tmp_path, "new", calls, max_facts=8)
+    rep = build_contract_report(tmp_path, trace=new, against=old)
+    assert rep.diff_clean is True
+    assert rep.fact_diff["verdict"] == "inconclusive" and rep.fact_diff["incomplete"] is True
+    reasons = _fact_diff_reasons(rep.fact_diff)
+    assert any("baseline facts snapshot reached its fact cap" in r for r in reasons)
+    _stamp_verdict(rep, str(new), str(old), [])
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+    assert any("evicted" in r for r in rep.verdict_reasons)
+
+
+def test_widened_snapshot_is_a_note_not_a_blocker(tmp_path):
+    from pymolt.verify.report import build_contract_report
+
+    (tmp_path / "app.py").write_text("import dep\n\ndep.compute()\n")
+    old = _facts_trace(tmp_path, "old", [(3, n) for n in range(10)], facts_per_site=4)
+    new = _facts_trace(tmp_path, "new", [(3, n) for n in reversed(range(10))],
+                       facts_per_site=4)
+    rep = build_contract_report(tmp_path, trace=new, against=old)
+    assert rep.fact_diff["verdict"] == "pass"
+    _stamp_verdict(rep, str(new), str(old), [])
+    assert any(note.startswith("widened:") for note in rep.notes)
+    assert not any("widened" in r for r in rep.verdict_reasons)
+
+
+def test_command_capture_uses_the_facts_sink_end_to_end(tmp_path):
+    from pymolt.verify import boundary_tracer
+    from pymolt.verify.facts import load_facts, snapshot_path
+
+    if not hasattr(boundary_tracer, "ENV_SINK"):
+        import pytest
+
+        pytest.skip("this watcher has no PYMOLT_TRACE_SINK")
+    app = tmp_path / "app.py"
+    app.write_text(
+        "import json, threading\n"
+        "def work():\n"
+        "    for i in range(500):\n"
+        "        json.loads('[%d]' % (i % 3))\n"
+        "ts = [threading.Thread(target=work) for _ in range(4)]\n"
+        "[t.start() for t in ts]\n"
+        "[t.join() for t in ts]\n"
+    )
+    slot = service.capture_named_trace(
+        tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+        command=[sys.executable, str(app)], target="json", cwd=tmp_path,
+    )
+    assert slot.validity.value == "valid", slot.validity_reason
+    # A long run samples values (novelty first, then 10%) and still counts every call.
+    assert slot.sample_rate == service.LONG_RUN_SAMPLE_RATE
+    assert slot.events_seen == 2000 and slot.dropped_events == 0
+    assert 0 < slot.events < 2000
+    meta = json.loads(open(slot.metadata_path).read())
+    assert meta["sampling"] == {"rate": 0.1, "first": 32, "source": "default"}
+    assert snapshot_path(slot.trace_path).is_file()
+    fs = load_facts(slot.trace_path, root=tmp_path)
+    assert fs.snapshot and fs.calls == 2000 and fs.tallies_complete
+    assert sum(f.count for f in fs.facts) == slot.events
+    site_text = load_site_text(slot.trace_path)
+    assert "json.loads('[%d]' % (i % 3))" in site_text.values()

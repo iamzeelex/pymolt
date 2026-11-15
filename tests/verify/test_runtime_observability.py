@@ -102,7 +102,10 @@ def test_runtime_metadata_propagates_to_result_slot_and_sidecar(tmp_path):
     assert metadata["deployment_id"] == "release-42"
     assert metadata["request_id"] == "request-7"
     assert metadata["correlation_id"] == "correlation-9"
-    assert metadata["sample_rate"] == 1.0
+    # A long-run capture with no explicit rate samples values (every call is still
+    # counted): the effective policy is recorded, and its source says it was the default.
+    assert metadata["sample_rate"] == 0.1
+    assert metadata["sampling"]["source"] == "default"
     assert metadata["counters"]["dropped_events"] == 0
     assert service.load_contract_state(tmp_path).baseline == slot
 
