@@ -1,0 +1,828 @@
+"""The agent surface: one compact, honest payload per command.
+
+``pymolt <command> --agent`` prints these objects and the MCP server returns them.
+Both interfaces call the same service function and then the builder here, so the
+summary wording, the list budgets, the completeness flags and the failure shape are
+decided once and cannot drift apart.
+
+Success envelope (every builder)::
+
+    {"ok": true, "summary": "<short plain text>", "data": {...},
+     "full_report_path": "<path or null>", "hint": "<next step or null>"}
+
+Failure envelope, the same shape ``--json`` failures have on the CLI::
+
+    {"ok": false, "error": "<one line>", "hint": "<how to fix>"}   # hint only if known
+
+Every ``data`` carries three keys besides its own:
+
+* ``warnings``: what the service flagged. Never dropped; a failure the agent
+  cannot see is a failure it will report as success.
+* ``complete``: True when every list in ``data`` is shown whole.
+* ``truncated``: ``{list name: number omitted}``, empty when complete.
+
+Lists an agent answers *from* are budgeted by size (:func:`fit_answer`); lists that
+are context around an answer are capped at :data:`LIST_CAP` items. Counts are always
+the true totals, and the summary says how complete each answer list is. The rest is
+written to ``.pymolt/agent/<command>.json`` (``full_report_path``).
+
+Builders take what the services return and only read; the one thing they write is
+that full report. Nothing here runs analysis.
+"""
+
+from __future__ import annotations
+
+import difflib
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+#: Cap for lists that are context around an answer stated elsewhere.
+LIST_CAP = 20
+
+#: Lists that ARE the answer (which packages change, which calls changed) are
+#: budgeted by size, not clipped at a fixed count. Measured on flasgger: 31 compact
+#: assess rows cost 453 tokens, while 20 JSON rows cost 643, so a count clip made the
+#: payload larger per unit of answer and agents answered from a partial list.
+#: ~6000 chars is about 1.5k tokens.
+ANSWER_BUDGET_CHARS = 6000
+
+#: Where the complete payload behind a view is written, relative to the project.
+AGENT_REPORT_DIR = Path(".pymolt") / "agent"
+
+
+class AgentInputError(ValueError):
+    """An input the caller can fix. Rendered as the failure envelope."""
+
+    def __init__(self, error: str, hint: str | None = None) -> None:
+        super().__init__(error)
+        self.error = error
+        self.hint = hint
+
+
+# ── envelope and budgets ─────────────────────────────────────────────────────
+
+
+def ok(summary: str, data: dict, *, full_report_path: str | None = None,
+       hint: str | None = None) -> dict:
+    return {
+        "ok": True,
+        "summary": summary,
+        "data": data,
+        "full_report_path": full_report_path,
+        "hint": hint,
+    }
+
+
+def failure(error: str, hint: str | None = None) -> dict:
+    """The failure envelope. Mirrors ``cli.output.fail(..., json_output=True)``."""
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if hint:
+        payload["hint"] = hint
+    return payload
+
+
+def dumps(payload: Any) -> str:
+    """How ``--agent`` prints a view: one compact JSON line."""
+    return json.dumps(payload, default=str)
+
+
+def cap_list(items: list[Any], cap: int = LIST_CAP) -> tuple[list[Any], int]:
+    """Return (the first ``cap`` items, number omitted)."""
+    if len(items) <= cap:
+        return list(items), 0
+    return list(items[:cap]), len(items) - cap
+
+
+def fit_answer(rows: list[str], budget: int = ANSWER_BUDGET_CHARS) -> tuple[list[str], int]:
+    """Return (the rows that fit in ``budget`` chars, number omitted).
+
+    Use for any list the agent answers *from*; use :func:`cap_list` only for lists
+    that are context around an answer stated elsewhere. The first row always fits.
+    """
+    out: list[str] = []
+    used = 0
+    for row in rows:
+        cost = len(row) + 1
+        if out and used + cost > budget:
+            return out, len(rows) - len(out)
+        out.append(row)
+        used += cost
+    return out, 0
+
+
+def truncation_note(shown: int, dropped: int, full_report_path: str | None) -> str:
+    """One line stating how complete a list is.
+
+    Silence about truncation is what makes an agent treat a partial list as the
+    whole answer.
+    """
+    if not dropped:
+        return f"All {shown} listed."
+    where = f" Full list: {full_report_path}" if full_report_path else ""
+    return f"Showing {shown} of {shown + dropped}, {dropped} omitted.{where}"
+
+
+def write_full_report(project_dir: str | Path, name: str, payload: Any) -> str:
+    """Write ``payload`` to ``.pymolt/agent/<name>.json`` and return the path."""
+    out_dir = Path(project_dir) / AGENT_REPORT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{name}.json"
+    out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    return str(out_path)
+
+
+class _Lists:
+    """Records what a view cut, so ``complete``/``truncated`` are computed, not kept by hand."""
+
+    def __init__(self) -> None:
+        self.truncated: dict[str, int] = {}
+
+    def fit(self, name: str, rows: list[str], budget: int = ANSWER_BUDGET_CHARS) -> list[str]:
+        shown, dropped = fit_answer(rows, budget)
+        if dropped:
+            self.truncated[name] = dropped
+        return shown
+
+    def cap(self, name: str, items: list[Any], cap: int = LIST_CAP) -> list[Any]:
+        shown, dropped = cap_list(items, cap)
+        if dropped:
+            self.truncated[name] = dropped
+        return shown
+
+    def finish(self, data: dict, warnings: list[str]) -> dict:
+        data["warnings"] = self.cap("warnings", [str(w) for w in warnings])
+        data["complete"] = not self.truncated
+        data["truncated"] = dict(self.truncated)
+        return data
+
+
+def _note(lists: _Lists, name: str, shown: int, full_report_path: str | None) -> str:
+    return truncation_note(shown, lists.truncated.get(name, 0), full_report_path)
+
+
+# ── status ───────────────────────────────────────────────────────────────────
+
+
+def status_view(report) -> dict:
+    """``FunnelStatus`` -> view. Everything fits, so there is no full report."""
+    lists = _Lists()
+    phases = [
+        {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker}
+        for p in report.phases
+    ]
+    checks = [check.model_dump(mode="json") for check in report.checks]
+    done = sum(1 for p in report.phases if p.state == "done")
+    lines = [
+        f"Funnel status for {Path(report.project_dir).name}: "
+        f"{done}/{len(report.phases)} phases done."
+    ]
+    for state, label in (("stale", "Stale, redo"), ("blocked", "Blocked")):
+        names = [p.phase for p in report.phases if p.state == state]
+        if names:
+            lines.append(f"{label}: {', '.join(names)}.")
+    warnings: list[str] = []
+    for c in report.checks:
+        if c.state != "ok":
+            warnings.append(f"{c.name}: {c.detail}" + (f" ({c.hint})" if c.hint else ""))
+            lines.append(f"{c.state.upper()} {warnings[-1]}")
+    lines.append(f"Next: {report.next_command}" if report.next_command
+                 else f"Next: nothing to run. {report.next_reason}")
+    data = {
+        "phases": phases,
+        "checks": checks,
+        "next_command": report.next_command,
+        "next_reason": report.next_reason,
+        "notes": list(report.notes),
+    }
+    return ok("\n".join(lines), lists.finish(data, warnings),
+              hint=report.next_reason or None)
+
+
+# ── scan ─────────────────────────────────────────────────────────────────────
+
+
+def scan_view(report, project_dir: str | Path) -> dict:
+    """``ScanReport`` -> view. The full report is the ``scan --json`` payload."""
+    full_path = write_full_report(project_dir, "scan", report.model_dump(mode="json"))
+    lists = _Lists()
+    surfaces = report.surfaces
+
+    roots: list[dict] = []
+    divergences: list[str] = []
+    for root in surfaces.project_roots:
+        if root.is_divergent:
+            divergences.append(f"{root.path}: {', '.join(root.runtime_versions()) or '?'}")
+        roots.append({
+            "path": root.path,
+            "chosen_manifest": root.manifests[0] if root.manifests else None,
+            "manifests": list(root.manifests),
+            "python_version_evidence": [
+                {"source": e.source, "version": e.version, "kind": e.kind}
+                for e in root.version_evidence
+            ],
+            "divergent": root.is_divergent,
+        })
+
+    by_group: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    total_edges = 0
+    for inv in report.inventory_by_root.values():
+        total_edges += len(inv.edges)
+        for group, count in inv.counts_by_group().items():
+            by_group[group] = by_group.get(group, 0) + count
+        for kind, count in inv.counts_by_kind().items():
+            by_kind[kind] = by_kind.get(kind, 0) + count
+
+    data: dict[str, Any] = {
+        "root_count": len(roots),
+        "roots": lists.cap("roots", roots),
+        "excluded_roots": lists.cap("excluded_roots", list(surfaces.excluded_roots)),
+        "edge_totals": {"total": total_edges, "by_group": by_group, "by_kind": by_kind},
+        "divergences": lists.cap("divergences", divergences),
+        "contacts": None,
+    }
+    lines = [f"{len(roots)} project root(s), {total_edges} dependency edge(s)."]
+    if "roots" in lists.truncated:
+        lines.append("Roots: " + _note(lists, "roots", len(data["roots"]), full_path))
+    if surfaces.excluded_roots:
+        lines.append(f"{len(surfaces.excluded_roots)} manifest directory(ies) deliberately "
+                     "excluded (see excluded_roots).")
+
+    warnings = list(surfaces.notes)
+    cmap = report.contact_map
+    if cmap is not None:
+        warnings.extend(cmap.notes)
+        per_dep = sorted(((dep, len(t)) for dep, t in cmap.by_dep.items()),
+                         key=lambda kv: (-kv[1], kv[0]))
+        shown = lists.fit("per_dependency", [f"{dep} {count}" for dep, count in per_dep])
+        distinct = len({c.target for c in cmap.contacts})
+        data["contacts"] = {
+            "total": len(cmap.contacts),
+            "distinct_symbols": distinct,
+            "dependencies": len(cmap.by_dep),
+            "files_scanned": cmap.files_scanned,
+            "per_dependency_format": "dep distinct_symbol_count",
+            "per_dependency": shown,
+        }
+        lines.append(
+            f"{len(cmap.contacts)} call site(s) into {len(cmap.by_dep)} dependency(ies), "
+            f"{distinct} distinct symbol(s), {cmap.files_scanned} file(s) scanned. "
+            + _note(lists, "per_dependency", len(shown), full_path)
+        )
+    lines.append(f"{len(divergences)} root(s) with Python-version divergence."
+                 if divergences else "No Python-version divergence detected.")
+    if by_kind:
+        kinds = ", ".join(f"{k}:{v}" for k, v in sorted(by_kind.items()))
+        lines.append(f"Edge kinds: {kinds}.")
+    if warnings:
+        lines.append(f"{len(warnings)} warning(s), see data.warnings.")
+    return ok("\n".join(lines), lists.finish(data, warnings), full_report_path=full_path,
+              hint="Next: setup (manifest, tool, base and target Python), then assess.")
+
+
+# ── setup ────────────────────────────────────────────────────────────────────
+
+
+def setup_choices(options, *, manifest: str | None, tool: str | None,
+                  base_python: str | None, target_python: str | None,
+                  container_id: str | None = None, target_env: str | None = None):
+    """The non-interactive setup request -> ``SetupChoices``, or None to list options.
+
+    No choice at all lists the valid values and saves nothing; all four save; a
+    partial or invalid set raises :class:`AgentInputError` naming what is wrong.
+    """
+    from pymolt.ingestion.config import ToolChoice
+    from pymolt.setup.service import SetupChoices, SetupError, check_setup_values
+
+    if not options.manifests:
+        raise AgentInputError(
+            "no Python dependency manifests detected",
+            "Point project_dir at a project with requirements*.txt, pyproject.toml, "
+            "Pipfile or environment.yml.",
+        )
+    given = {"manifest": manifest, "tool": tool, "base_python": base_python,
+             "target_python": target_python}
+    if not any(given.values()):
+        return None
+    missing = [name for name, value in given.items() if not value]
+    if missing:
+        raise AgentInputError(f"Missing: {', '.join(missing)}.",
+                              "Run setup with no choices to list the valid values.")
+    try:
+        check_setup_values(options, manifest=manifest, tool=tool, base_python=base_python,
+                           target_python=target_python, container_id=container_id)
+    except SetupError as exc:
+        raise AgentInputError(f"{exc}.", exc.hint) from exc
+    return SetupChoices(
+        selected_manifest=manifest,
+        selected_tool=ToolChoice(tool),
+        base_python=base_python,
+        # Echoing the detected default back is not a statement about the project: an
+        # assumed base Python stays assumed, so assess keeps capping its tier.
+        base_python_source=(options.base_python_source
+                            if base_python == options.base_python_default else "declared"),
+        target_python=target_python,
+        container_id=container_id,
+        target_env_created=bool(target_env),
+        target_env_path=target_env,
+    )
+
+
+def setup_payload(options, project_dir: str | Path, *, config=None) -> dict:
+    """The ``setup --json`` payload: the full options, and the config if one was saved."""
+    return {
+        "saved": config is not None,
+        "config_path": (str(Path(project_dir) / ".pymolt" / "env_config.json")
+                        if config is not None else None),
+        "config": config.model_dump(mode="json") if config is not None else None,
+        "options": options.model_dump(mode="json"),
+    }
+
+
+def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
+    """``SetupOptions`` (+ the saved ``EnvConfig``, if any) -> view."""
+    full = setup_payload(options, project_dir, config=config)
+    full_path = write_full_report(project_dir, "setup", full)
+    lists = _Lists()
+    offered = [v.version for v in options.target_versions]
+    data: dict[str, Any] = {k: full[k] for k in ("saved", "config_path", "config")}
+    data["options"] = None
+    if config is not None:
+        # The option notes describe defaults ("assuming X"); once explicit choices
+        # are saved only what still holds is said (the notes stay in the full report).
+        warnings = []
+        if config.base_python_source == "assumed":
+            warnings.append(f"base Python {config.base_python} is assumed (the interpreter "
+                            "pymolt runs on), not declared by the project.")
+        if offered and config.target_python not in offered:
+            warnings.append(f"Python {config.target_python} is not in the available list; "
+                            "assess fails if it cannot be provisioned.")
+        tool = getattr(config.selected_tool, "value", config.selected_tool)
+        summary = (f"Saved {full['config_path']}.\nManifest {config.selected_manifest}, tool "
+                   f"{tool}, Python {config.base_python} -> {config.target_python}.")
+        hint = "Next: assess (resolves the dependencies for the target Python)."
+    else:
+        warnings = list(options.notes)
+        tools = [t.name for t in options.tools if t.available]
+        data["options"] = {
+            "manifests": lists.cap("manifests", [m.name for m in options.manifests]),
+            "default_manifest": options.default_manifest,
+            "tools": tools,
+            "default_tool": options.default_tool,
+            "containers": lists.cap("containers", [c.id for c in options.containers]),
+            "interpreters": lists.cap("interpreters", list(options.interpreters)),
+            "base_python_default": options.base_python_default,
+            "base_python_source": options.base_python_source,
+            "target_python_options": lists.cap("target_python_options", offered),
+            "default_target_python": options.default_target,
+        }
+        summary = (
+            f"Nothing saved. Manifests: {', '.join(m.name for m in options.manifests)}.\n"
+            f"Tools: {', '.join(tools) or 'none available'} (default {options.default_tool}).\n"
+            f"Base Python: {options.base_python_default} ({options.base_python_source}).\n"
+            f"Target options: {', '.join(offered) or 'none'}."
+        )
+        hint = ("Run setup again with manifest, tool, base_python and target_python taken "
+                "from these values (CLI: --manifest --tool --base-python --target-python).")
+    return ok(summary, lists.finish(data, warnings), full_report_path=full_path, hint=hint)
+
+
+# ── assess ───────────────────────────────────────────────────────────────────
+
+_ROW_PRIORITY = {"conflict": 0, "removed": 1, "upgrade": 2, "added": 3}
+_VERDICT_LEVEL = {"red": "blocked", "yellow": "unproven", "green": "resolves"}
+
+
+def assess_payload(result, *, baseline_hint=None, target_hint=None) -> dict:
+    """The ``assess --json`` payload, built from an ``AssessResult``."""
+    payload: dict[str, Any] = {
+        "project_dir": result.project_dir,
+        "source_manifest": result.source_manifest,
+        "source_fixation": result.source_fixation,
+        "resolution_quality": result.resolution_quality,
+        "detected_python": result.detected_python,
+        "target_python": result.target_python,
+        "target_resolved": result.target_resolved,
+        "target_error": result.target_error,
+        "baseline_unresolved": result.baseline_unresolved,
+        "baseline_tier": result.baseline_tier,
+        "target_manifest_path": result.target_manifest_path,
+        "warnings": list(result.warnings),
+        "manual_zone": list(result.manual_zone),
+        "packages": list(result.rows),
+    }
+    if baseline_hint is not None:
+        payload["baseline_hint"] = baseline_hint.model_dump(mode="json")
+    if target_hint is not None:
+        payload["target_hint"] = target_hint.model_dump(mode="json")
+    if result.risk is not None:
+        payload["risk"] = result.risk.model_dump(mode="json")
+    return payload
+
+
+def assess_hints(project_dir: str | Path, result) -> dict:
+    """How to build the environment assess could not resolve in, and the target one."""
+    baseline_hint = target_hint = None
+    if result.baseline_unresolved and result.detected_python:
+        from pymolt.setup.baseline_hint import build_baseline_hint
+
+        baseline_hint = build_baseline_hint(
+            project_dir, result.detected_python,
+            reason=result.warnings[0] if result.warnings else None,
+        )
+    if result.target_python and result.target_resolved:
+        from pymolt.setup.target_hint import build_target_hint
+
+        target_hint = build_target_hint(project_dir, result.target_python,
+                                        manifest=result.target_manifest_path)
+    return {"baseline_hint": baseline_hint, "target_hint": target_hint}
+
+
+def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False,
+                baseline_hint=None, target_hint=None) -> dict:
+    """``AssessResult`` -> view. The verdict wording is the service's own."""
+    from pymolt.assess.service import BaselineTier, compatibility_verdict
+
+    full_path = write_full_report(project_dir, "assess", assess_payload(
+        result, baseline_hint=baseline_hint, target_hint=target_hint))
+    lists = _Lists()
+    warnings = list(result.warnings)
+
+    risk_by_pkg: dict[str, str] = {}
+    risk_data = None
+    if result.risk is not None:
+        tiers: dict[str, int] = {}
+        for pkg in result.risk.packages:
+            tier = getattr(pkg.tier, "value", str(pkg.tier))
+            risk_by_pkg[pkg.name] = tier
+            tiers[tier] = tiers.get(tier, 0) + 1
+        risk_data = {"assessed": result.risk.assessed, "skipped": result.risk.skipped,
+                     "errors": result.risk.errors, "by_tier": tiers}
+        if result.risk.errors:
+            warnings.append(f"risk: {result.risk.errors} package(s) unreachable; "
+                            "their risk is unknown, not low.")
+    elif risk_requested:
+        warnings.append("risk was requested but not assessed: there is no resolved base "
+                        "to compare against.")
+
+    def row(r: dict) -> str:
+        line = (f"{r['name']} {r['baseline_version'] or '-'}>{r['target_version'] or '-'} "
+                f"{r['status']}")
+        return line + (f" risk={risk_by_pkg[r['name']]}" if r["name"] in risk_by_pkg else "")
+
+    moved = sorted((r for r in result.rows if r["status"] not in ("unchanged", "baseline")),
+                   key=lambda r: (_ROW_PRIORITY.get(r["status"], 9), r["name"]))
+    changes = lists.fit("changes", [row(r) for r in moved])
+    counts = result.counts_by_status()
+    manual_zone = [str(item) for item in result.manual_zone]
+
+    verdict = None
+    found = compatibility_verdict(result.target_python, result.target_error,
+                                  BaselineTier(result.baseline_tier))
+    if found is not None:
+        title, body, style = found
+        verdict = {"title": re.sub(r"^\W+", "", title), "detail": body,
+                   "level": _VERDICT_LEVEL.get(style, style)}
+
+    data: dict[str, Any] = {
+        "target_python": result.target_python,
+        "verdict": verdict,
+        "baseline_tier": result.baseline_tier,
+        "baseline_unresolved": result.baseline_unresolved,
+        "source_manifest": result.source_manifest,
+        "source_fixation": result.source_fixation,
+        "resolution_quality": result.resolution_quality,
+        "target_resolved": result.target_resolved,
+        "target_error": result.target_error,
+        "changes_format": "name base>target status" + (" risk=tier" if risk_by_pkg else ""),
+        "changes": changes,
+        "changes_total": len(moved),
+        "unchanged": counts.get("unchanged", 0),
+        "status_counts": counts,
+        "manual_zone": lists.cap("manual_zone", manual_zone),
+        "manual_zone_count": len(manual_zone),
+        "risk": risk_data,
+        "target_manifest_path": result.target_manifest_path,
+        "target_env": None,
+        "baseline_env": None,
+    }
+    if target_hint is not None:
+        data["target_env"] = {"suggested_uv_commands": target_hint.suggested_uv_commands,
+                              "suggested_dockerfile": target_hint.suggested_dockerfile,
+                              "notes": target_hint.notes}
+    if baseline_hint is not None:
+        data["baseline_env"] = {"base_python": baseline_hint.base_python,
+                                "reason": baseline_hint.reason,
+                                "suggested_commands": baseline_hint.suggested_commands,
+                                "rerun_command": baseline_hint.rerun_command,
+                                "notes": baseline_hint.notes}
+
+    lines = [verdict["title"] if verdict else "No target Python: nothing was compared."]
+    lines.append(
+        f"Base tier: {result.baseline_tier}. Upgrades: {counts.get('upgrade', 0)}, "
+        f"added: {counts.get('added', 0)}, removed: {counts.get('removed', 0)}, "
+        f"conflicts: {counts.get('conflict', 0)}, manual-zone: {len(manual_zone)}."
+    )
+    lines.append(f"{len(moved)} package(s) differ, {counts.get('unchanged', 0)} unchanged. "
+                 + _note(lists, "changes", len(changes), full_path))
+    if result.baseline_unresolved:
+        lines.append("No base was resolved: every row is target-only ('added' means not "
+                     "compared). See data.baseline_env.")
+    if result.target_manifest_path:
+        lines.append(f"Pinned target manifest written: {result.target_manifest_path}")
+    if warnings:
+        lines.append(f"{len(warnings)} warning(s), see data.warnings.")
+    lines.append("A resolve is not evidence the code still works: capture and verify decide.")
+
+    if result.target_error:
+        hint = "Fix the conflict in data.target_error (or loosen constraints), then assess again."
+    elif result.baseline_unresolved:
+        hint = "Build the base environment (data.baseline_env), then assess again inside it."
+    else:
+        hint = "Next: capture the baseline before any code edit, then plan."
+    return ok("\n".join(lines), lists.finish(data, warnings), full_report_path=full_path,
+              hint=hint)
+
+
+# ── capture ──────────────────────────────────────────────────────────────────
+
+
+def capture_view(slot, *, when: str, state) -> dict:
+    """A capture's ``ContractSlot`` (+ the contract state after it) -> view.
+
+    ``when`` is the CLI word: ``baseline`` or ``post-migration``. A capture that is
+    not accepted as evidence is still an answer (``ok`` true, ``accepted`` false):
+    the command ran, and what it recorded cannot stand for that side.
+    """
+    from pymolt.verify.models import CaptureValidity
+
+    lists = _Lists()
+    accepted = slot.validity is CaptureValidity.VALID
+    filled = [name for name in ("baseline", "post_migration") if getattr(state, name) is not None]
+    warnings: list[str] = []
+    for item in slot.activation_failures or []:
+        warnings.append(f"the watcher failed to activate in pid {item.get('pid')} (python "
+                        f"{item.get('python')}): {item.get('error')}. That process ran "
+                        "UNTRACED, so this capture cannot support a PASS.")
+    for label, value in (("dropped event(s)", slot.dropped_events),
+                         ("trace write failure(s)", slot.write_failures),
+                         ("sink failure(s)", slot.sink_failures)):
+        if value:
+            warnings.append(f"{value} {label}: the recording is incomplete.")
+    if slot.instrumentation_skipped:
+        warnings.append(f"{len(slot.instrumentation_skipped)} instrumentation target(s) skipped.")
+
+    validity = getattr(slot.validity, "value", str(slot.validity))
+    data = {
+        "when": when,
+        "accepted": accepted,
+        "validity": validity,
+        "validity_reason": slot.validity_reason,
+        "events": slot.events,
+        "processes": slot.processes,
+        "returncode": slot.returncode,
+        "trace_path": slot.trace_path,
+        "command_log": slot.command_log,
+        "filled_slots": filled,
+        "env_note": slot.env_note,
+        "duration_seconds": slot.duration_seconds,
+        "dropped_events": slot.dropped_events,
+        "coverage_pct": slot.coverage_pct,
+        "archived_previous": slot.archived_previous,
+        "impact_targets": lists.cap("impact_targets", list(slot.impact_targets)),
+        "deployment_id": slot.deployment_id,
+        "request_id": slot.request_id,
+        "correlation_id": slot.correlation_id,
+        "metadata_path": slot.metadata_path,
+    }
+    if accepted:
+        lines = [f"Recorded {slot.events} call(s) in {slot.processes} process(es) as the "
+                 f"'{when}' capture.", f"Filled: {', '.join(filled) or 'none'}."]
+        if slot.env_note:
+            lines.append(f"Env: {slot.env_note}")
+        hint = ("Next: change the code (or apply a plan), then capture post-migration."
+                if "post_migration" not in filled else
+                "Next: verify (compares baseline and post-migration).")
+    else:
+        lines = [f"NOT accepted as '{when}' evidence: {slot.validity_reason or validity}.",
+                 f"Diagnostic artifact: {slot.trace_path}"]
+        hint = "Fix the command (see command_log) and capture again; the slot is unchanged."
+    if warnings:
+        lines.append(f"{len(warnings)} warning(s), see data.warnings.")
+    return ok("\n".join(lines), lists.finish(data, warnings),
+              full_report_path=slot.trace_path, hint=hint)
+
+
+def capture_attach_view(instructions, *, when: str, collect_command: str) -> dict:
+    """``--mode attach``: what to run, and how to finish. Nothing is recorded yet."""
+    data = {"when": when, "attach_command": instructions.command_hint,
+            "collect_command": collect_command}
+    return ok(f"Attach capture for '{when}' started; nothing recorded yet.\n"
+              f"Run: {instructions.command_hint}",
+              _Lists().finish(data, []), hint=f"Then finish it: {collect_command}")
+
+
+# ── plan ─────────────────────────────────────────────────────────────────────
+
+
+def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) -> dict:
+    """A saved ``MigrationPlan`` -> view. The full report is the plan file itself."""
+    from pymolt.codemods.models import CodemodPattern
+
+    full_path = str(plan_path)
+    lists = _Lists()
+    diffs = [json.dumps({"path": change.path, "diff": "".join(difflib.unified_diff(
+        change.old_source.splitlines(keepends=True),
+        change.new_source.splitlines(keepends=True),
+        fromfile=f"a/{change.path}", tofile=f"b/{change.path}",
+    ))}) for change in plan.changes]
+    files = lists.fit("files_to_change", sorted(change.path for change in plan.changes))
+    advisories = [
+        f"{a.path}:{a.line} [{'caveat' if a.severity == 'precondition' else 'not applied'}] "
+        f"{a.reason}" for a in plan.advisories
+    ]
+    impacts = [
+        f"{i.package} {i.path} {i.kind} risk={i.risk}"
+        + (f" -> {i.replacement_path}" if i.replacement_path else "")
+        for i in plan.impacts
+    ]
+    per_package = []
+    for pkg, items in by_pkg.items():
+        patterns = sum(1 for item in items if isinstance(item, CodemodPattern))
+        per_package.append(f"{pkg} rules={len(items) - patterns} patterns={patterns}")
+    sites = sum(change.sites for change in plan.changes)
+
+    data: dict[str, Any] = {
+        "plan_id": plan.plan_id,
+        "plan_path": full_path,
+        "source": source_desc,
+        "dependencies": lists.cap("dependencies", [
+            f"{d.name} {d.from_version}>{d.to_version}" for d in plan.dependencies]),
+        "per_package": lists.cap("per_package", per_package),
+        "files_to_change": files,
+        "files_total": len(plan.changes),
+        "rewrite_sites": sites,
+        "diffs": [json.loads(d) for d in lists.fit("diffs", diffs, ANSWER_BUDGET_CHARS * 2)],
+        "advisories": lists.fit("advisories", advisories),
+        "advisories_total": len(advisories),
+        "api_impacts": lists.fit("api_impacts", impacts),
+        "api_impacts_total": len(impacts),
+        "baseline_bound": plan.baseline_trace_path is not None,
+        **_risk_data(lists, getattr(plan, "risks", None)),
+    }
+    warnings: list[str] = []
+    if plan.baseline_trace_path is None:
+        warnings.append("No baseline capture is bound to this plan: apply refuses it without "
+                        "--allow-no-baseline and verify could only be INCONCLUSIVE. Capture "
+                        "the baseline, then plan again.")
+    lines = [
+        f"Plan {plan.plan_id[:8]} saved: {len(plan.changes)} file(s) to change, {sites} "
+        f"site(s), {len(plan.dependencies)} dependency move(s), from {source_desc}.",
+        "Files: " + _note(lists, "files_to_change", len(files), full_path),
+    ]
+    if advisories:
+        lines.append(f"{len(advisories)} site(s) need manual review (data.advisories).")
+    if impacts:
+        lines.append(f"{len(impacts)} API impact(s) (data.api_impacts).")
+    if data["risks_status"] is not None:
+        attention = data["risks_attention_total"]
+        fixed = data["risks_fixed_total"]
+        lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the plan "
+                     f"(data.risks_attention, data.risks_fixed; evidence {data['risks_status']}).")
+    if by_pkg and not plan.changes:
+        lines.append(f"No call sites matched: none of the returned recipes apply in the "
+                     f"{plan.files_scanned} file(s) scanned. The plan changes no file.")
+    if "diffs" in lists.truncated:
+        lines.append(f"{lists.truncated['diffs']} diff(s) omitted; the plan file has every change.")
+    if warnings:
+        lines.append(f"{len(warnings)} warning(s), see data.warnings.")
+    return ok("\n".join(lines), lists.finish(data, warnings), full_report_path=full_path,
+              hint="Review the diffs; a person then runs `pymolt apply` in the project "
+                   "(it refuses the plan if a planned file changed since).")
+
+
+def _risk_label(risk) -> str:
+    fixed = " [fixed by the plan]" if risk.fixed_by_plan else ""
+    return f"{risk.tier.value} {risk.site.label()} {risk.symbol}: {risk.reason}{fixed}"
+
+
+def _risk_data(lists: _Lists, report) -> dict[str, Any]:
+    """A plan's predicted risks, most severe first, split by whether the plan fixes them."""
+    if report is None:
+        return {"risks_status": None, "risks_attention": [], "risks_attention_total": 0,
+                "risks_fixed": [], "risks_fixed_total": 0}
+    from pymolt.verify.predict import TIER_ORDER
+
+    ordered = sorted(report.risks, key=lambda r: (TIER_ORDER[r.tier], r.site.label()))
+    attention = [_risk_label(r) for r in ordered if not r.fixed_by_plan]
+    fixed = [_risk_label(r) for r in ordered if r.fixed_by_plan]
+    return {
+        "risks_status": report.status,
+        "risks_attention": lists.fit("risks_attention", attention),
+        "risks_attention_total": len(attention),
+        "risks_fixed": lists.fit("risks_fixed", fixed),
+        "risks_fixed_total": len(fixed),
+    }
+
+
+def _calibration_data(lists: _Lists, calibration) -> dict[str, Any] | None:
+    """Predicted vs observed, as counts plus the hits and the unpredicted changes."""
+    if calibration is None:
+        return None
+    hits = [f"{r.tier.value} {r.site.label()} {r.symbol}" for r in calibration.risks
+            if r.result.value == "hit"]
+    unpredicted = [f"{o.category} {o.site.label()} {o.symbol}" for o in calibration.unpredicted]
+    return {
+        "source": calibration.source,
+        "predicted": calibration.predicted,
+        "hit": calibration.hit,
+        "prevented": calibration.prevented,
+        "miss": calibration.miss,
+        "not_exercised": calibration.not_exercised,
+        "hits": lists.fit("calibration.hits", hits),
+        "unpredicted": lists.fit("calibration.unpredicted", unpredicted),
+        "unpredicted_total": len(unpredicted),
+    }
+
+
+# ── verify ───────────────────────────────────────────────────────────────────
+
+_CHANGE_CATEGORIES = ("changed", "disappeared", "appeared", "uncomparable", "rewritten")
+
+
+def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | None) -> dict:
+    """``UnifiedVerificationReport`` -> view.
+
+    ``saved_path`` is where the verdict was saved (None: compared recordings other
+    than the captures, so nothing was saved and the full report is written instead).
+    """
+    rep = unified.contract
+    full_path = (str(saved_path) if saved_path is not None
+                 else write_full_report(project_dir, "verify", unified.model_dump(mode="json")))
+    lists = _Lists()
+    verdict = unified.verdict.value
+    trust_pct = round(rep.trust * 100)
+    data: dict[str, Any] = {
+        "verdict": verdict,
+        "reasons": list(unified.reasons),
+        "saved_path": str(saved_path) if saved_path is not None else None,
+        "baseline_stale": rep.baseline_stale,
+        "static_targets": rep.static_targets,
+        "confirmed": rep.confirmed,
+        "blind": rep.blind,
+        "dynamic_only": rep.dynamic_only,
+        "trust_pct": trust_pct,
+        "compared": rep.diff is not None or bool(rep.fact_diff),
+        "changes": {},
+        "change_counts": {},
+        "calibration": _calibration_data(lists, getattr(rep, "calibration", None)),
+    }
+    lines = [f"VERDICT: {verdict.upper()}"
+             + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]
+    if rep.baseline_stale:
+        lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
+                     "environment than the one it must describe. Capture again before "
+                     "trusting this verdict.")
+    lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
+                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.")
+    if verdict == "pass" and rep.blind:
+        lines.append(f"PASS covers the exercised calls only: {rep.blind} BLIND symbol(s) "
+                     "were never run.")
+
+    fact_diff = rep.fact_diff or {}
+    if fact_diff:
+        entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
+        for category in _CHANGE_CATEGORIES:
+            names = [e.get("symbol", "?") for e in entries if e.get("category") == category]
+            if names:
+                data["changes"][category] = lists.fit(f"changes.{category}", names)
+        data["change_counts"] = {k: v for k, v in (fact_diff.get("counts") or {}).items() if v}
+        counted = ", ".join(f"{k} {v}" for k, v in data["change_counts"].items())
+        lines.append(f"Calls: {counted or 'nothing moved'}.")
+        dropped = sum(v for k, v in lists.truncated.items() if k.startswith("changes."))
+        if dropped:
+            lines.append(f"{dropped} symbol name(s) omitted from data.changes; full report: "
+                         f"{full_path}")
+    cal = data["calibration"]
+    if cal is not None and cal["predicted"]:
+        prevented = f"{cal['prevented']} prevented by the plan, " if cal["prevented"] else ""
+        lines.append(f"Predictions ({cal['source']}): {cal['hit']} hit, {prevented}"
+                     f"{cal['miss']} miss, {cal['not_exercised']} not exercised; "
+                     f"{cal['unpredicted_total']} change(s) nobody predicted "
+                     "(data.calibration).")
+    if saved_path is None:
+        lines.append("Not saved: compared recordings other than the captures.")
+
+    if not data["compared"]:
+        hint = ("Only one side is recorded, so nothing was compared: change the code, then "
+                "capture post-migration.")
+    elif verdict == "fail":
+        hint = "Behaviour changed: fix the listed calls, capture post-migration again, verify."
+    elif verdict == "inconclusive":
+        hint = "Read the reasons: usually a fresh capture or more coverage (BLIND) is needed."
+    else:
+        hint = None
+    return ok("\n".join(lines), lists.finish(data, list(rep.notes)),
+              full_report_path=full_path, hint=hint)

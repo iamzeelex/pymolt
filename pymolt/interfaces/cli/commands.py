@@ -192,6 +192,9 @@ def _select_target_python_interactive(
 app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
 
+#: Every command's --agent: the compact payload in pymolt.interfaces.views, the same
+#: object the MCP tool of that name returns. --json stays the full payload.
+_AGENT_HELP = "Print the compact agent view as JSON (what the MCP tool returns)"
 
 _STATE_MARK = {
     "done": ("✓", "green"),
@@ -213,6 +216,7 @@ _CHECK_MARK = {
 def status(
     project_dir: str = typer.Argument(".", help="Project directory"),
     json_output: bool = typer.Option(False, "--json", help="Print the status as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Show where the migration stands and the next command.
 
@@ -224,9 +228,16 @@ def status(
 
     from pymolt.status import build_status
 
-    project_path = require_project_dir(project_dir, json_output=json_output)
+    project_path = require_project_dir(project_dir, json_output=json_output or agent)
+    if agent:
+        project_path = project_path.resolve()
     report = build_status(project_path, check_environments=True)
 
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.status_view(report)))
+        return
     if json_output:
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
         return
@@ -304,6 +315,7 @@ def verify_migration(
         help="Run rollback when a required canary gate fails",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Compare the baseline and post-migration captures. Prints PASS, FAIL or INCONCLUSIVE.
 
@@ -343,7 +355,10 @@ def verify_migration(
     )
     from pymolt.verify.unified import build_unified_verification
 
+    json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
     explicit = bool(baseline_file or post_file)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
@@ -459,6 +474,11 @@ def verify_migration(
             json_output=json_output,
         )
 
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.verify_view(unified, project_path, saved_path=saved_path)))
+        raise typer.Exit(code=_verification_exit(unified.verdict))
     if json_output:
         typer.echo(json.dumps(unified.model_dump(mode="json"), indent=2))
         raise typer.Exit(code=_verification_exit(unified.verdict))
@@ -527,6 +547,7 @@ def plan(
         None, "--patch", help="Also write the diff to this file"
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the plan summary as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Save the codemods for the target manifest as a plan and show the diff.
 
@@ -539,7 +560,10 @@ def plan(
     from pymolt.codemods.service import PlanInputError, build_migration_plan
     from pymolt.config import load_endpoint
 
+    json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
     target_file = target_file or target_file_old
     try:
         with err.status("Building the migration plan…", spinner="dots") as status:
@@ -584,6 +608,12 @@ def plan(
         "patch_path": str(patch_path) if patch_path else None,
         "risks": _risks_payload(migration_plan.risks),
     }
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.plan_view(
+            migration_plan, by_pkg, source_desc, plan_path=saved_path)))
+        return
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
@@ -832,12 +862,20 @@ def rollback(
 def scan(
     project_dir: str = typer.Argument(".", help="Project or repository directory"),
     json_output: bool = typer.Option(False, "--json", help="Print the scan as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Find manifests, Python versions, dependencies, and where the code calls them. Offline."""
     from pymolt.scan import run_scan
 
-    project_path = require_project_dir(project_dir, json_output=json_output)
+    project_path = require_project_dir(project_dir, json_output=json_output or agent)
+    if agent:
+        project_path = project_path.resolve()
     report = run_scan(project_path)
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.scan_view(report, project_path)))
+        return
     if json_output:
         import json as json_lib
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
@@ -954,12 +992,18 @@ def setup(
     target_env: str | None = typer.Option(
         None, "--target-env", help="Existing target environment, e.g. .venv-target"
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the options, or the saved config, as JSON (asks nothing)"
+    ),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Choose the manifest, tool and Python versions. Writes .pymolt/env_config.json.
 
     In a terminal it asks for what the options do not give; with --manifest,
     --tool, --base-python and --target-python it asks nothing. Without a
     terminal, missing values take the detected defaults and the output names them.
+    With --json or --agent it never asks or defaults: no choice lists the valid
+    ones and saves nothing, all four save, anything in between is an error.
     """
     import sys
 
@@ -973,11 +1017,34 @@ def setup(
         gather_setup_options,
     )
 
-    project_path = require_project_dir(project_dir)
+    machine = json_output or agent
+    project_path = require_project_dir(project_dir, json_output=machine)
+    if agent:
+        project_path = project_path.resolve()
     try:
         options = gather_setup_options(project_path)
     except Exception as e:
-        fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT)
+        fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT, json_output=machine)
+
+    if machine:
+        import json
+
+        from pymolt.interfaces import views
+
+        try:
+            choices = views.setup_choices(
+                options, manifest=manifest, tool=tool, base_python=base_python,
+                target_python=target_python, container_id=container, target_env=target_env,
+            )
+        except views.AgentInputError as exc:
+            fail(exc.error, hint=exc.hint, json_output=True)
+        config = apply_setup(project_path, choices) if choices is not None else None
+        if agent:
+            typer.echo(views.dumps(views.setup_view(options, project_path, config=config)))
+        else:
+            typer.echo(json.dumps(
+                views.setup_payload(options, project_path, config=config), indent=2))
+        return
 
     if not options.manifests:
         fail(
@@ -1240,7 +1307,8 @@ def _resolve_target_python(
 ):
     """Resolve (prompting if needed), validate against downgrades, and warn on EOL."""
     if target_python_to_use is None:
-        if not sys.stdout.isatty():
+        # Machine output never prompts: a prompt on stdout would corrupt the JSON.
+        if json_output or not sys.stdout.isatty():
             fail(
                 "no target Python: pass --target-python, or run 'pymolt setup' to "
                 "configure one (this is required outside an interactive terminal).",
@@ -1528,6 +1596,7 @@ def assess(
     risk: bool = typer.Option(
         False, "--risk", help="Also rate each package: CVEs, wheels, abandonment (network)"
     ),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Resolve the dependencies for the target Python and write requirements-target.txt.
 
@@ -1541,7 +1610,11 @@ def assess(
     from pymolt.ingestion.fallback_compiler import find_python_interpreter
 
     current_python = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    json_output = json_output or agent  # --agent is machine output too: no tables, no prompts
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
+        project_dir = str(project_path)
 
     # 1. Load (or auto-detect) the environment configuration.
     config_file = project_path / ".pymolt" / "env_config.json"
@@ -1704,6 +1777,7 @@ def assess(
         )
         target_resolved = target_error is None and target_graph is not None
         target_manifest_path = None
+        warnings = list(report.warnings)
         if target_python_to_use and target_resolved and not no_write:
             try:
                 written = _write_target_manifest(
@@ -1712,36 +1786,47 @@ def assess(
                 )
                 if written is not None:
                     target_manifest_path = str(written)
-            except OSError:
+            except OSError as exc:
                 target_manifest_path = None
-        payload = {
-            "project_dir": str(project_dir),
-            "source_manifest": chosen_source.path.name,
-            "source_fixation": report.source_fixation,
-            "resolution_quality": report.resolution_quality,
-            "detected_python": report.detected_python,
-            "target_python": target_python_to_use,
-            "target_resolved": target_resolved,
-            "target_error": target_error,
-            "baseline_unresolved": baseline_unresolved,
-            "baseline_tier": baseline_tier.value,
-            "target_manifest_path": target_manifest_path,
-            "warnings": report.warnings,
-            "manual_zone": report.manual_zone,
-            "packages": rows,
-        }
-        if baseline_hint is not None:
-            payload["baseline_hint"] = baseline_hint.model_dump(mode="json")
-        target_hint = _target_hint(
-            project_path, target_python_to_use, target_resolved, target_manifest_path,
-        )
-        if target_hint is not None:
-            payload["target_hint"] = target_hint.model_dump(mode="json")
+                warnings.append(f"the pinned target manifest was not written: {exc}")
+        risk_report = None
         if risk and baseline_graph is not None:
             from pymolt.risk.assess import assess_risk
             risk_report = assess_risk(baseline_graph, target_graph, target_python_to_use, project_path)
-            payload["risk"] = risk_report.model_dump(mode="json")
-        typer.echo(json_lib.dumps(payload, indent=2))
+
+        from pymolt.assess.service import AssessResult
+        from pymolt.interfaces import views
+
+        # One result, two renderings: --json is the full payload, --agent the view.
+        result = AssessResult(
+            project_dir=str(project_dir),
+            source_manifest=chosen_source.path.name,
+            source_fixation=report.source_fixation,
+            resolution_quality=report.resolution_quality,
+            detected_python=report.detected_python,
+            target_python=target_python_to_use,
+            target_resolved=target_resolved,
+            target_error=target_error,
+            baseline_unresolved=baseline_unresolved,
+            baseline_tier=baseline_tier.value,
+            target_manifest_path=target_manifest_path,
+            warnings=warnings,
+            manual_zone=report.manual_zone,
+            rows=rows,
+            risk=risk_report,
+        )
+        target_hint = _target_hint(
+            project_path, target_python_to_use, target_resolved, target_manifest_path,
+        )
+        if agent:
+            typer.echo(views.dumps(views.assess_view(
+                result, project_path, risk_requested=risk,
+                baseline_hint=baseline_hint, target_hint=target_hint,
+            )))
+            return
+        typer.echo(json_lib.dumps(views.assess_payload(
+            result, baseline_hint=baseline_hint, target_hint=target_hint,
+        ), indent=2))
         return
 
     # Interactive customize loop
