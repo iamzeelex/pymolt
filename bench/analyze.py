@@ -38,7 +38,7 @@ def main(paths: list[str]) -> int:
               f"{'turns':>7}{'wall s':>9}{'cost $':>9}")
         for t in tasks:
             rows = {}
-            for arm in ("bare", "mcp_only", "plugin"):
+            for arm in ("bare", "mcp_only", "plugin", "cli_skill"):
                 rs = [r for r in runs if r["task"] == t and r["arm"] == arm]
                 if not rs:
                     continue
