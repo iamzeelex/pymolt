@@ -391,7 +391,7 @@ def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
 
 # ── assess ───────────────────────────────────────────────────────────────────
 
-_ROW_PRIORITY = {"conflict": 0, "removed": 1, "upgrade": 2, "added": 3}
+_ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3, "added": 4}
 _VERDICT_LEVEL = {"red": "blocked", "yellow": "unproven", "green": "resolves"}
 
 
@@ -406,6 +406,8 @@ def assess_payload(result, *, baseline_hint=None, target_hint=None) -> dict:
         "target_python": result.target_python,
         "target_resolved": result.target_resolved,
         "target_error": result.target_error,
+        "target_error_detail": result.target_error_detail,
+        "target_culprits": list(result.target_culprits),
         "baseline_unresolved": result.baseline_unresolved,
         "baseline_tier": result.baseline_tier,
         "target_manifest_path": result.target_manifest_path,
@@ -496,6 +498,8 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         "resolution_quality": result.resolution_quality,
         "target_resolved": result.target_resolved,
         "target_error": result.target_error,
+        "target_error_detail": result.target_error_detail,
+        "target_culprits": list(result.target_culprits),
         "changes_format": "name base>target status" + (" risk=tier" if risk_by_pkg else ""),
         "changes": changes,
         "changes_total": len(moved),
@@ -523,7 +527,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
     lines.append(
         f"Base tier: {result.baseline_tier}. Upgrades: {counts.get('upgrade', 0)}, "
         f"added: {counts.get('added', 0)}, removed: {counts.get('removed', 0)}, "
-        f"conflicts: {counts.get('conflict', 0)}, manual-zone: {len(manual_zone)}."
+        f"conflicts: {counts.get('conflict', 0)}, "
+        + (f"unresolved: {counts['unresolved']}, " if counts.get("unresolved") else "")
+        + f"manual-zone: {len(manual_zone)}."
     )
     lines.append(f"{len(moved)} package(s) differ, {counts.get('unchanged', 0)} unchanged. "
                  + _note(lists, "changes", len(changes), full_path))
@@ -537,7 +543,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
     lines.append("A resolve is not evidence the code still works: capture and verify decide.")
 
     if result.target_error:
-        hint = "Fix the conflict in data.target_error (or loosen constraints), then assess again."
+        culprits = ", ".join(result.target_culprits) or "none named by the resolver"
+        hint = (f"The target does not resolve: {result.target_error}. Culprit(s): {culprits}. "
+                "Fix or loosen them, then assess again.")
     elif result.baseline_unresolved:
         hint = "Build the base environment (data.baseline_env), then assess again inside it."
     else:

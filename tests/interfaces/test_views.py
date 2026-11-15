@@ -183,7 +183,8 @@ def test_setup_view_has_one_key_set_listing_or_saved(tmp_path):
 _ASSESS_KEYS = {
     "target_python", "verdict", "baseline_tier", "baseline_unresolved", "source_manifest",
     "source_fixation", "resolution_quality", "target_resolved", "target_error",
-    "changes_format", "changes", "changes_total", "unchanged", "status_counts",
+    "target_error_detail", "target_culprits", "changes_format", "changes", "changes_total",
+    "unchanged", "status_counts",
     "manual_zone", "manual_zone_count", "risk", "target_manifest_path", "target_env",
     "baseline_env",
 }
@@ -245,7 +246,22 @@ def test_assess_blocked_target_says_so(tmp_path):
     view = views.assess_view(result, tmp_path)
     assert view["data"]["verdict"]["level"] == "blocked"
     assert "do not resolve" in view["summary"].splitlines()[0]
-    assert "conflict" in view["hint"]
+    assert view["hint"].startswith("The target does not resolve: no solution for flask>=9.")
+    assert "Culprit(s): none named" in view["hint"]
+
+
+def test_assess_counts_unresolved_apart_and_names_culprits(tmp_path):
+    result = _assess_result(
+        target_resolved=False, target_error="Failed to build `bcolz==1.2.1`",
+        target_culprits=["bcolz"], target_error_detail="x",
+        rows=[_row("bcolz", "1.2.1", None, "conflict"), _row("flask", "1.1.4", None, "unresolved"),
+              _row("six", "1.15.0", None, "unresolved")])
+    view = views.assess_view(result, tmp_path)
+    assert "conflicts: 1, unresolved: 2," in view["summary"]
+    assert view["data"]["changes"][0].startswith("bcolz")
+    assert view["hint"] == ("The target does not resolve: Failed to build `bcolz==1.2.1`. "
+                            "Culprit(s): bcolz. Fix or loosen them, then assess again.")
+    assert view["data"]["target_culprits"] == ["bcolz"]
 
 
 def test_assess_unresolved_base_is_not_read_as_additions(tmp_path):
