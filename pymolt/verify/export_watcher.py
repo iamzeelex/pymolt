@@ -11,7 +11,8 @@ Docker image, the 3.6 devcontainer, …) and the watcher auto-activates from the
       sitecustomize.py            # auto-imported at interpreter startup -> activate()
       pymolt_trace/
         __init__.py
-        _normalize.py _backend.py _sinks.py boundary_tracer.py   # verbatim, stdlib-only
+        _normalize.py _identity.py _backend.py _monitoring.py _sinks.py _wrap.py
+        boundary_tracer.py                                       # verbatim, stdlib-only
 
 CLI: ``pymolt verify export-watcher <dir>``
 Standalone: ``python -m pymolt.verify.export_watcher <dir>``
@@ -19,11 +20,20 @@ Standalone: ``python -m pymolt.verify.export_watcher <dir>``
 import shutil
 from pathlib import Path
 
-from pymolt.verify import _backend, _identity, _normalize, _sinks, _wrap, boundary_tracer
+from pymolt.verify import (
+    _backend,
+    _identity,
+    _monitoring,
+    _normalize,
+    _sinks,
+    _wrap,
+    boundary_tracer,
+)
 
 # The injected runtime modules, copied verbatim. Their intra-package relative imports
 # (``from ._backend import ...``) resolve inside the ``pymolt_trace`` package unchanged.
-_RUNTIME_MODULES = (_normalize, _identity, _backend, _sinks, _wrap, boundary_tracer)
+# ``_monitoring`` is imported by the runtime only on 3.12+, but always ships (it parses on 3.6).
+_RUNTIME_MODULES = (_normalize, _identity, _backend, _monitoring, _sinks, _wrap, boundary_tracer)
 
 _SITECUSTOMIZE_SRC = Path(__file__).with_name("sitecustomize.py")
 _IMPORT_LINE = "from pymolt.verify.boundary_tracer import activate"
