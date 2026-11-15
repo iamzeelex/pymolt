@@ -230,3 +230,31 @@ def test_describe_failure_without_stderr_falls_back_to_the_message():
 
     found = describe_resolver_failure(ValueError("boom"))
     assert found == "boom" and found.detail is None and found.culprits == []
+
+
+def test_rows_mark_only_culprits_as_conflict():
+    class _N:
+        def __init__(self, name):
+            self.version, self.declared_requirement = "1.0", None
+            self.direct, self.manual_bridge = True, False
+            self.provenance = type('P', (), {'value': 'pypi'})()
+            self.name = name
+
+    class _G:
+        nodes = {"bcolz": _N("bcolz"), "six": _N("six")}
+
+    from pymolt.assess.service import TargetResolveError
+
+    rows = {r["name"]: r["status"] for r in build_comparison_rows(
+        _G, None, "3.12", TargetResolveError("x", "tail", ["BColz"]))}
+    assert rows == {"bcolz": "conflict", "six": "unresolved"}
+
+
+def test_assess_reports_the_manifest_fixation_not_the_resolve_fixation():
+    from pymolt.assess.service import manifest_fixation
+    from pymolt.core.enums import SourceFixation
+
+    class _Src:
+        fixation = SourceFixation.INTENT
+
+    assert manifest_fixation(_Src) == "intent"

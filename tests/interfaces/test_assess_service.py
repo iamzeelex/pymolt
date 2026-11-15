@@ -46,10 +46,17 @@ def test_build_comparison_rows_classifies_status():
     assert rows["old"]["status"] == "removed"
 
 
-def test_build_comparison_rows_conflict_on_target_error():
+def test_build_comparison_rows_only_culprits_conflict_on_target_error():
+    baseline = _graph({"requests": _node("requests", "2.31.0"), "bcolz": _node("bcolz", "1.2.1")})
+    rows = {r["name"]: r["status"] for r in build_comparison_rows(
+        baseline, None, "3.12", "resolution failed", target_culprits=["bcolz"])}
+    assert rows == {"bcolz": "conflict", "requests": "unresolved"}
+
+
+def test_build_comparison_rows_no_culprits_means_all_unresolved():
     baseline = _graph({"requests": _node("requests", "2.31.0")})
     rows = build_comparison_rows(baseline, None, "3.12", "resolution failed")
-    assert all(r["status"] == "conflict" for r in rows)
+    assert all(r["status"] == "unresolved" for r in rows)
 
 
 def test_resolve_chosen_source_missing_raises():

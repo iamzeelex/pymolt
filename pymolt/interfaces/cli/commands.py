@@ -3,6 +3,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -13,6 +14,7 @@ from pymolt.assess.service import (
     baseline_tests_passed,
     classify_baseline_tier,
     compatibility_verdict,
+    failure_evidence,
 )
 from pymolt.assess.service import build_comparison_rows as _build_comparison_rows
 from pymolt.assess.service import resolve_chosen_source as _service_resolve_chosen_source
@@ -1402,6 +1404,7 @@ _STATUS_MARK = {
     "upgrade": ("▲ upgrade", "bold blue"),
     "added": ("✚ added", "cyan"),
     "conflict": ("⚠ conflict", "bold red"),
+    "unresolved": ("? unresolved", "yellow"),
     "removed": ("⚠ removed", "red"),
     "unchanged": ("✔ same", "green"),
 }
@@ -1440,6 +1443,8 @@ def _render_comparison_table(rows, verbose):
 
         if status == "conflict":
             move = f"{b_ver} → [red]conflict[/red]"
+        elif status == "unresolved":
+            move = f"{b_ver} → [yellow]unresolved[/yellow]"
         elif status == "removed":
             move = f"{b_ver} → [red]—[/red]"
         elif status == "unchanged":
@@ -1821,12 +1826,14 @@ def assess(
         result = AssessResult(
             project_dir=str(project_dir),
             source_manifest=chosen_source.path.name,
-            source_fixation=report.source_fixation,
+            source_fixation=chosen_source.fixation.value,
             resolution_quality=report.resolution_quality,
             detected_python=report.detected_python,
             target_python=target_python_to_use,
             target_resolved=target_resolved,
-            target_error=target_error,
+            target_error=None if target_error is None else str(target_error),
+            target_error_detail=failure_evidence(target_error)[0],
+            target_culprits=failure_evidence(target_error)[1],
             baseline_unresolved=baseline_unresolved,
             baseline_tier=baseline_tier.value,
             target_manifest_path=target_manifest_path,
@@ -1882,6 +1889,14 @@ def assess(
                 f"[bold {style}]{title}[/bold {style}]\n{body}",
                 title="Compatibility Report", border_style=style,
             ))
+            culprits = failure_evidence(target_error)[1]
+            if culprits:
+                console.print(f"[bold]Culprit(s):[/bold] {', '.join(culprits)}")
+            if target_error:
+                detail = failure_evidence(target_error)[0]
+                if detail:
+                    console.print(Panel(escape(detail), title="Resolver output (tail)",
+                                        border_style="dim"))
             console.print()
 
         if not verbose:

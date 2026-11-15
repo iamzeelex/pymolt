@@ -38,6 +38,10 @@ class AssessResult(BaseModel):
     target_python: str | None = None
     target_resolved: bool = False
     target_error: str | None = None
+    # The resolver's stderr tail (<= 40 lines, ANSI stripped) and the packages its
+    # failure lines name. Only culprits get a "conflict" row; the rest are "unresolved".
+    target_error_detail: str | None = None
+    target_culprits: list[str] = Field(default_factory=list)
     # The legacy baseline could not be resolved (no legacy interpreter). The
     # target side is still resolved, but there is nothing honest to compare it to.
     baseline_unresolved: bool = False
@@ -176,6 +180,21 @@ def describe_resolver_failure(exc: BaseException) -> TargetResolveError:
     )
 
 
+def manifest_fixation(source) -> str:
+    """How firmly the *manifest* pins its versions (``pinned`` / ``intent`` / ...).
+
+    Not the resolved graph's fixation: a resolve always yields pins, which says
+    nothing about the file the engineer wrote (ranges only is still ``intent``).
+    """
+    fixation = source.fixation
+    return getattr(fixation, "value", str(fixation))
+
+
+def failure_evidence(target_error) -> tuple[str | None, list[str]]:
+    """``(stderr tail, culprits)`` carried by a ``resolve_target_graph`` error, if any."""
+    return getattr(target_error, "detail", None), list(getattr(target_error, "culprits", []))
+
+
 def resolve_chosen_source(sources, manifest_name: str | None):
     """Pick the source manifest by name, or default to the first lock/manifest.
 
@@ -240,13 +259,22 @@ def extract_constraint(declared: str | None) -> str | None:
         return text or "any"
 
 
-def build_comparison_rows(baseline_graph, target_graph, target_python, target_error) -> list[dict]:
+def build_comparison_rows(
+    baseline_graph, target_graph, target_python, target_error, target_culprits=None,
+) -> list[dict]:
     """Compute the baseline/target comparison as plain dicts (no rich markup).
+
+    When the target did not resolve, only the packages the resolver named
+    (``target_culprits``, else the ones ``target_error`` carries) are ``conflict``;
+    every other row is ``unresolved``: the resolver never judged it.
 
     Shared by the CLI table renderer and ``--json``. One row per package
     in the union; visibility filtering is the renderer's concern.
     """
     rows = []
+    if target_culprits is None:
+        target_culprits = getattr(target_error, "culprits", None)
+    culprit_set = {canonical_name(c) for c in (target_culprits or [])}
     all_packages = sorted(
         set(baseline_graph.nodes.keys() if baseline_graph else [])
         | set(target_graph.nodes.keys() if target_graph else [])
@@ -266,7 +294,8 @@ def build_comparison_rows(baseline_graph, target_graph, target_python, target_er
 
         if target_python:
             if target_error:
-                target_version, status = None, "conflict"
+                target_version = None
+                status = "conflict" if canonical_name(name) in culprit_set else "unresolved"
             elif t:
                 target_version = t.version or "unpinned"
                 if not b:
@@ -315,7 +344,7 @@ def resolve_target_graph(
         )
         return graph, None
     except Exception as e:
-        return None, str(e)
+        return None, describe_resolver_failure(e)
     finally:
         if constraint_path and constraint_path.exists():
             try:
@@ -695,6 +724,7 @@ def run_assess(
     )
     _p("compare", 0.8)
     rows = build_comparison_rows(baseline_graph, target_graph, target_python, target_error)
+    error_detail, error_culprits = failure_evidence(target_error)
 
     risk = None
     if with_risk and baseline_graph is not None:
@@ -719,12 +749,14 @@ def run_assess(
     return AssessResult(
         project_dir=str(project_path),
         source_manifest=chosen.path.name,
-        source_fixation=report.source_fixation,
+        source_fixation=manifest_fixation(chosen),
         resolution_quality=report.resolution_quality,
         detected_python=report.detected_python,
         target_python=target_python,
         target_resolved=target_resolved,
-        target_error=target_error,
+        target_error=None if target_error is None else str(target_error),
+        target_error_detail=error_detail,
+        target_culprits=error_culprits,
         baseline_unresolved=baseline_graph is None,
         baseline_tier=classify_baseline_tier(
             baseline_resolved=baseline_graph is not None,
