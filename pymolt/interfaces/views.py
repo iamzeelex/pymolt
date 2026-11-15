@@ -664,6 +664,16 @@ def capture_attach_view(instructions, *, when: str, collect_command: str) -> dic
 # ── plan ─────────────────────────────────────────────────────────────────────
 
 
+def inconclusive_deltas(risks) -> tuple[int, int]:
+    """``(K, T)``: the plan's API deltas that were inconclusive, and all of them."""
+    deltas = list(getattr(risks, "deltas", None) or ())
+    return sum(1 for d in deltas if getattr(d, "quality", None) == "inconclusive"), len(deltas)
+
+
+def unknown_api_phrase(inconclusive: int, total: int) -> str:
+    return f"API changes unknown for {inconclusive} of {total} package(s)"
+
+
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) -> dict:
     """A saved ``MigrationPlan`` -> view. The full report is the plan file itself."""
     from pymolt.codemods.models import CodemodPattern
@@ -690,6 +700,7 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         patterns = sum(1 for item in items if isinstance(item, CodemodPattern))
         per_package.append(f"{pkg} rules={len(items) - patterns} patterns={patterns}")
     sites = sum(change.sites for change in plan.changes)
+    inconclusive, delta_total = inconclusive_deltas(getattr(plan, "risks", None))
 
     data: dict[str, Any] = {
         "plan_id": plan.plan_id,
@@ -707,6 +718,8 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         "api_impacts": lists.fit("api_impacts", impacts),
         "api_impacts_total": len(impacts),
         "baseline_bound": plan.baseline_trace_path is not None,
+        "api_deltas_inconclusive": inconclusive,
+        "api_deltas_total": delta_total,
         **_risk_data(lists, getattr(plan, "risks", None)),
     }
     warnings: list[str] = []
@@ -726,11 +739,22 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
     if data["risks_status"] is not None:
         attention = data["risks_attention_total"]
         fixed = data["risks_fixed_total"]
-        lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the plan "
-                     f"(data.risks_attention, data.risks_fixed; evidence {data['risks_status']}).")
+        unknown = unknown_api_phrase(inconclusive, delta_total)
+        if inconclusive and inconclusive == delta_total:
+            lines.append(f"Predicted risks: none rated — {unknown} (inconclusive)")
+        elif inconclusive:
+            lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the "
+                         f"plan; {unknown} (inconclusive)")
+        else:
+            lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the "
+                         f"plan (data.risks_attention, data.risks_fixed; evidence "
+                         f"{data['risks_status']}).")
     if by_pkg and not plan.changes:
+        unknown_tail = (f", but API changes are unknown for {inconclusive} of "
+                        f"{delta_total} package(s)" if inconclusive else "")
         lines.append(f"No call sites matched: none of the returned recipes apply in the "
-                     f"{plan.files_scanned} file(s) scanned. The plan changes no file.")
+                     f"{plan.files_scanned} file(s) scanned. The plan changes no file"
+                     f"{unknown_tail}.")
     if "diffs" in lists.truncated:
         lines.append(f"{lists.truncated['diffs']} diff(s) omitted; the plan file has every change.")
     if warnings:

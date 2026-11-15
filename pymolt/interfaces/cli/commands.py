@@ -628,7 +628,7 @@ def plan(
         f"advisories: [yellow]{payload['advisories']}[/yellow]",
         title="Migration plan", border_style="cyan", expand=False,
     ))
-    _render_recipes(by_pkg, previews, migration_plan.files_scanned)
+    _render_recipes(by_pkg, previews, migration_plan.files_scanned, migration_plan.risks)
     _render_risks(migration_plan.risks)
     _render_or_write_patches(previews, project_path, None)
     console.print(
@@ -679,13 +679,28 @@ def _render_risks(risks) -> None:
                           risk.symbol, why)
         console.print(table)
     if not risks.risks:
-        console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
-                      "exercised.")
+        from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
+
+        unknown, total = inconclusive_deltas(risks)
+        if unknown:
+            console.print(f"\n[yellow]Predicted risks: none rated[/yellow] — "
+                          f"{unknown_api_phrase(unknown, total)} (inconclusive).")
+        else:
+            console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
+                          "exercised.")
+    else:
+        from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
+
+        unknown, total = inconclusive_deltas(risks)
+        if unknown:
+            console.print(f"\n[yellow]Predicted risks[/yellow]: {len(risks.needs_attention)} "
+                          f"need attention, {len(risks.fixed)} fixed by the plan; "
+                          f"{unknown_api_phrase(unknown, total)} (inconclusive).")
     for note in risks.notes:
         console.print(f"[dim]  note: {note}[/dim]")
 
 
-def _render_recipes(by_pkg, previews, files_scanned: int) -> None:
+def _render_recipes(by_pkg, previews, files_scanned: int, risks=None) -> None:
     """What the service returned per package, what needs a person, and whether it matched."""
     from pymolt.codemods.models import CodemodPattern
 
@@ -716,10 +731,15 @@ def _render_recipes(by_pkg, previews, files_scanned: int) -> None:
                     f"  [yellow]{preview.path}:{adv.line}[/yellow] — [{tag}] {adv.reason}"
                 )
     if by_pkg and not any(p.old_source != p.new_source for p in previews):
+        from pymolt.interfaces.views import inconclusive_deltas
+
+        unknown, total = inconclusive_deltas(risks)
+        unknown_tail = (f", but API changes are unknown for {unknown} of {total} package(s)"
+                        if unknown else "")
         console.print(Panel(
             f"[bold]No call sites matched.[/bold]\n"
             f"Scanned {files_scanned} file(s); none of the returned recipes apply to "
-            "this codebase. The plan changes no file.",
+            f"this codebase. The plan changes no file{unknown_tail}.",
             border_style="yellow", padding=(0, 1), expand=False,
         ))
 
