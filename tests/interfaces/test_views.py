@@ -349,7 +349,8 @@ def test_capture_accepted_points_at_the_other_side():
 _PLAN_KEYS = {
     "plan_id", "plan_path", "source", "dependencies", "per_package", "files_to_change",
     "files_total", "rewrite_sites", "diffs", "advisories", "advisories_total", "api_impacts",
-    "api_impacts_total", "baseline_bound", "risks_status", "risks_attention",
+    "api_impacts_total", "baseline_bound", "api_deltas_inconclusive", "api_deltas_total",
+    "risks_status", "risks_attention",
     "risks_attention_total", "risks_fixed", "risks_fixed_total",
 }
 
@@ -458,3 +459,46 @@ def test_plan_view_splits_predicted_risks_by_whether_the_plan_fixes_them():
     assert data["risks_attention"][0].startswith("high toyapp/core.py:24")
     assert "[fixed by the plan]" in data["risks_fixed"][0]
     assert _risk_data(_Lists(), None)["risks_status"] is None
+
+
+def _plan_with_risks(deltas, risks=(), changes=True):
+    from pymolt.migration_plan import MigrationPlan, PlannedDependency, PlannedFileChange
+    from pymolt.verify.predict import DeltaSummary, PredictionReport
+
+    plan = MigrationPlan(
+        target_python="3.12", source_manifest="requirements.txt", files_scanned=7,
+        dependencies=[PlannedDependency(name="pandas", from_version="1.5.3", to_version="2.2.3")],
+        changes=[PlannedFileChange(path="core.py", old_sha256="a", new_sha256="b",
+                                   old_source="a\n", new_source="b\n", sites=1)] if changes else [],
+        risks=PredictionReport(
+            risks=list(risks),
+            deltas=[DeltaSummary(package=f"p{i}", quality=q) for i, q in enumerate(deltas)]),
+    )
+    return plan
+
+
+def test_plan_says_when_every_api_delta_was_inconclusive():
+    plan = _plan_with_risks(["inconclusive", "inconclusive"], changes=False)
+    view = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")
+    summary = view["summary"]
+    assert ("Predicted risks: none rated \u2014 API changes unknown for 2 of 2 package(s) "
+            "(inconclusive)") in summary
+    assert "need attention" not in summary
+    assert ("The plan changes no file, but API changes are unknown for 2 of 2 package(s)"
+            in summary)
+    assert view["data"]["api_deltas_inconclusive"] == 2
+
+
+def test_plan_counts_risks_beside_the_unknown_api_changes():
+    plan = _plan_with_risks(["complete", "inconclusive"])
+    summary = views.plan_view(plan, {}, "t.txt", plan_path="/p/plan.json")["summary"]
+    assert ("Predicted risks: 0 need attention, 0 fixed by the plan; API changes unknown "
+            "for 1 of 2 package(s) (inconclusive)") in summary
+
+
+def test_plan_keeps_the_plain_risk_line_when_every_delta_is_conclusive():
+    plan = _plan_with_risks(["complete"], changes=False)
+    summary = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")["summary"]
+    assert "Predicted risks: 0 need attention, 0 fixed by the plan (" in summary
+    assert "unknown" not in summary
+    assert "The plan changes no file." in summary
