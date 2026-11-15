@@ -81,6 +81,45 @@ def migrations_from_assess_result(result: AssessResult) -> list[DependencyMigrat
     return migrations_from_rows(list(result.rows))
 
 
+_WITNESSABLE = ("upgrade", "unchanged", "added")
+
+
+def witness_rows(
+    rows: list[dict], witnessed: dict[str, str] | None,
+) -> tuple[list[dict], list[str]]:
+    """Comparison rows with the baseline side set to what the baseline capture ran.
+
+    A baseline manifest that does not pin a package is resolved today, to its newest
+    release: the plan would then compute API changes from a version the app never ran
+    (pandas 3.x instead of the 1.5 the baseline captured). The capture's record is
+    witnessed, so it wins, and each correction is reported. Returns ``(rows, notes)``;
+    rows without a record pass through unchanged.
+    """
+    if not witnessed:
+        return rows, []
+    from packaging.utils import canonicalize_name
+
+    out: list[dict] = []
+    notes: list[str] = []
+    for row in rows:
+        name = row.get("name")
+        ran = witnessed.get(canonicalize_name(name)) if isinstance(name, str) else None
+        target = row.get("target_version")
+        if (ran is None or row.get("status") not in _WITNESSABLE
+                or target in (None, "unpinned") or ran == row.get("baseline_version")):
+            out.append(row)
+            continue
+        resolved = row.get("baseline_version")
+        status = "upgrade" if ran != target else "unchanged"
+        out.append({**row, "baseline_version": ran, "status": status})
+        if "upgrade" not in (status, row.get("status")):
+            continue                        # the correction changes no migration
+        notes.append(f"{name}: the baseline capture ran {ran}"
+                     + (f" (the baseline manifest resolves to {resolved} today)"
+                        if resolved not in (None, "unpinned") else ""))
+    return out, notes
+
+
 def _config_value(config: dict | EnvConfig | None, key: str, default=None):
     if config is None:
         return default
@@ -258,7 +297,21 @@ def migrations_from_dependency_file(
     rows = build_comparison_rows(
         baseline_graph, target_graph, target_python="target", target_error=None
     )
+    rows, notes = witness_rows(rows, witnessed_baseline(project_path))
+    if warnings is not None:
+        warnings.extend(notes)
     return migrations_from_rows(rows)
+
+
+def witnessed_baseline(project_dir: str | Path) -> dict[str, str] | None:
+    """The versions the baseline capture ran, if it recorded them (see ``witness_rows``)."""
+    from pymolt.verify.service import witnessed_distributions
+
+    try:
+        return witnessed_distributions(project_dir, "baseline")
+    except Exception as exc:  # a broken state file must not break planning
+        log.warning("could not read the baseline capture's versions: %s", exc)
+        return None
 
 
 def resolve_codemod_migrations(
@@ -276,8 +329,10 @@ def resolve_codemod_migrations(
     (e.g. a configured container that is no longer running) is appended to it.
     """
     if assess_result is not None and assess_result.rows:
-        migrations = migrations_from_assess_result(assess_result)
-        return migrations, f"cached assess result ({len(assess_result.rows)} row(s))"
+        rows, notes = witness_rows(list(assess_result.rows), witnessed_baseline(project_dir))
+        if warnings is not None:
+            warnings.extend(notes)
+        return migrations_from_rows(rows), f"cached assess result ({len(rows)} row(s))"
 
     if target_dependency_file:
         migrations = migrations_from_dependency_file(
@@ -551,9 +606,15 @@ def build_migration_plan(
 
     root = Path(project_dir)
     config, target_path = plan_inputs(root, target_file)
+    notes: list[str] = []
     migrations, source_desc = resolve_codemod_migrations(
         root, target_dependency_file=target_path, config=config.model_dump(mode="json"),
+        warnings=notes,
     )
+    if notes:
+        # Where the from-versions came from (the baseline capture's record over today's
+        # resolve of an unpinned manifest) and any degraded resolve, stated, not implied.
+        source_desc = f"{source_desc}; " + "; ".join(notes)
     scanned: set[str] = set()
     impacts: dict[str, list[ApiImpact]] = {}
     by_pkg: dict[str, list[CodemodPattern] | list[CodemodRule]] = {}
