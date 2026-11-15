@@ -596,12 +596,20 @@ def capture_view(slot, *, when: str, state) -> dict:
         "request_id": slot.request_id,
         "correlation_id": slot.correlation_id,
         "metadata_path": slot.metadata_path,
+        "red": getattr(slot, "red", None),
     }
     if accepted:
         lines = [f"Recorded {slot.events} call(s) in {slot.processes} process(es) as the "
                  f"'{when}' capture.", f"Filled: {', '.join(filled) or 'none'}."]
         if slot.env_note:
             lines.append(f"Env: {slot.env_note}")
+        red = getattr(slot, "red", None)
+        if red:
+            failed = red.get("failed")
+            lines.append(f"RED: the command exited {red.get('returncode')} "
+                         f"({failed if failed is not None else 'some'} test(s) failed); kept "
+                         "because --accept-failing was given. The calls from failing tests are "
+                         "compared as usual.")
         hint = ("Next: change the code (or apply a plan), then capture post-migration."
                 if "post_migration" not in filled else
                 "Next: verify (compares baseline and post-migration).")
@@ -787,6 +795,7 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
                      "trusting this verdict.")
     lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
                  f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.")
+    lines.extend(f"{note}" for note in rep.notes if note.startswith("RED:"))
     if verdict == "pass" and rep.blind:
         lines.append(f"PASS covers the exercised calls only: {rep.blind} BLIND symbol(s) "
                      "were never run.")

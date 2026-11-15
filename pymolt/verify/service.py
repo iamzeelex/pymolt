@@ -1210,14 +1210,48 @@ def _inspect_snapshot(trace: Path, snap: Path) -> TraceArtifactQuality:
 
 
 def _capture_validity(
-    result: TraceCaptureResult, staged_path: Path,
+    result: TraceCaptureResult, staged_path: Path, *, accept_failing: bool = False,
 ) -> tuple[CaptureValidity, str | None]:
     if result.returncode not in (None, 0) and not result.cancelled:
-        return CaptureValidity.COMMAND_FAILED, f"command exited with code {result.returncode}"
+        # A red run is accepted only on request, and only when it recorded events: a run
+        # that called nothing has nothing to compare, red or not.
+        if not (accept_failing and result.events > 0):
+            return CaptureValidity.COMMAND_FAILED, f"command exited with code {result.returncode}"
     if result.events == 0:
         return CaptureValidity.EMPTY, "capture produced zero events"
     quality = inspect_trace_artifact(staged_path)
     return quality.validity, quality.reason
+
+
+_FAILED_COUNT = re.compile(r"(\d+) failed")
+
+
+def parse_failed_count(command_log: str | Path | None) -> tuple[int | None, str]:
+    """``(N, summary line)`` from a pytest-style ``N failed`` line in a command log;
+    ``(None, "")`` when the log is missing or has none."""
+    if not command_log:
+        return None, ""
+    try:
+        lines = Path(command_log).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None, ""
+    for line in reversed(lines):
+        match = _FAILED_COUNT.search(line)
+        if match:
+            return int(match.group(1)), line.strip(" =")
+    return None, ""
+
+
+def _red_stamp(result: TraceCaptureResult) -> dict | None:
+    """``{"returncode", "failed", "summary"}`` for a non-zero run, else None.
+
+    ``failed`` and ``summary`` are parsed from a pytest-style summary line in the command
+    log (``N failed``); ``failed`` is None when the log has none.
+    """
+    if result.returncode in (None, 0) or result.cancelled:
+        return None
+    failed, summary = parse_failed_count(result.command_log)
+    return {"returncode": result.returncode, "failed": failed, "summary": summary}
 
 
 def _diagnostic_path(project_dir: Path, when: str) -> Path:
@@ -1279,6 +1313,7 @@ def capture_named_trace(
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
+    accept_failing: bool = False,
 ) -> ContractSlot:
     """Capture a trace and persist it as the named slot (``"baseline"`` or
     ``"post_migration"``). For ``mode in (TEST_SUITE, LIVE_COMMAND)`` — pymolt
@@ -1296,6 +1331,9 @@ def capture_named_trace(
     ``_coverage_gap_summary``) and stamps it onto the slot's ``coverage_pct``/
     ``covered_sites``/``blind_sites``. Best-effort: degrades to ``None``/``0``/``0`` (logged,
     never raised) when ``coverage`` isn't installed or the second pass fails.
+
+    A command that exits non-zero is refused as evidence unless ``accept_failing`` is set
+    and the run recorded events; the slot is then stamped ``red`` (still ``valid``).
 
     Never prompts; raises ``ValueError`` on bad input (unknown ``when``, no
     ``command``, or an unsupported ``mode`` for this function — see
@@ -1417,7 +1455,8 @@ def capture_named_trace(
     if not staged_path.exists():
         staged_path.parent.mkdir(parents=True, exist_ok=True)
         staged_path.touch()
-    validity, validity_reason = _capture_validity(result, staged_path)
+    validity, validity_reason = _capture_validity(
+        result, staged_path, accept_failing=accept_failing)
     state = load_contract_state(project_dir)
     archived_previous = None
 
@@ -1504,6 +1543,7 @@ def capture_named_trace(
         sink_failures=result.sink_failures,
         instrumentation_skipped=result.instrumentation_skipped,
         activation_failures=getattr(result, "activation_failures", []),
+        red=_red_stamp(result) if validity is CaptureValidity.VALID else None,
     )
     if validity is CaptureValidity.VALID:
         setattr(state, when, slot)
@@ -2027,6 +2067,14 @@ def _stamp_verdict(
         validity = getattr(slot, "validity", CaptureValidity.UNKNOWN)
         if validity is not CaptureValidity.VALID:
             comparability.append(f"{name} capture validity is {validity.value}")
+        red = getattr(slot, "red", None)
+        if red:
+            failed = red.get("failed")
+            report.notes.append(
+                f"RED: the {name} capture was taken with "
+                f"{failed if failed is not None else 'some'} failing test(s) "
+                f"(exit {red.get('returncode')}); the calls from failing tests are compared "
+                "as usual")
         dropped = getattr(slot, "dropped_events", None)
         if dropped is None:
             comparability.append(f"{name} capture has no event-loss counters")

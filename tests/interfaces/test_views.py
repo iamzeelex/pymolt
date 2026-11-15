@@ -270,7 +270,7 @@ _CAPTURE_KEYS = {
     "when", "accepted", "validity", "validity_reason", "events", "processes", "returncode",
     "trace_path", "command_log", "filled_slots", "env_note", "duration_seconds",
     "dropped_events", "coverage_pct", "archived_previous", "impact_targets",
-    "deployment_id", "request_id", "correlation_id", "metadata_path",
+    "deployment_id", "request_id", "correlation_id", "metadata_path", "red",
 }
 
 
@@ -288,6 +288,18 @@ def test_capture_not_accepted_is_said_first_and_untraced_processes_are_warned():
     assert data["accepted"] is False and data["validity"] == "command-failed"
     assert view["summary"].startswith("NOT accepted as 'baseline' evidence: the command exited 2")
     assert any("UNTRACED" in w for w in data["warnings"])
+
+
+def test_red_capture_is_ok_and_says_so():
+    from pymolt.verify.models import CaptureMode, CaptureValidity, ContractSlot, ContractState
+
+    slot = ContractSlot(
+        trace_path="/p/t.jsonl", captured_at="now", mode=CaptureMode.TEST_SUITE,
+        validity=CaptureValidity.VALID, events=12, processes=1, returncode=1,
+        red={"returncode": 1, "failed": 2, "summary": "2 failed"})
+    view = views.capture_view(slot, when="baseline", state=ContractState(baseline=slot))
+    assert view["ok"] is True and view["data"]["red"]["failed"] == 2
+    assert "RED" in view["summary"]
 
 
 def test_capture_accepted_points_at_the_other_side():
