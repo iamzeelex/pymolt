@@ -39,7 +39,7 @@ class PhaseState(BaseModel):
 class EnvironmentCheck(BaseModel):
     """Whether one configured environment exists."""
 
-    name: str           # baseline environment | target environment
+    name: str           # base environment | target environment
     state: str          # ok | warning | error
     detail: str
     hint: str | None = None
@@ -97,7 +97,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
     if config.selected_tool and config.selected_tool.value == "container":
         running = bool(config.container_id and container_is_running(config.container_id))
         checks.append(EnvironmentCheck(
-            name="baseline environment",
+            name="base environment",
             state="ok" if running else "error",
             detail=(
                 f"container {config.container_id[:12]} is running"
@@ -107,7 +107,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
         ))
     else:
         checks.append(EnvironmentCheck(
-            name="baseline environment", state="warning",
+            name="base environment", state="warning",
             detail=f"local Python {config.base_python or '?'}; interpreter not pinned",
         ))
 

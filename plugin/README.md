@@ -51,7 +51,7 @@ args = ["mcp"]
   dependency upgrade, so the agent captures a baseline *before* it starts editing.
 - **Slash command**: `/pymolt:migrate [project-dir]` — walk the funnel honestly.
 - **Subagent**: `pymolt-migrator` — drives a dead-project migration, reporting the medallion
-  baseline tier and never overclaiming feasibility.
+  base tier and never overclaiming feasibility.
 
 > The single most important thing this plugin changes: it makes the agent record a
 > **baseline before the first edit**. That recording cannot be recreated afterwards.
