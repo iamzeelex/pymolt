@@ -162,7 +162,7 @@ def _capture_phase(
     if slot is None:
         return PhaseState(
             phase=label, state=TODO,
-            detail="not captured — no dynamic evidence for this side",
+            detail="not captured",
         )
 
     bits = [f"{slot.events} events"]
@@ -339,14 +339,14 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     if assess.state != DONE:
         return PhaseState(
             phase="plan", state=BLOCKED,
-            detail="no target dependency snapshot to plan against",
+            detail="no target manifest to plan for",
             blocker="assessment has not produced a pinned target manifest",
         )
     plan = MigrationPlan.load(project_path)
     if plan is None:
         return PhaseState(
             phase="plan", state=TODO,
-            detail="no exact reviewed migration plan",
+            detail="no plan saved",
         )
     inspection = inspect_migration_plan(project_path, plan)
     if not inspection.valid:
@@ -412,7 +412,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     if config is None:
         status.phases.append(PhaseState(
             phase="setup", state=TODO,
-            detail="no .pymolt/env_config.json — manifest and target Python unchosen",
+            detail="not configured (no .pymolt/env_config.json)",
         ))
     else:
         target = config.target_python or "?"
@@ -439,7 +439,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
         ))
     else:
         status.phases.append(PhaseState(
-            phase="assess", state=TODO, detail="no pinned target manifest yet",
+            phase="assess", state=TODO, detail="no target manifest yet",
         ))
 
     # ── contract: the two captures, then the report they enable ──────────────
@@ -476,17 +476,17 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     if baseline.state == TODO and post.state == TODO:
         report = PhaseState(
             phase="report", state=BLOCKED, blocker="no capture to build a report from",
-            detail="static map only — every contact would be BLIND",
+            detail="no capture: every call site would be BLIND",
         )
     elif baseline.state == DONE and post.state == DONE:
         report = PhaseState(
             phase="report", state=TODO,
-            detail="both sides captured — the before/after diff is available",
+            detail="both captures exist",
         )
     else:
         report = PhaseState(
             phase="report", state=TODO,
-            detail="one side captured — coverage report, no version diff yet",
+            detail="one capture: coverage only, nothing to compare yet",
         )
 
     from pymolt.verify.unified import UnifiedVerificationReport
@@ -503,7 +503,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
         report = PhaseState(
             phase="report",
             state=DONE,
-            detail=f"unified verdict: {verification.verdict.value}",
+            detail=f"verdict: {verification.verdict.value}",
         )
     status.phases.append(report)
 
@@ -541,12 +541,12 @@ def _decide_next(
         return
     if config is None:
         status.next_command = "pymolt setup ."
-        status.next_reason = "Choose the manifest, toolset and target Python."
+        status.next_reason = "Choose the manifest, tool and Python versions."
         return
     if assess and assess.state == TODO:
         target = config.target_python or "<X.Y>"
         status.next_command = f"pymolt assess . --target-python {target}"
-        status.next_reason = "Resolve baseline vs target and pin the target manifest."
+        status.next_reason = "Resolve the target dependencies and write the target manifest."
         return
     workload_text = " ".join(workload) if workload else "<command that exercises the app>"
     migrated_without_baseline = receipt is not None and receipt.allow_no_baseline
@@ -555,8 +555,8 @@ def _decide_next(
             f"pymolt capture baseline --mode tests -- {workload_text}"
         )
         status.next_reason = (
-            "Record how the code behaves BEFORE migrating — this is the one step that "
-            "cannot be done later."
+            "Record the calls your code makes before any code change. This cannot be "
+            "done later."
         )
         return
     if baseline.state == STALE and not migrated_without_baseline:
@@ -564,39 +564,38 @@ def _decide_next(
             f"pymolt capture baseline --mode tests -- {workload_text}"
         )
         status.next_reason = (
-            "The baseline no longer describes this project — re-capture before trusting "
-            "any diff against it."
+            "The baseline does not match the project. Capture it again before comparing."
         )
         return
     if migration.state != DONE and plan.state in {TODO, STALE}:
         status.next_command = "pymolt plan ."
         status.next_reason = (
-            "Freeze the exact locally verified diff before applying any source changes."
+            "Save the code changes as a plan and review the diff."
         )
         return
     if migration.state in {TODO, STALE}:
         status.next_command = "pymolt apply ."
         status.next_reason = (
-            "Apply the hash-bound reviewed plan. Durable rollback data will be retained."
+            "Apply the saved plan. The original files are kept for rollback."
         )
         return
     if post.state in {TODO, STALE}:
         status.next_command = (
             f"pymolt capture post-migration --mode tests -- {workload_text}"
         )
-        status.next_reason = "Record the new behavior after the recorded migration."
+        status.next_reason = "Record the same calls after the migration, in the target environment."
         return
     if report.state != DONE:
         status.next_command = "pymolt verify ."
-        status.next_reason = "Both sides captured — fold every oracle into one verdict."
+        status.next_reason = "Both captures exist. Compare them."
         return
     if verification is not None and verification.verdict.value == "fail":
         status.next_command = "pymolt rollback ."
-        status.next_reason = "The unified policy failed; restore the frozen pre-migration sources."
+        status.next_reason = "The verdict is FAIL. Rollback restores the files apply changed."
         return
     status.next_command = None
     status.next_reason = (
-        "Migration verification is complete."
+        "Done: the verdict is PASS."
         if verification is not None and verification.verdict.value == "pass"
-        else "Verification completed but remains inconclusive; add evidence before promotion."
+        else "The verdict is INCONCLUSIVE; its reasons name the missing evidence."
     )

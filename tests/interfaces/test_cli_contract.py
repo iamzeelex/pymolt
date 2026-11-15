@@ -237,7 +237,7 @@ class TestRendering:
 
     def test_help_lists_the_preparation_phases_in_funnel_order(self):
         result = runner.invoke(app, ["--help"])
-        funnel = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
+        funnel = result.output.split("╭─ Migration ")[1].split("╰")[0]
         order = [name for name in ("scan", "setup", "assess", "plan", "apply") if name in funnel]
         positions = [funnel.index(name) for name in order]
         assert positions == sorted(positions), f"funnel out of order: {order}"
@@ -255,7 +255,7 @@ class TestRendering:
         assert "╭─ Behavioural proof" in result.output
         proof = result.output.split("╭─ Behavioural proof")[1].split("╰")[0]
         assert "capture" in proof and "verify" in proof
-        prep = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
+        prep = result.output.split("╭─ Migration ")[1].split("╰")[0]
         assert "capture" not in prep and "verify" not in prep
 
     def test_help_leads_with_capturing_a_baseline_first(self):
@@ -263,7 +263,7 @@ class TestRendering:
         result = runner.invoke(app, ["--help"])
         lead = result.output.split("╭─ Options")[0]
         assert "pymolt capture baseline" in lead
-        assert "BEFORE" in lead
+        assert "before any code change" in lead
 
     def test_version_diff_is_prose_not_a_python_dict(self, tmp_path):
         from pymolt.interfaces.cli.verify_cmd import _render_contract_report
