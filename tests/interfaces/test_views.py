@@ -115,7 +115,7 @@ def test_scan_keeps_excluded_roots_and_notes(tmp_path):
     )
     view = views.scan_view(report, tmp_path)
     data = _assert_envelope(view, {"root_count", "roots", "excluded_roots", "edge_totals",
-                                   "divergences", "contacts"})
+                                   "divergences", "contacts", "python_exposure"})
     assert data["excluded_roots"] == ["vendor/lib: vendored tree"]
     assert "could not parse broken.py" in data["warnings"]
     assert "Dockerfile ARG PY_VERSION has no default" in data["warnings"]

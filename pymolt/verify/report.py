@@ -32,7 +32,6 @@ here, not a separate tool.
 import json
 import logging
 import os
-import sys
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -41,6 +40,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from pymolt.core.stdlib import is_stdlib
 from pymolt.verify import identity_resolver
 from pymolt.verify.comparators import ComparatorProfile, TraceComparator, compare_traces
 from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map, contact_class
@@ -593,7 +593,6 @@ def build_contract_report(
             names.add(identity.sym)
         impact_names[path] = names
 
-    stdlib = sys.stdlib_module_names
     observed_tops = {name.split(".", 1)[0] for name in (*view.observations, *view.q_names)}
     symbols: list[SymbolStatus] = []
     for target, s in static.items():
@@ -605,7 +604,7 @@ def build_contract_report(
             else "existence"
         )
         if klass == "behavioural" and identity is not None and identity.resolved:
-            if identity.sym.split(".")[0] in stdlib:
+            if is_stdlib(identity.sym.split(".")[0]):
                 klass = "interpreter"
         elif klass == "behavioural" and identity is not None and identity.error:
             unobservable = _unresolvable_class(identity.error, s["dep"])
@@ -651,7 +650,7 @@ def build_contract_report(
         )
     for obs in sorted(unmatched, key=lambda o: o.name):
         dep = obs.name.split(".")[0]
-        if dep in stdlib or dep in _IGNORE_DEPS:
+        if is_stdlib(dep) or dep in _IGNORE_DEPS:
             continue  # the trace boundary may include odd entries; keep deps only
         matched_paths = _names_match_impact([obs.name, *sorted(obs.legacy)], impact_names)
         symbols.append(

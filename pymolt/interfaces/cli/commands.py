@@ -927,11 +927,32 @@ def scan(
 
     if report.contact_map is not None:
         _render_contact_map(report.contact_map)
+    if report.python_exposure is not None:
+        _render_python_exposure(report.python_exposure, report.contact_map)
 
     next_step(project_path)
 
 
 _CONTACT_ROWS = 15
+
+
+def _render_python_exposure(exposure: dict, cmap) -> None:
+    """Stdlib names the data says are gone, and how far up the code runs unchanged."""
+    from pymolt.interfaces import views
+
+    summary = views.exposure_summary(exposure)
+    if summary:
+        console.print(f"\n[bold]Python exposure[/bold] — {summary}")
+        for row in exposure["unguarded_sites"][:_CONTACT_ROWS]:
+            console.print(f"  [dim]{row}[/dim]")
+        extra = len(exposure["unguarded_sites"]) - _CONTACT_ROWS
+        if extra > 0:
+            console.print(f"  [dim]… {extra} more (pymolt scan --json)[/dim]")
+    if cmap is not None and cmap.unparsed_cython:
+        console.print(
+            f"[dim]{len(cmap.unparsed_cython)} .pyx/.pxd/.pxi file(s) are not parsed; names "
+            "used only inside them are not counted.[/dim]"
+        )
 
 
 def _render_contact_map(cmap) -> None:
