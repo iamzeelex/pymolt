@@ -126,7 +126,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
         checks.append(EnvironmentCheck(
             name="target environment", state="warning",
             detail="no target environment configured",
-            hint="Build it, then re-run `pymolt setup .` and point it there.",
+            hint="Build it, then re-run `pymolt setup . --target-env PATH`.",
         ))
     return checks
 
