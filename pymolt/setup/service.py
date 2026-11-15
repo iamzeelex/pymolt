@@ -132,8 +132,8 @@ _VARIANT_MARKERS = ("dev", "test", "tests", "doc", "docs", "rtd", "ci", "lint",
 #: Names that state the project's dependencies outright.
 _CANONICAL_MANIFESTS = {"requirements.txt", "requirements.in", "pyproject.toml",
                         "pipfile", "environment.yml", "environment.yaml"}
-#: Packaging metadata pymolt cannot yet classify into edges (see the inventory's
-#: own note) — a last resort, never the assumed source of truth.
+#: Packaging metadata: its dependencies are only partly readable (computed
+#: values are not executed) — a last resort, never the assumed source of truth.
 _UNCLASSIFIED_MANIFESTS = {"setup.py", "setup.cfg"}
 
 
