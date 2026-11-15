@@ -40,6 +40,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_serializer
 
+from pymolt.adapters.python_runner import RunnerSpec
+
 SCHEMA = "pymolt.delta/1"
 
 FactKind = Literal["REMOVED", "MOVED", "SIGNATURE", "DEFAULT", "DEPRECATED", "UNCHANGED"]
@@ -174,6 +176,8 @@ class Interpreter(BaseModel):
     reason: str | None = None  # set when executable is None
     built_seconds: float | None = None
     versions: dict[str, str | None] = Field(default_factory=dict)
+    # Set when the interpreter lives in a container: ``executable`` is then a path inside it.
+    runner: RunnerSpec | None = None
 
     @property
     def available(self) -> bool:
