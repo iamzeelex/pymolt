@@ -30,76 +30,48 @@ uv tool install pymolt
 uv tool install "pymolt[mcp]"
 ```
 
-**Record the contract before you change anything** — this is the step that cannot be recovered later:
+One path, in order. `pymolt status .` shows at any time where the project is and which command is next; every command also prints that next command.
 
 ```bash
 cd your-legacy-project
-pymolt doctor .
-pymolt contract capture --when baseline --mode tests -- pytest tests/
+pymolt setup .                                         # manifest, tool, base and target Python
+pymolt assess .                                        # resolve the target, write requirements-target.txt
+pymolt capture baseline --mode tests -- pytest tests/  # before any code change; cannot be redone later
+pymolt plan .                                          # the codemods as a plan; shows the diff, writes no source
+pymolt apply .                                         # writes exactly that plan
+pymolt capture post-migration --mode tests -- pytest tests/   # in the target environment
+pymolt verify .                                        # PASS / FAIL / INCONCLUSIVE
 ```
 
-Then migrate however you like — by hand, with `pymolt assess` + `pymolt codemods`, or by handing the project to an AI agent. When the target environment runs, record the other side and compare:
-
-```bash
-pymolt plan .                 # freeze the exact reviewed codemod plan
-pymolt apply .                # apply that plan; retains durable rollback data
-pymolt rollback .             # restore the last applied plan if needed
-pymolt migrate .              # end-to-end read-only preview shortcut
-pymolt migrate . --patch migration.patch  # export the exact unified diff
-pymolt migrate . --write      # requires the valid baseline above
-pymolt contract capture --when post-migration --mode tests -- pytest tests/
-pymolt verify .               # one verdict across traces, replay, golden/canary evidence
-```
+`pymolt rollback .` undoes the last `apply`. Instead of `plan` + `apply` you can change the code by hand or hand the project to an AI agent; `verify` compares the two captures the same way (`status` tracks only migrations made with `apply`).
 
 `verify` gives you three numbers that no resolver can: how much of the Axiom-impacted dependency surface your tests actually exercised, how much stayed **BLIND**, and which calls changed behaviour. Its verdict is deliberately tri-state: `PASS`, `FAIL`, or `INCONCLUSIVE`. Missing, stale, opaque, sampled, or non-comparable evidence can never become a green result.
-
-> Prefer one command? `pymolt migrate` runs the preparation phases end-to-end. It resolves, previews codemods and shows diffs — but it cannot prove anything on its own, and it will tell you so. The contract still needs a baseline recorded *before* the first edit.
 
 ---
 
 ## How It Works: The Funnel Feeds The Contract
 
-The contract brackets the migration. Everything else happens inside the brackets:
+The two captures bracket the code change. Everything before them prepares it:
 
 ```
-   contract capture ──────── the migration ───────► contract capture
-      (baseline)                                     (post-migration)
-          │          scan → setup → assess → codemods         │
-          │       surfaces   target   resolve   LibCST        │
-          │       & edges     Python  baseline  rewrites      │
-          │                   & tool  vs target               │
-          └───────────────────────┬───────────────────────────┘
-                                  ▼
-                          pymolt verify
-              confirmed · BLIND · trust % · what changed
+ scan → setup → assess → capture baseline → plan → apply → capture post-migration → verify
+ what    which   resolve   before any         the code change    in the target          what
+ is      Python  the       code change        (or by hand)       environment            changed
+ there   & tool  target
 ```
 
-```bash
-# 0. BASELINE — record first. This is the only step you cannot do later.
-pymolt contract capture --when baseline --mode tests -- pytest tests/
+| Step | Command | What it does |
+|---|---|---|
+| scan | `pymolt scan .` | Manifests, Python-version divergence, dependency edges, and every call site into a dependency. Offline. |
+| setup | `pymolt setup .` | Manifest, resolution tool, base and target Python. Options or prompts. |
+| assess | `pymolt assess . --risk` | Lock-first resolution of baseline vs target, CVE deltas, the pinned target manifest, and how to build the target environment. |
+| capture | `pymolt capture baseline -- pytest tests/` | Records the calls your code makes into its dependencies. Needs setup. The one step you cannot do later. |
+| plan | `pymolt plan .` | The verified codemods as a plan, with the diff. Writes no source. |
+| apply | `pymolt apply .` | Writes exactly the plan; refuses it if a planned file changed since. Keeps rollback data. |
+| capture | `pymolt capture post-migration -- pytest tests/` | The same recording in the target environment. |
+| verify | `pymolt verify .` | Compares the captures: confirmed · BLIND · trust % · what changed. |
 
-# 1. SCAN: monorepo surfaces, Dockerfiles, Python-version divergence — offline
-pymolt scan .
-
-# 2. SETUP: pick target Python (3.12 / 3.13) and resolver toolset (uv, pip, conda)
-pymolt setup .
-
-# 3. ASSESS: lock-first resolution of baseline vs target, CVE deltas, compile risk
-pymolt assess . --target-python 3.12 --risk
-
-# 4. PLAN/APPLY: freeze the AST result, then apply exactly what was reviewed
-pymolt plan .                 # dry-run, hash-bound plan with unified diff
-pymolt apply .                # baseline-gated, durable and transactional
-# `codemods .` remains a focused preview/apply shortcut for one codemod phase.
-
-# 5. PROVE IT: record the other side and diff the two contracts
-pymolt contract capture --when post-migration --mode tests -- pytest tests/
-pymolt verify .
-```
-
-Steps 1–4 are the migration. Step 0 and step 5 are the reason to trust it.
-
-**Where is the contact map in this?** `pymolt contract map .` is the static denominator — calls, attribute reads, decorators, bases, context managers, constants and protocol operations that cross into a dependency. Axiom delta paths focus this map automatically after `apply`; full-surface totals remain visible.
+**Where is the contact map in this?** `pymolt scan .` lists it: calls, attribute reads, decorators, bases, context managers, constants and protocol operations that cross into a dependency. It is the static denominator of every coverage number. Axiom delta paths focus it automatically after `apply`; full-surface totals remain visible.
 
 ---
 
@@ -126,25 +98,17 @@ Add PyMolt to your agent config (e.g. `~/.cursor/mcp.json` or `claude_desktop_co
 
 ### Available MCP Tools
 
-**The ones your agent cannot do for itself** — these need LibCST scope resolution or recorded runtime traces, and no amount of file reading substitutes:
+The tools have the names of the CLI commands. None of them writes source: `plan` saves the plan, and a person applies it with `pymolt apply`.
 
 | Tool | What the agent gets |
 |---|---|
-| `contract_map` | Every call site into a dependency, resolved through imports and scopes. Import greps undercount this severalfold. |
-| `contract_capture` | Runs *your* test or app command with a boundary tracer injected — zero edits to the project — and stores it as the `baseline` or `post-migration` slot. |
-| `contract_report` | The verdict: confirmed / BLIND coverage, trust %, and exactly which dependency calls changed result, changed raise, or disappeared. |
-
-**Preparation** — faster and more reproducible than driving the tools by hand, and they carry honesty markers (fixation, resolution quality, baseline tier) that a hand-run loses:
-
-| Tool | What the agent gets |
-|---|---|
-| `status` | Where the project stands in the funnel, and the single next command. |
-| `scan` | Project roots, dependency edges and Python-version divergence, without parsing Dockerfiles by hand. |
-| `setup_options` / `setup_apply` | Valid target Python versions and package managers, then the pinned configuration. |
-| `assess` | Baseline vs target resolution: which versions move, which conflict, what enters the manual zone — plus optional risk scoring (CVEs, C-wheel compilation, abandonment). An input to the contract, never the conclusion. |
-| `codemods_preview` / `codemods` | Unified diffs of AST rewrites; `write=True` applies them. |
-| `env_hint` | Dockerfile recipes and `uv` commands for building the target environment. |
-| `migrate` | Runs the preparation phases end-to-end in one call. |
+| `status` | Where the project stands, whether its environments exist, and the single next tool. |
+| `scan` | Project roots, dependency edges, Python-version divergence, and every call site into a dependency, resolved through imports and scopes. Import greps undercount this severalfold. |
+| `setup` | With no choices, the valid manifests, tools and Python versions; with them, the saved configuration. |
+| `assess` | Baseline vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment — plus optional risk scoring. An input to the contract, never the conclusion. |
+| `capture` | Runs *your* test or app command with a boundary tracer injected — zero edits to the project — and keeps it as the `baseline` or `post-migration` capture. |
+| `plan` | The codemods for the target manifest as a saved plan and unified diffs. |
+| `verify` | The verdict: PASS / FAIL / INCONCLUSIVE, confirmed / BLIND coverage, trust %, and exactly which dependency calls changed result, changed raise, or disappeared. |
 
 ---
 
@@ -155,7 +119,7 @@ Static type checkers catch signature changes. They cannot tell you that a method
 PyMolt ships a zero-dependency runtime tracer that attaches through standard library hooks (`sys.setprofile` / import wrappers) — **no code changes, no decorators, nothing added to your requirements**. It runs inside your app's interpreter, which may well be Python 3.6, and it is pure stdlib on purpose.
 
 1. Run your existing test suite (or the app itself) under the baseline Python to record real interaction shapes.
-2. Upgrade dependencies, apply codemods, edit code.
+2. Upgrade dependencies, plan and apply codemods, edit code.
 3. Re-run the same command under the target Python.
 4. `pymolt verify .` diffs the two and folds every configured oracle into one verdict.
 
@@ -163,7 +127,7 @@ What comes back combines three coverage numbers with a tri-state verdict:
 
 - **confirmed** — dependency calls your run actually exercised, on both sides.
 - **BLIND** — calls in the static contact map that your run never touched. This is the honest measure of how much your test suite does *not* cover. A green suite with high BLIND proves very little, and PyMolt says so instead of pretending otherwise.
-- **trust %** — confirmed against the static denominator from `contract map`.
+- **trust %** — confirmed against the static denominator `scan` lists.
 
 Plus the behavioural verdict: which calls changed result, changed raise, or disappeared. `PASS` means no change was observed on a valid, comparable and fully covered contract surface; `FAIL` means a comparable oracle found a change; `INCONCLUSIVE` identifies the exact missing evidence.
 
@@ -185,44 +149,35 @@ Regex replacements break code; large language models frequently hallucinate non-
 - **Typed Metavariables**: Declarative match/rewrite templates (e.g., `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`).
 - **Client Verification**: PyMolt locally re-verifies every rule before applying it to your repository.
 - **Transactional apply**: every changed file is prepared and parsed before the first replacement; an interrupted or failed mixed rule/pattern batch rolls all replacements back.
-- **Free Public Cloud Hub**: Recipes are fetched on demand from Axiom Cloud Hub. Custom/private on-prem instances are supported via `--endpoint <url>` or `PYMOLT_ENDPOINT`.
+- **Free Public Cloud Hub**: Recipes are fetched on demand from Axiom Cloud Hub. Custom/private on-prem instances are supported via `pymolt axiom endpoint <url>`, `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT`.
 
 ---
 
 ## Commands Summary
 
-**Proof**
+**Migration**, in the order you run them:
 
 | Command | Description |
 |---|---|
-| `pymolt verify [dir]` | Unified persisted `PASS` / `FAIL` / `INCONCLUSIVE`; supports exact/shape/custom, golden snapshots, canary policy, safe shadow classification and opt-in rollback. |
-| `pymolt contract map [dir]` | Static contact map: every call site into a dependency (the coverage denominator). |
-| `pymolt contract capture --when baseline\|post-migration -- <cmd>` | Runs your command and promotes only a valid trace; failed/empty captures remain diagnostic artifacts. |
-| `pymolt contract report [dir]` | `PASS` / `FAIL` / `INCONCLUSIVE`, confirmed / BLIND / trust %, and behavioral changes. |
-| `pymolt contract diff OLD NEW` | Fold two recordings into a BoundaryDiff directly. |
+| `pymolt status [dir]` | Where the project stands, whether its environments exist, and the next command. |
+| `pymolt scan [dir]` | Manifests, Python-version divergence, dependency edges and call sites into dependencies. |
+| `pymolt setup [dir]` | Manifest, tool, base and target Python: `--manifest`, `--tool`, `--base-python`, `--target-python`, `--container`, `--target-env`, or prompts. |
+| `pymolt assess [dir]` | Baseline vs target resolution, CVE deltas, pinned target manifest, target-environment commands. |
+| `pymolt capture baseline\|post-migration -- <cmd>` | Runs your command and keeps only a valid recording; failed/empty captures remain diagnostic artifacts. |
+| `pymolt plan [dir]` | The codemods as a plan with the diff; `--patch FILE` exports it. Writes no source. |
+| `pymolt apply [dir]` | Writes only the saved plan; validates hashes and retains rollback data. |
+| `pymolt verify [dir]` | `PASS` / `FAIL` / `INCONCLUSIVE`, confirmed / BLIND / trust %, and behavioural changes; also golden snapshots, canary policy, shadow classification, opt-in rollback. `--baseline`/`--post-migration` compare other recordings (not saved). |
+| `pymolt rollback [dir]` | Restores the sources of the last apply; protects later edits unless `--force`. |
 
-**Preparation**
-
-| Command | Description |
-|---|---|
-| `pymolt status [dir]` | Where the project stands in the funnel, and the exact next command. |
-| `pymolt doctor [dir]` | Read-only preflight for environments, detected workload, evidence validity and migration receipt. |
-| `pymolt scan [dir]` | Monorepo surfaces, Dockerfiles and lockfiles: version divergence and edges. |
-| `pymolt setup [dir]` | Interactive setup for target Python, package manager and manifest. |
-| `pymolt assess [dir]` | Baseline vs target resolution, CVE deltas, pinned target manifest. |
-| `pymolt plan [dir]` | Freeze the exact hash-bound codemod result for review and later apply. |
-| `pymolt apply [dir]` | Apply only the saved plan; validates hashes and retains durable rollback data. |
-| `pymolt rollback [dir]` | Atomically restore the latest applied plan; protects later edits unless `--force`. |
-| `pymolt codemods [dir]` | Focused exact unified preview by default; `--patch FILE` exports it and `--write` uses the durable plan path. |
-| `pymolt migrate [dir]` | End-to-end exact preview; `--patch FILE` exports it, while `--write` uses the durable plan path and requires a valid baseline. |
-| `pymolt env hint [dir]` | Generates a target `Dockerfile` and `uv` environment commands. |
-
-**Plumbing**
+**Tools**
 
 | Command | Description |
 |---|---|
+| `pymolt axiom login\|logout\|status\|endpoint\|clear-cache` | Axiom access: token, endpoint, local cache. |
 | `pymolt mcp` | Starts the stdio Model Context Protocol server for AI coding agents. |
-| `pymolt auth login` | Authenticates the CLI for Axiom Cloud Hub recipe access. |
+| `pymolt succession [dir]`, `pymolt forks REPO` | Experimental: framework succession (`--plan` for `apply`) and fork triage. |
+
+Commands removed in this version print their replacement: `doctor` → `status`; `contract capture/trace/boundary/export-watcher` → `capture`; `contract report/diff` → `verify`; `contract map` → `scan`; `migrate`, `codemods` → `plan` + `apply`; `env hint` → `assess`; `auth`, `config`, `login`, `logout` → `axiom`.
 
 ---
 
