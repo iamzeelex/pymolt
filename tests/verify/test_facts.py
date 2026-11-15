@@ -101,6 +101,18 @@ def test_pandas_decorator_wrapper_and_direct_call_are_the_same_fact(tmp_path):
     assert entry.level is ComparisonLevel.EXACT and entry.new_symbol is None
 
 
+def test_constructor_receiver_compares_whenever_a_backend_rendered_it(tmp_path):
+    # setprofile renders __init__'s self before the body runs (opaque), the wrap backend
+    # after the call (the finished Series): the same pd.Series(a) call is one fact.
+    init = "pandas.core.series.Series.__init__"
+    site = text_at(10, "s1 = pd.Series(a)")
+    old = [ev(init, {"self": {"__opaque__": "pandas.core.series.Series"},
+                     "data": {"__list__": [1]}}, sym=init, defaulted=["copy"])]
+    new = [ev(init, {"self": S1, "data": {"__list__": [1]}}, sym=init, defaulted=["copy"])]
+    d = run_diff(tmp_path, old, new, old_text=site, new_text=site)
+    assert d.counts()["equal"] == 1 and d.is_clean(), d.counts()
+
+
 def test_library_added_defaulted_parameter_is_drift_not_changed(tmp_path):
     concat = "pandas.core.reshape.concat.concat"
     bound = {"objs": {"__list__": [S1, S2]}}

@@ -1363,6 +1363,31 @@ def _annotate_from_snapshot(fs: FactSet, snap: Path,
     )
 
 
+def _constructor_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    """``__init__``'s receiver as ``{"__opaque__": <type>}``: the object under construction.
+
+    Its state is what the constructor produces, not an input, and backends render it at
+    different moments (setprofile / monitoring before the body runs: an empty or opaque
+    object; wrap after the call: the finished one). Left as recorded, the same
+    ``pd.Series(a)`` call keyed differently per backend and showed as DISAPPEARED +
+    APPEARED instead of comparing."""
+    bound = inputs.get("bound")
+    if isinstance(bound, dict) and "self" in bound:
+        return {**inputs, "bound": {**bound, "self": _receiver_marker(bound["self"])}}
+    args = inputs.get("args")
+    if isinstance(args, list) and args:
+        return {**inputs, "args": [_receiver_marker(args[0]), *args[1:]]}
+    return inputs
+
+
+def _receiver_marker(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        for key in ("__opaque__", "__structure__", "__shape__", "__cycle__"):
+            if isinstance(value.get(key), str):
+                return {"__opaque__": value[key]}
+    return {"__opaque__": type(value).__name__ if value is not None else "?"}
+
+
 def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     """One JSONL event or one aggregated record -> a uniform event dict (None = not a call)."""
     if not isinstance(raw, Mapping):
@@ -1400,6 +1425,8 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         if isinstance(inputs.get("defaulted"), list):
             defaulted = tuple(sorted({str(n) for n in inputs["defaulted"]}))
         inputs = {k: v for k, v in inputs.items() if k != "defaulted"}
+        if (sym or q).endswith(".__init__"):
+            inputs = _constructor_inputs(inputs)
     if kind == "raise":
         value = _raise_name(value)
     v = raw.get("v")
