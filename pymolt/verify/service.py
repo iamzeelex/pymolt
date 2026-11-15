@@ -2032,6 +2032,18 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
             "plan_id": bound[0].plan_id if bound else None, "notes": notes}
 
 
+def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]) -> str:
+    """Why there is nothing to diff against, naming the side that is actually missing."""
+    names = {name for name, _ in used_slots}
+    if names == {"baseline"}:
+        return "no post-migration capture yet (only the baseline is recorded)"
+    if names == {"post-migration"}:
+        return "no baseline capture"
+    if not names and trace is None:
+        return "no captures"
+    return "no baseline trace is available for a version diff"
+
+
 def _stamp_verdict(
     report: ContractReport,
     trace: str | None,
@@ -2054,7 +2066,7 @@ def _stamp_verdict(
                 quality.reason or f"current trace is {quality.validity.value}"
             )
     if against is None:
-        comparability.append("no baseline trace is available for a version diff")
+        comparability.append(_missing_side_reason(trace, used_slots))
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
