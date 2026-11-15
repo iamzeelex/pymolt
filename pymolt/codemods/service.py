@@ -21,6 +21,7 @@ No printing / prompting here — callers own their I/O.
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -229,6 +230,24 @@ def _resolve_graph_for_source(
     raise ValueError(f"Could not resolve dependency source {source_path} in {project_dir}")
 
 
+def _resolver_failure(side: str, manifest: str | Path, exc: subprocess.CalledProcessError):
+    """A resolver (uv) failure while planning, as a :class:`PlanInputError`.
+
+    The summary is the resolver's own first error line, not a Python traceback; the
+    hint names the culprits and the way out.
+    """
+    from pymolt.assess.service import describe_resolver_failure
+
+    found = describe_resolver_failure(exc)
+    name = Path(manifest).name
+    culprits = f"Culprit(s): {', '.join(found.culprits)}. " if found.culprits else ""
+    return PlanInputError(
+        f"the {side} manifest {name} does not resolve: {found}",
+        f"{culprits}Fix or loosen them, then run `pymolt assess .` and plan again. "
+        "No source files were changed.",
+    )
+
+
 def migrations_from_dependency_file(
     project_dir: str | Path,
     target_dependency_file: str | Path,
@@ -267,27 +286,33 @@ def migrations_from_dependency_file(
     base_python = _config_value(cfg, "base_python")
     container_id = _config_value(cfg, "container_id")
 
-    baseline_graph, _, baseline_warning = _resolve_graph_for_source(
-        project_path,
-        baseline_manifest or project_path,
-        base_python=base_python,
-        container_id=container_id,
-        tool=baseline_tool,
-        use_cache=use_cache,
-    )
+    try:
+        baseline_graph, _, baseline_warning = _resolve_graph_for_source(
+            project_path,
+            baseline_manifest or project_path,
+            base_python=base_python,
+            container_id=container_id,
+            tool=baseline_tool,
+            use_cache=use_cache,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise _resolver_failure("baseline", baseline_manifest or project_path, exc) from exc
     # The target side is resolved fresh under the TARGET Python and must never
     # go through the legacy container (see the invariant in CLAUDE.md). Passing
     # the baseline container here made the lookup search for a 3.13 interpreter
     # inside a 3.6 image, find nothing, and report the live container as "not
     # running" — degrading a resolve that was never supposed to use it.
-    target_graph, _, target_warning = _resolve_graph_for_source(
-        target_dependency_file,
-        target_dependency_file,
-        base_python=_config_value(cfg, "target_python") or base_python,
-        container_id=None,
-        tool="uv" if baseline_tool == "container" else baseline_tool,
-        use_cache=use_cache,
-    )
+    try:
+        target_graph, _, target_warning = _resolve_graph_for_source(
+            target_dependency_file,
+            target_dependency_file,
+            base_python=_config_value(cfg, "target_python") or base_python,
+            container_id=None,
+            tool="uv" if baseline_tool == "container" else baseline_tool,
+            use_cache=use_cache,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise _resolver_failure("target", target_dependency_file, exc) from exc
 
     if warnings is not None:
         for w in (baseline_warning, target_warning):

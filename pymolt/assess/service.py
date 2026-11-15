@@ -57,6 +57,125 @@ class AssessResult(BaseModel):
         return dict(Counter(r["status"] for r in self.rows))
 
 
+# ── resolver failures ────────────────────────────────────────────────────────
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_DETAIL_LINES = 40
+_REQ_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# `name==1.0`, `name[extra]>=2`, `name @ url`: the name is what precedes the first operator.
+_REQ_WITH_OP = re.compile(
+    r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*(?:===|==|~=|!=|<=|>=|<|>|\s@\s)"
+)
+_FAILED_BUILD = re.compile(
+    r"Failed to (?:download and build|build|download|fetch|clone)\s+`([^`]+)`")
+_NOT_FOUND = re.compile(r"`([^`]+)` was not found in the package registry")
+_NO_VERSIONS = re.compile(r"there are no versions of ([A-Za-z0-9][A-Za-z0-9._-]*)")
+_NO_DIST = re.compile(r"No matching distribution found for ([A-Za-z0-9][A-Za-z0-9._-]*)")
+_GIT_URL = re.compile(r"git\+(?:git|https?|ssh)://\S*?/([A-Za-z0-9._-]+?)(?:\.git)?(?:[@#\s`'\"]|$)")
+
+
+def canonical_name(name: str) -> str:
+    """PEP 503 normalisation, so ``Flask_Cors`` and ``flask-cors`` compare equal."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+class TargetResolveError(str):
+    """A one-line resolver failure summary that also carries the resolver's evidence.
+
+    A ``str`` so every existing ``target_error`` consumer keeps working;
+    ``detail`` is the stderr tail and ``culprits`` the packages its failure lines name.
+    """
+
+    detail: str | None
+    culprits: list[str]
+
+    def __new__(cls, summary: str, detail: str | None = None, culprits: list[str] | None = None):
+        obj = super().__new__(cls, summary)
+        obj.detail = detail
+        obj.culprits = list(culprits or [])
+        return obj
+
+
+def _spec_name(spec: str) -> str | None:
+    match = _REQ_NAME.match(spec.strip())
+    return canonical_name(match.group(0)) if match else None
+
+
+def parse_resolver_culprits(stderr: str) -> list[str]:
+    """The package names a resolver's failure output points at, in order of appearance.
+
+    Supported uv shapes: ``Failed to build `x==1```, ``Failed to download/fetch/clone
+    `x```, ``Because x==1 depends on y>=2`` (incl. ``And because`` / ``Because only x<=1
+    is available``, wrapped over lines), ```x` was not found in the package registry``,
+    ``there are no versions of x``, ``No matching distribution found for x``, and
+    ``git+git://host/org/x.git`` URLs. The bare ``No solution found`` header names none.
+    """
+    text = _ANSI.sub("", stderr or "")
+    found: list[str] = []
+
+    # Join wrapped continuation lines (and uv's tree glyphs) into one string.
+    flat = re.sub(r"\s*\n[\s│├└─▶╰×]*", " ", text)
+    positions: list[tuple[int, str | None]] = []
+    for m in _FAILED_BUILD.finditer(flat):
+        positions.append((m.start(), _spec_name(m.group(1))))
+    for m in _NOT_FOUND.finditer(flat):
+        positions.append((m.start(), _spec_name(m.group(1))))
+    for m in _NO_VERSIONS.finditer(flat):
+        positions.append((m.start(), canonical_name(m.group(1))))
+    for m in _NO_DIST.finditer(flat):
+        positions.append((m.start(), canonical_name(m.group(1))))
+    for m in re.finditer(r"(?:[Bb]ecause|you require|Your project requires)\b", flat):
+        end = flat.find(", we can conclude", m.end())
+        clause = flat[m.end(): end if end != -1 else m.end() + 300]
+        for req in _REQ_WITH_OP.finditer(clause):
+            positions.append((m.start(), canonical_name(req.group(1))))
+    for m in _GIT_URL.finditer(flat):
+        positions.append((m.start(), canonical_name(m.group(1))))
+    for _, name in sorted(positions, key=lambda item: item[0]):
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def resolver_summary(stderr: str, fallback: str) -> str:
+    """uv's first ``error:`` / ``×`` line, else its first non-blank line, else ``fallback``."""
+    lines = [ln.strip() for ln in _ANSI.sub("", stderr or "").splitlines() if ln.strip()]
+    for ln in lines:
+        m = re.match(r"^(?:error:|×|ERROR:)\s*(.+)$", ln)
+        if m:
+            return m.group(1).rstrip(":").strip()
+    return lines[0].rstrip(":") if lines else fallback
+
+
+def _process_error(exc: BaseException | None):
+    """The ``CalledProcessError`` at the root of ``exc``'s cause chain, if any."""
+    import subprocess
+
+    for _ in range(8):
+        if exc is None:
+            return None
+        if isinstance(exc, subprocess.CalledProcessError):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def describe_resolver_failure(exc: BaseException) -> TargetResolveError:
+    """A resolver exception as a one-line summary plus its stderr tail and culprits."""
+    proc = _process_error(exc)
+    stderr = ""
+    if proc is not None:
+        raw = proc.stderr
+        stderr = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else (raw or "")
+    if not stderr.strip():
+        return TargetResolveError(str(exc))
+    clean = _ANSI.sub("", stderr).rstrip()
+    tail = "\n".join(clean.splitlines()[-_DETAIL_LINES:])
+    return TargetResolveError(
+        resolver_summary(stderr, str(exc)), tail, parse_resolver_culprits(stderr),
+    )
+
+
 def resolve_chosen_source(sources, manifest_name: str | None):
     """Pick the source manifest by name, or default to the first lock/manifest.
 
