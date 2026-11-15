@@ -65,16 +65,17 @@ _INSTRUCTIONS = """\
 PyMolt proves whether a Python migration changed your program's behaviour.
 
 START HERE — the two tools nothing else can replace:
-  contract_map     every call site into a dependency, resolved through imports
-                   and scopes (LibCST). Grepping imports finds modules, not the
-                   symbols actually called, and undercounts the surface severalfold.
+  scan             every project root, and every call site into a dependency,
+                   resolved through imports and scopes (LibCST). Grepping imports
+                   finds modules, not the symbols actually called, and undercounts
+                   the surface severalfold.
   contract_capture / contract_report
                    record what the code really calls at runtime before AND after
                    the migration, then report what changed: results, raises,
                    symbols that vanished. This cannot be derived by reading files
                    or by resolving dependencies — it requires the recorded traces.
 
-Supporting phases, in order:  scan -> setup_options/setup_apply -> assess -> env_hint
+Supporting phases, in order:  setup_options/setup_apply -> assess -> env_hint
   These prepare the migration; assess resolves baseline vs target and tells you
   which versions move. A successful resolve is NOT evidence the program still
   works — it is an input to the contract, never the conclusion.
@@ -237,7 +238,8 @@ def status(project_dir: str = ".") -> dict:
 @mcp.tool()
 def scan(project_dir: str = ".") -> dict:
     """Find EVERY project root in the repo, with its manifests, Python-version
-    evidence and dependency edges — offline, no resolution.
+    evidence and dependency edges, and every call site where the code enters a
+    third-party dependency — offline, no resolution, no runtime.
 
     Assume the repo is a monorepo until this tool says otherwise. A nested
     directory whose only marker is its own requirements.txt is a separate project
@@ -245,6 +247,11 @@ def scan(project_dir: str = ".") -> dict:
     when the tree is walked by hand looking for setup.py/pyproject.toml. This also
     reports where roots *disagree* about the target Python — divergence a
     file-by-file read does not surface.
+
+    Call sites are resolved through imports and scopes with LibCST. Do not
+    reconstruct them by grepping imports: an import says a module is present, not
+    which symbols are called, and undercounts the contact surface severalfold. They
+    are the denominator every coverage and trust number is measured against.
 
     Args:
         project_dir: Project/repo directory to scan (default: current directory).
@@ -306,6 +313,28 @@ def scan(project_dir: str = ".") -> dict:
         summary_lines = [
             f"{len(surfaces.project_roots)} project root(s), {total_edges} dependency edge(s).",
         ]
+        cmap = report.contact_map
+        if cmap is not None:
+            per_dep = sorted(
+                ((dep, len(targets)) for dep, targets in cmap.by_dep.items()),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+            per_dep_capped, per_dep_trunc = _fit_answer([f"{d} {c}" for d, c in per_dep])
+            distinct = len({c.target for c in cmap.contacts})
+            data["contacts"] = {
+                "total": len(cmap.contacts),
+                "distinct_symbols": distinct,
+                "files_scanned": cmap.files_scanned,
+                "per_dependency_format": "dep distinct_symbol_count",
+                "per_dependency": per_dep_capped,
+            }
+            if per_dep_trunc:
+                data["contacts"]["truncated"] = per_dep_trunc
+            summary_lines.append(
+                f"{len(cmap.contacts)} call site(s) into {len(cmap.by_dep)} dependency(ies), "
+                f"{distinct} distinct symbol(s), {cmap.files_scanned} file(s) scanned. "
+                + _truncation_note(len(per_dep_capped), per_dep_trunc, full_path)
+            )
         if divergences:
             summary_lines.append(f"{len(divergences)} root(s) with Python-version divergence.")
         else:
@@ -603,69 +632,6 @@ def assess(
             f"assess failed: {e}",
             hint="Ensure `uv` is on PATH and setup is configured; try no_cache=true.",
         )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. contract_map
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def contract_map(project_dir: str = ".") -> dict:
-    """Every call site where this project's code enters a third-party dependency,
-    resolved through imports and scopes with LibCST. Cheap, static, no runtime.
-
-    Do not try to reconstruct this by reading files or grepping imports: an import
-    tells you a module is present, not which symbols are called or how often, and
-    counting imports undercounts the real contact surface severalfold. This is the
-    denominator every coverage and trust number is measured against.
-
-    Args:
-        project_dir: Project directory (default: current directory).
-
-    Returns total call sites, distinct symbols, and per-dependency ranking.
-    Run it before migrating, to see the surface a change could break.
-    """
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.verify.contact_map import build_contact_map
-
-        cmap = build_contact_map(str(path))
-        full = cmap.model_dump(mode="json")
-        full_path = _write_full_report(path, "contract_map", full)
-
-        per_dep = sorted(
-            ((dep, len(targets)) for dep, targets in cmap.by_dep.items()),
-            key=lambda kv: (-kv[1], kv[0]),
-        )
-        per_dep_capped, per_dep_trunc = _fit_answer([f"{d} {c}" for d, c in per_dep])
-        data: dict[str, Any] = {
-            "total_contacts": len(cmap.contacts),
-            "distinct_symbols": len({c.target for c in cmap.contacts}),
-            "files_scanned": cmap.files_scanned,
-            "per_dependency_format": "dep distinct_symbol_count",
-            "per_dependency": per_dep_capped,
-        }
-        if per_dep_trunc:
-            data["truncated"] = per_dep_trunc
-
-        summary = (
-            f"{len(cmap.contacts)} static contact(s) — call sites — across "
-            f"{len(cmap.by_dep)} dependency(ies) and "
-            f"{len({c.target for c in cmap.contacts})} distinct symbol(s), "
-            f"{cmap.files_scanned} file(s) scanned.\n"
-            f"Ranked by distinct symbols per dependency. "
-            + _truncation_note(len(per_dep_capped), per_dep_trunc, full_path)
-        )
-        return _ok(
-            summary,
-            data,
-            full_report_path=full_path,
-            hint="Capture baseline + post-migration traces, then run contract_report.",
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(f"contract_map failed: {e}",
-                     hint="Check that `project_dir` is a readable project directory.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -136,7 +136,6 @@ class TestExitCodes:
             ["codemods", missing, "-p", "flask", "--from", "1", "--to", "2"],
             ["succession", missing],
             ["env", "hint", missing],
-            ["contract", "map", missing],
             ["contract", "report", missing],
         ):
             result = runner.invoke(app, argv)
@@ -189,6 +188,19 @@ class TestRendering:
         result = runner.invoke(app, ["scan", str(project)])
         assert result.exit_code == EXIT_OK
         assert "flask" in result.stdout
+
+    def test_scan_shows_where_the_code_calls_dependencies(self, project):
+        result = runner.invoke(app, ["scan", str(project)])
+        assert "Calls into dependencies" in result.stdout
+        assert "flask.Flask" in result.stdout
+
+        payload = json.loads(runner.invoke(app, ["scan", str(project), "--json"]).stdout)
+        assert any(c["target"] == "flask.Flask" for c in payload["contact_map"]["contacts"])
+
+    def test_contract_map_points_at_scan(self, project):
+        result = runner.invoke(app, ["contract", "map", str(project)])
+        assert result.exit_code == EXIT_USAGE
+        assert "pymolt scan" in result.output
 
     def test_next_step_is_guidance_on_stderr_not_part_of_the_answer(self, project):
         result = runner.invoke(app, ["scan", str(project)])

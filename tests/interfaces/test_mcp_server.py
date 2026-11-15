@@ -23,7 +23,6 @@ _EXPECTED_TOOLS = {
     "setup_options",
     "setup_apply",
     "assess",
-    "contract_map",
     "contract_capture",
     "contract_report",
     "codemods",
@@ -77,7 +76,7 @@ def test_dir_taking_tools_use_project_dir_param():
     import inspect
 
     dir_tools = ["scan", "setup_options", "setup_apply", "assess",
-                 "contract_map", "contract_capture", "contract_report", "codemods_preview"]
+                 "contract_capture", "contract_report", "codemods_preview"]
     for name in dir_tools:
         params = inspect.signature(getattr(mcp_server, name)).parameters
         assert "project_dir" in params, f"{name} lost its project_dir param"
@@ -103,6 +102,15 @@ def test_scan_returns_contract_shape_and_writes_report(tmp_path):
     assert written.is_file()
     assert written.parts[-3:] == (".pymolt", "mcp", "scan.json")
     json.loads(written.read_text(encoding="utf-8"))  # must parse
+
+
+def test_scan_reports_the_call_sites_into_dependencies(tmp_path):
+    result = mcp_server.scan(project_dir=str(_make_project(tmp_path)))
+
+    contacts = result["data"]["contacts"]
+    assert contacts["total"] >= 1
+    assert any(row.startswith("requests ") for row in contacts["per_dependency"])
+    assert "call site" in result["summary"]
 
 
 def test_scan_result_is_json_serializable(tmp_path):
@@ -131,7 +139,6 @@ def test_every_tool_handles_nonexistent_dir(tmp_path):
             base_python="3.8", target_python="3.12",
         ),
         "assess": lambda: mcp_server.assess(project_dir=missing),
-        "contract_map": lambda: mcp_server.contract_map(project_dir=missing),
         "contract_capture": lambda: mcp_server.contract_capture(
             project_dir=missing, when="baseline", mode="tests", command=["pytest"],
         ),
