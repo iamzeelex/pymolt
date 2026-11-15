@@ -1,13 +1,31 @@
 # Manual testing scenarios
 
 Hands-on commands to exercise pymolt against real projects. The sample projects under
-`tests/artifacts/` (`flasgger`, `pyfolio`, `blaze`) have deliberately different shapes:
+`tests/artifacts/` (git submodules, fetched as below) have deliberately different shapes:
 
 | Project    | Shape | Good for testing |
 |------------|-------|------------------|
 | `flasgger` | requirements + dev + Dockerfile + tox + `.python-version` + nested `demo_app/` + named contract captures (create via `pymolt contract capture`) | scan (monorepo, version divergence, edges), contact map, **contract report** |
 | `pyfolio`  | `setup.py` / `setup.cfg` + conda | scan of a setup.py project |
 | `blaze`    | many `requirements-*.txt` + `etc/requirements_*.txt` + conda `blaze_env.yml` | scan (edge inventory at scale), assess |
+| `odo`      | `setup.py` + one `etc/requirements_*.txt` per backend + conda recipe | scan (extras per backend), assess |
+| `zipline`  | `setup.py` + 17 Cython `.pyx` + pip-compiled locks (`etc/requirements_locked.txt`, `etc/requirements_py36_locked.txt`) + Dockerfiles; Python 2.7–3.6, pandas 0.18 / numpy 1.11; unmaintained since Quantopian closed, a maintained `-reloaded` fork exists | lock-first ingestion, compiled deps and wheels (`assess --risk`), legacy-interpreter capture, pandas API changes, fork ranking |
+| `alphalens` | `setup.py` + tox; Python 2.7–3.5; pandas-heavy, sibling of `pyfolio` (`-reloaded` fork exists) | pandas API changes: plan codemods, predicted risks, verify on a real test suite |
+| `vibora`   | `setup.py` + `requirements.txt` + 14 Cython `.pyx`; Python 3.6 only, asyncio web framework, archived | 3.6-only capture, compiled extensions, a migration with no successor |
+| `hyper`    | `setup.py` + tox; HTTP/2 client capped at `h2<3`, `hyperframe<4`; Python 2.7–3.5, archived | narrow version caps, removed protocol-library APIs |
+| `theano`   | `setup.py` + `requirements.txt` + conda recipe + C/Cython sources; Python 2.7–3.8; discontinued in 2017 (successors Aesara, PyTensor) | framework succession, numpy C-API changes |
+| `lasagne`  | `setup.py` + `requirements.txt` (`Theano>=0.8.2`) | a library built on a dead framework: succession through a dependency |
+
+The artifacts are shallow submodules pinned to each project's last commit (`shallow = true` in
+`.gitmodules`), about 150 MB in all on a fresh fetch. Fetch all of them, or just the one you need:
+
+```bash
+git submodule update --init                          # all artifacts
+git submodule update --init tests/artifacts/zipline  # one
+```
+
+They are marked `ignore = dirty`: running pymolt writes `.pymolt/` and target manifests into an
+artifact, and that never shows up as a change in this repo.
 
 ## Setup (once)
 
