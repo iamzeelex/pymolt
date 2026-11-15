@@ -75,7 +75,7 @@ START HERE — the two tools nothing else can replace:
                    symbols that vanished. This cannot be derived by reading files
                    or by resolving dependencies — it requires the recorded traces.
 
-Supporting phases, in order:  setup_options/setup_apply -> assess -> env_hint
+Supporting phases, in order:  setup_options/setup_apply -> assess
   These prepare the migration; assess resolves baseline vs target and tells you
   which versions move. A successful resolve is NOT evidence the program still
   works — it is an input to the contract, never the conclusion.
@@ -533,6 +533,10 @@ def assess(
             abandonment). This does NETWORK calls (cached) and can take a while.
         no_cache: Bypass the resolved-graph cache and re-resolve from scratch.
 
+    On a successful resolve it also returns `target_env`: the uv commands (and a
+    Dockerfile derived from the project's, if it has one) that build the target
+    environment. pymolt builds nothing; you or the engineer build it.
+
     Use after setup. Requires `uv` on PATH.
     """
     try:
@@ -606,6 +610,15 @@ def assess(
         }
         if rows_trunc:
             data["truncated"] = rows_trunc
+        if result.target_resolved:
+            from pymolt.setup.target_hint import build_target_hint
+
+            hint = build_target_hint(path, effective_target, manifest=target_manifest)
+            data["target_env"] = {
+                "suggested_uv_commands": hint.suggested_uv_commands,
+                "suggested_dockerfile": hint.suggested_dockerfile,
+                "notes": hint.notes,
+            }
 
         if result.target_resolved:
             head = f"Target Python {effective_target}: resolution feasible."
@@ -1148,87 +1161,6 @@ def migrate(
         return _fail(f"migrate failed: {e}", hint="Ensure project directory and dependencies are accessible.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. env_hint
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def env_hint(
-    project_dir: str = ".",
-    target_python: str | None = None,
-    manifest: str | None = None,
-) -> dict:
-    """Suggests how to build a runnable target-Python environment (a derived Dockerfile
-    and/or `uv venv` + `uv pip install` commands) from the assess target manifest — run
-    assess first. This is a SUGGESTION only: pymolt never builds the environment, it only
-    tells you what to build. Build it yourself, then point pymolt at it (`pymolt setup`'s
-    target environment prompt, or --container on contract capture).
-
-    Args:
-        project_dir: Project directory (default: current directory).
-        target_python: Target Python (e.g. "3.13"); falls back to setup config.
-        manifest: Target manifest path; defaults to requirements-target.txt.
-
-    Use after assess, before contract_capture(when='post-migration'). Runs nothing — no
-    exec opt-in required.
-    """
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.ingestion.config import EnvConfig
-        from pymolt.setup.target_hint import build_target_hint
-
-        cfg = EnvConfig.load(path / ".pymolt" / "env_config.json")
-        effective_target_python = target_python or (cfg.target_python if cfg else None)
-        if not effective_target_python:
-            return _fail(
-                "target_python is required (no --target-python given and none configured).",
-                hint="Run `pymolt setup` or `pymolt assess` first, or pass target_python "
-                     "explicitly.",
-            )
-
-        effective_manifest = manifest
-        if effective_manifest is None:
-            default_target_manifest = path / "requirements-target.txt"
-            if default_target_manifest.is_file():
-                effective_manifest = default_target_manifest.name
-            elif cfg is not None and cfg.selected_manifest:
-                effective_manifest = cfg.selected_manifest
-
-        hint = build_target_hint(path, effective_target_python, manifest=effective_manifest)
-        full = hint.model_dump(mode="json")
-        full_path = _write_full_report(path, "env_hint", full)
-
-        data: dict[str, Any] = {
-            "target_python": hint.target_python,
-            "manifest": hint.manifest,
-            "suggested_dockerfile": hint.suggested_dockerfile,
-            "suggested_uv_commands": hint.suggested_uv_commands,
-            "notes": hint.notes,
-        }
-        summary_lines = [
-            f"Target-env suggestion for Python {hint.target_python} (build it yourself)."
-        ]
-        if hint.suggested_dockerfile:
-            summary_lines.append("Derived Dockerfile suggested (see full_report_path).")
-        if hint.notes:
-            summary_lines.append("Notes: " + "; ".join(hint.notes))
-        return _ok(
-            "\n".join(summary_lines),
-            data,
-            full_report_path=full_path,
-            hint=hint.capture_hint,
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(
-            f"env_hint failed: {e}",
-            hint="Run assess first so a target manifest exists, or pass target_python explicitly.",
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def run() -> None:

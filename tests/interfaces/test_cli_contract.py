@@ -103,11 +103,6 @@ class TestJsonFailureEnvelope:
         assert result.exit_code == EXIT_USAGE
         assert "no Python dependency sources" in self._envelope(result)["error"]
 
-    def test_env_hint_without_a_target_python(self, project):
-        result = runner.invoke(app, ["env", "hint", str(project), "--json"])
-        assert result.exit_code == EXIT_USAGE
-        assert "target Python" in self._envelope(result)["error"]
-
     def test_succession_without_a_manifest_is_an_empty_answer_not_prose(self, tmp_path):
         """Nothing declared is a real (empty) answer — valid JSON, exit 0."""
         result = runner.invoke(app, ["succession", str(tmp_path), "--json"])
@@ -135,7 +130,6 @@ class TestExitCodes:
             ["setup", missing],
             ["codemods", missing, "-p", "flask", "--from", "1", "--to", "2"],
             ["succession", missing],
-            ["env", "hint", missing],
             ["contract", "report", missing],
         ):
             result = runner.invoke(app, argv)
@@ -196,6 +190,16 @@ class TestRendering:
 
         payload = json.loads(runner.invoke(app, ["scan", str(project), "--json"]).stdout)
         assert any(c["target"] == "flask.Flask" for c in payload["contact_map"]["contacts"])
+
+    def test_assess_says_how_to_build_the_target_environment(self, project):
+        argv = ["assess", str(project), "--base-python", "3.11", "--target-python", "3.12"]
+        result = runner.invoke(app, argv)
+        assert result.exit_code == EXIT_OK, result.output
+        assert "Target environment" in result.stdout
+        assert "uv venv .venv-target --python 3.12" in result.stdout
+
+        payload = json.loads(runner.invoke(app, [*argv, "--json", "--no-write"]).stdout)
+        assert payload["target_hint"]["target_python"] == "3.12"
 
     def test_contract_map_points_at_scan(self, project):
         result = runner.invoke(app, ["contract", "map", str(project)])
