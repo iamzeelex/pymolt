@@ -17,9 +17,9 @@ _ENVELOPE = {"ok", "summary", "data", "full_report_path", "hint"}
 _COMMON = {"warnings", "complete", "truncated"}
 
 
-def _assert_envelope(view: dict, keys: set[str]) -> dict:
+def _assert_envelope(view: dict, keys: set[str], *, ok: bool = True) -> dict:
     assert set(view) == _ENVELOPE
-    assert view["ok"] is True
+    assert view["ok"] is ok
     assert set(view["data"]) == keys | _COMMON, set(view["data"]) ^ (keys | _COMMON)
     json.dumps(view)  # plain data, nothing that needs a custom encoder
     return view["data"]
@@ -284,10 +284,42 @@ def test_capture_not_accepted_is_said_first_and_untraced_processes_are_warned():
         activation_failures=[{"pid": 7, "python": "3.6", "error": "SyntaxError"}],
     )
     view = views.capture_view(slot, when="baseline", state=ContractState())
-    data = _assert_envelope(view, _CAPTURE_KEYS)
+    data = _assert_envelope(view, _CAPTURE_KEYS, ok=False)
     assert data["accepted"] is False and data["validity"] == "command-failed"
     assert view["summary"].startswith("NOT accepted as 'baseline' evidence: the command exited 2")
     assert any("UNTRACED" in w for w in data["warnings"])
+
+
+def _refused(**kw):
+    from pymolt.verify.models import CaptureMode, ContractSlot
+
+    base = dict(trace_path="/p/diag.jsonl", captured_at="now", mode=CaptureMode.TEST_SUITE)
+    base.update(kw)
+    return ContractSlot(**base)
+
+
+def test_capture_refusal_hint_follows_the_cause(tmp_path):
+    from pymolt.verify.models import CaptureValidity, ContractState
+
+    state = ContractState()
+    empty = _refused(validity=CaptureValidity.EMPTY, returncode=0, events=0)
+    view = views.capture_view(empty, when="baseline", state=state, static_contacts=238)
+    assert view["ok"] is False
+    assert view["hint"].startswith("The command ran (exit 0) but called no recorded dependency "
+                                   "(238 static contacts)")
+    assert "command_log" not in view["hint"]
+
+    log = tmp_path / "run.log"
+    log.write_text("=== 3 failed, 10 passed in 1.2s ===\n")
+    red = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=1, events=40,
+                      command_log=str(log))
+    view = views.capture_view(red, when="baseline", state=state)
+    assert view["hint"] == ("3 test(s) failed (exit 1). Fix or deselect them, or keep a red "
+                            "baseline with --accept-failing.")
+
+    dead = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=127, events=0)
+    hint = views.capture_view(dead, when="baseline", state=state)["hint"]
+    assert "exit 127" in hint and "command_log" not in hint
 
 
 def test_red_capture_is_ok_and_says_so():

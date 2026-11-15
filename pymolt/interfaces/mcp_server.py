@@ -204,8 +204,8 @@ def capture(project_dir: str = ".", when: str = "baseline", mode: str = "tests",
     post-migration capture. Call this instead of wiring a tracer yourself.
 
     It runs in the environment setup saved for that side (the configured container
-    for the baseline, the target env after), else locally. `accepted: false` means
-    the run cannot stand as evidence (failed command, empty trace); read the reason.
+    for the baseline, the target env after), else locally. `ok: false` means the run
+    cannot stand as evidence (failed command, empty trace); the hint follows the cause.
 
     Args:
         when: "baseline" (BEFORE migrating) or "post-migration" (AFTER).
@@ -243,7 +243,8 @@ def capture(project_dir: str = ".", when: str = "baseline", mode: str = "tests",
             deployment_id=deployment_id, request_id=request_id, correlation_id=correlation_id,
             accept_failing=accept_failing,
         )
-        return views.capture_view(slot, when=when, state=service.load_contract_state(p))
+        return views.capture_view(slot, when=when, state=service.load_contract_state(p),
+                                  project_dir=p)
 
     return _run("capture", project_dir, build,
                 "Ensure the command runs from project_dir and exits (e.g. a test suite).")
