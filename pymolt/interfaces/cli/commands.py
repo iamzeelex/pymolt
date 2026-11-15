@@ -172,12 +172,6 @@ def _select_target_python_interactive(
 # target. Its own help panel: this is the evidence the rest of the funnel exists to produce.
 app.add_typer(verify_app, name="contract", rich_help_panel="Behavioural proof")
 
-# Target-env provisioner: turns an assess result into a runnable migration environment.
-env_app = typer.Typer(
-    help="Suggest a runnable target-Python environment (uv venv or Dockerfile) — builds nothing."
-)
-app.add_typer(env_app, name="env", rich_help_panel="Tools & account")
-
 config_app = typer.Typer(
     help="Manage pymolt configuration and local offline delta cache."
 )
@@ -1604,6 +1598,11 @@ def assess(
         }
         if baseline_hint is not None:
             payload["baseline_hint"] = baseline_hint.model_dump(mode="json")
+        target_hint = _target_hint(
+            project_path, target_python_to_use, target_resolved, target_manifest_path,
+        )
+        if target_hint is not None:
+            payload["target_hint"] = target_hint.model_dump(mode="json")
         if risk and baseline_graph is not None:
             from pymolt.risk.assess import assess_risk
             risk_report = assess_risk(baseline_graph, target_graph, target_python_to_use, project_path)
@@ -1719,7 +1718,46 @@ def assess(
         except OSError as e:
             err.print(f"[bold red]Failed to write target manifest:[/bold red] {e}")
 
+    target_manifest = next((
+        name for name in ("requirements-target.txt", "environment-target.yml")
+        if (project_path / name).is_file()
+    ), None)
+    target_hint = _target_hint(
+        project_path, target_python_to_use,
+        target_graph is not None and not target_error, target_manifest,
+    )
+    if target_hint is not None:
+        _render_target_hint(target_hint)
+
     next_step(project_path)
+
+
+def _target_hint(project_path: Path, target_python, resolved: bool, manifest):
+    """How to build the target environment, once the target side resolved."""
+    if not target_python or not resolved:
+        return None
+    from pymolt.setup.target_hint import build_target_hint
+
+    return build_target_hint(project_path, target_python, manifest=manifest)
+
+
+def _render_target_hint(hint) -> None:
+    """The target environment the post-migration capture runs in. pymolt does not build it."""
+    console.print(
+        f"\n[bold]Target environment[/bold] (Python {hint.target_python}; "
+        "pymolt does not build it)"
+    )
+    if hint.suggested_dockerfile:
+        console.print("[bold]Dockerfile.pymolt-target:[/bold]")
+        console.print(hint.suggested_dockerfile)
+    for cmd in hint.suggested_uv_commands:
+        console.print(f"  [white]{cmd}[/white]")
+    for note in hint.notes:
+        console.print(f"  [dim]note: {note}[/dim]")
+    console.print(
+        "  [dim]Once it exists: pymolt setup . --target-env PATH "
+        "(or --container on the post-migration capture).[/dim]"
+    )
 
 
 def _render_baseline_hint(hint) -> None:
@@ -2785,75 +2823,6 @@ def logout():
 
 
 
-@env_app.command("hint")
-def env_hint(
-    project_dir: str = typer.Argument(".", help="The target project directory"),
-    target_python: str | None = typer.Option(
-        None, "--target-python",
-        help="Target Python version (e.g. 3.13); falls back to setup config"),
-    manifest: str | None = typer.Option(
-        None, "--manifest", help="Target manifest path; defaults to requirements-target.txt"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the result as JSON on stdout"),
-):
-    """Suggest how to build a runnable target-Python environment — pymolt does not build it.
-
-    Prints a derived ``Dockerfile`` (base-image version swap, target manifest) when the
-    project has one, plus the ``uv venv`` / ``uv pip install`` commands that would create
-    an equivalent venv, and the ready-to-copy post-migration capture command. Nothing is
-    written or run — build the environment yourself, then point pymolt at it (the target
-    environment prompt in `pymolt setup`, or `--container` on `pymolt contract capture`).
-
-    Run `pymolt assess` first so a target manifest exists.
-    """
-    from pymolt.ingestion.config import EnvConfig
-    from pymolt.setup.target_hint import build_target_hint
-
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    config = EnvConfig.load(project_path / ".pymolt" / "env_config.json")
-
-    effective_target_python = target_python or (config.target_python if config else None)
-    if not effective_target_python:
-        fail(
-            "no target Python to build an environment for.",
-            hint="Pass --target-python, or run 'pymolt setup' / 'pymolt assess' first "
-                 "so one is configured.",
-            json_output=json_output,
-        )
-
-    effective_manifest = manifest
-    if effective_manifest is None:
-        default_target_manifest = project_path / "requirements-target.txt"
-        if default_target_manifest.is_file():
-            effective_manifest = default_target_manifest.name
-        elif config is not None and config.selected_manifest:
-            effective_manifest = config.selected_manifest
-
-    hint = build_target_hint(project_path, effective_target_python, manifest=effective_manifest)
-
-    if json_output:
-        typer.echo(hint.model_dump_json(indent=2))
-        return
-
-    console.print(
-        f"[bold blue]pymolt env hint[/bold blue] — target Python [cyan]{hint.target_python}[/cyan]"
-    )
-    if hint.suggested_dockerfile:
-        console.print("\n[bold]Suggested Dockerfile.pymolt-target:[/bold]")
-        console.print(hint.suggested_dockerfile)
-    console.print("\n[bold]Suggested uv commands:[/bold]")
-    for cmd in hint.suggested_uv_commands:
-        console.print(f"  [white]{cmd}[/white]")
-    for note in hint.notes:
-        console.print(f"  [dim]note: {note}[/dim]")
-
-    console.print(Panel(
-        f"[bold]Next step[/bold] — build the environment above yourself, then capture the "
-        f"post-migration contract:\n\n"
-        f"  [white]{hint.capture_hint}[/white]",
-        title="next step", expand=False, border_style="green",
-    ))
-
-
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
 
 
@@ -2976,3 +2945,4 @@ def _removed(
 
 _removed("doctor", "`pymolt status`")
 _removed("map", "`pymolt scan`", group=verify_app, prefix="contract ")
+_removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})

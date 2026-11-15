@@ -28,7 +28,6 @@ _EXPECTED_TOOLS = {
     "codemods",
     "codemods_preview",
     "migrate",
-    "env_hint",
 }
 
 
@@ -250,15 +249,36 @@ def test_contract_capture_before_setup_is_refused(tmp_path, monkeypatch):
     assert not (project / ".pymolt" / "contract_state.json").exists()
 
 
-def test_env_hint_not_gated_returns_hint(tmp_path):
-    """env_hint runs nothing (it only suggests a Dockerfile/uv commands), so it must work
-    without PYMOLT_MCP_ALLOW_EXEC set at all — unlike contract_capture."""
+def test_assess_says_how_to_build_the_target_environment(tmp_path, monkeypatch):
+    """What env_hint used to answer comes with the resolve it depends on."""
     project = _make_project(tmp_path)
     (project / "Dockerfile").write_text("FROM python:3.6\n", encoding="utf-8")
-    result = mcp_server.env_hint(project_dir=str(project), target_python="3.13")
-    assert result["ok"] is True
-    assert result["data"]["suggested_dockerfile"] is not None
-    assert "pymolt contract capture --when post-migration" in result["hint"]
+
+    class _Result:
+        target_resolved = True
+        target_error = None
+        manual_zone: list = []
+        risk = None
+        target_manifest_path = "requirements-target.txt"
+        rows: list = []
+
+        def counts_by_status(self):
+            return {}
+
+        def model_dump(self, mode="json"):
+            return {}
+
+    monkeypatch.setattr("pymolt.assess.service.run_assess", lambda *a, **k: _Result())
+    monkeypatch.setattr(
+        "pymolt.interfaces.cli.commands._load_or_autodetect_assess_config",
+        lambda *a, **k: {"target_python": "3.13", "selected_tool": "uv"},
+    )
+
+    result = mcp_server.assess(project_dir=str(project), target_python="3.13")
+
+    env = result["data"]["target_env"]
+    assert "python:3.13" in env["suggested_dockerfile"]
+    assert any("requirements-target.txt" in cmd for cmd in env["suggested_uv_commands"])
 
 
 def test_scan_not_gated_by_exec_check(tmp_path):

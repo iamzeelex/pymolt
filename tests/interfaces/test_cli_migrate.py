@@ -42,20 +42,10 @@ def test_codemods_help_has_endpoint() -> None:
     assert "--endpoint" in result.output
 
 
-def test_env_direct_invocation(tmp_path: Path) -> None:
-    # Setup minimal env config
-    pymolt_dir = tmp_path / ".pymolt"
-    pymolt_dir.mkdir()
-    (pymolt_dir / "env_config.json").write_text(
-        json.dumps({"target_python": "3.12", "selected_manifest": "requirements.txt"}),
-        encoding="utf-8",
-    )
-    (tmp_path / "requirements.txt").write_text("flask==2.0.3\n", encoding="utf-8")
-
-    # Invoke `pymolt env hint <dir>`
+def test_env_hint_points_at_assess(tmp_path: Path) -> None:
     result = runner.invoke(app, ["env", "hint", str(tmp_path)])
-    assert result.exit_code == 0
-    assert "pymolt env hint — target Python 3.12" in result.output
+    assert result.exit_code == 2
+    assert "pymolt assess" in result.output
 
 
 def test_migrate_executes_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
