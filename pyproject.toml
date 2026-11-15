@@ -57,7 +57,8 @@ dev = [
     "fastapi>=0.110",
 ]
 mcp = [
-    "mcp>=1.2",
+    # Pinned below 2: the server is built on FastMCP's 1.x API (mcp.server.fastmcp).
+    "mcp>=1.2,<2",
 ]
 
 [project.scripts]

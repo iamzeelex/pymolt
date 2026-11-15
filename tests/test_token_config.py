@@ -1,4 +1,4 @@
-"""pymolt.config — token storage + resolution, and the login/logout CLI.
+"""pymolt.config — token storage + resolution, and the removed login/logout CLI.
 
 All tests isolate the config dir via XDG_CONFIG_HOME=tmp so they never touch a
 real ~/.config/pymolt/config.json.
@@ -45,14 +45,15 @@ def test_env_token_overrides_saved_file(monkeypatch):
     assert config.load_token() == "pmk_from_env"
 
 
-def test_cli_login_saves_token():
+def test_cli_login_is_removed_and_stores_nothing():
     result = runner.invoke(app, ["axiom", "login", "--token", "pmk_clitoken"])
-    assert result.exit_code == 0
-    assert config.load_token() == "pmk_clitoken"
-
-
-def test_cli_logout_removes_token():
-    config.save_token("pmk_toremove")
-    result = runner.invoke(app, ["axiom", "logout"])
-    assert result.exit_code == 0
+    assert result.exit_code == 2
+    assert "PYMOLT_API_TOKEN" in result.output
     assert config.load_token() is None
+
+
+def test_cli_logout_is_removed_and_keeps_a_saved_token():
+    config.save_token("pmk_tokeep")
+    result = runner.invoke(app, ["axiom", "logout"])
+    assert result.exit_code == 2
+    assert config.load_token() == "pmk_tokeep"

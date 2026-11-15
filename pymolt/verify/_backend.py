@@ -34,7 +34,19 @@ outcomes: what a generator yields is not part of its call's fact.
 Every recorded call carries ``dur`` (``time.perf_counter`` seconds, call -> return/raise) and
 ``tid`` (``threading.get_ident()``), passed only to sinks whose ``on_return``/``on_raise``
 accept them.
+
+Runtime warnings (``install_warning_capture``): while a backend has a call in flight, a
+``DeprecationWarning`` / ``PendingDeprecationWarning`` / ``FutureWarning`` issued through
+``warnings.warn`` is attributed to that call and passed to the sink as ``warnings``
+(``[{"category", "message", "count"}]``, message capped at 300 chars), sampled or tallied.
+The in-flight calls are the thread's own stack: the frames between the ``warn()`` caller and
+the innermost frame a backend has pending (setprofile / monitoring) or a wrapper frame (wrap)
+ARE the thread-local stack of recorded calls, so attribution costs nothing on the call path;
+only a ``warn()`` walks it. ``warnings.warn`` is wrapped, not replaced: the original always
+runs, with ``stacklevel`` shifted by the one frame the wrapper adds, so the filters, the
+"once"/"default" registries and the reported file/line are exactly what they were.
 """
+import functools
 import inspect
 import os
 import sys
@@ -54,6 +66,7 @@ from ._identity import (
     wrapper_call,
 )
 from ._normalize import AMBIGUOUS_OUTCOME, OutcomeMarker
+from ._sinks import add_warning, warning_list
 
 # Monotonic, high resolution (``time.monotonic`` is ~15 ms on older Windows builds).
 _now = time.perf_counter
@@ -100,6 +113,131 @@ def _site_roots():
     except Exception:
         pass
     return tuple(os.path.normpath(r) + os.sep for r in roots if r)
+
+
+def _norm_dist(name):
+    """PEP 503 normalization (``Foo_Bar.baz`` -> ``foo-bar-baz``) without ``re``."""
+    out = []
+    for ch in name.lower():
+        out.append("-" if ch in "-_." else ch)
+    return "-".join(part for part in "".join(out).split("-") if part)
+
+
+def _dist_header(path):
+    """``(Name, Version)`` from a dist-info METADATA / egg-info PKG-INFO, or None."""
+    for leaf in ("METADATA", "PKG-INFO"):
+        try:
+            with open(os.path.join(path, leaf), encoding="utf-8", errors="replace") as fh:
+                name = version = None
+                for line in fh:
+                    if not line.strip():
+                        break  # end of the header block
+                    if line.startswith("Name:"):
+                        name = line[5:].strip()
+                    elif line.startswith("Version:"):
+                        version = line[8:].strip()
+                if name and version:
+                    return name, version
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _dist_tops(path):
+    """Top-level import names a distribution provides (top_level.txt, else its RECORD)."""
+    tops = set()
+    try:
+        with open(os.path.join(path, "top_level.txt"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    tops.add(line.strip().replace("/", "."))
+        return tops
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(os.path.join(path, "RECORD"), encoding="utf-8") as fh:
+            for line in fh:
+                first = line.split(",", 1)[0].split("/", 1)[0]
+                if not first or first.endswith((".dist-info", ".egg-info", ".data")) \
+                        or first.startswith(".."):
+                    continue
+                if first.endswith(".py"):
+                    first = first[:-3]
+                elif "." in first:  # foo.cpython-312-darwin.so -> foo
+                    first = first.split(".", 1)[0]
+                tops.add(first)
+    except (OSError, ValueError):
+        pass
+    return tops
+
+
+def loaded_distributions(modules=None, roots=None, limit=1000):
+    """``{distribution: version}`` for the installed distributions with a module loaded.
+
+    What a capture actually ran against, as opposed to what a manifest says (an unpinned
+    ``pandas`` resolves to whatever is newest today): the host takes a migration's
+    ``from`` side from the baseline's record. Read from the ``*.dist-info`` /
+    ``*.egg-info`` directories in the site roots by plain file reads, never by importing
+    ``importlib.metadata`` or ``pkg_resources``, so it behaves the same on 3.6 and costs a
+    directory listing plus one small read per loaded distribution. A distribution whose
+    name is not its import name (``yaml`` -> PyYAML) is found through its top_level.txt or
+    RECORD, read only while some loaded module is still unattributed."""
+    roots = _site_roots() if roots is None else roots
+    modules = sys.modules if modules is None else modules
+    tops = set()
+    for name, module in list(modules.items()):
+        if "." in name or module is None:
+            continue
+        path = getattr(module, "__file__", None)
+        if not path:
+            continue
+        path = os.path.normpath(path)
+        if any(path.startswith(root) for root in roots):
+            tops.add(name)
+    if not tops:
+        return {}
+    infos = []  # (normalized stem name, metadata dir)
+    for root in roots:
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.endswith(".dist-info"):
+                stem = entry[:-len(".dist-info")]
+            elif entry.endswith(".egg-info"):
+                stem = entry[:-len(".egg-info")]
+            else:
+                continue
+            infos.append((_norm_dist(stem.split("-", 1)[0]), os.path.join(root, entry)))
+    found = {}
+    pending = set(tops)
+    unmatched = []
+    by_name = {}
+    for norm, path in infos:
+        by_name.setdefault(norm, path)
+    for top in sorted(tops):
+        path = by_name.get(_norm_dist(top))
+        if path is None:
+            continue
+        header = _dist_header(path)
+        if header is not None:
+            found[header[0]] = header[1]
+            pending.discard(top)
+    if pending:
+        matched = set(by_name.get(_norm_dist(t)) for t in tops)
+        unmatched = [path for _norm, path in infos if path not in matched]
+    for path in unmatched:
+        if not pending or len(found) >= limit:
+            break
+        provided = _dist_tops(path) & pending
+        if not provided:
+            continue
+        header = _dist_header(path)
+        if header is not None:
+            found[header[0]] = header[1]
+            pending.difference_update(provided)
+    return found
 
 
 def _stdlib_roots():
@@ -290,11 +428,12 @@ class Sink(object):
         raise NotImplementedError
 
 
-_CALL_FIELDS = ("dur", "tid")
+_CALL_FIELDS = ("dur", "tid", "warnings")
 
 
 def sink_call_fields(sink):
-    """Which per-call keywords (``dur``, ``tid``) BOTH ``on_return`` and ``on_raise`` accept.
+    """Which per-call keywords (``dur``, ``tid``, ``warnings``) BOTH ``on_return`` and
+    ``on_raise`` accept.
 
     Decided once per backend, like ``sink_identity_fields``: today's sinks keep receiving
     exactly today's call (an unknown keyword would raise inside the hook and lose the event)."""
@@ -325,22 +464,30 @@ def sink_admit_accepts_key(sink):
 
 
 def sink_tally(sink):
-    """The sink's ``tally(qualname, sym, site, kind, raised=None, dur=None)``, adapted to what
-    it accepts, or None when the sink has no tally (an unsampled call is then only counted by
-    ``admit``, as before)."""
+    """The sink's ``tally(qualname, sym, site, kind, raised=None, dur=None, warnings=None)``,
+    adapted to what it accepts, or None when the sink has no tally (an unsampled call is then
+    only counted by ``admit``, as before). The adapter always takes every keyword."""
     fn = getattr(sink, "tally", None)
     if fn is None or not callable(fn):
         return None
     try:
         params = inspect.signature(fn).parameters
-        if (not any(p.kind == p.VAR_KEYWORD for p in params.values())
-                and not ("raised" in params and "dur" in params)):
-            def positional(qualname, sym, site, kind, raised=None, dur=None):
-                return fn(qualname, sym, site, kind)
-            return positional
     except Exception:
-        pass
-    return fn
+        params = None
+    if params is not None and any(p.kind == p.VAR_KEYWORD for p in params.values()):
+        return fn
+    timing = params is None or ("raised" in params and "dur" in params)
+    warns = params is not None and "warnings" in params
+    if timing and warns:
+        return fn
+    if timing:
+        def without_warnings(qualname, sym, site, kind, raised=None, dur=None, warnings=None):
+            return fn(qualname, sym, site, kind, raised=raised, dur=dur)
+        return without_warnings
+
+    def positional(qualname, sym, site, kind, raised=None, dur=None, warnings=None):
+        return fn(qualname, sym, site, kind)
+    return positional
 
 
 class TraceBackend(object):
@@ -502,6 +649,176 @@ def privacy_normalizer():
     return norm
 
 
+# ── runtime warnings, attributed to the recorded call in flight ──────────────
+# The categories that announce an API change; the message is capped (a hint, not a dump).
+WARN_CATEGORIES = (DeprecationWarning, PendingDeprecationWarning, FutureWarning)
+WARN_MESSAGE_MAX = 300
+ENV_WARNINGS = "PYMOLT_TRACE_WARNINGS"   # "0" / "off": do not wrap ``warnings.warn``
+_WARN_DEPTH = 256           # frames walked from the warn() caller to the call in flight
+_WARNED_MAX = 10000         # per backend: accumulators awaiting their call's completion
+
+_warn_lock = threading.Lock()
+_warn_owners = [()]         # [tuple of backends capturing], read lock-free by the hook
+_warn_saved = [None, None]  # [the original warnings.warn, our wrapper] while installed
+_category_labels = {}
+
+
+def _category_label(category):
+    label = _category_labels.get(category)
+    if label is None:
+        mod = getattr(category, "__module__", None)
+        name = getattr(category, "__qualname__", None) or getattr(category, "__name__", "?")
+        label = name if mod in (None, "builtins", "exceptions") else mod + "." + name
+        if len(_category_labels) < 256:
+            _category_labels[category] = label
+    return label
+
+
+def warning_key(message, category=None):
+    """``(category label, message)`` of a deprecation-family warning, else None.
+
+    Mirrors ``warnings.warn``'s own reading (a ``Warning`` instance gives its class; no
+    category means ``UserWarning``) without running user code: a Warning instance's text is
+    its single string argument, a non-string message is named by its type."""
+    if isinstance(message, Warning):
+        category = type(message)
+        args = getattr(message, "args", ())
+        text = args[0] if len(args) == 1 and isinstance(args[0], str) else category.__name__
+    elif isinstance(category, type):
+        text = message if isinstance(message, str) else "<" + type(message).__name__ + ">"
+    else:
+        return None
+    if not issubclass(category, WARN_CATEGORIES):
+        return None
+    if len(text) > WARN_MESSAGE_MAX:
+        text = text[:WARN_MESSAGE_MAX]
+    return (_category_label(category), text)
+
+
+def _capture_warning(owners, message, category, frame):
+    """Attribute one warning to the innermost recorded call in flight (across backends)."""
+    key = warning_key(message, category)
+    if key is None:
+        return
+    best = None
+    for owner in owners:
+        hit = owner._warning_frame(frame)
+        if hit is not None and (best is None or hit[0] < best[0]):
+            best = (hit[0], hit[1], owner)
+    if best is not None:
+        best[2]._add_warning(best[1], key)
+
+
+def _forward_stacklevel(stacklevel, kwargs, caller, c_impl=True):
+    """The ``stacklevel`` that makes the original ``warn`` attribute the warning to the frame
+    it would have chosen without our wrapper frame in between.
+
+    ``stacklevel <= 1`` means the caller itself (one step past the wrapper: 2). With
+    ``skip_file_prefixes`` (3.12+; the level is then at least 2) the first step from the
+    wrapper already skips the caller when the caller's own file is a skipped prefix, so the
+    level is shifted only when it is not. "Is a skipped prefix" is decided exactly as the
+    implementation decides it: C ``_warnings`` matches ``PyUnicode_Tailmatch(name, prefix,
+    0, -1, -1)``, i.e. ``name[:-1].startswith(prefix)``; the pure-Python fallback uses
+    ``name.startswith(prefix)``."""
+    prefixes = kwargs.get("skip_file_prefixes") if kwargs else None
+    if prefixes:
+        level = stacklevel if stacklevel > 2 else 2
+        name = caller.f_code.co_filename if caller is not None else ""
+        if c_impl:
+            name = name[:-1]
+        for prefix in prefixes:
+            if isinstance(prefix, str) and name.startswith(prefix):
+                return level
+        return level + 1
+    return (stacklevel if stacklevel > 1 else 1) + 1
+
+
+def _make_warn_hook(original):
+    c_impl = isinstance(original, types.BuiltinFunctionType)
+
+    def warn(message, category=None, stacklevel=1, source=None, **kwargs):
+        caller = sys._getframe(1)
+        owners = _warn_owners[0]
+        if owners:
+            try:
+                _capture_warning(owners, message, category, caller)
+            except Exception:
+                pass  # capture must never change what warn() does
+        try:
+            level = _forward_stacklevel(stacklevel, kwargs, caller, c_impl)
+        except Exception:
+            level = stacklevel  # a bad stacklevel: let the original raise its own error
+        return original(message, category, level, source, **kwargs)
+
+    try:
+        functools.update_wrapper(warn, original)
+    except Exception:
+        pass
+    warn.__pymolt_warn_hook__ = True
+    return warn
+
+
+def _warnings_disabled():
+    raw = os.environ.get(ENV_WARNINGS, "1").strip().lower()
+    return raw in ("0", "false", "no", "off")
+
+
+def install_warning_capture(owner):
+    """Start attributing warnings to ``owner``'s calls in flight (idempotent). The first
+    owner wraps ``warnings.warn``. ``owner`` provides ``_warning_frame(frame)`` ->
+    ``(depth, frame) | None`` and ``_add_warning(frame, key)``."""
+    if _warnings_disabled():
+        return False
+    try:
+        import warnings
+    except Exception:
+        return False
+    with _warn_lock:
+        owners = _warn_owners[0]
+        if not any(o is owner for o in owners):
+            _warn_owners[0] = owners + (owner,)
+        if _warn_saved[1] is None:
+            original = warnings.warn
+            hook = _make_warn_hook(original)
+            warnings.warn = hook
+            _warn_saved[0], _warn_saved[1] = original, hook
+    return True
+
+
+def remove_warning_capture(owner):
+    """Stop attributing warnings to ``owner``. The last owner restores ``warnings.warn``,
+    unless something wrapped our wrapper since (it then stays, as a pass-through)."""
+    with _warn_lock:
+        _warn_owners[0] = tuple(o for o in _warn_owners[0] if o is not owner)
+        if _warn_owners[0] or _warn_saved[1] is None:
+            return
+        try:
+            import warnings
+            if warnings.warn is _warn_saved[1]:
+                warnings.warn = _warn_saved[0]
+                _warn_saved[0] = _warn_saved[1] = None
+        except Exception:
+            pass
+
+
+def warned_add(warned, frame, key):
+    """Count ``key`` on the accumulator of the call running in ``frame``."""
+    ent = warned.get(id(frame))
+    if ent is None or ent[0] is not frame.f_code:
+        if len(warned) >= _WARNED_MAX:
+            warned.clear()  # completions lost (threads killed mid-call): never grow unbounded
+        ent = warned[id(frame)] = (frame.f_code, {})
+    add_warning(ent[1], key)
+
+
+def warned_take(warned, frame, code):
+    """The ``warnings`` list of the call that ran ``code`` in ``frame`` (None if none)."""
+    ent = warned.pop(id(frame), None)
+    if ent is None or ent[0] is not code:
+        return None
+    return warning_list(ent[1])
+
+
 class FrameBackend(TraceBackend):
     """What every frame-observing backend shares (setprofile, sys.monitoring).
 
@@ -536,7 +853,9 @@ class FrameBackend(TraceBackend):
         call_fields = sink_call_fields(sink)         # today's sinks keep today's call
         self._dur_kw = "dur" in call_fields
         self._tid_kw = "tid" in call_fields
+        self._warn_kw = "warnings" in call_fields
         self._tally = sink_tally(sink)
+        self._warned = {}   # id(frame) -> (code, {(category, message): count}) of calls in flight
         self._normalize = privacy_normalizer()
         self._identity = IdentityResolver(self._in_target)
         self._obs_lock = threading.Lock()
@@ -596,6 +915,36 @@ class FrameBackend(TraceBackend):
             return None
         code = caller_frame.f_code
         return {"file": code.co_filename, "line": caller_frame.f_lineno, "func": code.co_name}
+
+    # ── runtime warnings ───────────────────────────────────────────────────────
+    def _warning_frame(self, frame):
+        """``(depth, frame)`` of the innermost call this backend has in flight on the stack
+        above ``frame`` (the ``warn()`` caller), or None. The walk stops at our own code: a
+        warning our code issues, or one raised under a call of ours this backend is not
+        recording, is not the dependency call's."""
+        pending = self._pending
+        if not pending:
+            return None
+        near = self.near
+        depth = 0
+        while frame is not None and depth < _WARN_DEPTH:
+            info = pending.get(id(frame))
+            if info is not None and info[0] is frame.f_code:
+                return depth, frame
+            if near is not None and self._code_is_near(frame):
+                return None
+            frame = frame.f_back
+            depth += 1
+        return None
+
+    def _add_warning(self, frame, key):
+        warned_add(self._warned, frame, key)
+
+    def _take_warnings(self, frame, code):
+        try:
+            return warned_take(self._warned, frame, code)
+        except Exception:
+            return None
 
     # ── recording ──────────────────────────────────────────────────────────────
     def _call_identity(self, frame, ent):
@@ -705,21 +1054,24 @@ class FrameBackend(TraceBackend):
         pending = self._pending
         if len(pending) >= _PENDING_MAX:
             pending.clear()  # completions lost (threads killed mid-call): never grow unbounded
+        if self._warned:
+            self._warned.pop(id(frame), None)  # a lost completion's frame id, reused
         # t0 last: the duration is the callee's, not the cost of recording its inputs.
         pending[id(frame)] = (code, ci.q, inputs, site, sym, symq, own, _now(), tid, sampled)
         return True
 
-    def _finish(self, info, outcome, value):
+    def _finish(self, info, outcome, value, warns=None):
         """Complete a recorded call: ``on_return``/``on_raise`` if sampled, else ``tally``.
         ``value`` is the result (return), the raised type label (raise) or ignored
-        (ambiguous)."""
+        (ambiguous); ``warns`` the warnings attributed to the call while it ran."""
         t0 = info[7]
         dur = (_now() - t0) if t0 is not None else None
         if not info[9]:
             tally = self._tally
             if tally is not None:
                 tally(info[1], info[4], info[3], _TALLY_KIND[outcome],
-                      raised=value if outcome == OUTCOME_RAISE else None, dur=dur)
+                      raised=value if outcome == OUTCOME_RAISE else None, dur=dur,
+                      warnings=warns or None)
             return
         kw = {"admitted": True} if self._admit is not None else {}
         if self._sym_kw:
@@ -731,6 +1083,8 @@ class FrameBackend(TraceBackend):
             kw["dur"] = dur
         if self._tid_kw:
             kw["tid"] = info[8]
+        if warns and self._warn_kw:
+            kw["warnings"] = warns
         if outcome == OUTCOME_RAISE:
             self.sink.on_raise(info[1], info[2], value, info[3], **kw)
             return
@@ -875,7 +1229,8 @@ class SetProfileBackend(FrameBackend):
 
     def _emit_outcome(self, info, frame, arg):
         outcome = frame_outcome(frame, arg)
-        self._finish(info, outcome, UNTYPED_RAISE if outcome == OUTCOME_RAISE else arg)
+        warns = self._take_warnings(frame, info[0]) if self._warned else None
+        self._finish(info, outcome, UNTYPED_RAISE if outcome == OUTCOME_RAISE else arg, warns)
 
     @staticmethod
     def _c_qualname(cfunc):
@@ -894,6 +1249,7 @@ class SetProfileBackend(FrameBackend):
         self._prev = sys.getprofile()
         sys.setprofile(self._hook)
         threading.setprofile(self._hook)  # catch threads spawned after start
+        install_warning_capture(self)
 
     def retire(self):
         """Stop recording new calls (discover -> watch). Calls in flight still complete; each
@@ -918,8 +1274,10 @@ class SetProfileBackend(FrameBackend):
         if sys.getprofile() == self._hook:
             sys.setprofile(self._prev)
         threading.setprofile(None)
+        remove_warning_capture(self)
         self._pending.clear()
         self._inflight.clear()
+        self._warned.clear()
 
 
 def _monitoring_cls():

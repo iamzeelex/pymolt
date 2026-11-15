@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, computed_field, field_validator
 from pydantic_core import ValidationError
 
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
+from pymolt.verify.predict import PredictionReport
 
 PLAN_SCHEMA_VERSION = 1
 DEFAULT_PLAN_PATH = Path(".pymolt/migration_plan.json")
@@ -205,6 +206,9 @@ class MigrationPlan(BaseModel):
     files_scanned: int = 0
     changes: list[PlannedFileChange] = Field(default_factory=list)
     advisories: list[PlannedAdvisory] = Field(default_factory=list)
+    # Predicted risks per call site (baseline facts x the migrations' delta facts), each
+    # marked fixed by this plan or not; None when there was no baseline to predict from.
+    risks: PredictionReport | None = None
 
     @field_validator("plan_id")
     @classmethod
@@ -254,14 +258,21 @@ def create_migration_plan(
     target_manifest_path: str | Path | None,
     files_scanned: int,
     impacts: dict[str, list[ApiImpact]] | None = None,
+    delta_reports: list | None = None,
+    predict: bool = True,
 ) -> MigrationPlan:
-    """Freeze a locally verified preview into an exact, portable project plan."""
+    """Freeze a locally verified preview into an exact, portable project plan.
+
+    With a baseline capture (and ``predict``), the plan also stores its predicted risks:
+    the baseline's facts joined with ``delta_reports`` (the migrations' ``pymolt.delta/1``
+    reports; computed offline with ``pymolt.delta.compute_deltas`` when not given)."""
     from pymolt.verify.service import environment_fingerprint, load_contract_state
 
     root = Path(project_dir).resolve()
     contract = load_contract_state(root)
     baseline = contract.baseline
     baseline_hash = None
+    baseline_path = None
     if baseline is not None:
         baseline_path = Path(baseline.trace_path)
         if not baseline_path.is_absolute():
@@ -310,6 +321,10 @@ def create_migration_plan(
                 reason=advisory.reason,
             ))
 
+    risks = None
+    if predict and baseline_path is not None:
+        risks = _predict_risks(root, baseline_path, list(migrations), changes, delta_reports)
+
     return MigrationPlan(
         target_python=target_python,
         source_manifest=source_manifest,
@@ -335,7 +350,23 @@ def create_migration_plan(
         files_scanned=files_scanned,
         changes=changes,
         advisories=advisories,
+        risks=risks,
     )
+
+
+def _predict_risks(root: Path, baseline_path: Path, migrations: list,
+                   changes: list[PlannedFileChange],
+                   delta_reports: list | None) -> PredictionReport:
+    """Never lets a prediction failure cost the plan: it becomes an "unavailable" report."""
+    from pymolt.verify.predict import predict_plan_risks
+
+    try:
+        return predict_plan_risks(root, baseline_path, migrations, changes,
+                                  delta_reports=delta_reports)
+    except Exception as exc:  # noqa: BLE001 - the plan stands without its predictions
+        return PredictionReport(
+            status="unavailable",
+            notes=[f"risk prediction failed: {type(exc).__name__}: {exc}"])
 
 
 def inspect_migration_plan(

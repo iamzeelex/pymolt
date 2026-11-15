@@ -191,11 +191,10 @@ def _select_target_python_interactive(
 # evidence the rest of the funnel exists to produce.
 app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
-axiom_app = typer.Typer(
-    help="Axiom, the service pymolt gets codemods from: login, endpoint, local cache."
-)
-app.add_typer(axiom_app, name="axiom", rich_help_panel="Tools")
 
+#: Every command's --agent: the compact payload in pymolt.interfaces.views, the same
+#: object the MCP tool of that name returns. --json stays the full payload.
+_AGENT_HELP = "Print the compact agent view as JSON (what the MCP tool returns)"
 
 _STATE_MARK = {
     "done": ("✓", "green"),
@@ -217,6 +216,7 @@ _CHECK_MARK = {
 def status(
     project_dir: str = typer.Argument(".", help="Project directory"),
     json_output: bool = typer.Option(False, "--json", help="Print the status as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Show where the migration stands and the next command.
 
@@ -228,9 +228,16 @@ def status(
 
     from pymolt.status import build_status
 
-    project_path = require_project_dir(project_dir, json_output=json_output)
+    project_path = require_project_dir(project_dir, json_output=json_output or agent)
+    if agent:
+        project_path = project_path.resolve()
     report = build_status(project_path, check_environments=True)
 
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.status_view(report)))
+        return
     if json_output:
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
         return
@@ -308,6 +315,7 @@ def verify_migration(
         help="Run rollback when a required canary gate fails",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Compare the baseline and post-migration captures. Prints PASS, FAIL or INCONCLUSIVE.
 
@@ -347,7 +355,10 @@ def verify_migration(
     )
     from pymolt.verify.unified import build_unified_verification
 
+    json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
     explicit = bool(baseline_file or post_file)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
@@ -463,6 +474,11 @@ def verify_migration(
             json_output=json_output,
         )
 
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.verify_view(unified, project_path, saved_path=saved_path)))
+        raise typer.Exit(code=_verification_exit(unified.verdict))
     if json_output:
         typer.echo(json.dumps(unified.model_dump(mode="json"), indent=2))
         raise typer.Exit(code=_verification_exit(unified.verdict))
@@ -516,7 +532,13 @@ def plan(
     ),
     target_file_old: str | None = typer.Option(None, "--target-file", hidden=True),
     endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom endpoint URL (default: `pymolt axiom endpoint`)"
+        None, "--endpoint",
+        help="Use a remote Axiom at this URL (default: none, API changes are computed locally)",
+    ),
+    online: bool = typer.Option(
+        False, "--online",
+        help="Let the local engine read intermediate releases from PyPI for successor hints "
+             "(package names and versions only)",
     ),
     output: str | None = typer.Option(
         None, "--output", "-o", help="Where to save the plan (default: .pymolt/migration_plan.json)"
@@ -525,6 +547,7 @@ def plan(
         None, "--patch", help="Also write the diff to this file"
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the plan summary as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Save the codemods for the target manifest as a plan and show the diff.
 
@@ -537,7 +560,10 @@ def plan(
     from pymolt.codemods.service import PlanInputError, build_migration_plan
     from pymolt.config import load_endpoint
 
+    json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
     target_file = target_file or target_file_old
     try:
         with err.status("Building the migration plan…", spinner="dots") as status:
@@ -546,6 +572,7 @@ def plan(
                 target_file=target_file,
                 base_url=load_endpoint(endpoint),
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
+                online=online,
             )
         saved_path = migration_plan.save(project_path, output)
     except PlanInputError as exc:
@@ -579,7 +606,14 @@ def plan(
         "advisories": len(migration_plan.advisories),
         "api_impacts": len(migration_plan.impacts),
         "patch_path": str(patch_path) if patch_path else None,
+        "risks": _risks_payload(migration_plan.risks),
     }
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.plan_view(
+            migration_plan, by_pkg, source_desc, plan_path=saved_path)))
+        return
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
@@ -595,10 +629,60 @@ def plan(
         title="Migration plan", border_style="cyan", expand=False,
     ))
     _render_recipes(by_pkg, previews, migration_plan.files_scanned)
+    _render_risks(migration_plan.risks)
     _render_or_write_patches(previews, project_path, None)
     console.print(
         f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
     )
+
+
+def _risks_payload(risks) -> dict | None:
+    """The plan's predicted risks for --json: counts, then both groups in full."""
+    if risks is None:
+        return None
+    dump = risks.model_dump(mode="json")
+    return {
+        "status": risks.status,
+        "counts": risks.counts(),
+        "fixed_by_plan": [r for r in dump["risks"] if r["fixed_by_plan"]],
+        "needs_attention": [r for r in dump["risks"] if not r["fixed_by_plan"]],
+        "deltas": dump["deltas"],
+        "notes": dump["notes"],
+    }
+
+
+_TIER_STYLE = {"certain": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
+
+
+def _render_risks(risks) -> None:
+    """Predicted risks per call site, split into what the plan fixes and what it does not."""
+    if risks is None:
+        console.print("\n[dim]No predicted risks: there is no baseline capture to predict "
+                      "from (`pymolt capture baseline`).[/dim]")
+        return
+    for title, group, border in (
+        ("Needs attention", risks.needs_attention, "yellow"),
+        ("Fixed by the plan", risks.fixed, "green"),
+    ):
+        if not group:
+            continue
+        table = Table(title=f"Predicted risks — {title.lower()}", title_justify="left",
+                      border_style=border)
+        table.add_column("risk")
+        table.add_column("site")
+        table.add_column("symbol")
+        table.add_column("why")
+        for risk in group:
+            style = _TIER_STYLE.get(risk.tier.value, "")
+            why = risk.reason + ("" if risk.basis == "trace" else " (static only)")
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
+                          risk.symbol, why)
+        console.print(table)
+    if not risks.risks:
+        console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
+                      "exercised.")
+    for note in risks.notes:
+        console.print(f"[dim]  note: {note}[/dim]")
 
 
 def _render_recipes(by_pkg, previews, files_scanned: int) -> None:
@@ -778,12 +862,20 @@ def rollback(
 def scan(
     project_dir: str = typer.Argument(".", help="Project or repository directory"),
     json_output: bool = typer.Option(False, "--json", help="Print the scan as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Find manifests, Python versions, dependencies, and where the code calls them. Offline."""
     from pymolt.scan import run_scan
 
-    project_path = require_project_dir(project_dir, json_output=json_output)
+    project_path = require_project_dir(project_dir, json_output=json_output or agent)
+    if agent:
+        project_path = project_path.resolve()
     report = run_scan(project_path)
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.scan_view(report, project_path)))
+        return
     if json_output:
         import json as json_lib
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
@@ -900,12 +992,18 @@ def setup(
     target_env: str | None = typer.Option(
         None, "--target-env", help="Existing target environment, e.g. .venv-target"
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the options, or the saved config, as JSON (asks nothing)"
+    ),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Choose the manifest, tool and Python versions. Writes .pymolt/env_config.json.
 
     In a terminal it asks for what the options do not give; with --manifest,
     --tool, --base-python and --target-python it asks nothing. Without a
     terminal, missing values take the detected defaults and the output names them.
+    With --json or --agent it never asks or defaults: no choice lists the valid
+    ones and saves nothing, all four save, anything in between is an error.
     """
     import sys
 
@@ -919,11 +1017,34 @@ def setup(
         gather_setup_options,
     )
 
-    project_path = require_project_dir(project_dir)
+    machine = json_output or agent
+    project_path = require_project_dir(project_dir, json_output=machine)
+    if agent:
+        project_path = project_path.resolve()
     try:
         options = gather_setup_options(project_path)
     except Exception as e:
-        fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT)
+        fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT, json_output=machine)
+
+    if machine:
+        import json
+
+        from pymolt.interfaces import views
+
+        try:
+            choices = views.setup_choices(
+                options, manifest=manifest, tool=tool, base_python=base_python,
+                target_python=target_python, container_id=container, target_env=target_env,
+            )
+        except views.AgentInputError as exc:
+            fail(exc.error, hint=exc.hint, json_output=True)
+        config = apply_setup(project_path, choices) if choices is not None else None
+        if agent:
+            typer.echo(views.dumps(views.setup_view(options, project_path, config=config)))
+        else:
+            typer.echo(json.dumps(
+                views.setup_payload(options, project_path, config=config), indent=2))
+        return
 
     if not options.manifests:
         fail(
@@ -1186,7 +1307,8 @@ def _resolve_target_python(
 ):
     """Resolve (prompting if needed), validate against downgrades, and warn on EOL."""
     if target_python_to_use is None:
-        if not sys.stdout.isatty():
+        # Machine output never prompts: a prompt on stdout would corrupt the JSON.
+        if json_output or not sys.stdout.isatty():
             fail(
                 "no target Python: pass --target-python, or run 'pymolt setup' to "
                 "configure one (this is required outside an interactive terminal).",
@@ -1474,6 +1596,7 @@ def assess(
     risk: bool = typer.Option(
         False, "--risk", help="Also rate each package: CVEs, wheels, abandonment (network)"
     ),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Resolve the dependencies for the target Python and write requirements-target.txt.
 
@@ -1487,7 +1610,11 @@ def assess(
     from pymolt.ingestion.fallback_compiler import find_python_interpreter
 
     current_python = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    json_output = json_output or agent  # --agent is machine output too: no tables, no prompts
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
+        project_dir = str(project_path)
 
     # 1. Load (or auto-detect) the environment configuration.
     config_file = project_path / ".pymolt" / "env_config.json"
@@ -1650,6 +1777,7 @@ def assess(
         )
         target_resolved = target_error is None and target_graph is not None
         target_manifest_path = None
+        warnings = list(report.warnings)
         if target_python_to_use and target_resolved and not no_write:
             try:
                 written = _write_target_manifest(
@@ -1658,36 +1786,47 @@ def assess(
                 )
                 if written is not None:
                     target_manifest_path = str(written)
-            except OSError:
+            except OSError as exc:
                 target_manifest_path = None
-        payload = {
-            "project_dir": str(project_dir),
-            "source_manifest": chosen_source.path.name,
-            "source_fixation": report.source_fixation,
-            "resolution_quality": report.resolution_quality,
-            "detected_python": report.detected_python,
-            "target_python": target_python_to_use,
-            "target_resolved": target_resolved,
-            "target_error": target_error,
-            "baseline_unresolved": baseline_unresolved,
-            "baseline_tier": baseline_tier.value,
-            "target_manifest_path": target_manifest_path,
-            "warnings": report.warnings,
-            "manual_zone": report.manual_zone,
-            "packages": rows,
-        }
-        if baseline_hint is not None:
-            payload["baseline_hint"] = baseline_hint.model_dump(mode="json")
-        target_hint = _target_hint(
-            project_path, target_python_to_use, target_resolved, target_manifest_path,
-        )
-        if target_hint is not None:
-            payload["target_hint"] = target_hint.model_dump(mode="json")
+                warnings.append(f"the pinned target manifest was not written: {exc}")
+        risk_report = None
         if risk and baseline_graph is not None:
             from pymolt.risk.assess import assess_risk
             risk_report = assess_risk(baseline_graph, target_graph, target_python_to_use, project_path)
-            payload["risk"] = risk_report.model_dump(mode="json")
-        typer.echo(json_lib.dumps(payload, indent=2))
+
+        from pymolt.assess.service import AssessResult
+        from pymolt.interfaces import views
+
+        # One result, two renderings: --json is the full payload, --agent the view.
+        result = AssessResult(
+            project_dir=str(project_dir),
+            source_manifest=chosen_source.path.name,
+            source_fixation=report.source_fixation,
+            resolution_quality=report.resolution_quality,
+            detected_python=report.detected_python,
+            target_python=target_python_to_use,
+            target_resolved=target_resolved,
+            target_error=target_error,
+            baseline_unresolved=baseline_unresolved,
+            baseline_tier=baseline_tier.value,
+            target_manifest_path=target_manifest_path,
+            warnings=warnings,
+            manual_zone=report.manual_zone,
+            rows=rows,
+            risk=risk_report,
+        )
+        target_hint = _target_hint(
+            project_path, target_python_to_use, target_resolved, target_manifest_path,
+        )
+        if agent:
+            typer.echo(views.dumps(views.assess_view(
+                result, project_path, risk_requested=risk,
+                baseline_hint=baseline_hint, target_hint=target_hint,
+            )))
+            return
+        typer.echo(json_lib.dumps(views.assess_payload(
+            result, baseline_hint=baseline_hint, target_hint=target_hint,
+        ), indent=2))
         return
 
     # Interactive customize loop
@@ -2076,7 +2215,8 @@ def mcp(
 def succession(
     project_dir: str = typer.Argument(".", help="Project directory"),
     endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom endpoint URL (default: `pymolt axiom endpoint`)"
+        None, "--endpoint",
+        help="Ask a remote Axiom at this URL (default: none, pymolt's curated knowledge)",
     ),
     save_plan: bool = typer.Option(
         False, "--plan", help="Save the in-place codemods as the plan for `pymolt apply`"
@@ -2086,7 +2226,8 @@ def succession(
 ):
     """Find where a deprecated framework's code should go (e.g. TF1/Keras).
 
-    Detects the frameworks and asks Axiom where they went. In-place paths (e.g.
+    Detects the frameworks and looks up where they went in pymolt's curated
+    knowledge (or a remote Axiom given with --endpoint). In-place paths (e.g.
     keras → tensorflow.keras) are shown as file changes; --plan saves them as the
     plan for `pymolt apply`. Transplant paths (e.g. keras → torch) are shown as
     steps to follow, never applied. Writes no source file.
@@ -2118,7 +2259,7 @@ def succession(
         console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
 
     try:
-        with err.status("Querying Axiom Graph for succession…", spinner="dots") as status:
+        with err.status("Looking up framework succession…", spinner="dots") as status:
             edges, result = run_succession(
                 project_dir, base_url=load_endpoint(endpoint),
                 progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
@@ -2126,7 +2267,8 @@ def succession(
     except SuccessionError as exc:
         fail(
             f"Axiom Graph unavailable: {exc}",
-            hint="Check `pymolt axiom status`; set another endpoint with --endpoint.",
+            hint="Check the --endpoint URL (or PYMOLT_AXIOM_ENDPOINT); without one, pymolt "
+                 "uses its curated knowledge.",
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
@@ -2239,106 +2381,6 @@ def _render_transplant_plan(plan) -> None:
             console.print(f"  [{style}]{escape(cmd)}[/{style}]")
     for note in plan.notes:
         console.print(f"[dim]note: {escape(note)}[/dim]")
-
-
-# ---------------------------------------------------------------------------
-# Axiom commands (`pymolt axiom ...`)
-# ---------------------------------------------------------------------------
-
-@axiom_app.command("status")
-def axiom_status_cmd(
-    json_output: bool = typer.Option(False, "--json", help="Print the status as JSON"),
-):
-    """Show the endpoint and whether it answers, the login, and the local cache."""
-    from pymolt.codemods.client import AxiomGraphClient
-    from pymolt.config import config_show
-
-    info = config_show()
-    info["online"] = AxiomGraphClient(base_url=info["endpoint"]).health()
-    if json_output:
-        import json
-        typer.echo(json.dumps(info, indent=2))
-        return
-
-    online = "[green]online[/green]" if info["online"] else "[yellow]unreachable[/yellow]"
-    default = " (default)" if info["is_default_endpoint"] else ""
-    login_state = (f"logged in ({info['token_preview']})" if info["token_configured"]
-                   else "not logged in")
-    c = info["cache"]
-    console.print(f"Endpoint  [cyan]{info['endpoint']}[/cyan]{default} — {online}")
-    console.print(f"Login     {login_state}")
-    console.print(f"Cache     {c['packages']} package(s), {c['total_files']} file(s), "
-                  f"{round(c['total_size_bytes'] / 1024, 1)} KB  [dim]{c['path']}[/dim]")
-    console.print(f"Config    [dim]{info['config_file']}[/dim]")
-
-
-@axiom_app.command("endpoint")
-def axiom_endpoint_cmd(
-    url: str | None = typer.Argument(
-        None, help="Endpoint URL, e.g. https://hub.internal.corp or http://localhost:8000"
-    ),
-    reset: bool = typer.Option(False, "--reset", help="Go back to the default public endpoint"),
-):
-    """Show or set the Axiom endpoint. Saved in the user config."""
-    from pymolt.config import DEFAULT_ENDPOINT, clear_endpoint, load_endpoint, save_endpoint
-
-    if url and reset:
-        fail("give a URL or --reset, not both")
-    if reset:
-        clear_endpoint()
-        console.print(f"Endpoint reset to the default: [cyan]{DEFAULT_ENDPOINT}[/cyan]")
-        return
-    if not url:
-        console.print(load_endpoint())
-        return
-    clean_url = url.strip().rstrip("/")
-    if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-        fail("invalid endpoint URL", hint="It must start with http:// or https://.")
-    path = save_endpoint(clean_url)
-    console.print(f"Endpoint set to [cyan]{clean_url}[/cyan] [dim](saved to {path})[/dim]")
-
-
-@axiom_app.command("clear-cache")
-def axiom_clear_cache_cmd():
-    """Delete the locally cached Axiom data."""
-    from pymolt.config import clear_delta_cache
-
-    count = clear_delta_cache()
-    console.print(f"Cleared the local cache ({count} package folder(s) removed).")
-
-
-@axiom_app.command("login")
-def axiom_login_cmd(
-    token: str | None = typer.Option(
-        None, "--token", help="API token (pmk_…); omit to get a link that issues one"),
-):
-    """Log in to Axiom. Saves the token in the user config (mode 0600)."""
-    import secrets
-
-    from pymolt.config import load_endpoint, save_token
-
-    endpoint = load_endpoint()
-    auth_url = f"{endpoint}/cli/auth?session=pm_sess_{secrets.token_hex(8)}"
-    if token:
-        tok = token.strip()
-    else:
-        console.print(f"Get a token at:\n  [bold]{auth_url}[/bold]\n")
-        tok = typer.prompt("Paste your API token (pmk_…)", hide_input=True).strip()
-    if not tok:
-        fail("no token provided", hint=f"Get one at {auth_url}")
-    path = save_token(tok)
-    console.print(f"Logged in. Token saved to [cyan]{path}[/cyan].")
-
-
-@axiom_app.command("logout")
-def axiom_logout_cmd():
-    """Remove the saved Axiom token."""
-    from pymolt.config import clear_token
-
-    if clear_token():
-        console.print("Logged out. The saved token was removed.")
-    else:
-        console.print("[dim]No saved token.[/dim]")
 
 
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
@@ -2466,18 +2508,30 @@ _removed("contract", {
     "diff": "`pymolt verify --baseline OLD --post-migration NEW`",
 })
 _removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})
-_removed("auth", {
-    "login": "`pymolt axiom login`",
-    "status": "`pymolt axiom status`",
-    "logout": "`pymolt axiom logout`",
+# Axiom is no longer a service pymolt needs: `pymolt plan` computes API changes locally, and a
+# remote endpoint is used only when given explicitly (--endpoint / PYMOLT_AXIOM_ENDPOINT).
+_AXIOM_STATUS = ("`pymolt plan` (it computes API changes locally; a remote Axiom is used only "
+                 "with `--endpoint URL` or `PYMOLT_AXIOM_ENDPOINT`)")
+_AXIOM_ENDPOINT = "`pymolt plan --endpoint URL` or `PYMOLT_AXIOM_ENDPOINT` (none is the default)"
+_AXIOM_LOGIN = ("`PYMOLT_API_TOKEN` (sent only to an endpoint given with `--endpoint` or "
+                "`PYMOLT_AXIOM_ENDPOINT`)")
+_AXIOM_LOGOUT = "`unset PYMOLT_API_TOKEN`"
+_AXIOM_CACHE = "`rm -r .pymolt/cache/delta` in the project (the local API-change cache)"
+_removed("axiom", {
+    "status": _AXIOM_STATUS,
+    "endpoint": _AXIOM_ENDPOINT,
+    "login": _AXIOM_LOGIN,
+    "logout": _AXIOM_LOGOUT,
+    "clear-cache": _AXIOM_CACHE,
 })
+_removed("auth", {"login": _AXIOM_LOGIN, "status": _AXIOM_STATUS, "logout": _AXIOM_LOGOUT})
 _removed("config", {
-    "show": "`pymolt axiom status`",
-    "set-endpoint": "`pymolt axiom endpoint URL`",
-    "reset-endpoint": "`pymolt axiom endpoint --reset`",
-    "clear-cache": "`pymolt axiom clear-cache`",
+    "show": _AXIOM_STATUS,
+    "set-endpoint": _AXIOM_ENDPOINT,
+    "reset-endpoint": "`unset PYMOLT_AXIOM_ENDPOINT` (no endpoint is the default)",
+    "clear-cache": _AXIOM_CACHE,
 })
-_removed("login", "`pymolt axiom login`")
-_removed("logout", "`pymolt axiom logout`")
+_removed("login", _AXIOM_LOGIN)
+_removed("logout", _AXIOM_LOGOUT)
 _removed("migrate", "`pymolt plan`, then `pymolt apply` (status shows the steps before them)")
 _removed("codemods", "`pymolt plan` to see the changes, then `pymolt apply`")

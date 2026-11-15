@@ -19,9 +19,13 @@ strict comparison and reports it as a typed honesty marker). FactSink keeps the 
 distribution instead (at most ``MAX_OUTCOMES`` distinct outcomes per fact, then "other").
 
 Sink API (all keyword-compatible with phase-0/1 callers): ``admit(force=False)`` before any
-normalization; ``on_return(..., dur=None, tid=None)`` / ``on_raise(..., dur=None, tid=None)``
-for admitted calls; ``tally(qualname, sym, site, kind, raised=None, dur=None)`` for a call
-that was not sampled but completed (counted, its values never normalized).
+normalization; ``on_return(..., dur=None, tid=None, warnings=None)`` /
+``on_raise(..., dur=None, tid=None, warnings=None)`` for admitted calls;
+``tally(qualname, sym, site, kind, raised=None, dur=None, warnings=None)`` for a call that was
+not sampled but completed (counted, its values never normalized). ``warnings`` is the call's
+deprecation-family warnings, ``[{"category", "message", "count"}]``: on the JSONL event, on
+the snapshot fact (sampled calls) or tally (unsampled calls), in the JSONL sidecar's
+``tally_warnings`` (unsampled calls).
 """
 import collections
 import hashlib
@@ -128,6 +132,53 @@ def _identity_fields(ev, sym, symq, own):
         ev["own"] = own
 
 
+# ── runtime warnings carried on a call ────────────────────────────────────────
+# A recorded call's deprecation-family warnings (``_backend`` attributes them) travel as
+# ``[{"category", "message", "count"}]``. Every holder (a call, a fact, a tally) keeps at
+# most ``MAX_WARNINGS`` distinct (category, message) pairs; past that a pair's calls fold
+# into ``(category, WARNING_MORE)``, so the counts stay whole while the size stays bounded.
+MAX_WARNINGS = 8
+WARNING_MORE = "<more warnings>"
+
+
+def add_warning(acc, key, n=1):
+    """Count ``n`` occurrences of ``key = (category, message)`` into ``acc`` (a dict)."""
+    cur = acc.get(key)
+    if cur is not None:
+        acc[key] = cur + n
+    elif key[1] != WARNING_MORE and sum(1 for k in acc if k[1] != WARNING_MORE) >= MAX_WARNINGS:
+        more = (key[0], WARNING_MORE)
+        acc[more] = acc.get(more, 0) + n
+    else:
+        acc[key] = n
+
+
+def merge_warnings(acc, items):
+    """Fold a ``[{"category", "message", "count"}]`` list into ``acc``; malformed items are
+    skipped. Returns ``acc``."""
+    for item in items or ():
+        try:
+            category = item.get("category")
+            message = item.get("message")
+            count = item.get("count", 1)
+        except AttributeError:
+            continue
+        if not isinstance(category, str) or not isinstance(message, str):
+            continue
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            count = 1
+        add_warning(acc, (category, message), count)
+    return acc
+
+
+def warning_list(acc):
+    """``acc`` as the sorted ``[{"category", "message", "count"}]`` wire form."""
+    return [{"category": c, "message": m, "count": n} for (c, m), n in sorted(acc.items())]
+
+
+_TALLY_WARNING_SITES = 4096  # JsonlSink: (symbol, site) slots kept for unsampled calls
+
+
 class JsonlSink(object):
     """Streaming NDJSON writer. One event per line:
     ``{"v": 2, "t": "return"|"raise", "q": qualname, "sym": ..., "in": inputs, ...}``.
@@ -182,6 +233,9 @@ class JsonlSink(object):
             "shutdown_dropped": 0,
             "tallied": 0,
         }
+        # Warnings of unsampled calls: the JSONL keeps no event for them, so their warnings
+        # go to the sidecar (``tally_warnings``), per (symbol, site), bounded.
+        self._tally_warnings = {}
         self._writer = threading.Thread(
             target=self._writer_loop,
             name="pymolt-trace-writer-{0}".format(os.getpid()),
@@ -312,9 +366,9 @@ class JsonlSink(object):
         pass
 
     def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
-                  symq=None, own=None, dur=None, tid=None):
+                  symq=None, own=None, dur=None, tid=None, warnings=None):
         if not admitted and not self.admit():
-            self.tally(qualname, sym, site, "return", dur=dur)
+            self.tally(qualname, sym, site, "return", dur=dur, warnings=warnings)
             return
         ev = {"v": EVENT_VERSION, "t": "return", "q": qualname, "in": inputs,
               "result": _result_repr(result_obj, self._privacy), "ts": time.time()}
@@ -322,12 +376,15 @@ class JsonlSink(object):
         _timing_fields(ev, dur, tid)
         if site is not None:
             ev["where"] = site  # call site in our code: {file, line, func}
+        if warnings:
+            ev["warnings"] = warnings  # deprecation-family warnings this call issued
         self._write(ev)
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
-                 symq=None, own=None, dur=None, tid=None):
+                 symq=None, own=None, dur=None, tid=None, warnings=None):
         if not admitted and not self.admit(force=True):
-            self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur)
+            self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
+                       warnings=warnings)
             return
         ev = {"v": EVENT_VERSION, "t": "raise", "q": qualname, "in": inputs,
               "raised": exc_typename, "ts": time.time()}
@@ -335,12 +392,35 @@ class JsonlSink(object):
         _timing_fields(ev, dur, tid)
         if site is not None:
             ev["where"] = site
+        if warnings:
+            ev["warnings"] = warnings
         self._write(ev)
 
-    def tally(self, qualname, sym, site, kind, raised=None, dur=None):
+    def tally(self, qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         """An unsampled call that completed: the JSONL keeps no event for it, only the count
-        (``counters.tallied``), so the sidecar still says how many calls there were."""
+        (``counters.tallied``), so the sidecar still says how many calls there were. Its
+        warnings, if any, are kept per (symbol, site) for the sidecar's ``tally_warnings``."""
         self.note_failure("tallied")
+        if warnings:
+            try:
+                self._tally_warning(qualname, sym, site, warnings)
+            except Exception:
+                self.note_failure("sink_failures")
+
+    def _tally_warning(self, qualname, sym, site, warnings):
+        site = site if isinstance(site, dict) else {}
+        key = (sym or qualname, site.get("file"), site.get("line"), site.get("func"))
+        with self._metrics_lock:
+            slot = self._tally_warnings.get(key)
+            if slot is None:
+                head = {"q": qualname, "sym": sym, "where": dict(site) or None}
+                if len(self._tally_warnings) >= _TALLY_WARNING_SITES:
+                    key = (OVERFLOW_SITE, None, None, None)
+                    head = {"q": OVERFLOW_SITE, "sym": None, "where": None}
+                    slot = self._tally_warnings.get(key)
+                if slot is None:
+                    slot = self._tally_warnings[key] = (head, {})
+            merge_warnings(slot[1], warnings)
 
     def close(self):
         if self._closed:
@@ -374,6 +454,11 @@ class JsonlSink(object):
             "counters": metrics,
         }
         payload.update(self._metadata)
+        with self._metrics_lock:
+            tally_warnings = [dict(head, warnings=warning_list(acc))
+                              for head, acc in self._tally_warnings.values()]
+        if tally_warnings:
+            payload["tally_warnings"] = tally_warnings
         tmp = self.metadata_path + ".tmp-{0}-{1}".format(os.getpid(), threading.get_ident())
         try:
             with open(tmp, "w") as fh:
@@ -410,23 +495,23 @@ class MemorySink(object):
         return True
 
     def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
-                  symq=None, own=None, dur=None, tid=None):
+                  symq=None, own=None, dur=None, tid=None, warnings=None):
         self._store(qualname, inputs, result=_result_repr(result_obj, self._privacy),
-                    raised=None, site=site, sym=sym, symq=symq, own=own)
+                    raised=None, site=site, sym=sym, symq=symq, own=own, warnings=warnings)
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
-                 symq=None, own=None, dur=None, tid=None):
+                 symq=None, own=None, dur=None, tid=None, warnings=None):
         self._store(qualname, inputs, result=None, raised=exc_typename, site=site,
-                    sym=sym, symq=symq, own=own)
+                    sym=sym, symq=symq, own=own, warnings=warnings)
 
-    def tally(self, qualname, sym, site, kind, raised=None, dur=None):
+    def tally(self, qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         """MemorySink admits every call, so a tally can only come from a foreign backend:
         it is counted, never stored as a record."""
         with self._lock:
             self.tallied += 1
 
     def _store(self, qualname, inputs, result, raised, site=None, sym=None, symq=None,
-               own=None):
+               own=None, warnings=None):
         # Keyed by identity too: two ``__init__`` of one module share ``q`` but are different
         # calls, and so is one inherited method called on two receiver classes.
         k = self._key(qualname, inputs, sym, own)
@@ -443,6 +528,9 @@ class MemorySink(object):
                 if site is not None:
                     rec["where"] = site  # representative call site (first seen)
                 self.records[k] = rec
+            if warnings:
+                acc = merge_warnings({}, rec.get("warnings"))
+                rec["warnings"] = warning_list(merge_warnings(acc, warnings))
 
     def dump(self, path, target):
         with open(path, "w") as f:
@@ -628,7 +716,8 @@ class _Fact(object):
 
     __slots__ = ("skey", "q", "sym", "symq", "own", "where", "in_json", "widened",
                  "outcomes", "other", "other_types", "other_lost", "count", "bytes",
-                 "dur_n", "dur_sum", "dur_min", "dur_max", "first_ts", "last_ts", "seq")
+                 "dur_n", "dur_sum", "dur_min", "dur_max", "first_ts", "last_ts", "seq",
+                 "warnings")
 
     def __init__(self, skey, q, sym, symq, own, where, in_json, widened, now, seq):
         self.skey = skey
@@ -652,6 +741,7 @@ class _Fact(object):
         self.first_ts = now
         self.last_ts = now
         self.seq = seq
+        self.warnings = None     # (category, message) -> count, for its sampled calls
 
     def to_json(self):
         outs = []
@@ -677,15 +767,19 @@ class _Fact(object):
             head["widened"] = True
         if self.dur_n:
             head["dur"] = _dur_json(self.dur_n, self.dur_sum, self.dur_min, self.dur_max)
+        if self.warnings:
+            head["warnings"] = warning_list(self.warnings)
         return '{"in":' + self.in_json + ',"outcomes":[' + ",".join(outs) + "]," + \
             _canon(head)[1:]
 
 
 class _Tally(object):
-    """Every call at one (symbol, site), sampled or not: completeness and latency."""
+    """Every call at one (symbol, site), sampled or not: completeness and latency. Its
+    ``warnings`` are those of its UNSAMPLED calls only (a sampled call's are on its fact),
+    so a site's warnings are its facts' plus its tally's, never counted twice."""
 
     __slots__ = ("q", "sym", "where", "count", "returns", "raises", "raises_other",
-                 "dur_n", "dur_sum", "dur_min", "dur_max", "hist")
+                 "dur_n", "dur_sum", "dur_min", "dur_max", "hist", "warnings")
 
     def __init__(self, q, sym, where):
         self.q = q
@@ -700,12 +794,15 @@ class _Tally(object):
         self.dur_min = None
         self.dur_max = None
         self.hist = None
+        self.warnings = None
 
     def to_json(self):
         out = {"q": self.q, "sym": self.sym, "where": self.where, "count": self.count,
                "returns": self.returns, "raises": dict(self.raises)}
         if self.raises_other:
             out["raises_other"] = self.raises_other
+        if self.warnings:
+            out["warnings"] = warning_list(self.warnings)
         if self.dur_n:
             out["dur"] = _dur_json(self.dur_n, self.dur_sum, self.dur_min, self.dur_max,
                                    list(self.hist) if self.hist is not None else None)
@@ -932,9 +1029,9 @@ class FactSink(object):
         pass
 
     def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
-                  symq=None, own=None, dur=None, tid=None):
+                  symq=None, own=None, dur=None, tid=None, warnings=None):
         if not admitted and not self.admit():
-            self.tally(qualname, sym, site, "return", dur=dur)
+            self.tally(qualname, sym, site, "return", dur=dur, warnings=warnings)
             return
         try:
             result = normalize(result_obj, _privacy=self._privacy)
@@ -946,29 +1043,33 @@ class FactSink(object):
             in_json = self._input_json(inputs)
         except Exception:
             self.note_failure("write_failures")
-            self.tally(qualname, sym, site, "return", dur=dur)
+            self.tally(qualname, sym, site, "return", dur=dur, warnings=warnings)
             return
         self._push(("r", qualname, sym, symq, own, site, in_json, payload, result, dur,
-                    time.time()))
+                    time.time(), warnings or None))
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
-                 symq=None, own=None, dur=None, tid=None):
+                 symq=None, own=None, dur=None, tid=None, warnings=None):
         if not admitted and not self.admit(force=True):
-            self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur)
+            self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
+                       warnings=warnings)
             return
         try:
             in_json = self._input_json(inputs)
         except Exception:
             self.note_failure("write_failures")
-            self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur)
+            self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
+                       warnings=warnings)
             return
         self._push(("x", qualname, sym, symq, own, site, in_json, str(exc_typename), None,
-                    dur, time.time()))
+                    dur, time.time(), warnings or None))
 
-    def tally(self, qualname, sym, site, kind, raised=None, dur=None):
-        """A completed call whose values were not sampled: counted at its (symbol, site)."""
+    def tally(self, qualname, sym, site, kind, raised=None, dur=None, warnings=None):
+        """A completed call whose values were not sampled: counted at its (symbol, site),
+        its warnings (if any) kept on the tally."""
         self._push(("t", qualname, sym, None, None, site, None,
-                    raised or "<unknown>" if kind == "raise" else None, None, dur, None))
+                    raised or "<unknown>" if kind == "raise" else None, None, dur, None,
+                    warnings or None))
 
     def _input_json(self, inputs):
         in_json = _canon(inputs)
@@ -1013,7 +1114,7 @@ class FactSink(object):
                 self._c["write_failures"] += 1
 
     def _apply_locked(self, item):
-        okind, q, sym, symq, own, site, in_json, payload, result, dur, now = item
+        okind, q, sym, symq, own, site, in_json, payload, result, dur, now, warns = item
         if site is not None:
             skey = (sym or q, site.get("file"), site.get("line"), site.get("func"))
         else:
@@ -1053,6 +1154,10 @@ class FactSink(object):
             t.hist[_hist_bucket(dur)] += 1
         if okind == "t":
             c["tallied"] += 1
+            if warns:
+                if t.warnings is None:
+                    t.warnings = {}
+                merge_warnings(t.warnings, warns)
             return
         # ── fact: sampled calls ──
         c["sampled"] += 1
@@ -1061,6 +1166,15 @@ class FactSink(object):
             f = self._new_fact_locked(skey, q, sym, symq, own, site, in_json, now)
         f.count += 1
         f.last_ts = now
+        if warns:
+            if f.warnings is None:
+                f.warnings = {}
+            held = len(f.warnings)
+            merge_warnings(f.warnings, warns)
+            if len(f.warnings) != held:   # a new (category, message): it is held bytes too
+                grown = sum(len(k[1]) + len(k[0]) + 40 for k in list(f.warnings)[held:])
+                f.bytes += grown
+                self._bytes += grown
         if dur is not None:
             f.dur_n += 1
             f.dur_sum += dur

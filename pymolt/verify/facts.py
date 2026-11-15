@@ -72,7 +72,9 @@ from pymolt.verify._sinks import (
     MAX_OUTCOMES,
     SNAPSHOT_SCHEMA,
     WIDENED_INPUT,
+    merge_warnings,
     type_label,
+    warning_list,
     widen_value,
     write_snapshot_file,
 )
@@ -138,6 +140,28 @@ class Outcome(BaseModel):
     count: int = 1
 
 
+class CallWarning(BaseModel):
+    """A deprecation-family warning a dependency call issued while it ran (runtime
+    evidence of an announced API change). Evidence, never part of a fact's outcome."""
+
+    category: str          # "FutureWarning", "sqlalchemy.exc.RemovedIn20Warning", ...
+    message: str           # capped at 300 chars by the runtime
+    count: int = 1
+
+
+class SiteWarnings(BaseModel):
+    """Warnings of calls at one (symbol, site) whose values were not sampled (a snapshot
+    tally or a JSONL sidecar's ``tally_warnings``): a site's warnings are its facts' plus
+    these, never counted twice."""
+
+    symbol: str
+    file: str
+    func: str
+    line: int | None = None
+    text: str | None = None
+    warnings: list[CallWarning] = Field(default_factory=list)
+
+
 class Fact(BaseModel):
     """A dependency call from one site with one input, and every outcome it produced."""
 
@@ -155,6 +179,8 @@ class Fact(BaseModel):
     count: int = 0
     where: dict[str, Any] | None = None  # first-seen call site as recorded (absolute file)
     first_seen: int = 0              # event/record index: call order for positional pairing
+    # Deprecation-family warnings its (sampled) calls issued, merged across occurrences.
+    warnings: list[CallWarning] = Field(default_factory=list)
 
     @property
     def site(self) -> tuple[str, str, str | int | None]:
@@ -198,6 +224,11 @@ class FactSet(BaseModel):
     # nothing was dropped, no tally overflowed. Then presence/absence of a call site and
     # its outcome kinds are facts, whatever the value sampling rate.
     tallies_complete: bool = False
+    # Warnings of unsampled calls, per (symbol, site); facts carry the sampled calls' own.
+    unsampled_warnings: list[SiteWarnings] = Field(default_factory=list)
+    # The runtime's ``warnings_capture`` ("on" / "off"); None = a runtime that predates it,
+    # so "no warnings on a fact" does not mean "none were issued".
+    warnings_capture: str | None = None
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -286,6 +317,10 @@ class FactEntry(BaseModel):
     old_count: int = 0
     new_count: int = 0
     notes: list[str] = Field(default_factory=list)
+    # Deprecation-family warnings each side's calls issued: evidence shown with the entry,
+    # never part of its category (a warning is not an outcome).
+    old_warnings: list[CallWarning] | None = None
+    new_warnings: list[CallWarning] | None = None
     old_where: dict[str, Any] | None = Field(default=None, exclude=True)
     new_where: dict[str, Any] | None = Field(default=None, exclude=True)
 
@@ -632,6 +667,16 @@ def snapshot_fact_records(fact: Mapping[str, Any]) -> Iterator[dict]:
         base["where"] = fact["where"]
     if isinstance(fact.get("first_ts"), int | float):
         base["ts"] = fact["first_ts"]
+    # The fact's warnings ride on its first projected event only (folding sums them).
+    pending_warnings = fact.get("warnings") if isinstance(fact.get("warnings"), list) else None
+    for rec in _snapshot_outcome_records(fact, base):
+        if pending_warnings:
+            rec["warnings"] = pending_warnings
+            pending_warnings = None
+        yield rec
+
+
+def _snapshot_outcome_records(fact: Mapping[str, Any], base: dict[str, Any]) -> Iterator[dict]:
     for o in fact.get("outcomes") or ():
         if not isinstance(o, dict):
             continue
@@ -697,6 +742,7 @@ class _MergedFact:
     other_lost: int = 0
     count: int = 0
     dur: list | None = None  # [n, sum, min, max]
+    warnings: dict[tuple[str, str], int] | None = None
 
     def add_outcome(self, kind: str, payload: str, value: Any, n: int) -> None:
         key = (kind, payload)
@@ -737,6 +783,8 @@ class _MergedFact:
             head["widened"] = True
         if self.dur is not None:
             head["dur"] = dict(zip(("n", "sum", "min", "max"), self.dur, strict=True))
+        if self.warnings:
+            head["warnings"] = warning_list(self.warnings)
         return '{"in":' + self.in_json + ',"outcomes":[' + ",".join(outs) + "]," + \
             _canon(head)[1:]
 
@@ -759,7 +807,8 @@ def _merge_dur(acc: list | None, d: Any) -> list | None:
 
 _PROCESS_KEYS = ("pid", "python", "executable", "mode", "switched_at", "switch_reason",
                  "discovered", "armed", "settled_at", "settle_reason", "handed_over",
-                 "incremental_settle", "started_at", "ended_at", "backend", "sample_rate")
+                 "incremental_settle", "started_at", "ended_at", "backend", "sample_rate",
+                 "warnings_capture", "distributions")
 
 
 def merge_fact_snapshots(
@@ -889,6 +938,9 @@ def _merge_fact(facts: dict[tuple, _MergedFact], obj: dict) -> None:
                 f.other += n - kept
                 f.other_lost += n - kept
     f.dur = _merge_dur(f.dur, obj.get("dur"))
+    if isinstance(obj.get("warnings"), list) and obj["warnings"]:
+        f.warnings = merge_warnings(f.warnings if f.warnings is not None else {},
+                                    obj["warnings"])
 
 
 def _merge_tally(tallies: dict[tuple, dict], obj: dict) -> None:
@@ -905,6 +957,9 @@ def _merge_tally(tallies: dict[tuple, dict], obj: dict) -> None:
         t["raises"][name] = t["raises"].get(name, 0) + _positive_int(n)
     if _positive_int(obj.get("raises_other")):
         t["raises_other"] = t.get("raises_other", 0) + obj["raises_other"]
+    if isinstance(obj.get("warnings"), list) and obj["warnings"]:
+        t["warnings"] = warning_list(merge_warnings(merge_warnings({}, t.get("warnings")),
+                                                    obj["warnings"]))
     d = obj.get("dur")
     merged = _merge_dur(
         [t["dur"]["n"], t["dur"]["sum"], t["dur"]["min"], t["dur"]["max"]]
@@ -1032,6 +1087,7 @@ class _Acc:
     defaulted: set[tuple[str, ...]] | None = None
     outcomes: dict[str, list] = field(default_factory=dict)  # canon -> [kind, value, count]
     count: int = 0
+    warnings: dict[tuple[str, str], int] | None = None
 
 
 def fold_facts(
@@ -1109,6 +1165,9 @@ def fold_facts(
         else:
             slot[2] += ev["count"]
         a.count += ev["count"]
+        if ev["warnings"]:
+            a.warnings = merge_warnings(a.warnings if a.warnings is not None else {},
+                                        ev["warnings"])
     pool.clear()
     where_pool.clear()
     fs.schema_versions = sorted(versions)
@@ -1149,13 +1208,62 @@ def load_facts(
     fs = fold_facts(records, root=root, site_text=site_text, source=str(trace_path))
     fs.invalid_lines = stats.invalid_lines
     fs.aggregated = fs.aggregated or stats.aggregated
-    backends = _backends_of(_read_json(metadata_path(base)))
+    meta = _read_json(metadata_path(base))
+    backends = _backends_of(meta)
+    header: dict = {}
     if snap is not None:
         _annotate_from_snapshot(fs, snap, site_text)
+        header = read_snapshot_header(snap)
         if not backends:
-            backends = _backends_of(read_snapshot_header(snap))
+            backends = _backends_of(header)
     fs.backends = backends
+    fs.warnings_capture = _warnings_capture_of(meta, header)
+    _add_sidecar_tally_warnings(fs, meta, site_text)
     return fs
+
+
+def _warnings_capture_of(*sources: Mapping[str, Any]) -> str | None:
+    """"on" / "off" / "mixed" from a sidecar or snapshot header (its processes included);
+    None when no runtime said (a runtime that predates warning capture)."""
+    seen: set[str] = set()
+    for meta in sources:
+        for item in (meta, *(meta.get("processes") or ())):
+            if isinstance(item, dict) and isinstance(item.get("warnings_capture"), str):
+                seen.add(item["warnings_capture"])
+    if not seen:
+        return None
+    return seen.pop() if len(seen) == 1 else "mixed"
+
+
+def _site_warnings(fs: FactSet, item: Mapping[str, Any],
+                   site_text: Mapping[str, str] | None) -> SiteWarnings | None:
+    warns = item.get("warnings")
+    where = item.get("where") if isinstance(item.get("where"), dict) else {}
+    file = where.get("file")
+    if not isinstance(warns, list) or not warns or not isinstance(file, str):
+        return None
+    line = where.get("line") if _is_lineno(where.get("line")) else None
+    return SiteWarnings(
+        symbol=item.get("sym") or item.get("q") or "?",
+        file=_relativize(file, fs.root),
+        func=where.get("func") if isinstance(where.get("func"), str) else "?",
+        line=line,
+        text=(site_text or {}).get(f"{file}:{line}") if line is not None else None,
+        warnings=_call_warnings(merge_warnings({}, warns)),
+    )
+
+
+def _add_sidecar_tally_warnings(fs: FactSet, meta: Mapping[str, Any],
+                                site_text: Mapping[str, str] | None) -> None:
+    """JSONL captures: unsampled calls' warnings from ``tally_warnings`` (per process)."""
+    for item in (meta, *(meta.get("processes") or ())):
+        if not isinstance(item, dict):
+            continue
+        for tw in item.get("tally_warnings") or ():
+            if isinstance(tw, dict):
+                sw = _site_warnings(fs, tw, site_text)
+                if sw is not None:
+                    fs.unsampled_warnings.append(sw)
 
 
 def _read_json(path: Path) -> dict:
@@ -1224,6 +1332,10 @@ def _annotate_from_snapshot(fs: FactSet, snap: Path,
             rel = rel_cache.get(file)
             if rel is None:
                 rel = rel_cache[file] = _relativize(file, fs.root)
+            if t.get("warnings"):
+                sw = _site_warnings(fs, t, site_text)
+                if sw is not None:
+                    fs.unsampled_warnings.append(sw)
             symbol = t.get("sym") or t.get("q") or "?"
             func = where.get("func") if isinstance(where.get("func"), str) else "?"
             line = where.get("line") if _is_lineno(where.get("line")) else None
@@ -1249,6 +1361,31 @@ def _annotate_from_snapshot(fs: FactSet, snap: Path,
         and not num("sampling_dropped") and not num("dropped_events")
         and not num("write_failures")
     )
+
+
+def _constructor_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    """``__init__``'s receiver as ``{"__opaque__": <type>}``: the object under construction.
+
+    Its state is what the constructor produces, not an input, and backends render it at
+    different moments (setprofile / monitoring before the body runs: an empty or opaque
+    object; wrap after the call: the finished one). Left as recorded, the same
+    ``pd.Series(a)`` call keyed differently per backend and showed as DISAPPEARED +
+    APPEARED instead of comparing."""
+    bound = inputs.get("bound")
+    if isinstance(bound, dict) and "self" in bound:
+        return {**inputs, "bound": {**bound, "self": _receiver_marker(bound["self"])}}
+    args = inputs.get("args")
+    if isinstance(args, list) and args:
+        return {**inputs, "args": [_receiver_marker(args[0]), *args[1:]]}
+    return inputs
+
+
+def _receiver_marker(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        for key in ("__opaque__", "__structure__", "__shape__", "__cycle__"):
+            if isinstance(value.get(key), str):
+                return {"__opaque__": value[key]}
+    return {"__opaque__": type(value).__name__ if value is not None else "?"}
 
 
 def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1288,14 +1425,18 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         if isinstance(inputs.get("defaulted"), list):
             defaulted = tuple(sorted({str(n) for n in inputs["defaulted"]}))
         inputs = {k: v for k, v in inputs.items() if k != "defaulted"}
+        if (sym or q).endswith(".__init__"):
+            inputs = _constructor_inputs(inputs)
     if kind == "raise":
         value = _raise_name(value)
     v = raw.get("v")
     version = v if isinstance(v, int) and not isinstance(v, bool) else (2 if sym else 1)
     where = raw.get("where") if isinstance(raw.get("where"), dict) else {}
+    warns = raw.get("warnings")
     return {"q": q, "sym": sym, "symq": raw.get("symq") if isinstance(raw.get("symq"), str)
             else None, "input": inputs, "defaulted": defaulted, "kind": kind, "value": value,
-            "count": count, "where": where, "v": version, "aggregated": aggregated}
+            "count": count, "where": where, "v": version, "aggregated": aggregated,
+            "warnings": warns if isinstance(warns, list) and warns else None}
 
 
 UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise whose type it cannot see
@@ -1304,6 +1445,7 @@ UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise whose type it cann
 # an already-present name, so sharing it is safe.
 _FACT_FIELDS_SET = set(Fact.model_fields)
 _OUTCOME_FIELDS_SET = set(Outcome.model_fields)
+_WARNING_FIELDS_SET = set(CallWarning.model_fields)
 
 
 def _raise_name(value: Any) -> str:
@@ -1325,7 +1467,19 @@ def _fact_from_acc(a: _Acc) -> Fact:
         outcomes=[Outcome.model_construct(_OUTCOME_FIELDS_SET, kind=k, value=v, count=c)
                   for _, (k, v, c) in outcomes],
         count=a.count, where=a.where, first_seen=a.first_seen,
+        warnings=_call_warnings(a.warnings),
     )
+
+
+def _call_warnings(acc: Mapping[tuple[str, str], int] | None) -> list[CallWarning]:
+    if not acc:
+        return []
+    return [CallWarning.model_construct(_WARNING_FIELDS_SET, **w) for w in warning_list(acc)]
+
+
+def warnings_acc(warnings: Iterable[CallWarning] | None) -> dict[tuple[str, str], int]:
+    """``CallWarning``s as a ``(category, message) -> count`` accumulator (to merge more)."""
+    return merge_warnings({}, [w.model_dump() for w in warnings or ()])
 
 
 def _merge_facts(facts: list[Fact]) -> Fact:
@@ -1338,6 +1492,7 @@ def _merge_facts(facts: list[Fact]) -> Fact:
     defaulted: set[tuple[str, ...]] | None = None
     qualnames: set[str] = set()
     lines: set[int] = set()
+    warns: dict[tuple[str, str], int] = {}
     for f in ordered:
         qualnames.update(f.qualnames)
         lines.update(f.lines)
@@ -1349,6 +1504,8 @@ def _merge_facts(facts: list[Fact]) -> Fact:
                 outcomes[k][2] += o.count
             else:
                 outcomes[k] = [o.kind, o.value, o.count]
+        if f.warnings:
+            merge_warnings(warns, [w.model_dump() for w in f.warnings])
     return head.model_copy(update={
         "qualnames": sorted(qualnames),
         "symq": next((f.symq for f in ordered if f.symq), None),
@@ -1357,6 +1514,7 @@ def _merge_facts(facts: list[Fact]) -> Fact:
         "outcomes": [Outcome(kind=k, value=v, count=c)
                      for _, (k, v, c) in sorted(outcomes.items())],
         "count": sum(f.count for f in ordered),
+        "warnings": _call_warnings(warns),
     })
 
 
@@ -2220,6 +2378,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         old_defaulted=of.defaulted, new_defaulted=nf.defaulted, drift=drift,
         old_count=of.count, new_count=nf.count, notes=all_notes,
         old_where=of.where, new_where=nf.where,
+        old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
     )
 
 
@@ -2244,6 +2403,8 @@ def _single_entry(v: _V, *, old_side: bool) -> FactEntry:
         old_count=f.count if old_side else 0, new_count=0 if old_side else f.count,
         notes=notes,
         old_where=f.where if old_side else None, new_where=None if old_side else f.where,
+        old_warnings=(f.warnings or None) if old_side else None,
+        new_warnings=None if old_side else (f.warnings or None),
     )
 
 

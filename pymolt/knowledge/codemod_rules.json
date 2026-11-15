@@ -1,0 +1,42 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "kind": "codemod_rules",
+  "version": "2026-11-15",
+  "about": "Curated structural rewrites that no same-signature move or rename can express. Each rule is re-verified locally against its golden pair before it may be auto-applied.",
+  "entries": [
+    {
+      "id": "pandas-append-to-concat",
+      "package": "pandas",
+      "removed_in": "2.0.0",
+      "symbols": [
+        "pandas.core.series.Series.append",
+        "pandas.core.frame.DataFrame.append",
+        "pandas.Series.append",
+        "pandas.DataFrame.append"
+      ],
+      "successor": "pandas.concat",
+      "anchors": [".append(", "ignore_index"],
+      "requires_import": {"module": "pandas", "as": "pd"},
+      "rule": {
+        "match": "$S.append($OTHER, ignore_index=$IGN)",
+        "rewrite": ["pd.concat([$S, $OTHER], ignore_index=$IGN)"],
+        "condition": "simple_name_args",
+        "confidence": "verified",
+        "test_before": "out = s1.append(s2, ignore_index=True)\n",
+        "test_after": "out = pd.concat([s1, s2], ignore_index=True)\n",
+        "doc_link": "https://pandas.pydata.org/docs/whatsnew/v2.0.0.html#removal-of-prior-version-deprecations-changes",
+        "evidence": [
+          "pandas 1.4.0 deprecated Series.append and DataFrame.append in favour of pandas.concat",
+          "pandas 2.0.0 removed both"
+        ]
+      },
+      "notes": [
+        "Only the ignore_index= form is matched: list.append never takes that keyword, so the receiver is a pandas object. A bare `x.append(y)` is ambiguous and is left to the API impact list.",
+        "simple_name_args keeps call sites whose receiver and arguments are plain names; `df.append({...}, ignore_index=True)` (a dict row) is not rewritten because pd.concat does not accept dicts.",
+        "A name bound to a dict or a list of frames is not visible statically; the behavioural verify step is what catches that."
+      ],
+      "source": "pandas whatsnew v1.4.0 (GH#35407) and v2.0.0 removals",
+      "date": "2026-11-15"
+    }
+  ]
+}

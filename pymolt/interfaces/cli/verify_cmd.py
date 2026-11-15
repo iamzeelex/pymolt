@@ -49,6 +49,19 @@ _CAPTURE_MODE = {
 }
 
 
+def _emit_capture(slot, when: str, project_dir: str, *, agent: bool, invalid_code: int) -> None:
+    """--json prints the capture's slot, --agent the view; exits as the human path does."""
+    from pymolt.interfaces import views
+
+    if agent:
+        typer.echo(views.dumps(views.capture_view(
+            slot, when=when, state=service.load_contract_state(project_dir))))
+    else:
+        typer.echo(json.dumps(slot.model_dump(mode="json"), indent=2))
+    if slot.validity is not CaptureValidity.VALID:
+        raise typer.Exit(code=invalid_code)
+
+
 def capture_cmd(
     when: str = typer.Argument(..., help="baseline (before the migration) | post-migration"),
     command: list[str] = typer.Argument(
@@ -96,6 +109,10 @@ def capture_cmd(
         None, "--request-id", help="Request id to store with the capture"),
     correlation_id: str | None = typer.Option(
         None, "--correlation-id", help="Correlation id to store with the capture"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the capture as JSON (asks nothing)"),
+    agent: bool = typer.Option(
+        False, "--agent", help="Print the compact agent view as JSON (what the MCP tool returns)"),
 ):
     """Record the calls your code makes into its dependencies while CMD runs.
 
@@ -104,16 +121,24 @@ def capture_cmd(
     and wait for it to exit (Ctrl+C ends a long-running app and keeps what was
     recorded). --mode attach prints a command to run yourself, for example in a
     container or on a server; finish it with --mode attach --collect.
+    With --json or --agent it never asks: an existing capture needs --force.
     """
-    require_project_dir(project_dir)
+    machine = json_output or agent
+    require_project_dir(project_dir, json_output=machine)
+    if agent:
+        from pathlib import Path
+
+        project_dir = str(Path(project_dir).resolve())
     when_key = _CAPTURE_WHEN.get(when)
     if when_key is None:
-        fail(f"capture what: 'baseline' or 'post-migration' (got {when!r})")
+        fail(f"capture what: 'baseline' or 'post-migration' (got {when!r})", json_output=machine)
     capture_mode = _CAPTURE_MODE.get(mode)
     if capture_mode is None:
-        fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})")
+        fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})",
+             json_output=machine)
     if privacy not in {"auto", "values", "shape"}:
-        fail(f"--privacy must be 'auto', 'values', or 'shape' (got {privacy!r})")
+        fail(f"--privacy must be 'auto', 'values', or 'shape' (got {privacy!r})",
+             json_output=machine)
     effective_privacy = (
         "values" if capture_mode is CaptureMode.TEST_SUITE else "shape"
     ) if privacy == "auto" else privacy
@@ -124,6 +149,7 @@ def capture_cmd(
             "pymolt is not configured for this project",
             hint="Run `pymolt setup .` first. A capture records the environment it was "
                  "taken in.",
+            json_output=machine,
         )
 
     if collect:
@@ -132,11 +158,15 @@ def capture_cmd(
             fail(
                 f"no pending attach capture at {out_path}",
                 hint=f"Start one first: pymolt capture {when} --mode attach",
+                json_output=machine,
             )
         slot = service.finalize_attached_capture(
             project_dir, when_key, out_path, target=target,
             privacy=effective_privacy, sample_rate=sample_rate,
         )
+        if machine:
+            _emit_capture(slot, when, project_dir, agent=agent, invalid_code=EXIT_INCONCLUSIVE)
+            return
         if slot.validity is CaptureValidity.VALID:
             err.print(f"[green]collected[/green] {slot.events} events -> {slot.trace_path}")
             next_step(project_dir)
@@ -149,6 +179,12 @@ def capture_cmd(
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
 
     existing = getattr(service.load_contract_state(project_dir), when_key)
+    if existing is not None and not force and machine:
+        fail(
+            f"'{when}' already has a capture from {existing.captured_at}",
+            hint="Pass --force to replace it (the old one is archived, not deleted).",
+            json_output=True,
+        )
     if existing is not None and not force:
         # A baseline is a recording of a world that no longer exists once you
         # migrate — say what is being destroyed before destroying it.
@@ -165,6 +201,16 @@ def capture_cmd(
             project_dir, when_key, target=target, backend=backend,
             privacy=effective_privacy, sample_rate=sample_rate,
         )
+        collect_cmd = (
+            f"pymolt capture {when} --mode attach --collect --privacy {effective_privacy}"
+            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}"
+        )
+        if machine:
+            from pymolt.interfaces import views
+
+            view = views.capture_attach_view(instr, when=when, collect_command=collect_cmd)
+            typer.echo(views.dumps(view) if agent else json.dumps(view["data"], indent=2))
+            return
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
             f"  [white]pymolt capture {when} --mode attach --collect "
@@ -176,7 +222,7 @@ def capture_cmd(
         return
 
     if not command:
-        fail("provide a command after --, e.g. -- pytest tests/")
+        fail("provide a command after --, e.g. -- pytest tests/", json_output=machine)
     err.print(f"[dim]capturing[/dim] when=[cyan]{when}[/cyan] mode=[cyan]{mode}[/cyan] "
               f"cmd=[white]{' '.join(command)}[/white]")
     slot = service.capture_named_trace(
@@ -191,6 +237,11 @@ def capture_cmd(
         request_id=request_id,
         correlation_id=correlation_id,
     )
+    if machine:
+        _emit_capture(slot, when, project_dir, agent=agent, invalid_code=(
+            EXIT_FINDING if slot.validity is CaptureValidity.COMMAND_FAILED
+            else EXIT_INCONCLUSIVE))
+        return
     if slot.validity is not CaptureValidity.VALID:
         err.print(
             f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
@@ -304,6 +355,51 @@ def _render_fact_changes(fact_diff: dict | None) -> None:
     console.print(t)
 
 
+_CALIBRATION_LABEL = {
+    "hit": "[bold red]hit[/bold red]",
+    "prevented": "[green]prevented by the plan[/green]",
+    "miss": "[green]miss[/green]",
+    "not_exercised": "[dim]not exercised[/dim]",
+}
+
+
+def _render_calibration(cal) -> None:
+    """Predicted vs observed: each predicted risk against the fact diff, then the failing
+    changes no prediction covered."""
+    if cal is None:
+        return
+    source = ("the plan's predictions" if cal.source == "plan"
+              else "predictions from the baseline's runtime warnings")
+    if cal.risks:
+        prevented = f"{cal.prevented} prevented by the plan, " if cal.prevented else ""
+        t = Table(title=f"Calibration — {source}: {cal.hit} hit, {prevented}{cal.miss} miss, "
+                        f"{cal.not_exercised} not exercised", header_style="bold")
+        t.add_column("Prediction", no_wrap=True)
+        t.add_column("Result", no_wrap=True)
+        t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
+        t.add_column("Call site (your code)", overflow="fold", ratio=2)
+        t.add_column("Observed", overflow="fold", ratio=2)
+        for risk in cal.risks:
+            observed = ", ".join(f"{o.category} {o.symbol.rsplit('.', 1)[-1]}"
+                                 for o in risk.observed) or (risk.note or "—")
+            if risk.fixed_by_plan:
+                observed += " [dim](fixed by the plan)[/dim]"
+            t.add_row(risk.tier.value, _CALIBRATION_LABEL.get(risk.result.value,
+                                                              risk.result.value),
+                      escape(risk.symbol), escape(risk.site.label()), observed)
+        console.print(t)
+    else:
+        console.print(f"[dim]Calibration: {source} named no risk.[/dim]")
+    if cal.unpredicted:
+        console.print(f"[bold yellow]{len(cal.unpredicted)} observed change(s) no prediction "
+                      "covered:[/bold yellow]")
+        for item in cal.unpredicted[:20]:
+            console.print(f"  {item.category} {escape(item.symbol)} at "
+                          f"{escape(item.site.label())}")
+    for note in cal.notes:
+        console.print(f"[dim]  note: {escape(note)}[/dim]")
+
+
 
 def _render_contract_report(rep) -> None:
     trust_pct = round(rep.trust * 100)
@@ -370,6 +466,7 @@ def _render_contract_report(rep) -> None:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
     _render_fact_changes(rep.fact_diff)
+    _render_calibration(getattr(rep, "calibration", None))
 
     visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols
     probed = [s for s in visible_symbols if s.probed]
