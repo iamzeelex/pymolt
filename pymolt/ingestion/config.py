@@ -13,6 +13,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from pymolt.adapters.python_runner import RunnerSpec
+
 logger = logging.getLogger(__name__)
 
 CONFIG_SCHEMA_VERSION = 1
@@ -50,6 +52,9 @@ class EnvConfig(BaseModel):
     # ("unknown") so configs written before this field still load.
     base_python_source: str | None = None
     container_id: str | None = None
+    # How to reach the container's interpreter again (name, mounts, platform); filled by
+    # `setup --container`. None on configs written before it existed, or for non-container tools.
+    runner: RunnerSpec | None = None
     # Chosen interpreter for the `system` toolset (path or version); None = auto-detect.
     system_python: str | None = None
     target_python: str | None = None
