@@ -336,3 +336,34 @@ def test_injected_runtime_is_pure_stdlib():
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+class _Code:
+    def __init__(self, filename):
+        self.co_filename = filename
+
+
+class _Frame:
+    def __init__(self, filename):
+        self.f_code = _Code(filename)
+
+
+def test_generated_code_does_not_reclassify_a_dependency_module(monkeypatch):
+    """Dependency membership is decided per module from the module's own file. A
+    dataclass/namedtuple method is exec'd in the module's globals with ``co_filename``
+    ``"<string>"``; when such a frame was the first one seen, whole dependency modules
+    (pydantic.fields, sqlalchemy.orm.attributes) were cached as "not a dependency"."""
+    from pymolt.verify import _backend
+
+    root = _backend._site_roots()[0]
+    mod = types.ModuleType("vfakegen.fields")
+    mod.__file__ = root + "vfakegen/fields.py"
+    monkeypatch.setitem(sys.modules, "vfakegen.fields", mod)
+
+    far = _backend.SitePackagesMatcher()
+    assert far.matches("vfakegen.fields", _Frame("<string>")) is True
+    assert far.matches("vfakegen.fields", _Frame(root + "vfakegen/fields.py")) is True
+
+    near = _backend.AppMatcher()
+    assert near.matches("vfakegen.fields", _Frame("<string>")) is False
+    assert near.matches("vfakegen.fields", _Frame("<frozen importlib._bootstrap>")) is False
