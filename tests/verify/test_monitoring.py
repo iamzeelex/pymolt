@@ -3,6 +3,7 @@ typed raises, generators, tool-id hygiene and coexistence with another tool.
 
 Runtime-layer test: pure stdlib + pytest (3.6-compatible syntax); skipped below 3.12.
 """
+import functools
 import importlib
 import sys
 import types
@@ -454,3 +455,448 @@ def test_coexists_with_another_monitoring_tool(dep):
         mon.free_tool_id(other)
     assert len(sink.events) == 5
     assert seen.count("plain") == 1 and "uses_helper" in seen and "helper" in seen
+
+
+# ── incremental (CALL-driven watch set) ──────────────────────────────────────
+
+RECALL_MOD = "vfakerecall"
+
+RECALL_SRC = '''
+import functools
+
+def _helper(x):
+    return x + 1
+
+def f(x):
+    return _helper(x) + _helper(x)
+
+def g(x, y=2):
+    return x * y
+
+def deco(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+
+@deco
+def decorated(n=1):
+    return _helper(n)
+
+def _gen(n):
+    for i in range(n):
+        yield i
+
+def gen(n):
+    for i in range(n):
+        yield _helper(i)
+
+def rows(n):
+    return _gen(n)               # a generator created by the dependency, iterated by us
+
+class Base:
+    def __init__(self, x=0):
+        self.x = _helper(x)
+
+    def method(self, k=1):
+        return self.x + k
+
+    @classmethod
+    def make(cls, x):
+        return cls(x)
+
+    @staticmethod
+    def stat(v=3):
+        return v
+
+    @property
+    def prop(self):
+        return self.x
+
+    def __getitem__(self, k):
+        return k
+
+    def __iter__(self):
+        return iter([self.x])
+
+    def __len__(self):
+        return 1
+
+    def __add__(self, other):
+        return self.x + 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __call__(self, v):
+        return v
+
+class Result:
+    def __init__(self, v):
+        self.v = v
+
+    def value(self):
+        return self.v
+
+    def double(self):
+        return self.v * 2
+
+def query(v):
+    return Result(_helper(v))     # methods on a returned object
+
+def boom():
+    raise ValueError("no")
+'''
+
+
+def _local(x):
+    return x
+
+
+def _recall_workload(dep):
+    """Every way our code reaches dependency code, run several times."""
+    class Mine(dep.Base):
+        def __init__(self):
+            super().__init__(1)
+
+    class Inherit(dep.Base):
+        pass
+
+    part = functools.partial(dep.g, 3)
+    for _round in range(4):
+        dep.f(1)
+        dep.decorated(2)
+        list(dep.gen(2))
+        for _row in dep.rows(2):
+            pass
+        b = dep.Base(1)
+        b.method()
+        dep.Base.make(2)
+        dep.Base.stat()
+        b.prop
+        b[3]
+        for _item in b:
+            pass
+        len(b)
+        b + b
+        with b:
+            pass
+        b(5)
+        r = dep.query(1)
+        r.value()
+        r.double()
+        part()
+        for fn in (dep.f, dep.g, _local, dep.decorated):   # a polymorphic call site
+            fn(1)
+        list(map(dep.g, [1, 2]))
+        Mine()
+        Inherit(4)
+        try:
+            dep.boom()
+        except ValueError:
+            pass
+
+
+def _site_counts(sink):
+    import collections
+    return collections.Counter((e["sym"], e["t"], e["where"]["func"], e["where"]["line"])
+                               for e in sink.events)
+
+
+@pytest.fixture
+def recall_dep():
+    yield _module(RECALL_MOD, RECALL_SRC)
+    sys.modules.pop(RECALL_MOD, None)
+
+
+def _run_threads(body, n=3):
+    import threading
+    threads = [threading.Thread(target=body) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+
+
+def test_incremental_observes_the_same_calls_as_discover(recall_dep):
+    sinks = {}
+    for mode in ("discover", "incremental"):
+        sink = RecSink()
+        be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode=mode)
+        _run(be, lambda: (_recall_workload(recall_dep),
+                          _run_threads(lambda: _recall_workload(recall_dep))))
+        sinks[mode] = sink
+    discover, incremental = _site_counts(sinks["discover"]), _site_counts(sinks["incremental"])
+    assert incremental == discover          # same (sym, site) set AND the same call counts
+    syms = {k[0] for k in discover}
+    for expected in ("f", "decorated", "gen", "_gen", "Base.__init__", "Base.method",
+                     "Base.make", "Base.stat", "Base.prop", "Base.__getitem__",
+                     "Base.__iter__", "Base.__len__", "Base.__add__", "Base.__enter__",
+                     "Base.__exit__", "Base.__call__", "query", "Result.value",
+                     "Result.double", "g", "boom"):
+        assert RECALL_MOD + "." + expected in syms, expected
+    assert RECALL_MOD + "._helper" not in syms
+    raised = [e for e in sinks["incremental"].events if e["t"] == "raise"]
+    assert raised and all(e["raised"] == "ValueError" for e in raised)
+
+
+def test_incremental_disables_internal_and_settled_call_sites(recall_dep):
+    sink = RecSink()
+    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental")
+    calls = _counting(be, "_on_call")
+    starts = _counting(be, "_on_start")
+
+    def body():
+        for _ in range(50):
+            recall_dep.f(1)                         # one monomorphic site
+        for _ in range(10):
+            for fn in (recall_dep.f, recall_dep.g):
+                fn(1)                               # a polymorphic site: never disabled
+
+    _run(be, body)
+    # the f site settles after 2 calls; the polymorphic site fires all 20; range() x2 once each
+    assert calls["body"] == 2 + 20 + 2
+    assert calls.get("f", 0) <= 2                   # dep-internal sites: one callback each, ever
+    assert starts.get("_helper", 0) == 0            # unwatched dependency internals are free
+    assert starts["f"] == 60
+    assert len([e for e in sink.events if e["sym"] == RECALL_MOD + ".f"]) == 60
+    assert be.armed == 2
+
+
+def test_incremental_needs_two_tool_ids_and_releases_both(recall_dep):
+    mon = sys.monitoring
+    be = MonitoringBackend(RECALL_MOD, RecSink(), source=__name__, mode="incremental")
+    be.start()
+    tools = (be._tool, be._tool2)
+    try:
+        assert None not in tools and tools[0] != tools[1]
+        assert all(mon.get_tool(t) == _monitoring.TOOL_NAME for t in tools)
+    finally:
+        be.stop()
+    assert all(mon.get_tool(t) is None and mon.get_events(t) == 0 for t in tools)
+    taken = []
+    try:
+        for tool in _monitoring.TOOL_IDS[1:]:
+            if mon.get_tool(tool) is None:
+                mon.use_tool_id(tool, "squatter")
+                taken.append(tool)
+        with pytest.raises(RuntimeError, match="two free"):
+            MonitoringBackend(RECALL_MOD, RecSink(), source=__name__, mode="incremental").start()
+        assert mon.get_tool(_monitoring.TOOL_IDS[0]) is None     # nothing leaked
+    finally:
+        for tool in taken:
+            mon.free_tool_id(tool)
+
+
+def test_incremental_prewatches_impact_targets_outside_the_target(recall_dep):
+    other = _module("vfakerecall_other", "def h(x=0):\n    return x\n")
+    try:
+        sink = RecSink()
+        be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental",
+                               watch_targets=["vfakerecall_other.h"])
+        _run(be, lambda: (other.h(1), recall_dep.f(1)))
+    finally:
+        sys.modules.pop("vfakerecall_other", None)
+    assert [e["sym"] for e in sink.events] == ["vfakerecall_other.h", RECALL_MOD + ".f"]
+
+
+# ── incremental settle (tool B freed) ────────────────────────────────────────
+
+
+def _syms(sink, name):
+    return [e for e in sink.events if e["sym"] == RECALL_MOD + "." + name]
+
+
+def test_settle_frees_tool_b_hands_over_its_codes_and_keeps_arming_calls(recall_dep):
+    dep = recall_dep
+    mon = sys.monitoring
+    sink = RecSink()
+    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental")
+    be.start()
+    tool, tool2 = be._tool, be._tool2
+    try:
+        b = dep.Base(1)
+        b[1]                                  # dunder: tool B
+        b.prop                                # property: tool B
+        list(dep.gen(1))                      # generator: tool B
+        dep.f(1)                              # plain call: tool A
+        assert be.settle("test") is True
+        assert be.settle("again") is False    # once
+        assert mon.get_tool(tool2) is None and mon.get_events(tool2) == 0
+        assert mon.get_tool(tool) == _monitoring.TOOL_NAME
+        b[2]                                  # handed over: still recorded
+        b.prop
+        list(dep.gen(2))
+        dep.f(2)
+        dep.g(7)                              # a plain call first made after the settle
+        dep.query(3).double()                 # ... and methods on its returned object
+        len(b)                                # recall caveat: a dunder first used after
+        for _row in dep.rows(2):              # ... and a dependency-made generator
+            pass
+    finally:
+        be.stop()
+    assert mon.get_tool(tool) is None
+    assert [e["in"]["bound"]["k"] for e in _syms(sink, "Base.__getitem__")] == [1, 2]
+    assert len(_syms(sink, "Base.prop")) == 2
+    assert [e["in"]["bound"]["n"] for e in _syms(sink, "gen")] == [1, 2]
+    assert [e["in"]["bound"]["x"] for e in _syms(sink, "f")] == [1, 2]
+    assert len(_syms(sink, "g")) == 1 and len(_syms(sink, "Result.double")) == 1
+    assert _syms(sink, "Base.__len__") == [] and _syms(sink, "_gen") == []
+    assert be.settle_reason == "test" and be.handed_over >= 3 and be.settled_at is not None
+
+
+def test_settle_neither_loses_nor_doubles_calls_from_threads(recall_dep):
+    import collections
+    import threading
+    dep = recall_dep
+    sink = RecSink()
+    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental")
+    n, nthreads = 1500, 4
+    halfway = threading.Barrier(nthreads + 1)
+    b = dep.Base(0)
+
+    def worker(base):
+        for i in range(n):
+            v = base + i
+            b[v]                              # B -> A hand-over
+            dep.f(v)                          # A
+            list(dep.gen(v % 3))              # B generator -> A
+            if i == n // 3:
+                halfway.wait(10)
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    be.start()
+    try:
+        b[-1], dep.f(-1), list(dep.gen(0))    # recorded by both tools' owners first
+        threads = [threading.Thread(target=worker, args=(k * 100000,))
+                   for k in range(nthreads)]
+        for t in threads:
+            t.start()
+        halfway.wait(10)
+        assert be.settle("test")
+        for t in threads:
+            t.join(60)
+    finally:
+        be.stop()
+        sys.setswitchinterval(old)
+    values = [k * 100000 + i for k in range(nthreads) for i in range(n)]
+    assert sorted(e["in"]["bound"]["k"] for e in _syms(sink, "Base.__getitem__")) == \
+        sorted([-1] + values)
+    assert sorted(e["in"]["bound"]["x"] for e in _syms(sink, "f")) == sorted([-1] + values)
+    gens = collections.Counter(e["in"]["bound"]["n"] for e in _syms(sink, "gen"))
+    expected = collections.Counter([0] + [v % 3 for v in values])
+    assert gens == expected
+
+
+# ── microbenchmark (opt-in: PYMOLT_BENCH=1) ──────────────────────────────────
+
+BENCH_SRC = '''
+class _Node:
+    def __init__(self, v):
+        self.v = v
+
+    def __len__(self):
+        return 1
+
+def _helper(x):
+    return x + 1
+
+def api(x, scale=2):
+    acc = 0
+    for i in range(20):              # library-shaped: many internal calls per boundary call
+        acc += _helper(i)
+    node = _Node(x)                  # an internal construction
+    return acc + len(node) + scale   # an internal dunder (tool B's worst case)
+'''
+
+
+class _TallySink(RecSink):
+    """Steady state of a novelty-first sink: values unsampled, every call tallied."""
+
+    def __init__(self):
+        RecSink.__init__(self, sample=False)
+        self.n = 0
+
+    def tally(self, qualname, sym, site, kind, raised=None, dur=None):
+        self.n += 1
+
+
+def _bench_local(x):
+    return x * 2
+
+
+def _bench_workload(api, n):
+    acc = 0
+    for i in range(n):
+        acc += api(i)
+        for _ in range(20):
+            acc += _bench_local(i)
+    return acc
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("PYMOLT_BENCH"),
+                    reason="microbenchmark: set PYMOLT_BENCH=1")
+def test_microbenchmark_discover_vs_incremental_vs_watch(capsys):
+    import statistics
+    import time
+    dep = _module("vfakebench", BENCH_SRC)
+    n = 60000
+    try:
+        def make(mode):
+            if mode == "none":
+                return None
+            be = MonitoringBackend("vfakebench", _TallySink(), source=__name__,
+                                   mode="discover" if mode in ("discover", "watch")
+                                   else "incremental")
+            if mode == "incremental-settled":
+                orig_s = be.start
+
+                def start_settled():
+                    orig_s()
+                    dep.api(0)                       # arm, then free tool B
+                    be.settle("bench")
+                    # Steady state: past the de-duplication window after the settle. Busy,
+                    # not asleep: an idle second lets the OS park the thread on a slow core.
+                    until = time.monotonic() + _monitoring._SETTLE_GRACE + 0.05
+                    while time.monotonic() < until:
+                        dep.api(0)
+                    be.sink.n = 0
+                be.start = start_settled
+            if mode == "watch":
+                orig = be.start
+
+                def start():
+                    orig()
+                    dep.api(0)                       # observe, then watch the observed set
+                    be.enter_watch()
+                    be.sink.n = 0
+                be.start = start
+            return be
+
+        results = {}
+        for mode in ("none", "discover", "incremental", "incremental-settled", "watch"):
+            times = []
+            for _ in range(3):
+                be = make(mode)
+                if be is not None:
+                    be.start()
+                t0 = time.perf_counter()
+                _bench_workload(dep.api, n)
+                times.append(time.perf_counter() - t0)
+                if be is not None:
+                    be.stop()
+                    assert be.sink.n == n, (mode, be.sink.n)   # every boundary call counted
+            results[mode] = statistics.median(times)
+    finally:
+        sys.modules.pop("vfakebench", None)
+    base = results["none"]
+    with capsys.disabled():
+        print(f"\n{n} boundary calls, 22 dependency-internal + 20 local calls each")
+        for mode, t in results.items():
+            print(f"  {mode:<20} {t:.3f}s  {t / base:.2f}x")
+    assert results["incremental"] < results["discover"]
+    assert results["incremental-settled"] < results["incremental"]

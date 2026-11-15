@@ -757,8 +757,9 @@ def _merge_dur(acc: list | None, d: Any) -> list | None:
     return acc
 
 
-_PROCESS_KEYS = ("pid", "python", "executable", "mode", "switched_at", "discovered",
-                 "started_at", "ended_at", "backend", "sample_rate")
+_PROCESS_KEYS = ("pid", "python", "executable", "mode", "switched_at", "switch_reason",
+                 "discovered", "armed", "settled_at", "settle_reason", "handed_over",
+                 "incremental_settle", "started_at", "ended_at", "backend", "sample_rate")
 
 
 def merge_fact_snapshots(
