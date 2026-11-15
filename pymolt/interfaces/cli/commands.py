@@ -1326,7 +1326,7 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
 def _resolve_chosen_source(sources, manifest_name_to_use, project_dir, json_output=False):
     """CLI wrapper: pick the manifest via the shared service, failing cleanly on error."""
     try:
-        return _service_resolve_chosen_source(sources, manifest_name_to_use)
+        return _service_resolve_chosen_source(sources, manifest_name_to_use, project_dir)
     except ValueError as e:
         fail(str(e), hint=f"(searched in '{project_dir}')", json_output=json_output)
 
@@ -1668,7 +1668,7 @@ def assess(
 
     # Detect all available manifests
     try:
-        sources = detect_sources(project_path)
+        sources = detect_sources(project_path, include_subroots=True)
     except Exception as e:
         fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT, json_output=json_output)
 

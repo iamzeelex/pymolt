@@ -59,19 +59,19 @@ def test_build_comparison_rows_no_culprits_means_all_unresolved():
     assert all(r["status"] == "unresolved" for r in rows)
 
 
-def test_resolve_chosen_source_missing_raises():
-    class Src:
-        def __init__(self, name, is_lock=False):
-            self.path = type("P", (), {"name": name})()
-            self.is_lock = is_lock
+def test_resolve_chosen_source_missing_raises(tmp_path):
+    from pymolt.ingestion.detect import detect_sources
 
-    sources = [Src("requirements.txt"), Src("uv.lock", is_lock=True)]
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / "uv.lock").write_text('version = 1\n[[package]]\nname = "flask"\nversion = "1.0"\n')
+    sources = detect_sources(tmp_path)
     # Named -> exact match.
-    assert resolve_chosen_source(sources, "requirements.txt").path.name == "requirements.txt"
+    chosen = resolve_chosen_source(sources, "requirements.txt", tmp_path)
+    assert chosen.path.name == "requirements.txt"
     # Default -> first lock.
     assert resolve_chosen_source(sources, None).path.name == "uv.lock"
     with pytest.raises(ValueError):
-        resolve_chosen_source(sources, "nope.txt")
+        resolve_chosen_source(sources, "nope.txt", tmp_path)
 
 
 def test_run_assess_resolves_and_compares(tmp_path):
@@ -91,3 +91,19 @@ def test_run_assess_resolves_and_compares(tmp_path):
     assert result.target_python == "3.12"
     assert result.counts_by_status().get("upgrade") == 1
     assert orch.call_count == 2  # baseline + target
+
+
+def test_assess_picks_a_manifest_in_a_subroot(tmp_path):
+    """B4: setup saves ``etc/requirements_x.txt``; assess must find it, not 'not found'."""
+    from pymolt.assess.service import resolve_chosen_source
+    from pymolt.ingestion.detect import detect_sources
+
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "requirements_x.txt").write_text("flask==1.0\n")
+
+    sources = detect_sources(tmp_path, include_subroots=True)
+    chosen = resolve_chosen_source(sources, "etc/requirements_x.txt", tmp_path)
+
+    assert chosen.path.resolve() == (tmp_path / "etc" / "requirements_x.txt").resolve()

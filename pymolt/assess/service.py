@@ -20,7 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from pymolt.core.graph import DependencyGraph
-from pymolt.ingestion.detect import detect_sources
+from pymolt.ingestion.detect import detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 from pymolt.risk.models import RiskReport
 
@@ -195,16 +195,16 @@ def failure_evidence(target_error) -> tuple[str | None, list[str]]:
     return getattr(target_error, "detail", None), list(getattr(target_error, "culprits", []))
 
 
-def resolve_chosen_source(sources, manifest_name: str | None):
-    """Pick the source manifest by name, or default to the first lock/manifest.
+def resolve_chosen_source(sources, manifest_name: str | None, project_dir=None):
+    """Pick the source manifest by name or relative path, or default to the first lock/manifest.
 
     Raises ``ValueError`` when a named manifest is not found (the caller decides
     how to surface it).
     """
     if manifest_name:
-        for src in sources:
-            if src.path.name.lower() == manifest_name.lower():
-                return src
+        found = find_source(sources, manifest_name, project_dir or ".")
+        if found is not None:
+            return found
         discovered = [s.path.name for s in sources]
         raise ValueError(f"Manifest '{manifest_name}' not found. Discovered: {discovered}")
     lock_sources = [s for s in sources if s.is_lock]
@@ -693,10 +693,11 @@ def run_assess(
     config = config or {}
     project_path = Path(project_dir)
 
-    sources = detect_sources(project_path)
+    sources = detect_sources(project_path, include_subroots=True)
     if not sources:
         raise ValueError(f"No python dependency sources detected in directory {project_dir}")
-    chosen = resolve_chosen_source(sources, source_manifest or config.get("selected_manifest"))
+    chosen = resolve_chosen_source(
+        sources, source_manifest or config.get("selected_manifest"), project_path)
 
     overrides = overrides if overrides is not None else config.get("target_overrides", {})
 
