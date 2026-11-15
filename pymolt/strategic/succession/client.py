@@ -2,7 +2,7 @@
 
 Sends the project's framework names (never code), receives curated ``SuccessionEdge``s.
 Auth mirrors the codemod client: a Bearer token resolved explicit-arg → PYMOLT_API_TOKEN
-env → saved config (``pymolt login``).
+env → saved config (``pymolt axiom login``).
 """
 
 from __future__ import annotations

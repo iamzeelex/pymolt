@@ -46,13 +46,13 @@ def test_env_token_overrides_saved_file(monkeypatch):
 
 
 def test_cli_login_saves_token():
-    result = runner.invoke(app, ["login", "--token", "pmk_clitoken"])
+    result = runner.invoke(app, ["axiom", "login", "--token", "pmk_clitoken"])
     assert result.exit_code == 0
     assert config.load_token() == "pmk_clitoken"
 
 
 def test_cli_logout_removes_token():
     config.save_token("pmk_toremove")
-    result = runner.invoke(app, ["logout"])
+    result = runner.invoke(app, ["axiom", "logout"])
     assert result.exit_code == 0
     assert config.load_token() is None
