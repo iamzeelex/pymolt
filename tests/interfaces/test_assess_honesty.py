@@ -141,3 +141,16 @@ def test_baseline_hint_carries_recipe_and_agent_brief(tmp_path):
     assert "python:3.6-slim" in hint.suggested_dockerfile
     assert hint.rerun_command.startswith("pymolt assess") and "--container" in hint.rerun_command
     assert "Python 3.6" in hint.agent_brief and "do NOT" in hint.agent_brief
+
+
+def test_an_echoed_assumed_base_python_stays_assumed():
+    """The MCP adapter hands the config's base_python back to run_assess; that must not
+    turn setup's guess into a fact that lets the tier reach GOLD."""
+    from pymolt.assess.service import base_python_assumed
+
+    guessed = {"base_python": "3.12.12", "base_python_source": "assumed"}
+    assert base_python_assumed(guessed, None) is True
+    assert base_python_assumed(guessed, "3.12.12") is True     # echoed back: still a guess
+    assert base_python_assumed(guessed, "3.9") is False        # a real override is a fact
+    assert base_python_assumed({"base_python": "3.9", "base_python_source": "detected"},
+                               None) is False

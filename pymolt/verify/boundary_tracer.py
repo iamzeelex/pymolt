@@ -52,6 +52,10 @@ Watcher environment:
   PYMOLT_TRACE_SINK     jsonl | facts (default jsonl). facts: the aggregating FactSink, writing
                         PYMOLT_TRACE_OUT with its ``.jsonl`` suffix replaced by ``.facts.json``
   PYMOLT_TRACE_PRIVACY  values | shape (default values)
+  PYMOLT_TRACE_WARNINGS "0" to leave ``warnings.warn`` alone (default on: Deprecation/
+                        PendingDeprecation/FutureWarning issued during a recorded call are
+                        attributed to it, as ``warnings`` on the event / fact; the original
+                        ``warn`` still runs, so filters and output are unchanged)
   PYMOLT_TRACE_SAMPLE_RATE  fraction in (0, 1], default 1
   PYMOLT_TRACE_IMPACT_TARGETS  JSON array (preferred) or comma-list of exact symbols and/or
                                ``module.*`` prefixes. Exact-only sets use wrappers and do not
@@ -73,7 +77,9 @@ from ._backend import (
     AnyMatcher,
     PrefixMatcher,
     SetProfileBackend,
+    _warnings_disabled,
     build_matcher,
+    loaded_distributions,
     select_backend,
 )
 from ._sinks import JsonlSink, MemorySink
@@ -639,6 +645,9 @@ def activate():
         # The interpreter that ran the capture: the host resolves static symbols in it.
         "python": "{0}.{1}.{2}".format(*sys.version_info[:3]),
         "executable": sys.executable,
+        # Whether deprecation-family warnings are attributed to calls: "no warnings on a
+        # fact" means "none issued" only when this is "on".
+        "warnings_capture": "off" if _warnings_disabled() else "on",
     })
     backend = Controller(
         target, sink, mode=mode, prefer=backend_pref, exclude=exclude, source=source,
@@ -672,6 +681,12 @@ def activate():
                 sink.set_metadata(instrumentation_skipped=[
                     {"target": item[0], "reason": item[1]} for item in skipped
                 ])
+            try:
+                # What this process ran against: the host takes a migration's from-side
+                # versions from the baseline's record, not from re-resolving a manifest.
+                sink.set_metadata(distributions=loaded_distributions())
+            except Exception:
+                pass
             sink.close()
 
     atexit.register(_shutdown)

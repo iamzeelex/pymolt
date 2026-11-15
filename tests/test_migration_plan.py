@@ -73,6 +73,7 @@ def _plan(tmp_path, *, files=1):
         source_manifest="requirements.txt",
         target_manifest_path=target,
         files_scanned=files,
+        predict=False,  # plan/apply integrity only: prediction is tests/verify/test_predict.py
     )
     return plan
 
@@ -108,6 +109,7 @@ def test_plan_freezes_axiom_api_impacts(tmp_path):
             risk="high",
             explanation="public function moved",
         )]},
+        predict=False,
     )
 
     assert plan.impacts[0].package == "flask"

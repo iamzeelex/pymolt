@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """End-to-end acceptance check: a real pandas 1.5 -> 2.2 migration under pymolt.
 
-A toy app (requests + pandas) is captured under Python 3.11 + pandas 1.5.3 (baseline),
-migrated (``Series.append`` -> ``pd.concat``), and captured under Python 3.12 + pandas 2.2.3
-(post-migration). Each scenario has a fixed expected verdict, so this script is a pass/fail
-acceptance test for the verify pipeline, not just a demo:
+A toy app (requests + pandas, with an unpinned requirements.txt) is captured under Python
+3.11 + pandas 1.5.3 (baseline), planned offline against ``pandas==2.2.3`` (the plan must
+take pandas 1.5.3 from the baseline capture, propose ``Series.append`` -> ``pd.concat`` and
+predict the scenario's break), applied with ``pymolt apply``, and captured under Python 3.12
++ pandas 2.2.3 (post-migration). Each scenario has a fixed expected verdict, so this script
+is a pass/fail acceptance test for the plan -> apply -> verify pipeline, not just a demo:
 
   equiv            equivalent migration                      -> PASS
   change           + df.mean() on mixed columns, which 1.5 answers and 2.x raises on (the
@@ -139,10 +141,29 @@ def pymolt(root: Path, *args: str, log: str) -> int:
 
 
 def capture(root: Path, when: str, spec: dict) -> int:
-    return pymolt(root, "contract", "capture", "--when", when, "--mode", "tests",
+    return pymolt(root, "capture", when, "--mode", "tests",
                   "--project-dir", ".", "--force", "--",
                   str(env_python(spec)), "-m", "pytest", "-q", "-p", "no:cacheprovider",
                   log=f"capture_{when}.log")
+
+
+def check_plan(root: Path, change: bool) -> tuple[bool, str]:
+    """The offline plan's from-side, rewrite and predictions (acceptance criterion 1)."""
+    try:
+        plan = json.loads((root / ".pymolt" / "migration_plan.json").read_text())
+    except (OSError, ValueError):
+        return False, "no plan"
+    deps = {d.get("name"): d.get("from_version") for d in plan.get("dependencies", [])}
+    rewrites = [c.get("path") for c in plan.get("changes", [])]
+    risks = (plan.get("risks") or {}).get("risks", [])
+    append = [r for r in risks if r.get("symbol", "").endswith("Series.append")]
+    ok = deps.get("pandas") == "1.5.3" and rewrites == ["toyapp/core.py"] \
+        and bool(append) and append[0].get("tier") == "certain" \
+        and append[0].get("fixed_by_plan") is True
+    if change:
+        mean = [r for r in risks if r.get("symbol", "").endswith("DataFrame.mean")]
+        ok = ok and bool(mean) and mean[0].get("tier") == "high"
+    return ok, f"plan from pandas {deps.get('pandas')}, rewrites {rewrites}"
 
 
 def run_scenario(name: str, base: Path) -> dict:
@@ -151,36 +172,55 @@ def run_scenario(name: str, base: Path) -> dict:
     make_project(root, change)
     pymolt(root, "setup", ".", log="setup.log")
     rc_base = capture(root, "baseline", OLD)
-    core = root / "toyapp" / "core.py"
-    core.write_text(core.read_text().replace(
-        "return s1.append(s2, ignore_index=True)",
-        "return pd.concat([s1, s2], ignore_index=True)",
-    ))
+    (root / "requirements-target.txt").write_text("pandas==2.2.3\nrequests\n")
+    rc_plan = pymolt(root, "plan", ".", "--target-manifest", "requirements-target.txt",
+                     log="plan.log")
+    plan_ok, plan_detail = check_plan(root, change)
+    rc_apply = pymolt(root, "apply", ".", log="apply.log")
     if upgrade:
         (root / "requirements.txt").write_text("pandas==2.2.3\nrequests\n")
     rc_post = capture(root, "post-migration", NEW)
-    report = subprocess.run([str(PYMOLT), "contract", "report", ".", "--json"], cwd=root,
+    report = subprocess.run([str(PYMOLT), "verify", ".", "--json"], cwd=root,
                             capture_output=True, text=True)
     (root / "report.json").write_text(report.stdout)
     try:
-        rep = json.loads(report.stdout)
-    except ValueError:
+        rep = json.loads(report.stdout).get("contract") or {}
+    except (ValueError, AttributeError):
         rep = {}
     facts = rep.get("fact_diff") or {}
     counts = {k: v for k, v in (facts.get("counts") or {}).items() if v}
     changed = [e for e in facts.get("entries", []) if e.get("category") == "changed"]
     verdict = rep.get("verdict")
-    ok = rc_base == 0 and rc_post == 0 and verdict == expected
-    detail = ""
+    ok = rc_base == 0 and rc_plan == 0 and plan_ok and rc_apply == 0 and rc_post == 0 \
+        and verdict == expected
+    detail = plan_detail
+    calibration = rep.get("calibration") or {}
+    # The rewrite the plan made kept the behaviour: a prevented risk, never a miss.
+    append = [r for r in calibration.get("risks", [])
+              if r.get("symbol", "").endswith("Series.append")]
+    ok = ok and bool(append) and append[0].get("result") == "prevented"
     if change:
         mean = [e for e in changed if e.get("symbol", "").endswith("DataFrame.mean")]
         ok = ok and len(changed) == 1 and bool(mean)
         if mean:
             new = mean[0].get("new") or [{}]
-            detail = f"mean -> {new[0].get('kind')} {new[0].get('value')}"
+            detail += f"; mean -> {new[0].get('kind')} {new[0].get('value')}"
+        # The baseline's FutureWarning predicted the break: DataFrame.mean at core.py:24 is a
+        # high-tier prediction, and verify scores it a hit.
+        predicted = [r for r in calibration.get("risks", [])
+                     if r.get("symbol", "").endswith("DataFrame.mean")
+                     and (r.get("site") or {}).get("line") == 24]
+        ok = ok and bool(predicted) and predicted[0].get("tier") == "high" \
+            and predicted[0].get("result") == "hit"
+        if predicted:
+            detail += f"; predicted {predicted[0].get('tier')} -> {predicted[0].get('result')}"
     return {"scenario": name, "expected": expected, "verdict": verdict, "ok": ok,
             "facts": counts, "trust": rep.get("trust"), "reasons": rep.get("verdict_reasons"),
-            "detail": detail, "captures_rc": [rc_base, rc_post]}
+            "detail": detail, "captures_rc": [rc_base, rc_post],
+            "plan_rc": rc_plan, "apply_rc": rc_apply,
+            "calibration": {k: calibration.get(k) for k in
+                            ("source", "predicted", "hit", "prevented", "miss",
+                             "not_exercised")}}
 
 
 def run(names: list[str]) -> int:

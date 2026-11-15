@@ -13,6 +13,24 @@ from pymolt.codemods.client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _configured_endpoint(monkeypatch):
+    # The client is only used against an explicitly configured endpoint; there is no
+    # default one any more (pymolt computes API changes locally without it).
+    monkeypatch.setenv("PYMOLT_AXIOM_ENDPOINT", "http://svc:8000")
+
+
+def test_no_endpoint_configured_is_an_error_not_a_default_hub(monkeypatch):
+    monkeypatch.delenv("PYMOLT_AXIOM_ENDPOINT", raising=False)
+    with pytest.raises(AxiomGraphError, match="no Axiom endpoint"):
+        AxiomGraphClient()
+
+
+def test_explicit_base_url_wins_over_the_environment():
+    assert AxiomGraphClient("http://other:1/").base_url == "http://other:1"
+    assert AxiomGraphClient().base_url == "http://svc:8000"
+
+
 class _FakeResp:
     def __init__(self, payload, status=200):
         self._payload = payload

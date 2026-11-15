@@ -87,6 +87,8 @@ from ._backend import (
     PrefixMatcher,
     _monotonic,
     generator_marker,
+    install_warning_capture,
+    remove_warning_capture,
 )
 from ._identity import _wrapped_of
 from ._normalize import typename
@@ -429,16 +431,19 @@ class MonitoringBackend(FrameBackend):
                 self._release(tool2, local_events=False)
             self._release(tool)
             raise
+        install_warning_capture(self)
 
     def stop(self):
         tool, tool2 = self._tool, self._tool2
         if tool is None:
             return
         self._tool = self._tool2 = None
+        remove_warning_capture(self)
         if tool2 is not None:
             self._release(tool2, local_events=False)
         self._release(tool)
         self._pending.clear()
+        self._warned.clear()
 
     def _release(self, tool, local_events=True):
         mon = self._mon
@@ -639,7 +644,8 @@ class MonitoringBackend(FrameBackend):
                     frame = _frame_of(code)
                 info = self._pending.pop(id(frame), None)
                 if info is not None and info[0] is code:
-                    self._finish(info, OUTCOME_RETURN, retval)
+                    self._finish(info, OUTCOME_RETURN, retval,
+                                 self._take_warnings(frame, code) if self._warned else None)
         except Exception:
             pass
         return None     # never DISABLE: armed only on codes we record
@@ -652,7 +658,8 @@ class MonitoringBackend(FrameBackend):
                     frame = _frame_of(code)
                 info = self._pending.pop(id(frame), None)
                 if info is not None and info[0] is code:
-                    self._finish(info, OUTCOME_RAISE, raised_label(exc))
+                    self._finish(info, OUTCOME_RAISE, raised_label(exc),
+                                 self._take_warnings(frame, code) if self._warned else None)
         except Exception:
             pass
         return None     # PY_UNWIND cannot be disabled

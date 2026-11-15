@@ -1,0 +1,32 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "kind": "warning_switches",
+  "version": "2026-11-15",
+  "about": "Environment switches that make an OLD library version announce what the target version breaks. Set them for the baseline capture so its recorded warnings predict the breaks.",
+  "entries": [
+    {
+      "id": "sqlalchemy-warn-20",
+      "package": "sqlalchemy",
+      "old": ">=1.4,<2.0",
+      "new": ">=2.0",
+      "env": {"SQLALCHEMY_WARN_20": "1"},
+      "warning_filter": "always::DeprecationWarning",
+      "effect": "SQLAlchemy 1.4 emits RemovedIn20Warning for every 1.x-style usage that 2.0 removes.",
+      "doc_link": "https://docs.sqlalchemy.org/en/14/changelog/migration_20.html",
+      "source": "SQLAlchemy 1.4 'Migrating to SQLAlchemy 2.0', step two",
+      "date": "2026-11-15"
+    },
+    {
+      "id": "numpy-promotion-weak-and-warn",
+      "package": "numpy",
+      "old": ">=1.24,<2.0",
+      "new": ">=2.0",
+      "env": {"NPY_PROMOTION_STATE": "weak_and_warn"},
+      "warning_filter": null,
+      "effect": "NumPy 1.24-1.26 warns wherever NEP 50 (the 2.0 promotion rules) would change a result dtype.",
+      "doc_link": "https://numpy.org/neps/nep-0050-scalar-promotion.html",
+      "source": "NEP 50 and the NumPy 2.0 migration guide",
+      "date": "2026-11-15"
+    }
+  ]
+}

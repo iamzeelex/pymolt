@@ -35,15 +35,20 @@ import types
 
 from ._backend import (
     _GENERATOR_TYPES,
+    _WARN_DEPTH,
     AppMatcher,
     SetProfileBackend,
     _get_ident,
     _now,
     _split,
+    install_warning_capture,
     privacy_normalizer,
+    remove_warning_capture,
     sink_admit_accepts_key,
     sink_call_fields,
     sink_tally,
+    warned_add,
+    warned_take,
 )
 from ._identity import (
     SYMQ_FALLBACK,
@@ -61,6 +66,16 @@ from ._normalize import typename
 _WRAP_MARK = "__pymolt_wrapped__"
 _FUNCTION = types.FunctionType
 _MODULE = types.ModuleType
+# The code objects of the two wrapper ``def``s (every wrapper made from one ``def`` shares
+# its code): a frame running one is a wrapped call in flight (warning attribution).
+_WRAPPER_CODES = []
+
+
+def _note_wrapper_code(code):
+    for known in _WRAPPER_CODES:
+        if known is code:
+            return
+    _WRAPPER_CODES.append(code)
 
 
 def _alias_index():
@@ -107,7 +122,9 @@ class WrapBackend(object):
         call_fields = sink_call_fields(sink)          # today's sinks keep today's call
         self._dur_kw = "dur" in call_fields
         self._tid_kw = "tid" in call_fields
+        self._warn_kw = "warnings" in call_fields
         self._tally = sink_tally(sink)
+        self._warned = {}   # id(wrapper frame) -> (code, {(category, message): count})
         self._admit_key = sink_admit_accepts_key(sink)
         self._normalize = privacy_normalizer()
         self.patch_aliases = patch_aliases
@@ -148,8 +165,10 @@ class WrapBackend(object):
                 self._wrap_module(modname, mod)        # already imported -> patch now
         self._finder = _WrapFinder(self, set(self._by_module))
         sys.meta_path.insert(0, self._finder)          # patch the rest on import
+        install_warning_capture(self)
 
     def stop(self):
+        remove_warning_capture(self)
         if self._finder is not None:
             try:
                 sys.meta_path.remove(self._finder)
@@ -162,6 +181,44 @@ class WrapBackend(object):
             except Exception:
                 pass
         self._restore = []
+        self._warned.clear()
+
+    # ── runtime warnings ───────────────────────────────────────────────────────
+    def _warning_frame(self, frame):
+        """``(depth, wrapper frame)`` of the innermost boundary call this backend has in
+        flight above ``frame`` (the ``warn()`` caller), or None. A wrapper whose caller is
+        not our code is dependency-internal traffic (never recorded): the walk goes on to
+        an outer wrapper. It stops at our own code (see ``FrameBackend._warning_frame``)."""
+        codes = _WRAPPER_CODES
+        if not codes:
+            return None
+        near = self.near
+        depth = 0
+        while frame is not None and depth < _WARN_DEPTH:
+            code = frame.f_code
+            if any(code is c for c in codes):
+                if frame.f_locals.get("backend") is self:
+                    caller = frame.f_back
+                    if near is None or (caller is not None and near.matches(
+                            caller.f_globals.get("__name__", "") or "", caller)):
+                        return depth, frame
+            elif near is not None and near.matches(
+                    frame.f_globals.get("__name__", "") or "", frame):
+                return None
+            frame = frame.f_back
+            depth += 1
+        return None
+
+    def _add_warning(self, frame, key):
+        warned_add(self._warned, frame, key)
+
+    def _take_warnings(self):
+        """The warnings attributed to the calling wrapper's call (its frame is the caller)."""
+        try:
+            frame = sys._getframe(1)
+            return warned_take(self._warned, frame, frame.f_code)
+        except Exception:
+            return None
 
     # ── wrapping ───────────────────────────────────────────────────────────────
     @staticmethod
@@ -224,11 +281,14 @@ class WrapBackend(object):
             try:
                 result = inner(*a, **kw)
             except BaseException as exc:
-                backend._safe_record(qualname, inner, a, kw, None, exc, ident, _now() - t0)
+                backend._safe_record(qualname, inner, a, kw, None, exc, ident, _now() - t0,
+                                     backend._take_warnings() if backend._warned else None)
                 raise
-            backend._safe_record(qualname, inner, a, kw, result, None, ident, _now() - t0)
+            backend._safe_record(qualname, inner, a, kw, result, None, ident, _now() - t0,
+                                 backend._take_warnings() if backend._warned else None)
             return result
 
+        _note_wrapper_code(wrapper.__code__)
         setattr(wrapper, _WRAP_MARK, True)
         wrapper.__wrapped__ = inner
         new = rebind(wrapper) if rebind is not None else wrapper
@@ -297,12 +357,15 @@ class WrapBackend(object):
                 real_init(self_obj, *a, **kw)
             except BaseException as exc:
                 backend._safe_record(qualname, real_init, bound_args, kw, None, exc, ident,
-                                     _now() - t0)
+                                     _now() - t0,
+                                     backend._take_warnings() if backend._warned else None)
                 raise
             # construction "result" is the instance -> shape becomes opaque:<Class>
             backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None, ident,
-                                 _now() - t0)
+                                 _now() - t0,
+                                 backend._take_warnings() if backend._warned else None)
 
+        _note_wrapper_code(init_wrapper.__code__)
         setattr(init_wrapper, _WRAP_MARK, True)
         init_wrapper.__wrapped__ = real_init
         try:
@@ -317,10 +380,10 @@ class WrapBackend(object):
 
     # ── recording ──────────────────────────────────────────────────────────────
     def _safe_record(self, qualname, real, args, kwargs, result, exc,
-                     ident=(None, None, None, None), dur=None):
+                     ident=(None, None, None, None), dur=None, warns=None):
         """Tracing must never alter the wrapped API's return/raise behavior."""
         try:
-            self._record(qualname, real, args, kwargs, result, exc, ident, dur)
+            self._record(qualname, real, args, kwargs, result, exc, ident, dur, warns)
         except Exception:
             note = getattr(self.sink, "note_failure", None)
             if note is not None:
@@ -330,7 +393,7 @@ class WrapBackend(object):
                     pass
 
     def _record(self, qualname, real, args, kwargs, result, exc,
-                ident=(None, None, None, None), dur=None):
+                ident=(None, None, None, None), dur=None, warns=None):
         # caller frame: 0=_record, 1=_safe_record, 2=wrapper, 3=the code that
         # made the call (our boundary near side)
         try:
@@ -362,7 +425,7 @@ class WrapBackend(object):
         if not sampled:
             if self._tally is not None:
                 self._tally(qualname, sym, site, "raise" if exc is not None else "return",
-                            raised=raised, dur=dur)
+                            raised=raised, dur=dur, warnings=warns or None)
             return
         inputs = self._inputs(real, args, kwargs)
         extra = {"admitted": True} if admit is not None else {}
@@ -377,6 +440,8 @@ class WrapBackend(object):
             extra["dur"] = dur
         if self._tid_kw:
             extra["tid"] = _get_ident()
+        if warns and self._warn_kw:
+            extra["warnings"] = warns
         if exc is not None:
             self.sink.on_raise(qualname, inputs, raised, site, **extra)
         else:

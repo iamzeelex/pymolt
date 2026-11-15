@@ -17,15 +17,25 @@
  "symbols": 55,
  "units": 47,
  "timing": {
-  "contact_map_s": 2.21,
-  "probe_old_wall_s": 0.169,
-  "probe_old_in_process_s": 0.098,
-  "use_calls_old_wall_s": 0.073,
-  "probe_new_wall_s": 0.116,
-  "probe_new_in_process_s": 0.044,
-  "use_calls_new_wall_s": 0.072,
-  "diff_s": 0.002,
-  "local_total_excl_env_build_s": 0.36
+  "contact_map_s": 1.9,
+  "baseline_run_old_s": 0.074,
+  "engine": {
+   "env_resolve_s": 0.036,
+   "env_build_s": 0,
+   "symbols": 55,
+   "probe_s": 0.22,
+   "probe_old_s": 0.219,
+   "probe_old_cached": false,
+   "probe_new_s": 0.165,
+   "probe_new_cached": false,
+   "second_pass_s": 0.098,
+   "second_pass_paths": 10,
+   "diff_s": 0.002,
+   "fetch_s": 0.0,
+   "total_s": 0.387
+  },
+  "engine_wall_s": 0.388,
+  "local_total_excl_env_build_s": 0.39
  },
  "axiom_meta": {
   "flask": {
@@ -43,87 +53,6 @@
  },
  "score": {
   "local": {
-   "api": {
-    "tp": 8,
-    "fp": 0,
-    "fn": 1,
-    "precision": 1.0,
-    "recall": 0.8888888888888888,
-    "per_category": {
-     "REMOVED": {
-      "tp": [
-       "flask.Markup",
-       "flask.json.JSONEncoder"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "SIGNATURE": {
-      "tp": [
-       "flask.abort",
-       "flask.request.headers.get",
-       "flask.views.MethodView.dispatch_request"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "BASES": {
-      "tp": [
-       "flask.Blueprint",
-       "flask.Flask"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "DEPRECATED": {
-      "tp": [
-       "flask.__version__"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "BEHAVIOR": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.request.json"
-      ]
-     }
-    }
-   },
-   "use": {
-    "tp": 3,
-    "fp": 0,
-    "fn": 1,
-    "precision": 1.0,
-    "recall": 0.75,
-    "per_category": {
-     "REMOVED": {
-      "tp": [
-       "flask.Markup",
-       "flask.json.JSONEncoder"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "DEPRECATED": {
-      "tp": [
-       "flask.__version__"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "BEHAVIOR": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.request.json"
-      ]
-     }
-    }
-   }
-  },
-  "local_any_static_warn": {
    "api": {
     "tp": 8,
     "fp": 0,
@@ -311,9 +240,9 @@
     "markupsafe.Markup"
    ],
    "local": [
-    null,
-    null,
-    false
+    "markupsafe.Markup",
+    "same object (MOVED)",
+    true
    ],
    "axiom": [
     null,
@@ -341,7 +270,699 @@
    ]
   }
  },
- "intermediates": [],
+ "delta_reports": [
+  {
+   "schema": "pymolt.delta/1",
+   "package": "flask",
+   "from": "2.0.3",
+   "to": "3.0.0",
+   "old_python": "3.9.23",
+   "new_python": "3.12.11",
+   "quality": "complete",
+   "facts": [
+    {
+     "symbol": "flask.json.JSONEncoder",
+     "aliases": [],
+     "kind": "REMOVED",
+     "param": null,
+     "old": "flask.json.JSONEncoder",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "absent in new: AttributeError: module 'flask.json' has no attribute 'JSONEncoder'"
+     ]
+    },
+    {
+     "symbol": "flask.Markup",
+     "aliases": [],
+     "kind": "MOVED",
+     "param": null,
+     "old": "markupsafe.Markup",
+     "new": "markupsafe.Markup",
+     "deprecated_in_old": false,
+     "successor": "markupsafe.Markup",
+     "evidence": [
+      "existence",
+      "same object reachable as markupsafe.Markup"
+     ]
+    },
+    {
+     "symbol": "flask.abort",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "status",
+     "old": "status",
+     "new": "code",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature",
+      "rebound: werkzeug.exceptions.abort -> flask.helpers.abort"
+     ]
+    },
+    {
+     "symbol": "flask.app.Flask",
+     "aliases": [
+      "flask.Flask"
+     ],
+     "kind": "SIGNATURE",
+     "param": null,
+     "old": "flask.scaffold.Scaffold",
+     "new": "flask.sansio.app.App",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "bases",
+      "bases ['Scaffold'] -> ['App']"
+     ]
+    },
+    {
+     "symbol": "flask.blueprints.Blueprint",
+     "aliases": [
+      "flask.Blueprint"
+     ],
+     "kind": "SIGNATURE",
+     "param": null,
+     "old": "flask.scaffold.Scaffold",
+     "new": "flask.sansio.blueprints.Blueprint",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "bases",
+      "bases ['Scaffold'] -> ['Blueprint']"
+     ]
+    },
+    {
+     "symbol": "flask.views.MethodView.dispatch_request",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "args",
+     "old": "VAR_POSITIONAL",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.__version__",
+     "aliases": [],
+     "kind": "DEPRECATED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "deprecated-in-new:access-warning: DeprecationWarning: The '__version__' attribute is deprecated and will be removed in Flask 3.1. Use feature detection or 'importlib.metadata.version(\"flask\")' instead.",
+      "deprecated-in-new:getattr: The '__version__' attribute is deprecated and will be removed in Flask 3.1. Use feature detection or 'importlib.metadata.version(\"flask\")' instead."
+     ]
+    },
+    {
+     "symbol": "flask.app.Flask.app_context",
+     "aliases": [
+      "flask.Flask.app_context"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.app.Flask.register_blueprint",
+     "aliases": [
+      "flask.Flask.register_blueprint"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.app.Flask.url_map",
+     "aliases": [
+      "flask.current_app.url_map"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.app.Flask.view_functions",
+     "aliases": [
+      "flask.current_app.view_functions"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.blueprints.Blueprint.add_url_rule",
+     "aliases": [
+      "flask.Blueprint.add_url_rule"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.cli.with_appcontext",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.current_app",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.helpers.url_for",
+     "aliases": [
+      "flask.url_for"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.json.jsonify",
+     "aliases": [
+      "flask.jsonify"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.request",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.scaffold.Scaffold.route",
+     "aliases": [
+      "flask.Flask.route"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.templating.render_template",
+     "aliases": [
+      "flask.render_template"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.testing.FlaskClient",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.views.MethodView",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.views.View",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.wrappers.Request.endpoint",
+     "aliases": [
+      "flask.request.endpoint"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.wrappers.Request.headers",
+     "aliases": [
+      "flask.request.headers"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.wrappers.Request.method",
+     "aliases": [
+      "flask.request.method"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.wrappers.Request.url_rule",
+     "aliases": [
+      "flask.request.url_rule"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.wrappers.Request.view_args",
+     "aliases": [
+      "flask.request.view_args"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "flask.wrappers.Response",
+     "aliases": [
+      "flask.Response"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    }
+   ],
+   "notes": [
+    "old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-old/bin/python)",
+    "new: configured target environment (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-new)"
+   ]
+  },
+  {
+   "schema": "pymolt.delta/1",
+   "package": "werkzeug",
+   "from": "2.0.0",
+   "to": "3.0.0",
+   "old_python": "3.9.23",
+   "new_python": "3.12.11",
+   "quality": "complete",
+   "facts": [
+    {
+     "symbol": "werkzeug.datastructures.Headers.get",
+     "aliases": [
+      "flask.request.headers.get"
+     ],
+     "kind": "SIGNATURE",
+     "param": "as_bytes",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.datastructures.MultiDict.__getitem__",
+     "aliases": [
+      "flask.request.form.__getitem__"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.datastructures.TypeConversionDict.get",
+     "aliases": [
+      "flask.request.args.get",
+      "flask.request.form.get"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.middleware.dispatcher.DispatcherMiddleware",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.routing.Map.iter_rules",
+     "aliases": [
+      "flask.current_app.url_map.iter_rules"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.routing.Rule.__str__",
+     "aliases": [
+      "flask.request.url_rule.__str__"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.sansio.request.Request.args",
+     "aliases": [
+      "flask.request.args"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.sansio.request.Request.authorization",
+     "aliases": [
+      "flask.request.authorization"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.sansio.request.Request.host",
+     "aliases": [
+      "flask.request.host"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.sansio.request.Request.is_json",
+     "aliases": [
+      "flask.request.is_json"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.sansio.request.Request.is_secure",
+     "aliases": [
+      "flask.request.is_secure"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.serving.run_simple",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.utils.redirect",
+     "aliases": [
+      "flask.redirect"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.wrappers.request.Request.form",
+     "aliases": [
+      "flask.request.form"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "werkzeug.wrappers.request.Request.json",
+     "aliases": [
+      "flask.request.json"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    }
+   ],
+   "notes": [
+    "old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-old/bin/python)",
+    "new: configured target environment (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-new)"
+   ]
+  }
+ ],
  "per_unit": {
   "flask.Blueprint": {
    "ground_truth": {
@@ -367,12 +988,29 @@
    "local": {
     "categories": {
      "BASES": [
-      "bases ['Scaffold'] -> ['Blueprint']"
+      "SIGNATURE flask.blueprints.Blueprint"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "flask.blueprints.Blueprint",
+      "aliases": [
+       "flask.Blueprint"
+      ],
+      "kind": "SIGNATURE",
+      "param": null,
+      "old": "flask.scaffold.Scaffold",
+      "new": "flask.sansio.blueprints.Blueprint",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "bases",
+       "bases ['Scaffold'] -> ['Blueprint']"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {
@@ -412,7 +1050,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {
@@ -454,12 +1092,29 @@
    "local": {
     "categories": {
      "BASES": [
-      "bases ['Scaffold'] -> ['App']"
+      "SIGNATURE flask.app.Flask"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "flask.app.Flask",
+      "aliases": [
+       "flask.Flask"
+      ],
+      "kind": "SIGNATURE",
+      "param": null,
+      "old": "flask.scaffold.Scaffold",
+      "new": "flask.sansio.app.App",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "bases",
+       "bases ['Scaffold'] -> ['App']"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {},
@@ -495,7 +1150,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": "AppContext"
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -528,7 +1183,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {
@@ -567,7 +1222,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {
@@ -609,12 +1264,27 @@
    "local": {
     "categories": {
      "REMOVED": [
-      "absent in new"
+      "MOVED flask.Markup"
      ]
     },
-    "hint": null,
-    "hint_source": null,
-    "forwards_to_old": null
+    "hint": "markupsafe.Markup",
+    "hint_source": "same object (MOVED)",
+    "facts": [
+     {
+      "symbol": "flask.Markup",
+      "aliases": [],
+      "kind": "MOVED",
+      "param": null,
+      "old": "markupsafe.Markup",
+      "new": "markupsafe.Markup",
+      "deprecated_in_old": false,
+      "successor": "markupsafe.Markup",
+      "evidence": [
+       "existence",
+       "same object reachable as markupsafe.Markup"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {},
@@ -647,7 +1317,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -684,12 +1354,27 @@
    "local": {
     "categories": {
      "DEPRECATED": [
-      "The '__version__' attribute is deprecated and will be removed in Flask 3.1. Use feature detection or 'importlib.metadata.version(\"flask\")' instead."
+      "DEPRECATED flask.__version__"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "flask.__version__",
+      "aliases": [],
+      "kind": "DEPRECATED",
+      "param": null,
+      "old": null,
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "deprecated-in-new:access-warning: DeprecationWarning: The '__version__' attribute is deprecated and will be removed in Flask 3.1. Use feature detection or 'importlib.metadata.version(\"flask\")' instead.",
+       "deprecated-in-new:getattr: The '__version__' attribute is deprecated and will be removed in Flask 3.1. Use feature detection or 'importlib.metadata.version(\"flask\")' instead."
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {
@@ -745,12 +1430,27 @@
    "local": {
     "categories": {
      "SIGNATURE": [
-      "param code added as required"
+      "SIGNATURE flask.abort status: status -> code"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "flask.abort",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "status",
+      "old": "status",
+      "new": "code",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature",
+       "rebound: werkzeug.exceptions.abort -> flask.helpers.abort"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {},
@@ -783,7 +1483,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -805,7 +1505,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -832,7 +1532,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {
@@ -872,7 +1572,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -906,7 +1606,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {
@@ -948,12 +1648,27 @@
    "local": {
     "categories": {
      "REMOVED": [
-      "absent in new"
+      "REMOVED flask.json.JSONEncoder"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "flask.json.JSONEncoder",
+      "aliases": [],
+      "kind": "REMOVED",
+      "param": null,
+      "old": "flask.json.JSONEncoder",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "existence",
+       "absent in new: AttributeError: module 'flask.json' has no attribute 'JSONEncoder'"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {
@@ -996,7 +1711,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1021,7 +1736,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1054,7 +1769,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1087,7 +1802,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1120,7 +1835,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1142,7 +1857,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1196,7 +1911,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1230,7 +1945,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1263,7 +1978,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1296,7 +2011,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1330,7 +2045,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1367,7 +2082,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1400,7 +2115,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1422,7 +2137,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1458,12 +2173,28 @@
    "local": {
     "categories": {
      "SIGNATURE": [
-      "param as_bytes removed"
+      "SIGNATURE werkzeug.datastructures.Headers.get as_bytes: POSITIONAL_OR_KEYWORD -> None"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "werkzeug.datastructures.Headers.get",
+      "aliases": [
+       "flask.request.headers.get"
+      ],
+      "kind": "SIGNATURE",
+      "param": "as_bytes",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {},
@@ -1496,7 +2227,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1529,7 +2260,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1562,7 +2293,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1609,7 +2340,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1643,7 +2374,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1666,7 +2397,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1699,7 +2430,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1732,7 +2463,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1765,7 +2496,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1798,7 +2529,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1831,7 +2562,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1857,12 +2588,26 @@
    "local": {
     "categories": {
      "SIGNATURE": [
-      "*args removed"
+      "SIGNATURE flask.views.MethodView.dispatch_request args: VAR_POSITIONAL -> None"
      ]
     },
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": [
+     {
+      "symbol": "flask.views.MethodView.dispatch_request",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "args",
+      "old": "VAR_POSITIONAL",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
    },
    "axiom": {
     "categories": {
@@ -1901,7 +2646,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1934,7 +2679,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -1967,7 +2712,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},
@@ -2000,7 +2745,7 @@
     "categories": {},
     "hint": null,
     "hint_source": null,
-    "forwards_to_old": null
+    "facts": []
    },
    "axiom": {
     "categories": {},

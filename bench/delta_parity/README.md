@@ -9,7 +9,7 @@ pairs and writes the evidence to `results/`. The latest numbers are in [RESULTS.
 
 | side | what it is |
 |---|---|
-| **local** | `probe.py` runs inside the old and the new interpreter and reports, per touched symbol: existence, owner, signature, bases, `warnings.warn` prose (own body, or the PEP 562 `__getattr__` branch that serves the name), warnings raised on access, and the forwarding target. Old vs new are then diffed. It adds the warnings the baseline run emits (`calls_*.py` in the **old** env only), which is what tier 1's baseline capture records. For symbols that are removed with no local successor hint, an **intermediate fetch** scans PyPI releases between old and new, newest first. It range-requests one module file per wheel (versions only cross the wire) and mines its deprecation prose. |
+| **local** | the shipped engine, `pymolt.delta` (`run.py` calls `compute_deltas`; it no longer uses the prototype's own predictor). Its probe runs inside the old and the new interpreter and reports, per touched symbol: existence, owner, signature, bases, `warnings.warn` prose (own body, or the PEP 562 `__getattr__` branch that serves the name), warnings raised on access, and the forwarding target. Old vs new are then diffed. It adds the warnings the baseline run emits (`calls_*.py` in the **old** env only), which is what tier 1's baseline capture records. For symbols that are removed with no local successor hint, an **intermediate fetch** scans PyPI releases between old and new, newest first. It range-requests one module file per wheel (versions only cross the wire) and mines its deprecation prose. |
 | **axiom** | the cached Axiom Graph checkpoints on this machine (`~/Library/Caches/axiom_graph/checkpoints/<pkg>__<from>__<to>.jsonl`, override with `AXIOM_CHECKPOINTS`). Changes and transitions are matched to the same symbols through every spelling: public path, defining owner, receiver class path (how griffe lists inherited members), `defined_as`, `X.__init__`, and, to be generous, the callee a method forwards to. |
 | **ground truth** | introspection in both envs, **plus use**: `calls_<pair>.py` exercises each symbol the way the project does (flasgger's argument shapes, the toy app's calls) in both envs. A removal counts only if use also breaks. A behaviour change is any use whose outcome differs. |
 
@@ -26,6 +26,10 @@ Pairs:
 - `pandas`: the e2e toy app's 14 baseline symbols, pandas 1.5.3 (py3.11) → 2.2.3 (py3.12),
   reusing `bench/e2e_pandas/.envs`. The only Axiom checkpoint is 1.3.5 → 2.0.0; its
   1.5.3 → 2.0.0 step is used (a window mismatch, see RESULTS.md).
+
+## Engine
+
+`run.py` runs the shipped `pymolt.delta` engine on a scratch project whose baseline capture carries the symbols and warnings. The recall and precision in RESULTS.md were reproduced with it (pooled recall 0.95, precision 1.00; flask 0.89 / 1.00, pandas 1.00 / 1.00).
 
 ## Run
 
