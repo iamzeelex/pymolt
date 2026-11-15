@@ -190,15 +190,10 @@ def _select_target_python_interactive(
 # evidence the rest of the funnel exists to produce.
 app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
-config_app = typer.Typer(
-    help="Manage pymolt configuration and local offline delta cache."
+axiom_app = typer.Typer(
+    help="Axiom, the service pymolt gets codemods from: login, endpoint, local cache."
 )
-app.add_typer(config_app, name="config", rich_help_panel="Tools & account")
-
-auth_app = typer.Typer(
-    help="Manage Axiom Cloud Hub authentication and API tokens."
-)
-app.add_typer(auth_app, name="auth", rich_help_panel="Tools & account")
+app.add_typer(axiom_app, name="axiom", rich_help_panel="Tools & account")
 
 
 _STATE_MARK = {
@@ -2040,8 +2035,8 @@ def mcp(
 @app.command(rich_help_panel="Experimental Features")
 def succession(
     project_dir: str = typer.Argument(".", help="The project directory to migrate"),
-    axiom_url: str = typer.Option(
-        "http://localhost:8000", "--axiom-url", help="Axiom Graph service base URL"
+    endpoint: str | None = typer.Option(
+        None, "--endpoint", help="Axiom endpoint URL (default: `pymolt axiom endpoint`)"
     ),
     save_plan: bool = typer.Option(
         False, "--plan", help="Save the in-place shims as the migration plan for `pymolt apply`"
@@ -2056,6 +2051,7 @@ def succession(
     as the migration plan, which `pymolt apply` applies. TRANSPLANT paths (e.g. keras →
     torch) are shown as steps to follow, never applied. Writes no source.
     """
+    from pymolt.config import load_endpoint
     from pymolt.strategic.succession.client import SuccessionError
     from pymolt.strategic.succession.detect import detect_frameworks
     from pymolt.strategic.succession.service import run_succession
@@ -2084,13 +2080,13 @@ def succession(
     try:
         with err.status("Querying Axiom Graph for succession…", spinner="dots") as status:
             edges, result = run_succession(
-                project_dir, base_url=axiom_url,
+                project_dir, base_url=load_endpoint(endpoint),
                 progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
             )
     except SuccessionError as exc:
         fail(
             f"Axiom Graph unavailable: {exc}",
-            hint="Is the service running?  docker compose up --build",
+            hint="Check `pymolt axiom status`; set another endpoint with --endpoint.",
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
@@ -2206,141 +2202,103 @@ def _render_transplant_plan(plan) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Config Commands (`pymolt config ...`)
+# Axiom commands (`pymolt axiom ...`)
 # ---------------------------------------------------------------------------
 
-@config_app.command("show")
-def config_show_cmd(
-    json_output: bool = typer.Option(False, "--json", help="Emit config status as JSON"),
+@axiom_app.command("status")
+def axiom_status_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Emit the status as JSON"),
 ):
-    """Display active Axiom Cloud Hub configuration and local cache metrics."""
+    """Show the endpoint and whether it answers, the login, and the local cache."""
+    from pymolt.codemods.client import AxiomGraphClient
     from pymolt.config import config_show
 
     info = config_show()
+    info["online"] = AxiomGraphClient(base_url=info["endpoint"]).health()
     if json_output:
         import json
-        print(json.dumps(info, indent=2))
+        typer.echo(json.dumps(info, indent=2))
         return
 
-    console.print("\n[bold cyan]⚙  PyMolt Configuration & Cache[/bold cyan]")
-    endpoint_badge = "[dim](default)[/dim]" if info["is_default_endpoint"] else "[yellow](custom on-prem/vpc)[/yellow]"
-    console.print(f"  • [bold]Axiom Cloud Hub Endpoint:[/bold] [cyan]{info['endpoint']}[/cyan] {endpoint_badge}")
-    auth_badge = "[green](configured)[/green]" if info["token_configured"] else "[dim](anonymous / community)[/dim]"
-    console.print(f"  • [bold]Authentication Token:[/bold] {info['token_preview']} {auth_badge}")
-    console.print(f"  • [bold]Config File:[/bold] [dim]{info['config_file']}[/dim]")
-
+    online = "[green]online[/green]" if info["online"] else "[yellow]unreachable[/yellow]"
+    default = " (default)" if info["is_default_endpoint"] else ""
+    login_state = (f"logged in ({info['token_preview']})" if info["token_configured"]
+                   else "not logged in")
     c = info["cache"]
-    size_kb = round(c["total_size_bytes"] / 1024, 1)
-    console.print(f"  • [bold]Local Delta Cache:[/bold] {c['packages']} packages, {c['total_files']} files ({size_kb} KB)")
-    console.print(f"    [dim]{c['path']}[/dim]\n")
+    console.print(f"Endpoint  [cyan]{info['endpoint']}[/cyan]{default} — {online}")
+    console.print(f"Login     {login_state}")
+    console.print(f"Cache     {c['packages']} package(s), {c['total_files']} file(s), "
+                  f"{round(c['total_size_bytes'] / 1024, 1)} KB  [dim]{c['path']}[/dim]")
+    console.print(f"Config    [dim]{info['config_file']}[/dim]")
 
 
-@config_app.command("set-endpoint")
-def config_set_endpoint_cmd(
-    url: str = typer.Argument(
-        ..., help="Custom Axiom Cloud Hub or on-prem endpoint URL (e.g. https://hub.internal.corp or http://localhost:8000)"
+@axiom_app.command("endpoint")
+def axiom_endpoint_cmd(
+    url: str | None = typer.Argument(
+        None, help="Endpoint URL, e.g. https://hub.internal.corp or http://localhost:8000"
     ),
+    reset: bool = typer.Option(False, "--reset", help="Go back to the default public endpoint"),
 ):
-    """Set custom Axiom Cloud Hub / On-Premise Docker endpoint URL."""
-    from pymolt.config import save_endpoint
+    """Show or set the Axiom endpoint. Saved in the user config."""
+    from pymolt.config import DEFAULT_ENDPOINT, clear_endpoint, load_endpoint, save_endpoint
 
+    if url and reset:
+        fail("give a URL or --reset, not both")
+    if reset:
+        clear_endpoint()
+        console.print(f"Endpoint reset to the default: [cyan]{DEFAULT_ENDPOINT}[/cyan]")
+        return
+    if not url:
+        console.print(load_endpoint())
+        return
     clean_url = url.strip().rstrip("/")
     if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-        fail("Invalid endpoint URL format.", hint="URL must start with http:// or https://")
+        fail("invalid endpoint URL", hint="It must start with http:// or https://.")
     path = save_endpoint(clean_url)
-    console.print(f"[green]✓ Set[/green] Axiom endpoint to [cyan]{clean_url}[/cyan] (saved to [dim]{path}[/dim])")
+    console.print(f"Endpoint set to [cyan]{clean_url}[/cyan] [dim](saved to {path})[/dim]")
 
 
-@config_app.command("reset-endpoint")
-def config_reset_endpoint_cmd():
-    """Reset Axiom Cloud Hub endpoint to the default public service."""
-    from pymolt.config import DEFAULT_ENDPOINT, clear_endpoint
-
-    clear_endpoint()
-    console.print(f"[green]✓ Reset[/green] Axiom endpoint to default public Hub: [cyan]{DEFAULT_ENDPOINT}[/cyan]")
-
-
-@config_app.command("clear-cache")
-def config_clear_cache_cmd():
-    """Purge all locally cached delta bundles."""
+@axiom_app.command("clear-cache")
+def axiom_clear_cache_cmd():
+    """Delete the locally cached Axiom data."""
     from pymolt.config import clear_delta_cache
 
     count = clear_delta_cache()
-    console.print(f"[green]✓ Cleared[/green] local delta cache ({count} package cache folder(s) removed).")
+    console.print(f"Cleared the local cache ({count} package folder(s) removed).")
 
 
-# ---------------------------------------------------------------------------
-# Auth Commands (`pymolt auth ...` and top-level `login`/`logout`)
-# ---------------------------------------------------------------------------
-
-@auth_app.command("login")
-@app.command(rich_help_panel="Tools & account")
-def login(
+@axiom_app.command("login")
+def axiom_login_cmd(
     token: str | None = typer.Option(
-        None, "--token", help="API token (pmk_…); omit to open browser verification link"),
+        None, "--token", help="API token (pmk_…); omit to get a link that issues one"),
 ):
-    """Authenticate PyMolt CLI with Axiom Cloud Hub.
-
-    Generates a secure, anti-bot verification link to authorize this CLI
-    device session and persists the API token to your user config (0600).
-    """
+    """Log in to Axiom. Saves the token in the user config (mode 0600)."""
     import secrets
 
     from pymolt.config import load_endpoint, save_token
 
     endpoint = load_endpoint()
-    session_id = f"pm_sess_{secrets.token_hex(8)}"
-    auth_url = f"{endpoint}/cli/auth?session={session_id}"
-
-    if not token:
-        console.print("\n[bold cyan]🔐 Axiom Cloud Hub CLI Authorization[/bold cyan]")
-        console.print("To authenticate and verify against automated bot access, visit:")
-        console.print(f"  [bold underline yellow]{auth_url}[/bold underline yellow]\n")
-
-        tok = typer.prompt("Paste your API token (pmk_…)", hide_input=True).strip()
-    else:
+    auth_url = f"{endpoint}/cli/auth?session=pm_sess_{secrets.token_hex(8)}"
+    if token:
         tok = token.strip()
-
-    if not tok:
-        fail("no token provided.", hint=f"Obtain an API token at {auth_url}")
-
-    path = save_token(tok)
-    console.print(f"[green]✓ Successfully authenticated![/green] Token saved to [cyan]{path}[/cyan]\n")
-
-
-@auth_app.command("status")
-def auth_status_cmd():
-    """Check authentication and connection status to Axiom Cloud Hub."""
-    from pymolt.codemods.client import AxiomGraphClient
-    from pymolt.config import load_endpoint, load_token
-
-    tok = load_token()
-    endpoint = load_endpoint()
-    client = AxiomGraphClient(base_url=endpoint)
-    is_healthy = client.health()
-
-    console.print("\n[bold cyan]🔐 Axiom Cloud Hub Status[/bold cyan]")
-    status_badge = "[green]● Online[/green]" if is_healthy else "[yellow]○ Unreachable[/yellow]"
-    console.print(f"  • Endpoint: [cyan]{endpoint}[/cyan] {status_badge}")
-    if tok:
-        masked = f"{tok[:6]}...{tok[-4:]}" if len(tok) > 10 else "Set"
-        console.print(f"  • Authentication: [green]Logged in[/green] ({masked})")
     else:
-        console.print("  • Authentication: [dim]Anonymous / Community mode[/dim]")
-    console.print()
+        console.print(f"Get a token at:\n  [bold]{auth_url}[/bold]\n")
+        tok = typer.prompt("Paste your API token (pmk_…)", hide_input=True).strip()
+    if not tok:
+        fail("no token provided", hint=f"Get one at {auth_url}")
+    path = save_token(tok)
+    console.print(f"Logged in. Token saved to [cyan]{path}[/cyan].")
 
 
-@auth_app.command("logout")
-@app.command(rich_help_panel="Tools & account")
-def logout():
-    """Remove stored Axiom Cloud Hub API token."""
+@axiom_app.command("logout")
+def axiom_logout_cmd():
+    """Remove the saved Axiom token."""
     from pymolt.config import clear_token
 
     if clear_token():
-        console.print("[green]✓ Logged out.[/green] Removed stored API token.")
+        console.print("Logged out. The saved token was removed.")
     else:
-        console.print("[dim]No stored API token to remove.[/dim]")
-
+        console.print("[dim]No saved token.[/dim]")
 
 
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
@@ -2468,5 +2426,18 @@ _removed("contract", {
     "diff": "`pymolt verify --baseline OLD --post-migration NEW`",
 })
 _removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})
+_removed("auth", {
+    "login": "`pymolt axiom login`",
+    "status": "`pymolt axiom status`",
+    "logout": "`pymolt axiom logout`",
+})
+_removed("config", {
+    "show": "`pymolt axiom status`",
+    "set-endpoint": "`pymolt axiom endpoint URL`",
+    "reset-endpoint": "`pymolt axiom endpoint --reset`",
+    "clear-cache": "`pymolt axiom clear-cache`",
+})
+_removed("login", "`pymolt axiom login`")
+_removed("logout", "`pymolt axiom logout`")
 _removed("migrate", "`pymolt plan`, then `pymolt apply` (status shows the steps before them)")
 _removed("codemods", "`pymolt plan` to see the changes, then `pymolt apply`")
