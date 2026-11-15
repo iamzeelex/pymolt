@@ -3,6 +3,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -13,6 +14,7 @@ from pymolt.assess.service import (
     baseline_tests_passed,
     classify_baseline_tier,
     compatibility_verdict,
+    failure_evidence,
 )
 from pymolt.assess.service import build_comparison_rows as _build_comparison_rows
 from pymolt.assess.service import resolve_chosen_source as _service_resolve_chosen_source
@@ -628,7 +630,7 @@ def plan(
         f"advisories: [yellow]{payload['advisories']}[/yellow]",
         title="Migration plan", border_style="cyan", expand=False,
     ))
-    _render_recipes(by_pkg, previews, migration_plan.files_scanned)
+    _render_recipes(by_pkg, previews, migration_plan.files_scanned, migration_plan.risks)
     _render_risks(migration_plan.risks)
     _render_or_write_patches(previews, project_path, None)
     console.print(
@@ -679,13 +681,28 @@ def _render_risks(risks) -> None:
                           risk.symbol, why)
         console.print(table)
     if not risks.risks:
-        console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
-                      "exercised.")
+        from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
+
+        unknown, total = inconclusive_deltas(risks)
+        if unknown:
+            console.print(f"\n[yellow]Predicted risks: none rated[/yellow] — "
+                          f"{unknown_api_phrase(unknown, total)} (inconclusive).")
+        else:
+            console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
+                          "exercised.")
+    else:
+        from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
+
+        unknown, total = inconclusive_deltas(risks)
+        if unknown:
+            console.print(f"\n[yellow]Predicted risks[/yellow]: {len(risks.needs_attention)} "
+                          f"need attention, {len(risks.fixed)} fixed by the plan; "
+                          f"{unknown_api_phrase(unknown, total)} (inconclusive).")
     for note in risks.notes:
         console.print(f"[dim]  note: {note}[/dim]")
 
 
-def _render_recipes(by_pkg, previews, files_scanned: int) -> None:
+def _render_recipes(by_pkg, previews, files_scanned: int, risks=None) -> None:
     """What the service returned per package, what needs a person, and whether it matched."""
     from pymolt.codemods.models import CodemodPattern
 
@@ -716,10 +733,15 @@ def _render_recipes(by_pkg, previews, files_scanned: int) -> None:
                     f"  [yellow]{preview.path}:{adv.line}[/yellow] — [{tag}] {adv.reason}"
                 )
     if by_pkg and not any(p.old_source != p.new_source for p in previews):
+        from pymolt.interfaces.views import inconclusive_deltas
+
+        unknown, total = inconclusive_deltas(risks)
+        unknown_tail = (f", but API changes are unknown for {unknown} of {total} package(s)"
+                        if unknown else "")
         console.print(Panel(
             f"[bold]No call sites matched.[/bold]\n"
             f"Scanned {files_scanned} file(s); none of the returned recipes apply to "
-            "this codebase. The plan changes no file.",
+            f"this codebase. The plan changes no file{unknown_tail}.",
             border_style="yellow", padding=(0, 1), expand=False,
         ))
 
@@ -790,13 +812,22 @@ def apply_plan_cmd(
     if json_output:
         typer.echo(json.dumps(receipt.model_dump(mode="json"), indent=2))
         return
-    console.print(Panel(
-        f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]\n"
-        f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
-        f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
-        f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
-        title="Migration applied", border_style="green", expand=False,
-    ))
+    if not receipt.files_changed:
+        console.print(Panel(
+            f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]: "
+            "[bold]it changed no file[/bold] (0 files, 0 rewrite sites).\n"
+            "No call site needed a rewrite; the dependency moves still need testing: "
+            "capture and verify decide.",
+            title="Nothing to change", border_style="yellow", expand=False,
+        ))
+    else:
+        console.print(Panel(
+            f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]\n"
+            f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
+            f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
+            f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
+            title="Migration applied", border_style="green", expand=False,
+        ))
     next_step(project_path)
 
 
@@ -1038,10 +1069,15 @@ def setup(
             )
         except views.AgentInputError as exc:
             fail(exc.error, hint=exc.hint, json_output=True)
-        config = apply_setup(project_path, choices) if choices is not None else None
-        if agent:
-            typer.echo(views.dumps(views.setup_view(options, project_path, config=config)))
+        side_effects: list[str] = []
+        config = (apply_setup(project_path, choices, notes=side_effects)
+                  if choices is not None else None)
+        if agent:  # the agent view carries the side effects as warnings
+            typer.echo(views.dumps(views.setup_view(options, project_path, config=config,
+                                                    side_effects=side_effects)))
         else:
+            for note in side_effects:  # stderr: stdout stays pure JSON
+                warn(note)
             typer.echo(json.dumps(
                 views.setup_payload(options, project_path, config=config), indent=2))
         return
@@ -1088,6 +1124,9 @@ def setup(
         for c in options.containers:
             console.print(f"  Container {c.id} ({c.name}) - Python {c.python}")
         console.print()
+    else:
+        console.print("[bold cyan]Running Docker Containers:[/bold cyan]")
+        console.print("  None mounts this project.\n")
 
     tool_names = [t.name for t in options.tools]
     container_id = container
@@ -1208,10 +1247,13 @@ def setup(
         target_env_created=target_env_created,
         target_env_path=target_env_path,
     )
-    apply_setup(project_path, choices)
+    side_effects: list[str] = []
+    apply_setup(project_path, choices, notes=side_effects)
 
     config_file = project_path / ".pymolt" / "env_config.json"
     console.print(f"\n[bold green]✓ Configuration saved to {config_file}[/bold green]")
+    for note in side_effects:
+        console.print(f"[yellow]{note}[/yellow]")
     console.print(Panel(
         f"Selected Manifest  : {selected_manifest}\n"
         f"Resolution Tool    : {selected_tool}\n"
@@ -1295,7 +1337,7 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
 def _resolve_chosen_source(sources, manifest_name_to_use, project_dir, json_output=False):
     """CLI wrapper: pick the manifest via the shared service, failing cleanly on error."""
     try:
-        return _service_resolve_chosen_source(sources, manifest_name_to_use)
+        return _service_resolve_chosen_source(sources, manifest_name_to_use, project_dir)
     except ValueError as e:
         fail(str(e), hint=f"(searched in '{project_dir}')", json_output=json_output)
 
@@ -1382,6 +1424,7 @@ _STATUS_MARK = {
     "upgrade": ("▲ upgrade", "bold blue"),
     "added": ("✚ added", "cyan"),
     "conflict": ("⚠ conflict", "bold red"),
+    "unresolved": ("? unresolved", "yellow"),
     "removed": ("⚠ removed", "red"),
     "unchanged": ("✔ same", "green"),
 }
@@ -1420,6 +1463,8 @@ def _render_comparison_table(rows, verbose):
 
         if status == "conflict":
             move = f"{b_ver} → [red]conflict[/red]"
+        elif status == "unresolved":
+            move = f"{b_ver} → [yellow]unresolved[/yellow]"
         elif status == "removed":
             move = f"{b_ver} → [red]—[/red]"
         elif status == "unchanged":
@@ -1634,7 +1679,7 @@ def assess(
 
     # Detect all available manifests
     try:
-        sources = detect_sources(project_path)
+        sources = detect_sources(project_path, include_subroots=True)
     except Exception as e:
         fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT, json_output=json_output)
 
@@ -1801,12 +1846,14 @@ def assess(
         result = AssessResult(
             project_dir=str(project_dir),
             source_manifest=chosen_source.path.name,
-            source_fixation=report.source_fixation,
+            source_fixation=chosen_source.fixation.value,
             resolution_quality=report.resolution_quality,
             detected_python=report.detected_python,
             target_python=target_python_to_use,
             target_resolved=target_resolved,
-            target_error=target_error,
+            target_error=None if target_error is None else str(target_error),
+            target_error_detail=failure_evidence(target_error)[0],
+            target_culprits=failure_evidence(target_error)[1],
             baseline_unresolved=baseline_unresolved,
             baseline_tier=baseline_tier.value,
             target_manifest_path=target_manifest_path,
@@ -1862,6 +1909,14 @@ def assess(
                 f"[bold {style}]{title}[/bold {style}]\n{body}",
                 title="Compatibility Report", border_style=style,
             ))
+            culprits = failure_evidence(target_error)[1]
+            if culprits:
+                console.print(f"[bold]Culprit(s):[/bold] {', '.join(culprits)}")
+            if target_error:
+                detail = failure_evidence(target_error)[0]
+                if detail:
+                    console.print(Panel(escape(detail), title="Resolver output (tail)",
+                                        border_style="dim"))
             console.print()
 
         if not verbose:
@@ -2234,7 +2289,11 @@ def succession(
     """
     from pymolt.config import load_endpoint
     from pymolt.strategic.succession.client import SuccessionError
-    from pymolt.strategic.succession.detect import detect_frameworks
+    from pymolt.strategic.succession.detect import (
+        detect_frameworks,
+        knowledge_coverage,
+        plausible_frameworks,
+    )
     from pymolt.strategic.succession.service import run_succession
 
     require_project_dir(project_dir, json_output=json_output)
@@ -2255,8 +2314,15 @@ def succession(
         else:
             err.print("[yellow]No dependency manifest found — nothing to detect.[/yellow]")
         raise typer.Exit(code=0)
+    declared = frameworks
+    frameworks = plausible_frameworks(declared)
+    covered = knowledge_coverage()
     if not json_output:
-        console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+        if frameworks:
+            console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+        else:
+            console.print(f"[bold]No framework among the {len(declared)} declared "
+                          "dependencies[/bold] (all were checked).")
 
     try:
         with err.status("Looking up framework succession…", spinner="dots") as status:
@@ -2285,6 +2351,8 @@ def succession(
         import json as _json
         payload = {
             "frameworks": frameworks,
+            "checked_dependencies": len(declared),
+            "knowledge_covers": covered,
             "edges": [e.model_dump(mode="json") for e in edges],
             "transplant_plans": [
                 build_transplant_plan(e, project_dir).model_dump(mode="json")
@@ -2299,7 +2367,20 @@ def succession(
         return
 
     if not edges:
-        console.print("[yellow]No known succession path for these frameworks.[/yellow]")
+        named = ", ".join(frameworks) if frameworks else None
+        source = ("Axiom Graph" if load_endpoint(endpoint) else "pymolt's succession knowledge")
+        if named:
+            console.print(
+                f"[yellow]{named}: not in {source}, which covers {', '.join(covered)}.[/yellow]\n"
+                "[dim]That is a gap in what pymolt knows, not a finding that no successor "
+                "exists.[/dim]"
+            )
+        else:
+            console.print(
+                f"[yellow]Checked all {len(declared)} declared dependencies: none is a "
+                f"framework {source} has a succession path for (it covers "
+                f"{', '.join(covered)}).[/yellow]"
+            )
         return
 
     for e in edges:

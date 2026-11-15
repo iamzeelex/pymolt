@@ -376,3 +376,18 @@ def test_cli_setup_json_is_the_full_payload(tmp_path):
     assert payload["saved"] is False and payload["config"] is None
     assert payload["options"]["manifests"][0]["name"] == "requirements.txt"
     assert not (project / ".pymolt" / "env_config.json").exists()
+
+
+def test_capture_passes_accept_failing_through(tmp_path, monkeypatch):
+    project = _configured_project(tmp_path)
+    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
+    seen = {}
+    fake = _fake_capture(monkeypatch)
+
+    def spy(project_dir, when, mode, **kwargs):
+        seen.update(kwargs)
+        return fake(project_dir, when, mode, **kwargs)
+
+    monkeypatch.setattr("pymolt.verify.service.capture_named_trace", spy)
+    view = mcp_server.capture(project_dir=str(project), command=["pytest"], accept_failing=True)
+    assert view["ok"] is True and seen["accept_failing"] is True

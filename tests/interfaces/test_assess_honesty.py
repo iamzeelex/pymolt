@@ -154,3 +154,107 @@ def test_an_echoed_assumed_base_python_stays_assumed():
     assert base_python_assumed(guessed, "3.9") is False        # a real override is a fact
     assert base_python_assumed({"base_python": "3.9", "base_python_source": "detected"},
                                None) is False
+
+
+# ── resolver failures: culprits and the stderr tail (real uv shapes) ──────────
+
+_UV_BUILD_FAILURE = """\
+  \x1b[31m×\x1b[0m Failed to build `bcolz==1.2.1`
+  ├─▶ The build backend returned an error
+  ╰─▶ Call to
+      `setuptools.build_meta:__legacy__.prepare_metadata_for_build_wheel`
+      failed (exit status: 1)
+
+      [stderr]
+      ModuleNotFoundError: No module named 'setuptools'
+
+      hint: This error likely indicates that `bcolz@1.2.1` depends on
+      `setuptools`, but doesn't declare it as a build dependency.
+"""
+
+_UV_NO_SOLUTION = """\
+  × No solution found when resolving dependencies:
+  ╰─▶ Because only numpy<=1.19.1 is available and pandas==0.22.0 depends on
+      numpy>=1.9, we can conclude that pandas==0.22.0 cannot be used.
+      And because you require pandas==0.22.0, we can conclude that your
+      requirements are unsatisfiable.
+"""
+
+
+def test_culprits_from_a_failed_build():
+    from pymolt.assess.service import parse_resolver_culprits
+
+    assert parse_resolver_culprits(_UV_BUILD_FAILURE) == ["bcolz"]
+
+
+def test_culprits_from_a_no_solution_chain():
+    from pymolt.assess.service import parse_resolver_culprits
+
+    assert parse_resolver_culprits(_UV_NO_SOLUTION) == ["numpy", "pandas"]
+
+
+def test_culprits_from_registry_misses_and_git_urls():
+    from pymolt.assess.service import parse_resolver_culprits
+
+    assert parse_resolver_culprits(
+        "  × No solution found when resolving dependencies:\n"
+        "  ╰─▶ Because `Foo_Bar` was not found in the package registry and you require "
+        "Foo_Bar, we can conclude that your requirements are unsatisfiable.\n"
+    ) == ["foo-bar"]
+    assert parse_resolver_culprits(
+        "error: Failed to download and build `quantopian-thing @ "
+        "git+git://github.com/quantopian/thing.git`\n"
+    ) == ["quantopian-thing", "thing"]
+    assert parse_resolver_culprits("error: there are no versions of nose-timer that satisfy") == [
+        "nose-timer"]
+    assert parse_resolver_culprits("  × No solution found when resolving dependencies:\n") == []
+
+
+def test_describe_failure_keeps_stderr_tail_summary_and_culprits():
+    import subprocess
+
+    from pymolt.assess.service import describe_resolver_failure
+
+    long = "\n".join(f"line {i}" for i in range(80)) + "\n" + _UV_BUILD_FAILURE
+    exc = subprocess.CalledProcessError(2, ["uv", "pip", "compile"], output="", stderr=long)
+    found = describe_resolver_failure(exc)
+
+    assert found == "Failed to build `bcolz==1.2.1`"
+    assert found.culprits == ["bcolz"]
+    assert len(found.detail.splitlines()) == 40 and "\x1b" not in found.detail
+    assert "No module named 'setuptools'" in found.detail
+
+
+def test_describe_failure_without_stderr_falls_back_to_the_message():
+    from pymolt.assess.service import describe_resolver_failure
+
+    found = describe_resolver_failure(ValueError("boom"))
+    assert found == "boom" and found.detail is None and found.culprits == []
+
+
+def test_rows_mark_only_culprits_as_conflict():
+    class _N:
+        def __init__(self, name):
+            self.version, self.declared_requirement = "1.0", None
+            self.direct, self.manual_bridge = True, False
+            self.provenance = type('P', (), {'value': 'pypi'})()
+            self.name = name
+
+    class _G:
+        nodes = {"bcolz": _N("bcolz"), "six": _N("six")}
+
+    from pymolt.assess.service import TargetResolveError
+
+    rows = {r["name"]: r["status"] for r in build_comparison_rows(
+        _G, None, "3.12", TargetResolveError("x", "tail", ["BColz"]))}
+    assert rows == {"bcolz": "conflict", "six": "unresolved"}
+
+
+def test_assess_reports_the_manifest_fixation_not_the_resolve_fixation():
+    from pymolt.assess.service import manifest_fixation
+    from pymolt.core.enums import SourceFixation
+
+    class _Src:
+        fixation = SourceFixation.INTENT
+
+    assert manifest_fixation(_Src) == "intent"

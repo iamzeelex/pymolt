@@ -279,6 +279,8 @@ def test_empty_impact_set_is_active_and_reports_unmatched_paths(tmp_path):
     assert rep.symbols  # full details are not filtered away
     assert rep.impacted_symbols == []
     assert rep.unmatched_impact_paths == ["flask.no_longer_public"]
+    assert any("static contacts narrowed to the plan's packages" in note
+               and f"0 of {rep.all_static_targets} kept" in note for note in rep.notes)
 
 
 def test_single_serialized_axiom_impact_mapping_is_accepted(tmp_path):

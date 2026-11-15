@@ -358,3 +358,34 @@ def test_witnessed_distributions_reads_the_baseline_capture_record(tmp_path):
     assert witnessed_distributions(tmp_path) == {"pandas": "1.5.3"}
     meta.write_text(json.dumps({"processes": [{"pid": 1}]}))
     assert witnessed_distributions(tmp_path) is None      # a capture that predates it
+
+
+def test_a_resolver_failure_while_planning_is_a_plan_input_error(tmp_path):
+    """B3: a uv failure on the target manifest is a summary + hint, not a traceback."""
+    import subprocess
+
+    import pytest
+
+    from pymolt.codemods.service import PlanInputError
+
+    (tmp_path / "requirements.txt").write_text("empyrical==0.5.5\n")
+    target = tmp_path / "requirements-target.txt"
+    target.write_text("empyrical==0.5.5\n")
+    stderr = (
+        "  \x1b[31m\u00d7\x1b[0m Failed to build `empyrical==0.5.5`\n"
+        "  \u251c\u2500\u25b6 The build backend returned an error\n"
+        "      AttributeError: module 'configparser' has no attribute 'SafeConfigParser'\n"
+    )
+
+    def boom(*args, **kwargs):
+        raise subprocess.CalledProcessError(2, ["uv", "pip", "compile"], stderr=stderr)
+
+    cfg = EnvConfig(selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+                    base_python="3.11", target_python="3.12")
+    with patch("pymolt.codemods.service.orchestrate_ingestion", side_effect=boom):
+        with pytest.raises(PlanInputError) as caught:
+            migrations_from_dependency_file(tmp_path, target, config=cfg)
+
+    assert "does not resolve: Failed to build `empyrical==0.5.5`" in str(caught.value)
+    assert "Culprit(s): empyrical" in caught.value.hint
+    assert "No source files were changed" in caught.value.hint

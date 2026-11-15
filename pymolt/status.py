@@ -89,7 +89,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
     Writes nothing. A container baseline is checked with ``docker inspect``, which
     is why ``build_status`` runs this only when asked.
     """
-    from pymolt.verify.service import container_is_running
+    from pymolt.verify.service import container_is_running, display_container
 
     if config is None:
         return []
@@ -100,7 +100,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
             name="base environment",
             state="ok" if running else "error",
             detail=(
-                f"container {config.container_id[:12]} is running"
+                f"container {display_container(config.container_id)} is running"
                 if running else f"container {config.container_id or '?'} is not running"
             ),
             hint=None if running else "Start the container or re-run setup.",
@@ -114,6 +114,8 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
     if config.target_env_path:
         # Resolved the way `capture` resolves it, so "ok" here means capture finds it.
         target = Path(config.target_env_path)
+        if not target.is_absolute():
+            target = Path(project_dir) / target
         candidates = (target / "bin" / "python", target / "Scripts" / "python.exe")
         interpreter = next((path for path in candidates if path.is_file()), None)
         checks.append(EnvironmentCheck(
@@ -172,6 +174,11 @@ def _capture_phase(
         bits.append(" ".join(slot.command))
     if slot.coverage_pct is not None:
         bits.append(f"coverage {slot.coverage_pct:.0f}%")
+    red = getattr(slot, "red", None)
+    if red:
+        failed = red.get("failed")
+        bits.append(f"RED: {failed if failed is not None else 'some'} test(s) failed "
+                    f"(exit {red.get('returncode')})")
     detail = " · ".join(bits)
 
     if slot.events == 0:

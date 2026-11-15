@@ -17,9 +17,9 @@ _ENVELOPE = {"ok", "summary", "data", "full_report_path", "hint"}
 _COMMON = {"warnings", "complete", "truncated"}
 
 
-def _assert_envelope(view: dict, keys: set[str]) -> dict:
+def _assert_envelope(view: dict, keys: set[str], *, ok: bool = True) -> dict:
     assert set(view) == _ENVELOPE
-    assert view["ok"] is True
+    assert view["ok"] is ok
     assert set(view["data"]) == keys | _COMMON, set(view["data"]) ^ (keys | _COMMON)
     json.dumps(view)  # plain data, nothing that needs a custom encoder
     return view["data"]
@@ -178,12 +178,23 @@ def test_setup_view_has_one_key_set_listing_or_saved(tmp_path):
     assert saved["config"]["target_python"] == "3.13"
 
 
+def test_setup_view_says_what_saving_changed_besides_the_config(tmp_path):
+    from pymolt.ingestion.config import EnvConfig
+
+    config = EnvConfig(selected_manifest="requirements.txt", base_python="3.8",
+                       target_python="3.13")
+    note = "Added .pymolt/env_config.json to .gitignore."
+    view = views.setup_view(_options(), tmp_path, config=config, side_effects=[note])
+    assert note in view["data"]["warnings"]
+
+
 # ── assess ───────────────────────────────────────────────────────────────────
 
 _ASSESS_KEYS = {
     "target_python", "verdict", "baseline_tier", "baseline_unresolved", "source_manifest",
     "source_fixation", "resolution_quality", "target_resolved", "target_error",
-    "changes_format", "changes", "changes_total", "unchanged", "status_counts",
+    "target_error_detail", "target_culprits", "changes_format", "changes", "changes_total",
+    "unchanged", "status_counts",
     "manual_zone", "manual_zone_count", "risk", "target_manifest_path", "target_env",
     "baseline_env",
 }
@@ -245,7 +256,22 @@ def test_assess_blocked_target_says_so(tmp_path):
     view = views.assess_view(result, tmp_path)
     assert view["data"]["verdict"]["level"] == "blocked"
     assert "do not resolve" in view["summary"].splitlines()[0]
-    assert "conflict" in view["hint"]
+    assert view["hint"].startswith("The target does not resolve: no solution for flask>=9.")
+    assert "Culprit(s): none named" in view["hint"]
+
+
+def test_assess_counts_unresolved_apart_and_names_culprits(tmp_path):
+    result = _assess_result(
+        target_resolved=False, target_error="Failed to build `bcolz==1.2.1`",
+        target_culprits=["bcolz"], target_error_detail="x",
+        rows=[_row("bcolz", "1.2.1", None, "conflict"), _row("flask", "1.1.4", None, "unresolved"),
+              _row("six", "1.15.0", None, "unresolved")])
+    view = views.assess_view(result, tmp_path)
+    assert "conflicts: 1, unresolved: 2," in view["summary"]
+    assert view["data"]["changes"][0].startswith("bcolz")
+    assert view["hint"] == ("The target does not resolve: Failed to build `bcolz==1.2.1`. "
+                            "Culprit(s): bcolz. Fix or loosen them, then assess again.")
+    assert view["data"]["target_culprits"] == ["bcolz"]
 
 
 def test_assess_unresolved_base_is_not_read_as_additions(tmp_path):
@@ -270,7 +296,7 @@ _CAPTURE_KEYS = {
     "when", "accepted", "validity", "validity_reason", "events", "processes", "returncode",
     "trace_path", "command_log", "filled_slots", "env_note", "duration_seconds",
     "dropped_events", "coverage_pct", "archived_previous", "impact_targets",
-    "deployment_id", "request_id", "correlation_id", "metadata_path",
+    "deployment_id", "request_id", "correlation_id", "metadata_path", "red",
 }
 
 
@@ -284,10 +310,54 @@ def test_capture_not_accepted_is_said_first_and_untraced_processes_are_warned():
         activation_failures=[{"pid": 7, "python": "3.6", "error": "SyntaxError"}],
     )
     view = views.capture_view(slot, when="baseline", state=ContractState())
-    data = _assert_envelope(view, _CAPTURE_KEYS)
+    data = _assert_envelope(view, _CAPTURE_KEYS, ok=False)
     assert data["accepted"] is False and data["validity"] == "command-failed"
     assert view["summary"].startswith("NOT accepted as 'baseline' evidence: the command exited 2")
     assert any("UNTRACED" in w for w in data["warnings"])
+
+
+def _refused(**kw):
+    from pymolt.verify.models import CaptureMode, ContractSlot
+
+    base = dict(trace_path="/p/diag.jsonl", captured_at="now", mode=CaptureMode.TEST_SUITE)
+    base.update(kw)
+    return ContractSlot(**base)
+
+
+def test_capture_refusal_hint_follows_the_cause(tmp_path):
+    from pymolt.verify.models import CaptureValidity, ContractState
+
+    state = ContractState()
+    empty = _refused(validity=CaptureValidity.EMPTY, returncode=0, events=0)
+    view = views.capture_view(empty, when="baseline", state=state, static_contacts=238)
+    assert view["ok"] is False
+    assert view["hint"].startswith("The command ran (exit 0) but called no recorded dependency "
+                                   "(238 static contacts)")
+    assert "command_log" not in view["hint"]
+
+    log = tmp_path / "run.log"
+    log.write_text("=== 3 failed, 10 passed in 1.2s ===\n")
+    red = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=1, events=40,
+                      command_log=str(log))
+    view = views.capture_view(red, when="baseline", state=state)
+    assert view["hint"] == ("3 test(s) failed (exit 1). Fix or deselect them, or keep a red "
+                            "baseline with --accept-failing.")
+
+    dead = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=127, events=0)
+    hint = views.capture_view(dead, when="baseline", state=state)["hint"]
+    assert "exit 127" in hint and "command_log" not in hint
+
+
+def test_red_capture_is_ok_and_says_so():
+    from pymolt.verify.models import CaptureMode, CaptureValidity, ContractSlot, ContractState
+
+    slot = ContractSlot(
+        trace_path="/p/t.jsonl", captured_at="now", mode=CaptureMode.TEST_SUITE,
+        validity=CaptureValidity.VALID, events=12, processes=1, returncode=1,
+        red={"returncode": 1, "failed": 2, "summary": "2 failed"})
+    view = views.capture_view(slot, when="baseline", state=ContractState(baseline=slot))
+    assert view["ok"] is True and view["data"]["red"]["failed"] == 2
+    assert "RED" in view["summary"]
 
 
 def test_capture_accepted_points_at_the_other_side():
@@ -305,7 +375,8 @@ def test_capture_accepted_points_at_the_other_side():
 _PLAN_KEYS = {
     "plan_id", "plan_path", "source", "dependencies", "per_package", "files_to_change",
     "files_total", "rewrite_sites", "diffs", "advisories", "advisories_total", "api_impacts",
-    "api_impacts_total", "baseline_bound", "risks_status", "risks_attention",
+    "api_impacts_total", "baseline_bound", "api_deltas_inconclusive", "api_deltas_total",
+    "risks_status", "risks_attention",
     "risks_attention_total", "risks_fixed", "risks_fixed_total",
 }
 
@@ -414,3 +485,46 @@ def test_plan_view_splits_predicted_risks_by_whether_the_plan_fixes_them():
     assert data["risks_attention"][0].startswith("high toyapp/core.py:24")
     assert "[fixed by the plan]" in data["risks_fixed"][0]
     assert _risk_data(_Lists(), None)["risks_status"] is None
+
+
+def _plan_with_risks(deltas, risks=(), changes=True):
+    from pymolt.migration_plan import MigrationPlan, PlannedDependency, PlannedFileChange
+    from pymolt.verify.predict import DeltaSummary, PredictionReport
+
+    plan = MigrationPlan(
+        target_python="3.12", source_manifest="requirements.txt", files_scanned=7,
+        dependencies=[PlannedDependency(name="pandas", from_version="1.5.3", to_version="2.2.3")],
+        changes=[PlannedFileChange(path="core.py", old_sha256="a", new_sha256="b",
+                                   old_source="a\n", new_source="b\n", sites=1)] if changes else [],
+        risks=PredictionReport(
+            risks=list(risks),
+            deltas=[DeltaSummary(package=f"p{i}", quality=q) for i, q in enumerate(deltas)]),
+    )
+    return plan
+
+
+def test_plan_says_when_every_api_delta_was_inconclusive():
+    plan = _plan_with_risks(["inconclusive", "inconclusive"], changes=False)
+    view = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")
+    summary = view["summary"]
+    assert ("Predicted risks: none rated \u2014 API changes unknown for 2 of 2 package(s) "
+            "(inconclusive)") in summary
+    assert "need attention" not in summary
+    assert ("The plan changes no file, but API changes are unknown for 2 of 2 package(s)"
+            in summary)
+    assert view["data"]["api_deltas_inconclusive"] == 2
+
+
+def test_plan_counts_risks_beside_the_unknown_api_changes():
+    plan = _plan_with_risks(["complete", "inconclusive"])
+    summary = views.plan_view(plan, {}, "t.txt", plan_path="/p/plan.json")["summary"]
+    assert ("Predicted risks: 0 need attention, 0 fixed by the plan; API changes unknown "
+            "for 1 of 2 package(s) (inconclusive)") in summary
+
+
+def test_plan_keeps_the_plain_risk_line_when_every_delta_is_conclusive():
+    plan = _plan_with_risks(["complete"], changes=False)
+    summary = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")["summary"]
+    assert "Predicted risks: 0 need attention, 0 fixed by the plan (" in summary
+    assert "unknown" not in summary
+    assert "The plan changes no file." in summary
