@@ -423,6 +423,20 @@ def _executed_files(
     )
 
 
+def _container_path_note(scope_note: str, trace: str | Path | None, root: Path) -> str:
+    """Keep the path-suffix note only when container paths stayed foreign after mapping."""
+    if trace is None:
+        return scope_note
+    try:
+        facts = load_facts(trace, root=root)
+    except Exception:  # noqa: BLE001 — the note is advisory; never fail the report over it
+        return scope_note
+    foreign = facts.paths_foreign > 0 or any("container paths not mapped" in n for n in facts.notes)
+    if facts.paths_mapped and not foreign:
+        return f"container paths mapped via {facts.path_map_source}"
+    return scope_note
+
+
 def _ratio(confirmed: int, static: int) -> float:
     return confirmed / static if static else 0.0
 
@@ -561,7 +575,7 @@ def build_contract_report(
     if view.events:
         executed_files, scope_note = _executed_files(view.files, root, contact_files)
         if scope_note:
-            report.notes.append(scope_note)
+            report.notes.append(_container_path_note(scope_note, trace, root))
         executed_scope = bool(view.files - {f for f in view.files if f.startswith("<")})
         if not executed_scope:
             report.notes.append(

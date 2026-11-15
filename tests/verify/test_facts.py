@@ -22,6 +22,7 @@ from pymolt.verify.facts import (
     merge_fact_snapshots,
     outcome_type,
     project_snapshot,
+    record_site_text,
     store_site_text,
     value_type,
 )
@@ -962,3 +963,66 @@ def test_untallied_declines_make_the_tallies_incomplete(tmp_path, monkeypatch):
                   sym="m.f")
     sink.close()
     assert not load_facts(sink.path, root=ROOT).tallies_complete
+
+
+# ── container paths ──────────────────────────────────────────────────────────
+
+def _container_project(tmp_path, *, with_slot_runner=True):
+    from pymolt.adapters.python_runner import Mount, RunnerSpec
+
+    root = tmp_path / "proj"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "a.py").write_text("x = 1\nresult = dep.call(x)\n", encoding="utf-8")
+    trace = root / ".pymolt" / "contract_traces" / "baseline.jsonl"
+    trace.parent.mkdir(parents=True)
+    rec = {"v": 2, "t": "return", "q": "dep.call", "sym": "dep.call", "result": 1,
+           "in": {"bound": {}}, "where": {"file": "/work/pkg/a.py", "func": "f", "line": 2}}
+    trace.write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    spec = RunnerSpec(name="c", container_id="cid", mounts=[Mount(source=str(root),
+                                                                  destination="/work")])
+    slot = {"trace_path": ".pymolt/contract_traces/baseline.jsonl"}
+    if with_slot_runner:
+        slot["runner"] = spec.model_dump()
+    (root / ".pymolt" / "contract_state.json").write_text(
+        json.dumps({"schema_version": 1, "baseline": slot}), encoding="utf-8")
+    return root, trace, spec
+
+
+def test_container_sites_are_mapped_to_project_relative_paths(tmp_path):
+    root, trace, spec = _container_project(tmp_path)
+    fs = load_facts(trace, root=root)  # the slot's runner is found from the project's state
+    assert [f.file for f in fs.facts] == ["pkg/a.py"]
+    assert fs.path_map_source == "slot" and fs.paths_mapped == 1 and not fs.notes
+
+
+def test_explicit_runner_and_none_override_discovery(tmp_path):
+    root, trace, spec = _container_project(tmp_path)
+    assert load_facts(trace, root=root, runner=spec).facts[0].file == "pkg/a.py"
+    fs = load_facts(trace, root=root, runner=None)
+    assert fs.facts[0].file == "/work/pkg/a.py"
+    assert "container paths not mapped" in fs.notes[0]
+
+
+def test_old_trace_without_any_runner_is_left_and_noted(tmp_path):
+    root, trace, _spec = _container_project(tmp_path, with_slot_runner=False)
+    fs = load_facts(trace, root=root)
+    assert fs.facts[0].file == "/work/pkg/a.py"
+    assert fs.path_map_source is None
+    assert "container paths not mapped" in fs.notes[0]
+
+
+def test_config_runner_maps_an_old_trace(tmp_path):
+    root, trace, spec = _container_project(tmp_path, with_slot_runner=False)
+    (root / ".pymolt" / "env_config.json").write_text(
+        json.dumps({"runner": spec.model_dump()}), encoding="utf-8")
+    fs = load_facts(trace, root=root)
+    assert fs.facts[0].file == "pkg/a.py" and fs.path_map_source == "config"
+
+
+def test_site_text_is_collected_from_the_host_file_through_the_runner(tmp_path):
+    root, trace, spec = _container_project(tmp_path)
+    assert collect_site_text(trace, root) == {}
+    assert collect_site_text(trace, root, spec) == {"/work/pkg/a.py:2": "result = dep.call(x)"}
+    assert record_site_text(trace, root, spec) == 1
+    fs = load_facts(trace, root=root)
+    assert fs.facts[0].text == "result = dep.call(x)"
