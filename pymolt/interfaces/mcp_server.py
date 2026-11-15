@@ -63,32 +63,29 @@ _EXEC_ENV_VAR = "PYMOLT_MCP_ALLOW_EXEC"
 
 _INSTRUCTIONS = """\
 PyMolt proves whether a Python migration changed your program's behaviour.
+The tools have the names of the pymolt CLI commands.
 
-START HERE — the two tools nothing else can replace:
+Two answers only these tools give:
   scan             every project root, and every call site into a dependency,
                    resolved through imports and scopes (LibCST). Grepping imports
-                   finds modules, not the symbols actually called, and undercounts
-                   the surface severalfold.
-  contract_capture / verify
-                   record what the code really calls at runtime before AND after
-                   the migration, then report what changed: results, raises,
-                   symbols that vanished. This cannot be derived by reading files
-                   or by resolving dependencies — it requires the recorded traces.
+                   finds modules, not the symbols called, and undercounts the
+                   surface severalfold.
+  capture, verify  record what the code calls at runtime before AND after the
+                   migration, then report what changed: results, raises, calls
+                   that vanished. Reading files or resolving dependencies cannot
+                   tell you this; it takes the two recordings.
 
-Supporting phases, in order:  setup_options/setup_apply -> assess
-  These prepare the migration; assess resolves baseline vs target and tells you
-  which versions move. A successful resolve is NOT evidence the program still
-  works — it is an input to the contract, never the conclusion.
+Order (status says where the project is and which tool is next):
+  scan -> setup -> assess -> capture(when='baseline')
+  -> change the code -> capture(when='post-migration') -> verify
+  capture needs setup: it records the environment it ran in. Repeat code
+  changes + post-migration capture until verify says PASS. A successful assess
+  is not evidence the program still works.
 
-Typical run:
-  contract_capture(when='baseline')  BEFORE editing anything
-  -> assess -> engineer/agent edits code and builds the target env
-  -> contract_capture(when='post-migration') -> verify
-  Repeat edits + post-migration capture until verify says PASS.
-
-plan saves the code changes as a plan and returns the diffs; it writes no
-source file. Applying them is `pymolt apply`, run by a person in the project,
-outside this server.
+Changing the code: plan saves the codemods as the migration plan and returns
+the diffs; it writes no source file. A person applies the plan with
+`pymolt apply` in the project, outside this server. You may also edit the code
+yourself.
 """
 
 mcp = FastMCP("pymolt", instructions=_INSTRUCTIONS)
@@ -354,154 +351,119 @@ def scan(project_dir: str = ".") -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. setup_options
+# 2. setup
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def setup_options(project_dir: str = ".") -> dict:
-    """List the exact choices setup_apply accepts: available manifests, resolution
-    tools, interpreters, and candidate target Python versions. Call this instead
-    of guessing manifest/tool/version strings.
-
-    Args:
-        project_dir: Project directory (default: current directory).
-
-    Use before setup_apply — the returned string values are what you pass in.
-    """
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.setup.service import gather_setup_options
-
-        options = gather_setup_options(path)
-        full = options.model_dump(mode="json")
-        full_path = _write_full_report(path, "setup_options", full)
-
-        manifests = [m.name for m in options.manifests]
-        tools = [t.name for t in options.tools if t.available]
-        target_versions = [v.version for v in options.target_versions]
-        data = {
-            "manifests": manifests,
-            "default_manifest": options.default_manifest,
-            "tools": tools,
-            "default_tool": options.default_tool,
-            "interpreters": options.interpreters[:LIST_CAP],
-            "base_python_default": options.base_python_default,
-            "target_python_options": target_versions[:LIST_CAP],
-            "default_target_python": options.default_target,
-        }
-
-        if not manifests:
-            return _fail(
-                "No Python dependency manifests detected.",
-                hint="Point `project_dir` at a project with requirements.txt / pyproject.toml / "
-                     "environment.yml, then re-run setup_options.",
-            )
-
-        summary = (
-            f"Manifests: {', '.join(manifests)}.\n"
-            f"Tools: {', '.join(tools)} (default {options.default_tool}).\n"
-            f"Base Python: {options.base_python_default}.\n"
-            f"Target options: {', '.join(target_versions) or 'none'}."
-        )
-        return _ok(
-            summary,
-            data,
-            full_report_path=full_path,
-            hint="Call setup_apply with a manifest, tool, base_python, and target_python "
-                 "from these exact values.",
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(f"setup_options failed: {e}",
-                     hint="Check that `project_dir` is a readable project directory.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. setup_apply
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def setup_apply(
+def setup(
     project_dir: str = ".",
     manifest: str = "",
     tool: str = "",
     base_python: str = "",
     target_python: str = "",
     container_id: str | None = None,
+    target_env: str | None = None,
 ) -> dict:
-    """Persist the migration configuration to .pymolt/env_config.json (manifest,
-    tool, base+target Python). Deterministic: pass values from setup_options; an
-    invalid choice returns ok:false listing the valid ones.
+    """Choose the manifest, resolution tool and Python versions, and save them to
+    .pymolt/env_config.json. Every later tool reads this file.
+
+    Called with no choices, it returns the valid ones (manifests, tools,
+    interpreters, target Pythons, with defaults) and saves nothing. Called with
+    manifest, tool, base_python and target_python, it checks them and saves. An
+    invalid value returns ok:false naming the valid ones. Do not guess the strings.
 
     Args:
         project_dir: Project directory (default: current directory).
-        manifest: Manifest file name (from setup_options.manifests).
-        tool: Resolution tool (from setup_options.tools, e.g. uv/conda/poetry/system).
-        base_python: Baseline Python version (e.g. "3.6").
-        target_python: Target Python version (from setup_options.target_python_options).
-        container_id: Docker container id, required only when tool == "container".
-
-    Use after setup_options, before assess.
+        manifest: Manifest file name, from the returned manifests.
+        tool: Resolution tool, from the returned tools (uv/conda/poetry/container/system).
+        base_python: The project's current Python (e.g. "3.6").
+        target_python: Python to migrate to, from the returned target_python_options.
+        container_id: Docker container id; required only when tool == "container".
+        target_env: Path of an existing target environment (venv), if one is built.
     """
     try:
         path = _resolve_dir(project_dir)
         from pymolt.ingestion.config import ToolChoice
-        from pymolt.setup.service import SetupChoices, apply_setup, gather_setup_options
+        from pymolt.setup.service import (
+            SetupChoices,
+            SetupError,
+            apply_setup,
+            check_setup_values,
+            gather_setup_options,
+        )
 
         options = gather_setup_options(path)
-        valid_manifests = [m.name for m in options.manifests]
-        valid_tools = [t.name for t in options.tools if t.available]
-        valid_targets = [v.version for v in options.target_versions]
+        manifests = [m.name for m in options.manifests]
+        if not manifests:
+            return _fail(
+                "No Python dependency manifests detected.",
+                hint="Point `project_dir` at a project with requirements.txt / pyproject.toml / "
+                     "environment.yml.",
+            )
+        tools = [t.name for t in options.tools if t.available]
+        target_versions = [v.version for v in options.target_versions]
 
-        if not manifest or manifest not in valid_manifests:
-            return _fail(
-                f"Invalid or missing manifest {manifest!r}.",
-                hint=f"Valid manifests: {valid_manifests}",
+        given = {"manifest": manifest, "tool": tool, "base_python": base_python,
+                 "target_python": target_python}
+        if not any(given.values()):
+            full_path = _write_full_report(path, "setup", options.model_dump(mode="json"))
+            data = {
+                "manifests": manifests,
+                "default_manifest": options.default_manifest,
+                "tools": tools,
+                "default_tool": options.default_tool,
+                "interpreters": options.interpreters[:LIST_CAP],
+                "base_python_default": options.base_python_default,
+                "target_python_options": target_versions[:LIST_CAP],
+                "default_target_python": options.default_target,
+            }
+            summary = (
+                f"Nothing saved. Manifests: {', '.join(manifests)}.\n"
+                f"Tools: {', '.join(tools)} (default {options.default_tool}).\n"
+                f"Base Python: {options.base_python_default}.\n"
+                f"Target options: {', '.join(target_versions) or 'none'}."
             )
-        if not tool or tool not in valid_tools:
-            return _fail(
-                f"Invalid or missing tool {tool!r}.",
-                hint=f"Valid tools: {valid_tools}",
+            return _ok(summary, data, full_report_path=full_path,
+                       hint="Call setup again with manifest, tool, base_python and "
+                            "target_python from these values.")
+
+        missing = [name for name, value in given.items() if not value]
+        if missing:
+            return _fail(f"Missing: {', '.join(missing)}.",
+                         hint="Call setup with no choices to list the valid values.")
+        try:
+            check_setup_values(
+                options, manifest=manifest, tool=tool, base_python=base_python,
+                target_python=target_python, container_id=container_id,
             )
-        if not base_python:
+        except SetupError as exc:
+            return _fail(f"{exc}.", hint=exc.hint)
+        if target_versions and target_python not in target_versions:
             return _fail(
-                "base_python is required.",
-                hint=f"Suggested base_python: {options.base_python_default}",
-            )
-        if not target_python or (valid_targets and target_python not in valid_targets):
-            return _fail(
-                f"Invalid or missing target_python {target_python!r}.",
-                hint=f"Valid target_python values: {valid_targets}",
-            )
-        if tool == "container" and not container_id:
-            return _fail(
-                "container_id is required when tool == 'container'.",
-                hint=f"Running containers: {[c.id for c in options.containers]}",
+                f"Invalid target_python {target_python!r}.",
+                hint=f"Valid target_python values: {target_versions}",
             )
 
-        choices = SetupChoices(
+        config = apply_setup(path, SetupChoices(
             selected_manifest=manifest,
             selected_tool=ToolChoice(tool),
             base_python=base_python,
             target_python=target_python,
             container_id=container_id,
-        )
-        config = apply_setup(path, choices)
+            target_env_created=bool(target_env),
+            target_env_path=target_env,
+        ))
         config_path = str(path / ".pymolt" / "env_config.json")
-        data = {"config": config.model_dump(mode="json"), "config_path": config_path}
-        summary = (
-            f"Saved config to {config_path}.\n"
-            f"Manifest {manifest}, tool {tool}, {base_python} -> {target_python}."
-        )
         return _ok(
-            summary,
-            data,
+            f"Saved config to {config_path}.\n"
+            f"Manifest {manifest}, tool {tool}, {base_python} -> {target_python}.",
+            {"config": config.model_dump(mode="json"), "config_path": config_path},
             full_report_path=config_path,
             hint="Run assess to compare baseline vs target dependency graphs.",
         )
     except Exception as e:  # noqa: BLE001
-        return _fail(f"setup_apply failed: {e}", hint="Re-run setup_options for valid values.")
+        return _fail(f"setup failed: {e}", hint="Call setup with no choices for valid values.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -549,7 +511,7 @@ def assess(
         if not effective_target:
             return _fail(
                 "No target_python given and none configured.",
-                hint="Pass target_python (e.g. '3.13') or run setup_apply first.",
+                hint="Pass target_python (e.g. '3.13') or run setup first.",
             )
 
         tool = config.get("selected_tool", "uv")
@@ -637,7 +599,7 @@ def assess(
             summary,
             data,
             full_report_path=full_path,
-            hint="Capture a baseline contract (contract_capture when='baseline') before "
+            hint="Capture a baseline contract (capture when='baseline') before "
                  "editing code, then edit, then capture post-migration.",
         )
     except Exception as e:  # noqa: BLE001
@@ -648,14 +610,14 @@ def assess(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. contract_capture
+# 6. capture
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CAPTURE_WHEN = {"baseline": "baseline", "post-migration": "post_migration"}
 
 
 @mcp.tool()
-def contract_capture(
+def capture(
     project_dir: str = ".",
     when: str = "baseline",
     mode: str = "tests",
@@ -770,7 +732,7 @@ def contract_capture(
         )
     except Exception as e:  # noqa: BLE001
         return _fail(
-            f"contract_capture failed: {e}",
+            f"capture failed: {e}",
             hint="Ensure `command` runs from `project_dir` and exits (e.g. a test suite).",
         )
 
@@ -791,7 +753,7 @@ def verify(project_dir: str = ".") -> dict:
 
     This is the one question no amount of file reading, type checking or
     dependency resolution can answer — it requires the baseline and
-    post-migration captures from contract_capture. A green test suite and a
+    post-migration captures from capture. A green test suite and a
     clean resolve are not substitutes: they do not tell you a call started
     returning an empty generator instead of None.
 
@@ -858,7 +820,7 @@ def verify(project_dir: str = ".") -> dict:
         hint = None
         if state.post_migration is None:
             hint = ("No post-migration capture yet — edit the code, then "
-                    "contract_capture when='post-migration'.")
+                    "capture when='post-migration'.")
         elif unified.verdict.value == "fail":
             hint = ("Behaviour changed — fix the listed calls, re-capture "
                     "post-migration, verify again.")
@@ -867,7 +829,7 @@ def verify(project_dir: str = ".") -> dict:
     except Exception as e:  # noqa: BLE001
         return _fail(
             f"verify failed: {e}",
-            hint="Capture at least a baseline with contract_capture first.",
+            hint="Capture at least a baseline with capture first.",
         )
 
 

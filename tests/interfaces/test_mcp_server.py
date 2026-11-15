@@ -20,10 +20,9 @@ from pymolt.interfaces import mcp_server  # noqa: E402
 _EXPECTED_TOOLS = {
     "status",
     "scan",
-    "setup_options",
-    "setup_apply",
+    "setup",
     "assess",
-    "contract_capture",
+    "capture",
     "verify",
     "plan",
 }
@@ -53,11 +52,12 @@ def _no_exec_env(monkeypatch):
     monkeypatch.delenv("PYMOLT_MCP_ALLOW_EXEC", raising=False)
 
 
-# ── (a) module imports and all 8 tools are registered ────────────────────────
-def test_all_eight_tools_registered():
+# ── (a) module imports and its tools are registered ──────────────────────────
+def test_the_tools_are_the_cli_commands():
+    """One name per action, the same in the CLI and here."""
     tools = asyncio.run(mcp_server.mcp.list_tools())
     names = {t.name for t in tools}
-    assert _EXPECTED_TOOLS <= names, f"missing tools: {_EXPECTED_TOOLS - names}"
+    assert names == _EXPECTED_TOOLS
 
 
 def test_tool_functions_are_importable_and_callable():
@@ -72,8 +72,7 @@ def test_dir_taking_tools_use_project_dir_param():
     and scan the server's own cwd instead of the target — regression guard."""
     import inspect
 
-    dir_tools = ["scan", "setup_options", "setup_apply", "assess",
-                 "contract_capture", "verify", "plan"]
+    dir_tools = ["scan", "setup", "assess", "capture", "verify", "plan"]
     for name in dir_tools:
         params = inspect.signature(getattr(mcp_server, name)).parameters
         assert "project_dir" in params, f"{name} lost its project_dir param"
@@ -130,13 +129,9 @@ def test_every_tool_handles_nonexistent_dir(tmp_path):
     missing = str(tmp_path / "nope")
     calls = {
         "scan": lambda: mcp_server.scan(project_dir=missing),
-        "setup_options": lambda: mcp_server.setup_options(project_dir=missing),
-        "setup_apply": lambda: mcp_server.setup_apply(
-            project_dir=missing, manifest="requirements.txt", tool="uv",
-            base_python="3.8", target_python="3.12",
-        ),
+        "setup": lambda: mcp_server.setup(project_dir=missing),
         "assess": lambda: mcp_server.assess(project_dir=missing),
-        "contract_capture": lambda: mcp_server.contract_capture(
+        "capture": lambda: mcp_server.capture(
             project_dir=missing, when="baseline", mode="tests", command=["pytest"],
         ),
         "verify": lambda: mcp_server.verify(project_dir=missing),
@@ -165,21 +160,42 @@ def test_cap_list_truncates_and_reports_remainder():
 
 
 # ── contract-shape helpers ───────────────────────────────────────────────────
-def test_setup_options_happy_path_lists_choices(tmp_path):
-    result = mcp_server.setup_options(project_dir=str(_make_project(tmp_path)))
+def test_setup_without_choices_lists_them_and_saves_nothing(tmp_path):
+    project = _make_project(tmp_path)
+    result = mcp_server.setup(project_dir=str(project))
     assert result["ok"] is True
     assert "requirements.txt" in result["data"]["manifests"]
     assert result["data"]["default_tool"]
+    assert not (project / ".pymolt" / "env_config.json").exists()
 
 
-def test_setup_apply_rejects_invalid_manifest(tmp_path):
+def test_setup_rejects_invalid_manifest(tmp_path):
     project = _make_project(tmp_path)
-    result = mcp_server.setup_apply(
+    result = mcp_server.setup(
         project_dir=str(project), manifest="bogus.txt", tool="uv",
         base_python="3.8", target_python="3.12",
     )
     assert result["ok"] is False
     assert "requirements.txt" in str(result["hint"])
+
+
+def test_setup_names_missing_choices(tmp_path):
+    result = mcp_server.setup(project_dir=str(_make_project(tmp_path)), manifest="requirements.txt")
+    assert result["ok"] is False
+    assert "tool" in result["error"] and "target_python" in result["error"]
+
+
+def test_setup_saves_valid_choices(tmp_path):
+    project = _make_project(tmp_path)
+    options = mcp_server.setup(project_dir=str(project))["data"]
+    result = mcp_server.setup(
+        project_dir=str(project), manifest="requirements.txt", tool=options["tools"][0],
+        base_python="3.8", target_python=options["target_python_options"][0],
+        target_env=".venv-target",
+    )
+    assert result["ok"] is True, result
+    saved = json.loads((project / ".pymolt" / "env_config.json").read_text(encoding="utf-8"))
+    assert saved["target_env_path"] == ".venv-target"
 
 
 # ── workspace confinement (_resolve_dir + _WORKSPACE_ROOT) ──────────────────
@@ -227,19 +243,19 @@ def test_require_exec_allowed_permits_when_env_var_set(monkeypatch):
     assert mcp_server._require_exec_allowed() is None
 
 
-def test_contract_capture_blocked_without_exec_opt_in(tmp_path):
+def test_capture_blocked_without_exec_opt_in(tmp_path):
     project = _make_project(tmp_path)
-    result = mcp_server.contract_capture(
+    result = mcp_server.capture(
         project_dir=str(project), when="baseline", mode="tests", command=["pytest"],
     )
     assert result["ok"] is False
     assert "PYMOLT_MCP_ALLOW_EXEC" in result["hint"]
 
 
-def test_contract_capture_before_setup_is_refused(tmp_path, monkeypatch):
+def test_capture_before_setup_is_refused(tmp_path, monkeypatch):
     monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
     project = _make_project(tmp_path)
-    result = mcp_server.contract_capture(
+    result = mcp_server.capture(
         project_dir=str(project), when="baseline", mode="tests", command=["pytest"],
     )
     assert result["ok"] is False

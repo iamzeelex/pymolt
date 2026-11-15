@@ -63,7 +63,7 @@ class TestCaptureTrace:
         assert holder["result"].events >= 1
 
     def test_uncancelled_command_that_never_exits_times_out(self, tmp_path, monkeypatch):
-        """No cancel_event (the MCP server's contract_capture path) + a command that
+        """No cancel_event (the MCP server's capture path) + a command that
         never exits used to hang forever — _CAPTURE_TIMEOUT bounds it instead."""
         monkeypatch.setattr(service, "_CAPTURE_TIMEOUT", 0.2)
         # A timed-out capture deliberately keeps raw traces it could not merge; keep that
