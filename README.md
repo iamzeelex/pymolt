@@ -112,7 +112,7 @@ The tools have the names of the CLI commands. None of them writes source: `plan`
 
 ---
 
-## Behavioral Contract Verification
+## Behavioural Contract Verification
 
 Static type checkers catch signature changes. They cannot tell you that a method started returning an empty generator instead of `None`, that a call now raises `KeyError` where it used to raise nothing, or that a dependency call your code used to make simply stopped happening.
 
@@ -141,15 +141,15 @@ CI exit codes are stable: `0` = passed policy, `1` = incompatibility or failed c
 
 ---
 
-## AST Codemods & Axiom Cloud Hub
+## Codemods and Axiom
 
-Regex replacements break code; large language models frequently hallucinate non-existent API flags. PyMolt uses **LibCST (Concrete Syntax Trees)** paired with **Axiom Cloud Hub** recipes.
+`pymolt plan` rewrites code with **LibCST** codemods that it gets from **Axiom**, a service that knows which APIs changed between two versions of a package.
 
-- **Non-destructive AST edits**: Preserves your formatting, indentation, and comments exactly as written.
-- **Typed Metavariables**: Declarative match/rewrite templates (e.g., `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`).
-- **Client Verification**: PyMolt locally re-verifies every rule before applying it to your repository.
-- **Transactional apply**: every changed file is prepared and parsed before the first replacement; an interrupted or failed mixed rule/pattern batch rolls all replacements back.
-- **Free Public Cloud Hub**: Recipes are fetched on demand from Axiom Cloud Hub. Custom/private on-prem instances are supported via `pymolt axiom endpoint <url>`, `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT`.
+- **Formatting kept**: indentation and comments stay as written.
+- **Templates**: a codemod is a match/rewrite template, e.g. `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`.
+- **Checked locally**: pymolt re-checks every rule before it goes into a plan; rules it cannot check are listed for manual review.
+- **All or nothing**: `apply` prepares and parses every changed file before the first write; a failed apply restores them all.
+- **Endpoint**: the public Axiom is the default. Point pymolt at another one with `pymolt axiom endpoint <url>`, `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT`. Only package names and versions are sent, never code.
 
 ---
 
@@ -181,7 +181,28 @@ Commands removed in this version print their replacement: `doctor` → `status`;
 
 ---
 
+## Glossary
+
+One word per thing, in the CLI, the MCP tools and these docs.
+
+| Term | Meaning |
+|---|---|
+| **base** / **target** | The project as it is today (base Python, base dependencies) and as it will be after the migration. |
+| **manifest** | The file that declares dependencies: `requirements.txt`, `pyproject.toml`, `environment.yml`… setup picks one; assess writes the **target manifest** (`requirements-target.txt` or `environment-target.yml`). |
+| **capture** | The calls your code made into its dependencies while a command ran, recorded without changing the code. |
+| **baseline** | The capture taken before the migration. Nothing else is called baseline. |
+| **post-migration** | The capture taken after the migration, in the target environment. |
+| **call site** | A place in your code that calls into a dependency. `scan` lists them (the contact map). |
+| **BLIND** | A call site that no capture exercised. |
+| **codemod** | A rewrite rule for one dependency version change, from Axiom. |
+| **plan** | The codemods applied to your files as a diff, saved for `apply`. |
+| **verdict** | `PASS`, `FAIL` or `INCONCLUSIVE`, from `verify`. |
+| **base tier** | How far the base dependencies can be trusted: gold (pinned), silver (tests pass), bronze (unvalidated), none. JSON key: `baseline_tier`. |
+| **Axiom** | The service pymolt gets codemods from. |
+
+---
+
 ## License
 
 PyMolt is open-source software licensed under the [Apache License, Version 2.0](LICENSE).
-Axiom Cloud Hub recipes are provided under the Business Source License 1.1 with free public community access.
+Axiom codemods are provided under the Business Source License 1.1 with free public access.

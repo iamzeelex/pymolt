@@ -849,7 +849,7 @@ def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
 
     Args:
         project_dir: Project directory (default: current directory).
-        endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
+        endpoint: Axiom endpoint URL (default: the configured one).
 
     Use after setup, assess and the baseline capture.
     """
@@ -914,7 +914,7 @@ def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
     except Exception as e:  # noqa: BLE001
         return _fail(
             f"plan failed: {e}",
-            hint="Check that Axiom Cloud Hub is reachable and an API token is configured.",
+            hint="Check `pymolt axiom status`: the endpoint must answer and a token be set.",
         )
 
 
