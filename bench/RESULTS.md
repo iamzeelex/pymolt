@@ -415,3 +415,83 @@ package-change rate. Assumed: 4 turns per affected call site, 4 verification cyc
 lines touched per call site, 3–8 engineer-hours per 1,000 LOC, and that flasgger's density
 generalises. None of the projections has been validated against a completed migration —
 they are a framework for reasoning about the order of magnitude, not a quote.
+
+---
+
+# Round 3 — transport vs guidance (CLI+skill arm) — NOT RUN
+
+**Status: skipped by the owner's decision (2026-11-15).** The MCP-vs-CLI decision was
+taken on the strategy review instead (two independent reviews plus external evidence;
+see the note below on rounds 1–2 not being isolated). The harness below stays ready
+for a later run.
+
+Planned 2026-11-14: T3 + T4 × {`bare`, `plugin`, `cli_skill`} × n=3, `claude-sonnet-5-5`,
+interleaved, cap $8. **No agent run completed, and none of the numbers below are
+agent measurements.** Every `claude -p` child failed before its first API call with
+`Failed to authenticate: OAuth session expired and could not be refreshed`. The
+standalone CLI on this host is logged out (`claude auth status` → `loggedIn: false`),
+and `--bare` would need `ANTHROPIC_API_KEY`. **Spent: $0.00** (each attempt reported
+`total_cost_usd` 0). The decision rule has not been applied.
+
+## What is ready
+
+- Arm `cli_skill`: `Read,Grep,Glob,Bash` (+`Skill`), the repo's `.venv/bin/pymolt` on
+  PATH through `/tmp/pymolt_bench_ws/_bin`, no MCP server, and
+  `--plugin-dir bench/plugins/pymolt-cli`. Its single skill `pymolt` is the plugin's
+  `migration-contract` skill plus the `plugin` arm's instruction, rendered as CLI
+  commands with `--json`.
+- Task `T4_contract_risk` and its scorer (site-level F1, ground truth located in
+  `bench/e2e_pandas/run.py`'s own source: `core.py:13` `Series.append`, `core.py:24`
+  `DataFrame.mean`). The design note puts `mean` on line 23. The generated file has
+  it on 24, and the scorer accepts ±1 when the reason names the method.
+- PyMolt use counted over both transports: `pymolt_mcp_calls` + `pymolt_cli_calls`
+  (Bash segments that run `pymolt`, not `which`/`grep pymolt`), `pymolt_cmds`, and
+  `pymolt_result_tokens`. These are backward-compatible with the round-2 transcripts.
+
+## Verified without an agent (init event + local checks, $0)
+
+| arm | pymolt skill | user skills / plugins / hooks | pymolt MCP | `pymolt` on env PATH |
+|---|---|---|---|---|
+| bare | — | none | — | no |
+| mcp_only | — | none | connected | no |
+| plugin | — | none | connected | no |
+| cli_skill | `pymolt-cli:pymolt` | none (only `pymolt-cli`) | — | `_bin/pymolt` |
+
+**Rounds 1–2 were not isolated.** Without `--setting-sources project`, every arm loaded
+the user's 15 personal skills and 3 installed plugins. The antigravity plugin's
+`SessionStart` hook also injected its routing policy into the context; it appears in
+111 of the 112 transcripts under the flasgger workspace. All three arms got it equally, so the within-round comparisons
+stand, but absolute context sizes from those rounds include it.
+
+**Env PATH alone would have leaked.** Claude Code's Bash tool replays a snapshot of the
+login shell, and that snapshot ends in `export PATH=...` from `~/.zshrc`, which puts
+`~/.local/bin/pymolt` (a global `uv tool` install) back in every arm. A login shell
+with the sanitised env still finds it, and adding the per-arm `ZDOTDIR` stops that.
+**Not yet verified:** whether Claude Code's snapshot honours `ZDOTDIR`, and whether
+`--setting-sources project` keeps `~/.claude/CLAUDE.md` out. Both need one
+authenticated `--probe-isolation` run, about 3 short turns. A leak would also show up
+afterwards as `pymolt_cli_calls > 0` in a non-CLI arm.
+
+**T4 payloads differ by transport, which is expected.** For the same baseline,
+`pymolt contract report . --json` prints the full report: 2,961 tokens, with each
+symbol's `observed_at` file:line. MCP `contract_report` returns a 4-line summary
+(trust 100%, 3 confirmed) and writes the same 9.4 KB to
+`.pymolt/mcp/contract_report.json`. The line-level evidence T4 asks for therefore
+arrives inline over the CLI, and over MCP only if the agent opens that file. The
+static map (`contract map`) has no line numbers and does not see method calls on
+instances (`s1.append`, `df.mean`). Neither transport answers T4 by itself: the agent
+still has to know which pandas 2 changes apply.
+
+## To run
+
+```bash
+claude auth login            # or export ANTHROPIC_API_KEY=...
+python bench/bench_mcp.py --probe-isolation --model claude-sonnet-5-5 --arms bare,plugin,cli_skill
+python bench/bench_mcp.py --model claude-sonnet-5-5 --tasks T3_contact,T4_contract_risk \
+    --arms bare,plugin,cli_skill --repeats 3 --budget-usd 8 --spent-usd <probe spend> --tag round3
+python bench/score.py bench/results/mcp_claude-sonnet-5-5_round3.json
+python bench/transcript_metrics.py bench/results/mcp_claude-sonnet-5-5_round3.json
+```
+
+Decision rule, to apply once the runs exist: retire MCP from the plugin if `cli_skill`
+scores ≥ `plugin` − 0.05 on both T3 and T4, and uses PyMolt in ≥ 2/3 of its T3/T4 runs.

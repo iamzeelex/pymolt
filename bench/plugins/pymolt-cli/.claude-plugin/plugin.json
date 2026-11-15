@@ -1,0 +1,15 @@
+{
+  "name": "pymolt-cli",
+  "version": "0.1.0",
+  "description": "Bench-only plugin: the pymolt migration-contract skill rendered for the pymolt CLI (--json) instead of MCP tools. No mcpServers — the agent drives `pymolt` through Bash.",
+  "author": {
+    "name": "zeelex"
+  },
+  "license": "MIT",
+  "keywords": [
+    "python",
+    "migration",
+    "behavioral-contract",
+    "bench"
+  ]
+}
