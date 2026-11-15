@@ -812,13 +812,22 @@ def apply_plan_cmd(
     if json_output:
         typer.echo(json.dumps(receipt.model_dump(mode="json"), indent=2))
         return
-    console.print(Panel(
-        f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]\n"
-        f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
-        f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
-        f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
-        title="Migration applied", border_style="green", expand=False,
-    ))
+    if not receipt.files_changed:
+        console.print(Panel(
+            f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]: "
+            "[bold]it changed no file[/bold] (0 files, 0 rewrite sites).\n"
+            "No call site needed a rewrite; the dependency moves still need testing: "
+            "capture and verify decide.",
+            title="Nothing to change", border_style="yellow", expand=False,
+        ))
+    else:
+        console.print(Panel(
+            f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]\n"
+            f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
+            f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
+            f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
+            title="Migration applied", border_style="green", expand=False,
+        ))
     next_step(project_path)
 
 
