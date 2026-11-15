@@ -733,7 +733,7 @@ def scan(
     project_dir: str = typer.Argument(".", help="The repo/project directory to scan"),
     json_output: bool = typer.Option(False, "--json", help="Emit the full scan as JSON on stdout"),
 ):
-    """Primary as-is scan: surfaces, version divergence, and dependency edges (offline, no resolution)."""
+    """Find manifests, Python versions, dependencies, and where the code calls them. Offline."""
     from pymolt.scan import run_scan
 
     project_path = require_project_dir(project_dir, json_output=json_output)
@@ -756,7 +756,38 @@ def scan(
         console.print(f"\n[bold]Dependency edges — [cyan]{root_path}[/cyan][/bold]")
         _render_inventory(inv)
 
+    if report.contact_map is not None:
+        _render_contact_map(report.contact_map)
+
     next_step(project_path)
+
+
+_CONTACT_ROWS = 15
+
+
+def _render_contact_map(cmap) -> None:
+    """Where the code calls into each dependency: the static side of every report."""
+    total = len(cmap.contacts)
+    symbols = sum(len(targets) for targets in cmap.by_dep.values())
+    console.print(
+        f"\n[bold]Calls into dependencies[/bold] — {total} call site(s), {symbols} symbol(s), "
+        f"{len(cmap.by_dep)} dependencies, {cmap.files_scanned} file(s) scanned"
+    )
+    for dep, targets in cmap.by_dep.items():
+        rows = [c for c in cmap.contacts if c.dep == dep]
+        table = Table(
+            title=f"{dep} — {len(targets)} symbol(s)", title_justify="left", show_header=True,
+        )
+        table.add_column("Dependency symbol", style="cyan", overflow="fold")
+        table.add_column("Called from (your code)", overflow="fold")
+        table.add_column("File", style="dim", overflow="fold")
+        for c in rows[:_CONTACT_ROWS]:
+            table.add_row(c.target, c.caller, c.file or "—")
+        if len(rows) > _CONTACT_ROWS:
+            table.caption = f"… {len(rows) - _CONTACT_ROWS} more (pymolt scan --json)"
+        console.print(table)
+    for note in cmap.notes:
+        console.print(f"[dim]Note: {note}[/dim]")
 
 
 def _eol_hint(status: str, eol_date: str | None) -> str:
@@ -2844,11 +2875,18 @@ def forks(
 # of "No such command". Hidden from --help; any arguments are accepted.
 
 
-def _removed(name: str, replacement: str | dict[str, str]) -> None:
-    """Register ``pymolt NAME`` as removed: print what replaces it and exit 2.
+def _removed(
+    name: str,
+    replacement: str | dict[str, str],
+    *,
+    group: typer.Typer = app,
+    prefix: str = "",
+) -> None:
+    """Register ``pymolt [PREFIX]NAME`` as removed: print what replaces it, exit 2.
 
     ``replacement`` is the new command, or, for a removed group, a map from each
-    old subcommand to its replacement.
+    old subcommand to its replacement. ``group`` is the Typer app the old name
+    lived in (``prefix`` is its name, for the message).
     """
 
     def stub(ctx: typer.Context) -> None:
@@ -2861,10 +2899,10 @@ def _removed(name: str, replacement: str | dict[str, str]) -> None:
                 sub = ""
         else:
             use = replacement
-        old = f"pymolt {name}{' ' + sub if sub else ''}"
+        old = f"pymolt {prefix}{name}{' ' + sub if sub else ''}"
         fail(f"`{old}` was removed", hint=f"Use {use}.")
 
-    app.command(
+    group.command(
         name,
         hidden=True,
         add_help_option=False,
@@ -2873,3 +2911,4 @@ def _removed(name: str, replacement: str | dict[str, str]) -> None:
 
 
 _removed("doctor", "`pymolt status`")
+_removed("map", "`pymolt scan`", group=verify_app, prefix="contract ")

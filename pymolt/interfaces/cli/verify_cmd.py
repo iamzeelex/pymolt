@@ -503,40 +503,6 @@ def boundary_cmd(
 
 
 
-@app.command("map")
-def map_cmd(
-    project_dir: str = typer.Argument(".", help="The project directory to analyze"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the contact map as JSON"),
-):
-    """Static contact map: where our code calls into third-party dependencies (cheap, no runtime)."""
-    from pymolt.verify.contact_map import build_contact_map
-
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    cmap = build_contact_map(project_path)
-    if json_output:
-        typer.echo(json.dumps(cmap.model_dump(mode="json"), indent=2))
-        return
-
-    total = len(cmap.contacts)
-    console.print(Panel(
-        f"Scanned [bold]{cmap.files_scanned}[/bold] file(s) — "
-        f"[bold]{total}[/bold] call site(s) reaching [bold]{sum(len(t) for t in cmap.by_dep.values())}[/bold] symbol(s) across [bold]{len(cmap.by_dep)}[/bold] dependencies",
-        title="Static Contact Map", expand=False,
-    ))
-    for dep, targets in cmap.by_dep.items():
-        console.print(f"\n[bold magenta]{dep}[/bold magenta] — {len(targets)} symbol(s)")
-        table = Table(show_header=True)
-        table.add_column("Dependency symbol", style="cyan")
-        table.add_column("Called from (your code)")
-        table.add_column("File", style="dim")
-        for c in cmap.contacts:
-            if c.dep == dep:
-                table.add_row(c.target, c.caller, c.file or "—")
-        console.print(table)
-    for note in cmap.notes:
-        console.print(f"[dim]Note: {note}[/dim]")
-
-
 _TRUST_TIER_LABELS = {
     "exact": "exact-join",
     "canonical": "canonical",
