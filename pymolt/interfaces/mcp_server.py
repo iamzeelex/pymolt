@@ -144,8 +144,9 @@ def setup(project_dir: str = ".", manifest: str = "", tool: str = "",
             options, manifest=manifest or None, tool=tool or None,
             base_python=base_python or None, target_python=target_python or None,
             container_id=container_id, target_env=target_env)
-        config = apply_setup(p, choices) if choices is not None else None
-        return views.setup_view(options, p, config=config)
+        notes: list[str] = []
+        config = apply_setup(p, choices, notes=notes) if choices is not None else None
+        return views.setup_view(options, p, config=config, side_effects=notes)
 
     return _run("setup", project_dir, build, "Call setup with no choices for valid values.")
 

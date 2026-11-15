@@ -23,7 +23,7 @@ from pymolt.ingestion.detect import (
     detect_sources,
     detect_system_tools,
 )
-from pymolt.ingestion.fallback_compiler import list_running_containers
+from pymolt.ingestion.fallback_compiler import list_project_containers
 from pymolt.setup.pythons import (
     classify_eol,
     get_available_python_versions,
@@ -221,15 +221,18 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
 
     # Call the lister unconditionally — it self-guards on docker availability, so
     # we don't depend on the (sometimes flaky) daemon-liveness probe in system_tools.
+    # Only a container that mounts this project is offered.
     containers: list[ContainerOption] = []
     try:
-        for c in list_running_containers():
+        for c in list_project_containers(project_path):
             containers.append(
                 ContainerOption(id=c["id"], name=c.get("name", ""),
                                 python=c.get("python") or None)
             )
     except Exception as e:  # docker probing is best-effort
         notes.append(f"Container detection skipped: {e}")
+    if not containers:
+        notes.append("No running container mounts this project.")
 
     tools = _build_tool_options(sources, system_tools, containers)
     target_versions = build_target_options(base_python_default)
@@ -286,8 +289,8 @@ def _build_tool_options(sources, system_tools, containers) -> list[ToolOption]:
         if name == "container":
             available = bool(containers)
             detail = (
-                f"{len(containers)} running container(s)" if containers
-                else "no running containers"
+                f"{len(containers)} running container(s) mounting the project" if containers
+                else "no running container mounts the project"
             )
         elif name == "system":
             available = True
@@ -402,17 +405,22 @@ def check_setup_values(
         raise SetupError("a container is required with the container tool", f"Running: {running}.")
 
 
-def apply_setup(project_dir: str | Path, choices: SetupChoices) -> EnvConfig:
+def apply_setup(
+    project_dir: str | Path, choices: SetupChoices, *, notes: list[str] | None = None,
+) -> EnvConfig:
     """Persist the chosen config to ``.pymolt/env_config.json`` and return it.
 
-    Also creates the ``.pymolt`` folder and adds the config to
-    ``.gitignore`` (best-effort), matching what the CLI setup used to do inline.
+    Also creates the ``.pymolt`` folder and adds the config to ``.gitignore``
+    (best-effort). Every side effect outside ``.pymolt/`` is appended to ``notes``
+    when given, so the caller can say what it changed in the user's project.
     """
     project_path = Path(project_dir)
     pymolt_dir = project_path / ".pymolt"
     pymolt_dir.mkdir(parents=True, exist_ok=True)
     (pymolt_dir / "cache").mkdir(exist_ok=True)
-    _ensure_gitignore(project_path)
+    added = _ensure_gitignore(project_path)
+    if added and notes is not None:
+        notes.append(f"Added {_GITIGNORE_ENTRY} to {project_path / '.gitignore'}.")
 
     config = EnvConfig(
         selected_manifest=choices.selected_manifest,
@@ -429,16 +437,21 @@ def apply_setup(project_dir: str | Path, choices: SetupChoices) -> EnvConfig:
     return config
 
 
-def _ensure_gitignore(project_path: Path) -> None:
+_GITIGNORE_ENTRY = ".pymolt/env_config.json"
+
+
+def _ensure_gitignore(project_path: Path) -> bool:
+    """Append the config to an existing ``.gitignore``. True only when it wrote."""
     gitignore_path = project_path / ".gitignore"
-    entry = ".pymolt/env_config.json"
     try:
-        if gitignore_path.exists():
-            content = gitignore_path.read_text(encoding="utf-8")
-            if entry in content:
-                return
-            separator = "\n" if content and not content.endswith("\n") else ""
-            with open(gitignore_path, "a", encoding="utf-8") as f:
-                f.write(f"{separator}{entry}\n")
+        if not gitignore_path.exists():
+            return False
+        content = gitignore_path.read_text(encoding="utf-8")
+        if _GITIGNORE_ENTRY in content:
+            return False
+        separator = "\n" if content and not content.endswith("\n") else ""
+        with open(gitignore_path, "a", encoding="utf-8") as f:
+            f.write(f"{separator}{_GITIGNORE_ENTRY}\n")
+        return True
     except OSError:
-        pass
+        return False

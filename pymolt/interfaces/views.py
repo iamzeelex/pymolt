@@ -35,6 +35,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -341,8 +342,10 @@ def setup_payload(options, project_dir: str | Path, *, config=None) -> dict:
     }
 
 
-def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
-    """``SetupOptions`` (+ the saved ``EnvConfig``, if any) -> view."""
+def setup_view(options, project_dir: str | Path, *, config=None,
+               side_effects: Iterable[str] = ()) -> dict:
+    """``SetupOptions`` (+ the saved ``EnvConfig``, if any) -> view. ``side_effects``: what
+    saving changed besides the config (e.g. an edited ``.gitignore``), said, not hidden."""
     full = setup_payload(options, project_dir, config=config)
     full_path = write_full_report(project_dir, "setup", full)
     lists = _Lists()
@@ -359,6 +362,7 @@ def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
         if offered and config.target_python not in offered:
             warnings.append(f"Python {config.target_python} is not in the available list; "
                             "assess fails if it cannot be provisioned.")
+        warnings.extend(side_effects)
         tool = getattr(config.selected_tool, "value", config.selected_tool)
         summary = (f"Saved {full['config_path']}.\nManifest {config.selected_manifest}, tool "
                    f"{tool}, Python {config.base_python} -> {config.target_python}.")

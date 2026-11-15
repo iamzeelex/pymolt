@@ -153,6 +153,119 @@ def _is_subpath(child: Path, parent: Path) -> bool:
         return False
 
 
+def _project_mount_cwd(data: dict, project_path_abs: Path) -> str | None:
+    """Where ``project_path_abs`` appears inside the container ``data`` (a ``docker
+    inspect`` record), or None when the container does not mount it.
+
+    A bind mount of the project or one of its parents counts, and so do the
+    VS Code / JetBrains devcontainer labels. Pure: no docker needed.
+    """
+    config = data.get("Config", {}) or {}
+    labels = config.get("Labels", {}) or {}
+    container_cwd = None
+    mounted = False
+
+    # 1. Check bind mounts
+    for m in data.get("Mounts", []) or []:
+        if m.get("Type") == "bind":
+            src = m.get("Source", "")
+            dest = m.get("Destination", "")
+            if not src or not dest:
+                continue
+
+            norm_src = src
+            if norm_src.startswith("/host_mnt"):
+                norm_src = norm_src[len("/host_mnt"):]
+
+            try:
+                src_path = Path(norm_src).resolve()
+                if project_path_abs == src_path or _is_subpath(project_path_abs, src_path):
+                    mounted = True
+                    rel_path = project_path_abs.relative_to(src_path)
+                    container_cwd = str(Path(dest) / rel_path)
+                    break
+            except Exception:
+                pass
+
+    # 2. Check labels (JetBrains or VS Code devcontainer metadata)
+    if not mounted:
+        vscode_folder = labels.get("devcontainer.localFolder")
+        jb_sources = labels.get("com.intellij.devcontainer.sources.path")
+        jb_workspace = labels.get("com.intellij.devcontainer.workspace.path")
+
+        for folder_str in [vscode_folder, jb_sources]:
+            if folder_str:
+                try:
+                    folder_path = Path(folder_str).resolve()
+                    if project_path_abs == folder_path or _is_subpath(project_path_abs, folder_path):
+                        mounted = True
+                        workspace_path = jb_workspace or config.get("WorkingDir") or "/workspace"
+                        rel_path = project_path_abs.relative_to(folder_path)
+                        container_cwd = str(Path(workspace_path) / rel_path)
+                        break
+                except Exception:
+                    pass
+
+    if not mounted:
+        return None
+    return container_cwd or config.get("WorkingDir") or "/workspace"
+
+
+def _docker_inspect_running() -> list[dict]:
+    """``docker inspect`` of every running container. [] without docker or a daemon.
+
+    The one place setup's container listing touches docker, so tests replace it.
+    """
+    if not shutil.which("docker"):
+        return []
+    try:
+        res = subprocess.run(
+            ["docker", "ps", "-q"], capture_output=True, text=True, check=True, timeout=5
+        )
+        ids = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+        if not ids:
+            return []
+        return json.loads(subprocess.run(
+            ["docker", "inspect", *ids], capture_output=True, text=True, check=True, timeout=5
+        ).stdout)
+    except Exception:
+        return []
+
+
+def _docker_python_version(container_id: str) -> str:
+    """The container's Python (``major.minor[...]``), "" when it has none."""
+    for cmd in ("python", "python3"):
+        try:
+            r = subprocess.run(
+                ["docker", "exec", container_id, cmd, "-c", PYTHON_VERSION_PROBE],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
+    return ""
+
+
+def list_project_containers(project_dir: str | Path) -> list[dict[str, str]]:
+    """Running containers that mount ``project_dir`` (id, name, python, cwd).
+
+    Containers that do not mount the project are not offered: a container that
+    cannot see the code cannot resolve or run it. Empty when docker is absent,
+    stopped, or nothing mounts the project.
+    """
+    project_abs = Path(project_dir).resolve()
+    out: list[dict[str, str]] = []
+    for d in _docker_inspect_running():
+        cwd = _project_mount_cwd(d, project_abs)
+        if cwd is None:
+            continue
+        cid = d.get("Id", "")[:12]
+        out.append({"id": cid, "name": d.get("Name", "").lstrip("/"),
+                    "python": _docker_python_version(cid), "cwd": cwd})
+    return out
+
+
 def list_running_containers() -> list[dict[str, str]]:
     """Every running Docker container (id, name, python) — for interactive selection.
 
@@ -234,59 +347,10 @@ def find_running_containers_for_project(project_dir: Path, version: str) -> list
     for data in containers_data:
         container_id = data.get("Id", "")[:12]
         name = data.get("Name", "").lstrip("/")
-        config = data.get("Config", {})
-        labels = config.get("Labels", {})
-        mounts = data.get("Mounts", [])
-        
-        mounted_in_container = False
-        container_cwd = None
 
-        # 1. Check bind mounts
-        for m in mounts:
-            if m.get("Type") == "bind":
-                src = m.get("Source", "")
-                dest = m.get("Destination", "")
-                if not src or not dest:
-                    continue
-                
-                norm_src = src
-                if norm_src.startswith("/host_mnt"):
-                    norm_src = norm_src[len("/host_mnt"):]
-                
-                try:
-                    src_path = Path(norm_src).resolve()
-                    if project_path_abs == src_path or _is_subpath(project_path_abs, src_path):
-                        mounted_in_container = True
-                        rel_path = project_path_abs.relative_to(src_path)
-                        container_cwd = str(Path(dest) / rel_path)
-                        break
-                except Exception:
-                    pass
-
-        # 2. Check labels (JetBrains or VS Code devcontainer metadata)
-        if not mounted_in_container:
-            vscode_folder = labels.get("devcontainer.localFolder")
-            jb_sources = labels.get("com.intellij.devcontainer.sources.path")
-            jb_workspace = labels.get("com.intellij.devcontainer.workspace.path")
-            
-            for folder_str in [vscode_folder, jb_sources]:
-                if folder_str:
-                    try:
-                        folder_path = Path(folder_str).resolve()
-                        if project_path_abs == folder_path or _is_subpath(project_path_abs, folder_path):
-                            mounted_in_container = True
-                            workspace_path = jb_workspace or config.get("WorkingDir") or "/workspace"
-                            rel_path = project_path_abs.relative_to(folder_path)
-                            container_cwd = str(Path(workspace_path) / rel_path)
-                            break
-                    except Exception:
-                        pass
-
-        if not mounted_in_container:
+        container_cwd = _project_mount_cwd(data, project_path_abs)
+        if container_cwd is None:
             continue
-
-        if not container_cwd:
-            container_cwd = config.get("WorkingDir") or "/workspace"
 
         # Check Python version inside the container
         target_major_minor = ".".join(version.split(".")[:2])

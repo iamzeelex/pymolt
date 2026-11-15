@@ -1069,10 +1069,15 @@ def setup(
             )
         except views.AgentInputError as exc:
             fail(exc.error, hint=exc.hint, json_output=True)
-        config = apply_setup(project_path, choices) if choices is not None else None
-        if agent:
-            typer.echo(views.dumps(views.setup_view(options, project_path, config=config)))
+        side_effects: list[str] = []
+        config = (apply_setup(project_path, choices, notes=side_effects)
+                  if choices is not None else None)
+        if agent:  # the agent view carries the side effects as warnings
+            typer.echo(views.dumps(views.setup_view(options, project_path, config=config,
+                                                    side_effects=side_effects)))
         else:
+            for note in side_effects:  # stderr: stdout stays pure JSON
+                warn(note)
             typer.echo(json.dumps(
                 views.setup_payload(options, project_path, config=config), indent=2))
         return
@@ -1119,6 +1124,9 @@ def setup(
         for c in options.containers:
             console.print(f"  Container {c.id} ({c.name}) - Python {c.python}")
         console.print()
+    else:
+        console.print("[bold cyan]Running Docker Containers:[/bold cyan]")
+        console.print("  None mounts this project.\n")
 
     tool_names = [t.name for t in options.tools]
     container_id = container
@@ -1239,10 +1247,13 @@ def setup(
         target_env_created=target_env_created,
         target_env_path=target_env_path,
     )
-    apply_setup(project_path, choices)
+    side_effects: list[str] = []
+    apply_setup(project_path, choices, notes=side_effects)
 
     config_file = project_path / ".pymolt" / "env_config.json"
     console.print(f"\n[bold green]✓ Configuration saved to {config_file}[/bold green]")
+    for note in side_effects:
+        console.print(f"[yellow]{note}[/yellow]")
     console.print(Panel(
         f"Selected Manifest  : {selected_manifest}\n"
         f"Resolution Tool    : {selected_tool}\n"
