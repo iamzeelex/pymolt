@@ -27,7 +27,7 @@ snapshot of a commit while `pymolt/` is being edited, see "Measuring a fixed com
 | `hook --duration S --rate R` | control: service under a no-op `sys.setprofile` hook (`control/sitecustomize.py`), no pymolt |
 | `capture --duration S --rate R [--steady-warmup auto\|S\|off] [--env K=V ...] [-- <pymolt capture args>]` | `pymolt contract capture --when baseline --mode command --project-dir <run>/svc --force <args> -- <svc python> app.py`, load, then SIGINT to the service process only, then waits for pymolt to finalize. `--steady-warmup` defaults to `off` here |
 | `report <run-or-session-dir> [--nocap DIR ...] [--no-fold] [--refold]` | summary per run (`report.json`, `summary.md`); a capture/hook run is compared with the mean of the given nocap runs (default: every matching nocap run in its session); capture runs also get the host fold |
-| `gate [--duration 60] [--paced-rate 200] [--repeat N] [--steady-warmup auto\|S\|off] [--env K=V ...] [--control] [--wait-quiet S] [-- <capture args>]` | `nocap-sat-0, capture-sat-1, [hook-sat-1], nocap-sat-1, ... capture-sat-N, nocap-sat-N`, then `nocap-paced, capture-paced`, then the PASS/FAIL table |
+| `gate [--duration 60] [--paced-rate 200] [--repeat N] [--steady-warmup auto\|S\|off] [--env K=V ...] [--control] [--no-recall] [--wait-quiet S] [-- <capture args>]` | `nocap-sat-0, capture-sat-1, [hook-sat-1], nocap-sat-1, ... capture-sat-N, nocap-sat-N`, then `nocap-paced, capture-paced`, then the recall reference `capture-discover`, then the PASS/FAIL table |
 
 `--rate 0` means saturated (closed loop). Common options: `--threads` (default 16 saturated,
 64 paced), `--seed` (load mix, default 42), `--warmup` (default 2 s, sent but not measured),
@@ -65,6 +65,26 @@ offset into the load, and the service's rps until then (from the load generator'
 counts). `steady_state` says whether the measured window really started after the switch.
 The paced capture uses the same warmup. `--steady-warmup S` is a fixed warmup, `off` the old
 2 s warmup.
+
+**Startup.** The load generator is started together with the service; it builds its request
+sequence, waits for the ready file and starts the load the moment the service answers, so its
+per-second counts show the startup as clients see it. For each saturated run the startup
+curve is computed from the watcher start (`started_at` in the capture metadata; the process
+spawn for nocap/hook runs): rps over the first 30 s, with the seconds before the service
+answered counting as 0 (`rps_first_window`), the slowest 5-s window of the whole load
+(`min_5s_rps`) and when a 5-s window first reached 80% of the run's steady-state rps
+(`t80_s`). Criterion 6 compares `rps_first_window` with the mean of the neighbouring nocap
+runs. A run whose load ends before the 30 s window does gives `n/a` (ERROR).
+
+**Recall.** `capture-discover` is a reference capture in discover mode for the whole run
+(`--env PYMOLT_TRACE_MODE=discover` on top of the gate's `--env`), paced at `--paced-rate` so
+the result is not dominated by a stall. From each capture's merged facts snapshot (facts +
+tallies; the JSONL trace when there is no snapshot) the harness takes the set of (`sym`,
+call-site file relative to the project, line). Recall = |union over the default-mode capture
+runs ∩ reference| / |reference|; the missing items are listed in `summary.md` and
+`gate.json`. The reference run is not part of criteria 2-4 and is not folded. Calls made only
+after the discover -> watch switch (for example `Engine.dispose()` at shutdown) are the
+expected misses of auto mode.
 
 **Noise.** Every saturated capture runs between two nocap runs (`nocap-sat-(i-1)`,
 `capture-sat-i`, `nocap-sat-i`). The capture is compared with the mean of its two neighbours,
@@ -131,6 +151,8 @@ A 60 s phase-1 saturated capture leaves ~20-60 MB of trace; delete old sessions 
 | `rps_loss` | `1 - capture rps / mean(nocap rps)` against the neighbouring nocap runs (gate) or every nocap run with the same rate, duration and threads in the session (`report`) |
 | `nocap_spread` | `(max - min) / mean` of those nocap runs: how much the host moved during the comparison |
 | `warmup_s`, `warmup.rps` | when the measured window started (s after the load started) and the rps before it |
+| `per_second`, `t0_wall` | requests per second of the whole load (by start or due time), and the load's start as wall time |
+| `startup.*` (saturated runs) | `origin` (watcher start / process spawn), `boot_s` (until the service answered), `rps_first_window` (first 30 s), `min_5s_rps`, `t80_s`, `steady_rps` |
 | `discover.*` (capture) | `mode`, `switch_reason` (quiet / max), `discovered` symbols, `discover_s` (watcher start to switch), `switch_after_load_start_s`, `discover_rps` (load rps before the switch), `discover_bytes`, `steady_state` (window started after the switch) |
 | `events_written` / `events_seen` | JSONL events in the merged trace / events the runtime saw (`.meta.json` counters) |
 | `calls_counted` | the first of `calls_counted`, `calls_seen`, `calls`, `tallied` the runtime reports, else `events_seen` (phase 1 has no separate call counter) |
@@ -152,12 +174,15 @@ A 60 s phase-1 saturated capture leaves ~20-60 MB of trace; delete old sessions 
 | 3a | volume | max `bytes_per_day` of the capture runs < 1 GB (10^9 bytes) |
 | 3b | host fold | max fold RSS < 500 MiB |
 | 4 | tail latency | paced capture p99 (from schedule, steady state) <= 2 x paced nocap p99 |
+| 6 | startup | saturated capture rps over the first 30 s from the watcher start >= 50% of the mean of its neighbouring nocap runs (median over `--repeat`) |
+| 7 | recall | default-mode (sym, site) set covers >= 95% of the `capture-discover` reference |
 
 Rows marked INFO (discover window, no-op hook control, an unconfirmed steady state) are
 reported and never fail the gate.
 
-Gate 5 (pandas 1.5 -> 2.2 correctness) and 6 (stdlib-only runtime, suite passes) are not load
-measurements and are not checked here.
+The design doc's criteria 5 (pandas 1.5 -> 2.2 correctness) and 6 (stdlib-only runtime, suite
+passes) are not load measurements and are not checked here; the harness's 6 (startup) and 7
+(recall) are load-gate additions with their own numbers.
 
 ## Measuring a fixed commit
 
