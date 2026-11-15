@@ -17,14 +17,34 @@ dependency is imported:
 
 Honesty: symbols that can't be wrapped (not callable, read-only/C type, attr missing) are
 recorded in ``skipped`` rather than silently dropped. Feeds the same Sink as the other backends
-(``on_return``/``on_raise`` with the ``site``), so the JSONL / diff / contract are unchanged.
+(``on_return``/``on_raise`` with the ``site``, ``dur``, ``tid``; ``tally`` for an unsampled
+call), so the JSONL / diff / contract are unchanged. A raise is labelled ``module.Qualname``
+(builtins bare), exactly as the monitoring backend labels it.
+
+Watch after discover (``patch_aliases=True``): by the time the controller switches, user and
+dependency modules have long bound ``from dep import func`` aliases, which patching the
+defining module alone would miss. The backend then also patches every module-global alias of
+a wrapped module-level function (one pass over ``sys.modules`` at start), and restores them on
+``stop()``. Late ``from dep import func`` imports read the patched attribute.
 """
 import functools
 import importlib.util
 import inspect
 import sys
+import types
 
-from ._backend import AppMatcher, SetProfileBackend, _split
+from ._backend import (
+    _GENERATOR_TYPES,
+    AppMatcher,
+    SetProfileBackend,
+    _get_ident,
+    _now,
+    _split,
+    privacy_normalizer,
+    sink_admit_accepts_key,
+    sink_call_fields,
+    sink_tally,
+)
 from ._identity import (
     SYMQ_FALLBACK,
     SYMQ_RECEIVER,
@@ -36,9 +56,27 @@ from ._identity import (
     sink_identity_fields,
     unwrap,
 )
-from ._normalize import normalize
+from ._normalize import typename
 
 _WRAP_MARK = "__pymolt_wrapped__"
+_FUNCTION = types.FunctionType
+_MODULE = types.ModuleType
+
+
+def _alias_index():
+    """{id(function): [(module, name)]} of every module-global function binding."""
+    index = {}
+    for module in list(sys.modules.values()):
+        if not isinstance(module, _MODULE):
+            continue
+        try:
+            items = list(module.__dict__.items())
+        except Exception:
+            continue
+        for name, value in items:
+            if type(value) is _FUNCTION:
+                index.setdefault(id(value), []).append((module, name))
+    return index
 
 
 def _restore_setattr(holder, attr, original):
@@ -61,11 +99,19 @@ class WrapBackend(object):
 
     name = "wrap"
 
-    def __init__(self, symbols, sink, source=None, include_internal=False):
+    def __init__(self, symbols, sink, source=None, include_internal=False, patch_aliases=False):
         self.sink = sink
         fields = sink_identity_fields(sink)           # v1 sinks keep the v1 call
         self._sym_kw = "sym" in fields
         self._own_kw = "own" in fields
+        call_fields = sink_call_fields(sink)          # today's sinks keep today's call
+        self._dur_kw = "dur" in call_fields
+        self._tid_kw = "tid" in call_fields
+        self._tally = sink_tally(sink)
+        self._admit_key = sink_admit_accepts_key(sink)
+        self._normalize = privacy_normalizer()
+        self.patch_aliases = patch_aliases
+        self._aliases = None                          # built once at start when patching aliases
         self.near = None if include_internal else AppMatcher(_split(source))
         self._restore = []          # closures that undo each patch
         self._finder = None
@@ -91,6 +137,11 @@ class WrapBackend(object):
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
     def start(self):
+        if self.patch_aliases:
+            try:
+                self._aliases = _alias_index()
+            except Exception:
+                self._aliases = None
         for modname in list(self._by_module):
             mod = sys.modules.get(modname)
             if mod is not None:
@@ -169,12 +220,13 @@ class WrapBackend(object):
 
         @functools.wraps(inner)
         def wrapper(*a, **kw):
+            t0 = _now()
             try:
                 result = inner(*a, **kw)
             except BaseException as exc:
-                backend._safe_record(qualname, inner, a, kw, None, exc, ident)
+                backend._safe_record(qualname, inner, a, kw, None, exc, ident, _now() - t0)
                 raise
-            backend._safe_record(qualname, inner, a, kw, result, None, ident)
+            backend._safe_record(qualname, inner, a, kw, result, None, ident, _now() - t0)
             return result
 
         setattr(wrapper, _WRAP_MARK, True)
@@ -191,6 +243,22 @@ class WrapBackend(object):
             self._restore.append(_restore_setattr(holder, attr, original))
         else:
             self._restore.append(_restore_delattr(holder, attr))
+        if rebind is None and self._aliases and isinstance(holder, _MODULE):
+            self._patch_aliases(holder, attr, real_obj, new)
+
+    def _patch_aliases(self, holder, attr, real_obj, new):
+        """Rebind every other module-global name bound to ``real_obj`` (``from dep import f``
+        in user code, re-exports in package ``__init__``) to the wrapper, reversibly."""
+        for module, name in self._aliases.get(id(real_obj), ()):
+            if module is holder and name == attr:
+                continue
+            try:
+                if module.__dict__.get(name) is not real_obj:
+                    continue                            # rebound since the index was built
+                setattr(module, name, new)
+            except Exception:
+                continue
+            self._restore.append(_restore_setattr(module, name, real_obj))
 
     @staticmethod
     def _class_identity(holder, inner, ident):
@@ -224,13 +292,16 @@ class WrapBackend(object):
         @functools.wraps(real_init)
         def init_wrapper(self_obj, *a, **kw):
             bound_args = (self_obj,) + a            # include self so it binds to the real signature
+            t0 = _now()
             try:
                 real_init(self_obj, *a, **kw)
             except BaseException as exc:
-                backend._safe_record(qualname, real_init, bound_args, kw, None, exc, ident)
+                backend._safe_record(qualname, real_init, bound_args, kw, None, exc, ident,
+                                     _now() - t0)
                 raise
             # construction "result" is the instance -> shape becomes opaque:<Class>
-            backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None, ident)
+            backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None, ident,
+                                 _now() - t0)
 
         setattr(init_wrapper, _WRAP_MARK, True)
         init_wrapper.__wrapped__ = real_init
@@ -246,10 +317,10 @@ class WrapBackend(object):
 
     # ── recording ──────────────────────────────────────────────────────────────
     def _safe_record(self, qualname, real, args, kwargs, result, exc,
-                     ident=(None, None, None, None)):
+                     ident=(None, None, None, None), dur=None):
         """Tracing must never alter the wrapped API's return/raise behavior."""
         try:
-            self._record(qualname, real, args, kwargs, result, exc, ident)
+            self._record(qualname, real, args, kwargs, result, exc, ident, dur)
         except Exception:
             note = getattr(self.sink, "note_failure", None)
             if note is not None:
@@ -259,7 +330,7 @@ class WrapBackend(object):
                     pass
 
     def _record(self, qualname, real, args, kwargs, result, exc,
-                ident=(None, None, None, None)):
+                ident=(None, None, None, None), dur=None):
         # caller frame: 0=_record, 1=_safe_record, 2=wrapper, 3=the code that
         # made the call (our boundary near side)
         try:
@@ -270,25 +341,44 @@ class WrapBackend(object):
             mod = caller.f_globals.get("__name__", "") if caller is not None else ""
             if caller is None or not self.near.matches(mod, caller):
                 return                                  # internal dep<->dep call, not our boundary
-        # Sampling before normalization; raises are always retained.
-        admit = getattr(self.sink, "admit", None)
-        if admit is not None and not admit(force=exc is not None):
-            return
         site = None
         if caller is not None:
             code = caller.f_code
             site = {"file": code.co_filename, "line": caller.f_lineno, "func": code.co_name}
+        if type(result) in _GENERATOR_TYPES:
+            dur = None          # creating a generator is not its work (as setprofile/monitoring)
+        sym = ident[0] or qualname
+        raised = typename(exc) if exc is not None else None
+        # Sampling before normalization; raises are always retained. An unsampled call is
+        # still counted (tally), without its values.
+        admit = getattr(self.sink, "admit", None)
+        if admit is None:
+            sampled = True
+        elif self._admit_key:
+            key = (sym, site["file"], site["line"]) if site is not None else (sym, None, None)
+            sampled = admit(key=key, force=exc is not None)
+        else:
+            sampled = admit(force=exc is not None)
+        if not sampled:
+            if self._tally is not None:
+                self._tally(qualname, sym, site, "raise" if exc is not None else "return",
+                            raised=raised, dur=dur)
+            return
         inputs = self._inputs(real, args, kwargs)
         extra = {"admitted": True} if admit is not None else {}
         if self._sym_kw:
-            extra["sym"] = ident[0] or qualname
+            extra["sym"] = sym
             extra["symq"] = ident[1] if ident[0] else SYMQ_FALLBACK
         if self._own_kw and ident[2] is not None and args:
             own = receiver_owner(args[0], ident[2], ident[3])
             if own is not None:
                 extra["own"] = own
+        if self._dur_kw:
+            extra["dur"] = dur
+        if self._tid_kw:
+            extra["tid"] = _get_ident()
         if exc is not None:
-            self.sink.on_raise(qualname, inputs, type(exc).__qualname__, site, **extra)
+            self.sink.on_raise(qualname, inputs, raised, site, **extra)
         else:
             self.sink.on_return(qualname, inputs, result, site, **extra)
 
@@ -314,10 +404,11 @@ class WrapBackend(object):
             sig = self._signature(real)
             if sig is self._SIG_FAILED:
                 raise TypeError("no signature")
-            return bind_inputs(sig, args, kwargs, normalize)
+            return bind_inputs(sig, args, kwargs, self._normalize)
         except Exception:
-            return {"args": [normalize(v) for v in args],
-                    "kwargs": {k: normalize(v) for k, v in kwargs.items()}}
+            norm = self._normalize
+            return {"args": [norm(v) for v in args],
+                    "kwargs": {k: norm(v) for k, v in kwargs.items()}}
 
 
 class _WrapFinder(object):
@@ -454,13 +545,14 @@ class TargetedBackend(object):
 
     name = "targeted"
 
-    def __init__(self, targets, sink, source=None, include_internal=False):
+    def __init__(self, targets, sink, source=None, include_internal=False, patch_aliases=False):
         self.symbols, self.prefixes = _partition_impact_targets(targets)
         self.wrap = None
         self.profile = None
         if self.symbols:
             self.wrap = WrapBackend(
                 self.symbols, sink, source=source, include_internal=include_internal,
+                patch_aliases=patch_aliases,
             )
         if self.prefixes:
             self.profile = SetProfileBackend(

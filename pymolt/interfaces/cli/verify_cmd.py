@@ -265,9 +265,11 @@ def capture_cmd(
         "auto", "--privacy",
         help="auto (values for tests, shape for live) | values | shape",
     ),
-    sample_rate: float = typer.Option(
-        1.0, "--sample-rate", min=0.000001, max=1.0,
-        help="Fraction of completed calls to retain (sampled reports stay inconclusive)",
+    sample_rate: float | None = typer.Option(
+        None, "--sample-rate", min=0.000001, max=1.0,
+        help="Fraction of calls whose values are kept. Every call is still counted. Default: "
+             "1.0 for tests; 0.1 for command/attach, with the first 32 calls of each call "
+             "site always kept",
     ),
     impact_targets: str | None = typer.Option(
         None, "--impact-targets",
@@ -342,7 +344,8 @@ def capture_cmd(
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
             f"  [white]pymolt contract capture --when {when} --mode attach --collect "
-            f"--privacy {effective_privacy} --sample-rate {sample_rate}[/white]\n\n"
+            f"--privacy {effective_privacy}"
+            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}[/white]\n\n"
             f"  [white]{instr.command_hint}[/white]",
             title="capture (attach)", expand=False, border_style="cyan",
         ))

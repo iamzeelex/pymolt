@@ -55,7 +55,15 @@ from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
-from pymolt.verify.facts import record_site_text
+from pymolt.verify.facts import (
+    find_facts_snapshot,
+    iter_snapshot,
+    merge_fact_snapshots,
+    project_snapshot,
+    read_snapshot_header,
+    record_site_text,
+    snapshot_path,
+)
 from pymolt.verify.gaps import classify_gaps, scan_usage_sites
 from pymolt.verify.models import (
     CaptureMode,
@@ -112,6 +120,8 @@ class TraceCaptureResult(BaseModel):
     # Interpreters where tracing was requested but the watcher could not load (each wrote
     # ``<trace>.activation-error.json``): those processes ran UNTRACED.
     activation_failures: list[dict] = Field(default_factory=list)
+    # Facts sink (phase 2): the merged per-process snapshots, ``<out_path>.facts.json``.
+    facts_path: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,8 +141,21 @@ def trace_env(
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
+    sink: str | None = None,
+    trace_mode: str | None = None,
+    sample_first: int | None = None,
 ) -> dict:
-    """The PYMOLT_TRACE_* variables that drive the watcher (shared by local + container)."""
+    """The PYMOLT_TRACE_* variables that drive the watcher (shared by local + container).
+
+    Below a sample rate of 1 the novelty-first count ``PYMOLT_TRACE_SAMPLE_FIRST`` is set too
+    (``sample_first``, default ``LONG_RUN_SAMPLE_FIRST``; the caller's environment wins).
+
+    ``sink`` / ``trace_mode`` are this capture's defaults for ``PYMOLT_TRACE_SINK`` /
+    ``PYMOLT_TRACE_MODE`` (``TEST_SINK``/``TEST_TRACE_MODE`` for a test suite,
+    ``LONG_RUN_SINK``/``LONG_RUN_TRACE_MODE`` for command/attach); a value set in the
+    caller's own environment wins. With impact targets the mode is left to the caller's
+    environment (unset = the watcher's targeted capture). The facts sink's tunables are
+    forwarded when set, so a container capture honours them too."""
     if privacy not in {"values", "shape"}:
         raise ValueError("privacy must be 'values' or 'shape'")
     if not 0 < sample_rate <= 1:
@@ -163,7 +186,69 @@ def trace_env(
         env["PYMOLT_TRACE_SOURCE"] = source
     if include_internal:
         env["PYMOLT_TRACE_INTERNAL"] = "1"
+    if normalized_targets:
+        # Impact targets with no explicit mode keep meaning a targeted capture from the start
+        # (the watcher's own rule for an unset PYMOLT_TRACE_MODE): no default mode here.
+        trace_mode = None
+    for key, default in (("PYMOLT_TRACE_SINK", sink), ("PYMOLT_TRACE_MODE", trace_mode)):
+        value = os.environ.get(key) or default
+        if value:
+            env[key] = value
+    if sample_rate < 1:
+        env["PYMOLT_TRACE_SAMPLE_FIRST"] = os.environ.get("PYMOLT_TRACE_SAMPLE_FIRST") or str(
+            sample_first if sample_first is not None else LONG_RUN_SAMPLE_FIRST)
+    for key in _FORWARDED_TUNABLES:
+        if os.environ.get(key):
+            env[key] = os.environ[key]
     return env
+
+
+def sampling_policy(env: dict, source: str) -> dict:
+    """The value-sampling policy a capture ran with (recorded in its metadata)."""
+    rate = float(env.get("PYMOLT_TRACE_SAMPLE_RATE", "1"))
+    first = int(env.get("PYMOLT_TRACE_SAMPLE_FIRST", "0")) if rate < 1 else 0
+    return {"rate": rate, "first": first, "source": source}
+
+
+def default_sample_rate(mode: CaptureMode) -> float:
+    """Value-sampling rate when the caller passes none: every call of a test suite (the
+    oracle); a tenth of a long run's repetitions, after each call site's first
+    ``LONG_RUN_SAMPLE_FIRST`` calls, with every call still counted in the tallies."""
+    return 1.0 if mode is CaptureMode.TEST_SUITE else LONG_RUN_SAMPLE_RATE
+
+
+# Sink and discover/watch mode per capture kind (docs/design/tier1-observation-substrate.md):
+# a test suite is the oracle and must see everything; a long run aggregates in-process.
+TEST_SINK, TEST_TRACE_MODE = "jsonl", "discover"
+LONG_RUN_SINK, LONG_RUN_TRACE_MODE = "facts", "auto"
+# Measured (bench/load, phase 2): every call sampled costs ~40% rps in watch mode; 10% of
+# the repetitions, all calls tallied, ~14%.
+LONG_RUN_SAMPLE_RATE, LONG_RUN_SAMPLE_FIRST = 0.1, 32
+_FORWARDED_TUNABLES = (
+    "PYMOLT_TRACE_SAMPLE_KEYS",
+    "PYMOLT_TRACE_FLUSH_SECONDS", "PYMOLT_TRACE_FACTS_PER_SITE", "PYMOLT_TRACE_MAX_FACTS",
+    "PYMOLT_TRACE_MAX_TALLIES", "PYMOLT_TRACE_MAX_FACT_BYTES", "PYMOLT_TRACE_FACT_VALUE_BYTES",
+    "PYMOLT_TRACE_DISCOVER_QUIET", "PYMOLT_TRACE_DISCOVER_MAX",
+)
+
+
+def _process_traces(directory: Path, recursive: bool = False) -> list[str]:
+    """One trace path per traced process: its JSONL, or for a facts sink the JSONL path its
+    ``trace-<pid>.facts.json`` stands in for (whose ``.meta.json`` holds its counters)."""
+    pattern = "**/trace-*" if recursive else "trace-*"
+    out = set(glob.glob(str(directory / f"{pattern}.jsonl"), recursive=recursive))
+    for found in glob.glob(str(directory / f"{pattern}.facts.json"), recursive=recursive):
+        out.add(found[:-len(".facts.json")] + ".jsonl" if found.endswith(".facts.json")
+                else found)
+    return sorted(out)
+
+
+def _process_snapshot(trace_path: str) -> str | None:
+    """The facts snapshot a per-process trace path stands for (``trace-1.facts.json``)."""
+    if not trace_path.endswith(".jsonl"):
+        return None
+    candidate = trace_path[:-len(".jsonl")] + ".facts.json"
+    return candidate if os.path.isfile(candidate) else None
 
 
 def _normalize_impact_targets(values: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -274,6 +359,9 @@ def capture_trace_local(
     request_id: str | None = None,
     correlation_id: str | None = None,
     interrupted: threading.Event | None = None,
+    sink: str | None = None,
+    trace_mode: str | None = None,
+    sample_first: int | None = None,
 ) -> tuple[list[str], int | None]:
     """Inject the watcher into a locally-run command via PYTHONPATH + env.
 
@@ -305,6 +393,8 @@ def capture_trace_local(
     env.update(trace_env(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
+        sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
+        sample_first=sample_first,
     ))
 
     log_file = None
@@ -358,7 +448,7 @@ def capture_trace_local(
     finally:
         if log_file is not None:
             log_file.close()
-    return sorted(glob.glob(str(work / "trace-*.jsonl"))), returncode
+    return _process_traces(work), returncode
 
 
 def capture_trace_in_container(
@@ -369,6 +459,9 @@ def capture_trace_in_container(
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
+    sink: str | None = None,
+    trace_mode: str | None = None,
+    sample_first: int | None = None,
 ) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
@@ -388,6 +481,8 @@ def capture_trace_in_container(
     for key, val in trace_env(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
+        sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
+        sample_first=sample_first,
     ).items():
         exec_args += ["-e", f"{key}={val}"]
     if workdir:
@@ -399,8 +494,7 @@ def capture_trace_in_container(
     _docker(["cp", f"{container}:{trace_in}", str(pull)])
     # best-effort cleanup so the container is left exactly as found
     _docker(["exec", container, "rm", "-rf", bundle_in, trace_in], check=False)
-    produced = sorted(glob.glob(str(pull / "**" / "trace-*.jsonl"), recursive=True))
-    return produced, command_result.returncode
+    return _process_traces(pull, recursive=True), command_result.returncode
 
 
 def _docker(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -511,12 +605,92 @@ def _merge_traces(produced: list[str], out_path: Path) -> int:
     events = 0
     with out_path.open("w") as out:
         for f in produced:
+            if not os.path.isfile(f):
+                continue  # a facts-sink process: its evidence is the snapshot
             with open(f) as fh:
                 for line in fh:
                     if line.strip():
                         out.write(line)
                         events += 1
     return events
+
+
+def _sink_kwargs(sink: str | None, trace_mode: str | None,
+                 sample_first: int | None = None) -> dict:
+    """Only pass the phase-2 keywords when set (test doubles predate them)."""
+    out: dict = {}
+    if sink is not None:
+        out["sink"] = sink
+    if trace_mode is not None:
+        out["trace_mode"] = trace_mode
+    if sample_first is not None:
+        out["sample_first"] = sample_first
+    return out
+
+
+def _merge_process_snapshots(produced: list[str], out_path: Path) -> dict | None:
+    """Merge the per-process facts snapshots into ``<out_path>.facts.json`` and project its
+    facts into ``out_path`` (the JSONL readers keep working). None when no process ran the
+    facts sink. Streaming: one snapshot is read at a time (``merge_fact_snapshots``)."""
+    snapshots = [s for s in (_process_snapshot(p) for p in produced) if s]
+    if not snapshots:
+        return None
+    target = snapshot_path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header = merge_fact_snapshots(snapshots, target)
+    if header is None:
+        return None
+    projected = project_snapshot(target, out_path)
+    counters = header.get("counters") or {}
+    return {
+        "path": str(target),
+        "processes": len(snapshots),
+        "projected_events": projected,
+        "facts": counters.get("facts", 0),
+        "calls": counters.get("calls"),
+        "sampled": counters.get("sampled"),
+        "evicted": counters.get("evicted", 0),
+        "evicted_facts": counters.get("evicted_facts", 0),
+        "widened": counters.get("widened", 0),
+        "outcomes_other": counters.get("outcomes_other", 0),
+        "tally_overflow": counters.get("tally_overflow", 0),
+        "mode": header.get("mode"),
+    }
+
+
+def _record_sampling(trace_path: str | Path, sample_rate: float, source: str) -> None:
+    """Stamp the effective value-sampling policy (and whether it was the mode's default)
+    into the capture metadata."""
+    metadata = _read_trace_metadata(trace_path)
+    if not metadata:
+        return
+    sampling = metadata.get("sampling") if isinstance(metadata.get("sampling"), dict) else {}
+    first = sampling.get("first")
+    metadata["sampling"] = {
+        "rate": sample_rate,
+        "first": (first if isinstance(first, int) else LONG_RUN_SAMPLE_FIRST)
+        if sample_rate < 1 else 0,
+        "source": source,
+    }
+    _write_trace_metadata(trace_path, metadata)
+
+
+def _move_facts_snapshot(source: str | Path, destination: str | Path) -> str | None:
+    """Move ``<source>.facts.json`` along with its trace (None when there is none) and point
+    the destination's metadata sidecar at its new place."""
+    source_path = snapshot_path(source)
+    if not source_path.is_file():
+        return None
+    destination_path = snapshot_path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(source_path, destination_path)
+    metadata = _read_trace_metadata(destination)
+    if metadata:
+        metadata["facts_path"] = str(destination_path)
+        if isinstance(metadata.get("facts"), dict):
+            metadata["facts"]["path"] = str(destination_path)
+        _write_trace_metadata(destination, metadata)
+    return str(destination_path)
 
 
 _DROP_COUNTERS = (
@@ -676,8 +850,17 @@ def capture_trace(
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
+    sink: str | None = None,
+    trace_mode: str | None = None,
+    sample_first: int | None = None,
 ) -> TraceCaptureResult:
     """Run ``command`` with the watcher injected; merge produced JSONL into ``out_path``.
+
+    ``sink`` / ``trace_mode`` default to the test-suite pair (``jsonl`` + ``discover``);
+    ``capture_named_trace`` passes ``facts`` + ``auto`` for a long-running command. Processes
+    that ran the facts sink leave ``trace-<pid>.facts.json``: they are merged into
+    ``<out_path>.facts.json`` (counts summed, caps re-applied) and projected into the JSONL
+    as counted events, before the work dir is removed.
 
     Injection is purely external: a standalone bundle on PYTHONPATH + PYMOLT_TRACE_* env, with
     the target (local process, or an already-running ``--container``) left untouched.
@@ -708,6 +891,7 @@ def capture_trace(
                 container, workdir, exclude, source, include_internal,
                 privacy, sample_rate, impact_targets,
                 deployment_id, request_id, correlation_id,
+                **_sink_kwargs(sink, trace_mode, sample_first),
             )
         else:
             # Keep the log next to the durable trace artifact (out_path), not the
@@ -720,11 +904,15 @@ def capture_trace(
                 cwd=cwd, log_path=log_path, privacy=privacy, sample_rate=sample_rate,
                 impact_targets=impact_targets, deployment_id=deployment_id,
                 request_id=request_id, correlation_id=correlation_id,
-                interrupted=interrupted,
+                interrupted=interrupted, **_sink_kwargs(sink, trace_mode, sample_first),
             )
             command_log = str(log_path) if log_path.exists() else None
 
         events = _merge_traces(produced, Path(out_path))
+        facts = _merge_process_snapshots(produced, Path(out_path))
+        # A facts process's events are the calls it folded into facts (its JSONL meaning:
+        # events_written), not the projected lines that summarize them.
+        events += (facts.get("sampled") or 0) if facts else 0
         runtime = _aggregate_runtime_metadata(produced)
         activation_failures = _collect_activation_failures(work)
         counters = runtime["counters"]
@@ -759,6 +947,7 @@ def capture_trace(
             sink_failures=(counters["sink_failures"] if metadata_complete else None),
             instrumentation_skipped=runtime["instrumentation_skipped"],
             activation_failures=activation_failures,
+            facts_path=facts["path"] if facts else None,
         )
         metadata = {
             "schema_version": 1,
@@ -767,6 +956,9 @@ def capture_trace(
             "request_id": request_id,
             "correlation_id": correlation_id,
             "sample_rate": sample_rate,
+            "sampling": {"rate": sample_rate,
+                         "first": (sample_first if sample_first is not None
+                                   else LONG_RUN_SAMPLE_FIRST) if sample_rate < 1 else 0},
             "backend": effective_backend,
             "impact_targets": impact_targets,
             "events": events,
@@ -777,6 +969,9 @@ def capture_trace(
             "activation_failures": activation_failures,
             "processes": runtime["process_metadata"],
         }
+        if facts:
+            metadata["facts_path"] = facts["path"]
+            metadata["facts"] = facts
         result.metadata_path = _write_trace_metadata(out_path, metadata)
         complete = True
         return result
@@ -784,7 +979,7 @@ def capture_trace(
         # Everything in ``work`` has been merged into ``out_path`` / its metadata sidecar by
         # now, so it is disposable. On an error path (e.g. timeout) keep it only if the
         # watcher left raw per-process traces that were never copied anywhere.
-        if complete or not glob.glob(str(work / "**" / "trace-*.jsonl"), recursive=True):
+        if complete or not _process_traces(work, recursive=True):
             shutil.rmtree(work, ignore_errors=True)
         else:
             logger.warning(
@@ -814,6 +1009,10 @@ def _now() -> str:
 def inspect_trace_artifact(path: str | Path) -> TraceArtifactQuality:
     """Validate that a trace exists, is parseable, and contains usable events."""
     trace = Path(path)
+    snap = find_facts_snapshot(trace) if not trace.name.endswith(".facts.json") else (
+        trace if trace.is_file() else None)
+    if snap is not None and (snap == trace or _blank_file(trace)):
+        return _inspect_snapshot(trace, snap)
     if not trace.is_file():
         return TraceArtifactQuality(
             path=str(trace), validity=CaptureValidity.MISSING,
@@ -878,6 +1077,42 @@ def inspect_trace_artifact(path: str | Path) -> TraceArtifactQuality:
     return TraceArtifactQuality(
         path=str(trace), validity=CaptureValidity.VALID,
         events=len(usable), comparable_events=len(usable),
+    )
+
+
+def _blank_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            while chunk := fh.read(65536):
+                if chunk.strip():
+                    return False
+    except OSError:
+        pass
+    return True
+
+
+def _inspect_snapshot(trace: Path, snap: Path) -> TraceArtifactQuality:
+    """Validity of a trace whose only evidence is its facts snapshot."""
+    header = read_snapshot_header(snap)
+    if not header:
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.CORRUPT,
+            reason=f"facts snapshot {snap.name} is unreadable",
+        )
+    try:
+        facts = sum(1 for _ in iter_snapshot(snap, kinds=("fact",)))
+    except OSError as exc:
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.CORRUPT,
+            reason=f"facts snapshot is unreadable: {exc}",
+        )
+    if not facts:
+        return TraceArtifactQuality(
+            path=str(trace), validity=CaptureValidity.EMPTY,
+            reason="facts snapshot holds no facts",
+        )
+    return TraceArtifactQuality(
+        path=str(trace), validity=CaptureValidity.VALID, events=facts, comparable_events=facts,
     )
 
 
@@ -946,7 +1181,7 @@ def capture_named_trace(
     cancel_event: threading.Event | None = None,
     cwd: str | Path | None = None,
     privacy: str | None = None,
-    sample_rate: float = 1.0,
+    sample_rate: float | None = None,
     impact_targets: list[str] | None = None,
     deployment_id: str | None = None,
     request_id: str | None = None,
@@ -986,6 +1221,9 @@ def capture_named_trace(
     project_dir = Path(project_dir)
     if privacy is None:
         privacy = "values" if mode is CaptureMode.TEST_SUITE else "shape"
+    sampling_source = "caller"
+    if sample_rate is None:
+        sample_rate, sampling_source = default_sample_rate(mode), "default"
     if (
         impact_targets is None
         and when == "post_migration"
@@ -1050,13 +1288,19 @@ def capture_named_trace(
             capture_kwargs["request_id"] = request_id
         if correlation_id is not None:
             capture_kwargs["correlation_id"] = correlation_id
+        if mode is CaptureMode.LIVE_COMMAND:
+            capture_kwargs.update(sink=LONG_RUN_SINK, trace_mode=LONG_RUN_TRACE_MODE)
+            if sample_rate < 1:
+                capture_kwargs["sample_first"] = LONG_RUN_SAMPLE_FIRST
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
+        _record_sampling(staged_path, sample_rate, sampling_source)
         _record_site_text(staged_path, project_dir)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
         # looking like a recoverable capture.
-        for pending in (staged_path, staged_log, _trace_metadata_path(staged_path)):
+        for pending in (staged_path, staged_log, _trace_metadata_path(staged_path),
+                        snapshot_path(staged_path)):
             try:
                 pending.unlink()
             except OSError:
@@ -1083,6 +1327,7 @@ def capture_named_trace(
         result.out_path = str(diagnostic)
         try:
             result.metadata_path = _move_trace_metadata(staged_path, diagnostic)
+            result.facts_path = _move_facts_snapshot(staged_path, diagnostic)
         except OSError as exc:
             logger.warning("could not move diagnostic trace metadata: %s", exc)
         if result.command_log:
@@ -1098,7 +1343,7 @@ def capture_named_trace(
         had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
         archived_previous = archive_existing_capture(project_dir, when)
         if had_previous_trace and archived_previous is None:
-            for pending in (staged_path, staged_log):
+            for pending in (staged_path, staged_log, snapshot_path(staged_path)):
                 try:
                     pending.unlink()
                 except OSError:
@@ -1113,6 +1358,7 @@ def capture_named_trace(
         result.out_path = str(out_path)
         try:
             result.metadata_path = _move_trace_metadata(staged_path, out_path)
+            result.facts_path = _move_facts_snapshot(staged_path, out_path)
         except OSError as exc:
             logger.warning("could not promote trace metadata: %s", exc)
         if result.command_log:
@@ -1203,6 +1449,12 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
             shutil.move(str(current_metadata), str(_trace_metadata_path(destination)))
         except OSError as exc:
             logger.warning("could not archive previous %s trace metadata: %s", when, exc)
+    current_snapshot = snapshot_path(current)
+    if current_snapshot.is_file():
+        try:
+            shutil.move(str(current_snapshot), str(snapshot_path(destination)))
+        except OSError as exc:
+            logger.warning("could not archive previous %s facts snapshot: %s", when, exc)
     return str(destination)
 
 
@@ -1282,7 +1534,7 @@ def pending_attach_path(project_dir: str | Path, when: str) -> Path:
 
 def start_attached_capture(
     project_dir: str | Path, when: str, *, target: str = "all", backend: str = "auto",
-    privacy: str = "shape", sample_rate: float = 1.0,
+    privacy: str = "shape", sample_rate: float | None = None,
     impact_targets: list[str] | None = None,
     deployment_id: str | None = None,
     request_id: str | None = None,
@@ -1295,9 +1547,12 @@ def start_attached_capture(
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
 
     project_dir = Path(project_dir)
+    if sample_rate is None:
+        sample_rate = default_sample_rate(CaptureMode.LIVE_ATTACH)
     watcher_env = trace_env(
         target, backend, "", "", False, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
+        sink=LONG_RUN_SINK, trace_mode=LONG_RUN_TRACE_MODE,
     )
     bundle_dir = project_dir / ".pymolt" / "contract_bundle"
     out_path = pending_attach_path(project_dir, when)
@@ -1308,6 +1563,10 @@ def start_attached_capture(
             "collect it before starting another"
         )
     bundle = export_watcher(bundle_dir)
+    if watcher_env.get("PYMOLT_TRACE_SINK") == "facts":
+        # A facts sink writes only its snapshot (``.attach-pending.facts.json``); the pending
+        # JSONL is what marks the capture as started (and what --collect looks for).
+        out_path.touch()
 
     exported = {"PYTHONPATH": str(bundle), **watcher_env, "PYMOLT_TRACE_OUT": str(out_path)}
     hint = " ".join(f"{key}={shlex.quote(value)}" for key, value in exported.items())
@@ -1320,12 +1579,23 @@ def start_attached_capture(
 
 
 def poll_attached_capture(out_path: str | Path) -> int:
-    """Cheap line count on the (append-only) JSONL — how many events so far."""
+    """Cheap line count on the (append-only) JSONL — how many events so far. A facts sink
+    writes no events: its snapshot's recorded-call count is added."""
     path = Path(out_path)
-    if not path.is_file():
-        return 0
-    with path.open() as f:
-        return sum(1 for line in f if line.strip())
+    lines = 0
+    if path.is_file():
+        with path.open() as f:
+            # Projected snapshot facts summarize calls the snapshot already counts.
+            lines = sum(1 for line in f if line.strip() and _PROJECTED not in line)
+    snap = find_facts_snapshot(path)
+    if snap is None:
+        return lines
+    counters = read_snapshot_header(snap).get("counters") or {}
+    sampled = counters.get("sampled")
+    return lines + (sampled if isinstance(sampled, int) and sampled > 0 else 0)
+
+
+_PROJECTED = '"src": "facts"'  # how project_snapshot marks its lines
 
 
 def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
@@ -1342,21 +1612,56 @@ def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
         logger.warning("could not record call-site text for %s: %s", trace_path, exc)
 
 
+def _collect_attached_snapshot(out_path: Path) -> None:
+    """Normalize an attach capture's runtime snapshot (``X.facts.json`` next to ``X.jsonl``)
+    into the host form ``X.jsonl.facts.json`` and project it into the JSONL, as
+    ``capture_trace`` does for a command it ran."""
+    target = snapshot_path(out_path)
+    raw = find_facts_snapshot(out_path)
+    stem = out_path.name[:-len(".jsonl")] if out_path.name.endswith(".jsonl") else out_path.name
+    # Forked workers of an attached server write ``<stem>.<pid>.facts.json`` (no {pid} in an
+    # attach path), so they never overwrite the parent's snapshot.
+    raws = [] if raw is None or raw == target else [raw]
+    raws += [Path(p) for p in sorted(glob.glob(str(out_path.with_name(f"{stem}.*.facts.json"))))
+             if Path(p) != target and Path(p) not in raws]
+    if not raws:
+        return
+    try:
+        if merge_fact_snapshots(raws, target) is None:
+            return
+        for path in raws:
+            path.unlink()
+        if not out_path.exists():
+            out_path.touch()
+        project_snapshot(target, out_path)
+    except OSError as exc:
+        logger.warning("could not collect the facts snapshot of %s: %s", out_path, exc)
+
+
 def finalize_attached_capture(
     project_dir: str | Path, when: str, out_path: str | Path, *,
-    target: str = "all", privacy: str = "shape", sample_rate: float = 1.0,
+    target: str = "all", privacy: str = "shape", sample_rate: float | None = None,
     impact_targets: list[str] | None = None,
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
 ) -> ContractSlot:
     """Called when the engineer signals "I'm done" on a LIVE_ATTACH capture:
-    reads whatever landed on disk and persists it as the named slot."""
+    reads whatever landed on disk and persists it as the named slot.
+
+    The slot's sample rate is the one the watcher ran with (its sidecar), else
+    ``sample_rate``, else the attach default."""
     project_dir = Path(project_dir)
     out_path = Path(out_path)
+    _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
     _record_site_text(out_path, project_dir)
     metadata = _read_trace_metadata(out_path)
+    ran_with = metadata.get("sample_rate")
+    if isinstance(ran_with, int | float) and not isinstance(ran_with, bool) and 0 < ran_with <= 1:
+        sample_rate = float(ran_with)
+    elif sample_rate is None:
+        sample_rate = default_sample_rate(CaptureMode.LIVE_ATTACH)
     raw_counters = metadata.get("counters")
     counters = raw_counters if isinstance(raw_counters, dict) else {}
     runtime_metadata_complete = metadata.get("runtime_metadata_complete")
@@ -1408,6 +1713,7 @@ def finalize_attached_capture(
             raise
         try:
             metadata_path = _move_trace_metadata(out_path, final_path)
+            _move_facts_snapshot(out_path, final_path)
         except OSError as exc:
             logger.warning("could not promote attached trace metadata: %s", exc)
             metadata_path = None
@@ -1418,6 +1724,7 @@ def finalize_attached_capture(
             os.replace(out_path, diagnostic)
         try:
             metadata_path = _move_trace_metadata(out_path, diagnostic)
+            _move_facts_snapshot(out_path, diagnostic)
         except OSError as exc:
             logger.warning("could not move attached diagnostic metadata: %s", exc)
             metadata_path = None
@@ -1538,6 +1845,11 @@ def _stamp_verdict(
     used_slots: list[tuple[str, object]],
 ) -> None:
     """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty."""
+    for warning in (report.fact_diff or {}).get("warnings") or ():
+        # Snapshot caps that lower the comparison level without blocking PASS.
+        if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:")):
+            if warning not in report.notes:
+                report.notes.append(str(warning))
     comparability: list[str] = []
     if trace is None:
         comparability.append("no current trace is available")
@@ -1598,7 +1910,8 @@ def _stamp_verdict(
             comparability.append("baseline and post-migration used different privacy profiles")
         if baseline.sample_rate != post.sample_rate:
             comparability.append("baseline and post-migration used different sample rates")
-        if baseline.sample_rate < 1 or post.sample_rate < 1:
+        if (baseline.sample_rate < 1 or post.sample_rate < 1) and not _tallies_complete(
+                report.fact_diff):
             comparability.append(
                 "sampled captures cannot prove that unmatched interactions disappeared"
             )
@@ -1655,6 +1968,16 @@ def _stamp_verdict(
     )
 
 
+def _tallies_complete(fact_diff: dict | None) -> bool:
+    """Both sides' snapshots counted every call (sampled or not): presence and absence of a
+    call site are then proven by the tallies, so value sampling does not weaken them."""
+    if not fact_diff:
+        return False
+    return all(isinstance(fact_diff.get(side), dict)
+               and fact_diff[side].get("tallies_complete") is True
+               for side in ("old", "new"))
+
+
 def _unverified_dynamic_only(report: ContractReport) -> list[str]:
     """Dynamic-only symbols that still block PASS.
 
@@ -1677,6 +2000,14 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     entries = fact_diff.get("entries") or []
     counts = fact_diff.get("counts") or {}
     reasons: list[str] = []
+    for side, label in (("old", "baseline"), ("new", "post-migration")):
+        summary = fact_diff.get(side) or {}
+        evicted = summary.get("evicted") if isinstance(summary, dict) else None
+        if isinstance(evicted, int) and evicted > 0:
+            reasons.append(
+                f"the {label} facts snapshot reached its fact cap and evicted {evicted} "
+                "call(s): the evidence is incomplete"
+            )
     if not any(counts.values()):
         reasons.append("no comparable call facts were recorded on both sides")
     unpaired = sum(
@@ -1687,7 +2018,17 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         reasons.append(
             f"{unpaired} rewritten call site(s) could not be paired with a post-migration call"
         )
-    uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable")
+    evicted_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith("possibly-evicted") for n in e.get("notes") or ())
+    )
+    uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
+        - evicted_entries
+    if evicted_entries:
+        reasons.append(
+            f"{evicted_entries} call fact(s) are missing on a side that evicted facts and "
+            "cannot be compared"
+        )
     if uncomparable:
         reasons.append(
             f"{uncomparable} call fact(s) lost their outcome distribution and cannot be compared"

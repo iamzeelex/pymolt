@@ -39,9 +39,22 @@ values; at ``type`` level (``outcome_type``) when either side carries a type-onl
 side is nondeterministic (more than one distinct outcome and the sets are not identical) or when
 ``profile="shape"``. An aggregated record whose result collapsed to ``__nondeterministic__``
 lost its distribution and is UNCOMPARABLE (inconclusive, never a pass).
+
+Facts snapshots (phase 2, ``FactSink``): a capture whose processes aggregated in-process
+leaves ``<trace>.facts.json`` (``pymolt.facts-snapshot/1``, one fact per line) next to the
+trace. ``merge_fact_snapshots`` folds per-process snapshots into it (counts summed, outcome
+lists merged under the same caps) and ``project_snapshot`` writes its facts into the JSONL as
+counted events (``"count": n``, ``"src": "facts"``), so every JSONL reader keeps working.
+``load_facts`` reads the snapshot itself when it is given one, or when the JSONL next to it
+is absent or empty; either way the snapshot's quality counters annotate the FactSet:
+``evicted > 0`` makes the evidence incomplete (the diff is never PASS, and a vanished /
+appeared fact the evicting side may have dropped is UNCOMPARABLE instead of failing), and
+widened facts (``"in": {"__widened__": true}``) compare their whole (symbol, site) group at
+type level on both sides.
 """
 import io
 import json
+import logging
 import os
 import tokenize
 import uuid
@@ -54,7 +67,18 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field
 
+from pymolt.verify._sinks import (
+    MAX_OTHER_TYPES,
+    MAX_OUTCOMES,
+    SNAPSHOT_SCHEMA,
+    WIDENED_INPUT,
+    type_label,
+    widen_value,
+    write_snapshot_file,
+)
 from pymolt.verify.models import BoundaryDiff, VerificationVerdict
+
+logger = logging.getLogger(__name__)
 
 SITE_TEXT_MAX = 240
 FACT_DIFF_SCHEMA = "pymolt.fact-diff/1"
@@ -100,6 +124,7 @@ class Comparison(StrEnum):
 class ComparisonLevel(StrEnum):
     EXACT = "exact"
     TYPE = "type"
+    KIND = "kind"   # from tallies: which outcome kinds (return / raise types) occurred
 
 
 _CATEGORY_ORDER = {c: i for i, c in enumerate(FactCategory)}
@@ -154,6 +179,25 @@ class FactSet(BaseModel):
     defaulted_events: int = 0        # events carrying ``in.defaulted``
     site_text_entries: int = 0       # size of the site_text map supplied
     facts: list[Fact] = Field(default_factory=list)
+    # Facts snapshot quality (0 / None when the trace has no snapshot).
+    snapshot: bool = False           # facts came from, or were annotated by, a snapshot
+    calls: int | None = None         # completed boundary calls the runtime counted
+    sampled: int | None = None       # of which folded into facts
+    evicted: int = 0                 # calls whose facts were evicted at the fact cap
+    evicted_facts: int = 0
+    widened: int = 0                 # calls folded into widened (type-level) facts
+    widened_facts: int = 0
+    outcomes_other: int = 0          # calls past a fact's distinct-outcome cap
+    # (symbol, file, func) with at least one call per the snapshot's tallies; None = unknown
+    tally_sites: set[tuple[str, str, str]] | None = Field(default=None, exclude=True)
+    # Backends that produced the trace (metadata ``backend`` / ``processes[].backend``).
+    backends: list[str] = Field(default_factory=list)
+    # Every call per (symbol, site), sampled or not (a snapshot's tallies; None = no tallies)
+    site_tallies: list["SiteTally"] | None = Field(default=None, exclude=True)
+    # The tallies counted every call: nothing declined by the sampler went untallied,
+    # nothing was dropped, no tally overflowed. Then presence/absence of a call site and
+    # its outcome kinds are facts, whatever the value sampling rate.
+    tallies_complete: bool = False
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -171,6 +215,9 @@ class FactSet(BaseModel):
             schema_versions=self.schema_versions, sym_events=self.sym_events,
             defaulted_events=self.defaulted_events,
             facts_with_site_text=sum(1 for f in self.facts if f.text is not None),
+            snapshot=self.snapshot, calls=self.calls, evicted=self.evicted,
+            widened=self.widened, outcomes_other=self.outcomes_other,
+            tallies_complete=self.tallies_complete,
         )
 
 
@@ -184,6 +231,27 @@ class TraceSummary(BaseModel):
     sym_events: int = 0
     defaulted_events: int = 0
     facts_with_site_text: int = 0
+    snapshot: bool = False
+    calls: int | None = None
+    evicted: int = 0
+    widened: int = 0
+    outcomes_other: int = 0
+    tallies_complete: bool = False
+
+
+@dataclass
+class SiteTally:
+    """Every call one (symbol, site) received, sampled or not (a snapshot tally)."""
+
+    symbol: str
+    file: str
+    func: str
+    line: int | None
+    text: str | None
+    count: int
+    returns: int
+    raises: dict[str, int]
+    where: dict[str, Any] | None = None
 
 
 class SiteRef(BaseModel):
@@ -249,6 +317,9 @@ class FactDiff(BaseModel):
     old_summary: TraceSummary = Field(default_factory=TraceSummary)
     new_summary: TraceSummary = Field(default_factory=TraceSummary)
     warnings: list[str] = Field(default_factory=list)
+    # Value facts seen on one side only, at a call site both sides' complete tallies show
+    # was called, by a side that did not sample every call there: not compared, not failing.
+    unsampled: int = 0
 
     def counts(self) -> dict[str, int]:
         out = {c.value: 0 for c in FactCategory}
@@ -267,13 +338,21 @@ class FactDiff(BaseModel):
         """No CHANGED / DISAPPEARED / APPEARED, and no REWRITTEN with a different outcome."""
         return not any(e.fails for e in self.entries)
 
+    @property
+    def incomplete(self) -> bool:
+        """A side's facts snapshot evicted facts at its cap: what was not kept cannot be
+        shown equal, so the diff can fail but never pass."""
+        return bool(self.old_summary.evicted or self.new_summary.evicted)
+
     @computed_field
     @property
     def verdict(self) -> VerificationVerdict:
-        """FAIL on any failing entry; INCONCLUSIVE on undecidable entries or no evidence."""
+        """FAIL on any failing entry; INCONCLUSIVE on undecidable entries, incomplete
+        evidence (an evicting snapshot) or no evidence."""
         if not self.is_clean():
             return VerificationVerdict.FAIL
-        if not self.entries or any(e.inconclusive for e in self.entries):
+        if (not self.entries or self.incomplete
+                or any(e.inconclusive for e in self.entries)):
             return VerificationVerdict.INCONCLUSIVE
         return VerificationVerdict.PASS
 
@@ -290,7 +369,9 @@ class FactDiff(BaseModel):
             "profile": self.profile.value,
             "verdict": self.verdict.value,
             "clean": self.is_clean(),
+            "incomplete": self.incomplete,
             "counts": self.counts(),
+            "unsampled": self.unsampled,
             "warnings": list(self.warnings),
             "old": self.old_summary.model_dump(mode="json"),
             "new": self.new_summary.model_dump(mode="json"),
@@ -321,8 +402,12 @@ class FactDiff(BaseModel):
                     out.result_changed.append({**rec, "old": _result_of(e.old),
                                                "new": _result_of(e.new)})
             elif e.inconclusive:
-                reason = ("rewritten-unpaired" if e.comparison is Comparison.MISSING
-                          else "nondeterministic-unrecorded")
+                if any(n.startswith("possibly-evicted") for n in e.notes):
+                    reason = "evicted"
+                elif e.comparison is Comparison.MISSING:
+                    reason = "rewritten-unpaired"
+                else:
+                    reason = "nondeterministic-unrecorded"
                 out.skipped_opaque.append({**_legacy_record(e, old_side=e.old is not None),
                                            "reason": reason})
         return out
@@ -345,6 +430,14 @@ def iter_trace_records(path: str | Path, stats: _ReadStats | None = None) -> Ite
     """
     stats = stats if stats is not None else _ReadStats()
     p = Path(path)
+    if is_facts_snapshot(p):
+        yield from iter_snapshot_records(p)
+        return
+    if _is_blank(p):
+        snap = find_facts_snapshot(p)
+        if snap is not None:
+            yield from iter_snapshot_records(snap)
+            return
     first = ""
     with p.open(encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -389,6 +482,446 @@ def iter_trace_records(path: str | Path, stats: _ReadStats | None = None) -> Ite
 
 def metadata_path(trace_path: str | Path) -> Path:
     return Path(str(trace_path) + ".meta.json")
+
+
+# ── facts snapshots ───────────────────────────────────────────────────────────────────────
+
+
+def snapshot_path(trace_path: str | Path) -> Path:
+    """Where a capture keeps its merged facts snapshot: ``<trace>.facts.json``."""
+    return Path(str(trace_path) + ".facts.json")
+
+
+def find_facts_snapshot(trace_path: str | Path) -> Path | None:
+    """The snapshot that belongs to a trace: the host's merged ``<trace>.facts.json``, else a
+    runtime's own ``trace.jsonl`` -> ``trace.facts.json`` (an attach capture not yet
+    collected). None when there is none."""
+    p = Path(trace_path)
+    candidates = [snapshot_path(p)]
+    if p.name.endswith(".jsonl"):
+        candidates.append(p.with_name(p.name[:-len(".jsonl")] + ".facts.json"))
+    for c in candidates:
+        if c.is_file() and is_facts_snapshot(c):
+            return c
+    return None
+
+
+def snapshot_trace_path(snapshot: str | Path) -> Path:
+    """The trace a snapshot stands in for (whose ``.meta.json`` holds its site text)."""
+    p = Path(snapshot)
+    name = p.name
+    if name.endswith(".jsonl.facts.json"):
+        return p.with_name(name[:-len(".facts.json")])
+    if name.endswith(".facts.json"):
+        return p.with_name(name[:-len(".facts.json")] + ".jsonl")
+    return p
+
+
+def is_facts_snapshot(path: str | Path) -> bool:
+    try:
+        with Path(path).open("rb") as fh:
+            head = fh.read(256)
+    except OSError:
+        return False
+    text = head.lstrip().decode("utf-8", errors="replace")
+    return text.startswith('{"schema":"pymolt.facts-snapshot/') or (
+        text.startswith("{") and SNAPSHOT_SCHEMA in text and '"schema"' in text)
+
+
+def _is_blank(path: Path) -> bool:
+    """Missing, or nothing but whitespace (a facts capture's JSONL before projection)."""
+    try:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    return True
+                if chunk.strip():
+                    return False
+    except OSError:
+        return True
+
+
+def iter_snapshot(
+    path: str | Path, kinds: Iterable[str] = ("header", "fact", "tally"),
+) -> Iterator[tuple[str, dict]]:
+    """Stream a facts snapshot as ``("header", {...})``, ``("fact", {...})``...,
+    ``("tally", {...})``...; only the wanted ``kinds`` are parsed.
+
+    Streams the line layout ``write_snapshot_file`` writes (one fact per line), so a large
+    snapshot is never held in memory as a whole; any other layout (a hand-edited or
+    re-indented file) falls back to ``json.load``. Undecodable lines are skipped."""
+    want = set(kinds)
+    p = Path(path)
+    with p.open(encoding="utf-8", errors="replace") as fh:
+        first = fh.readline().strip()
+        second = fh.readline().strip()
+        if not (first.startswith("{") and first.endswith(",") and second == '"facts":['):
+            yield from _iter_snapshot_document(p, want)
+            return
+        if "header" in want:
+            try:
+                header = json.loads(first[:-1] + "}")
+            except json.JSONDecodeError:
+                header = {}
+            yield "header", header if isinstance(header, dict) else {}
+        section = "fact"
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line in ("],", "]", "]}"):
+                continue
+            if line == '"tallies":[':
+                section = "tally"
+                continue
+            if section not in want:
+                continue
+            try:
+                obj = json.loads(line[:-1] if line.endswith(",") else line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                yield section, obj
+
+
+def _iter_snapshot_document(p: Path, want: set[str]) -> Iterator[tuple[str, dict]]:
+    try:
+        with p.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    if "header" in want:
+        yield "header", {k: v for k, v in data.items() if k not in ("facts", "tallies")}
+    for key, kind in (("facts", "fact"), ("tallies", "tally")):
+        if kind in want:
+            for obj in data.get(key) or ():
+                if isinstance(obj, dict):
+                    yield kind, obj
+
+
+def read_snapshot_header(path: str | Path) -> dict:
+    """The header (counters, limits, process metadata) of a snapshot; ``{}`` if unreadable."""
+    try:
+        for _kind, header in iter_snapshot(path, kinds=("header",)):
+            return header
+    except OSError:
+        pass
+    return {}
+
+
+def snapshot_fact_records(fact: Mapping[str, Any]) -> Iterator[dict]:
+    """One snapshot fact as counted JSONL events (one per outcome, ``"count": n``).
+
+    "other" outcomes become type-level returns (``{"__opaque__": type}``) / raises per kept
+    type; calls whose type was not kept either (``lost``) become a
+    ``{"__nondeterministic__": true}`` return: that part of the distribution is unknown, so
+    the fact cannot compare (UNCOMPARABLE), never silently equal."""
+    q = fact.get("q") if isinstance(fact.get("q"), str) and fact.get("q") else None
+    sym = fact.get("sym") if isinstance(fact.get("sym"), str) and fact.get("sym") else None
+    base: dict[str, Any] = {"v": 2, "q": q or sym or "?", "in": fact.get("in"), "src": "facts"}
+    if sym:
+        base["sym"] = sym
+        if isinstance(fact.get("symq"), str):
+            base["symq"] = fact["symq"]
+    if isinstance(fact.get("own"), str):
+        base["own"] = fact["own"]
+    if isinstance(fact.get("where"), dict):
+        base["where"] = fact["where"]
+    if isinstance(fact.get("first_ts"), int | float):
+        base["ts"] = fact["first_ts"]
+    for o in fact.get("outcomes") or ():
+        if not isinstance(o, dict):
+            continue
+        count = _positive_int(o.get("count"))
+        if not count:
+            continue
+        t = o.get("t")
+        if t == "return":
+            yield {**base, "t": "return", "result": o.get("result"), "count": count}
+        elif t == "raise":
+            yield {**base, "t": "raise", "raised": str(o.get("raised")), "count": count}
+        elif t == "other":
+            kept = 0
+            for ty in o.get("types") or ():
+                n = _positive_int(ty.get("count")) if isinstance(ty, dict) else 0
+                if not n:
+                    continue
+                kept += n
+                if ty.get("t") == "raise":
+                    yield {**base, "t": "raise", "raised": str(ty.get("raised")), "count": n}
+                else:
+                    yield {**base, "t": "return", "count": n,
+                           "result": {"__opaque__": str(ty.get("type") or "object")}}
+            if count > kept:
+                yield {**base, "t": "return", "result": {"__nondeterministic__": True},
+                       "count": count - kept}
+
+
+def iter_snapshot_records(path: str | Path) -> Iterator[dict]:
+    """Every fact of a snapshot as counted events, in first-seen order."""
+    for _kind, fact in iter_snapshot(path, kinds=("fact",)):
+        yield from snapshot_fact_records(fact)
+
+
+def project_snapshot(snapshot: str | Path, jsonl_path: str | Path) -> int:
+    """Append a snapshot's facts to a JSONL trace as counted events; returns lines written.
+
+    The projection is what keeps every JSONL reader (the report's observations, artifact
+    validation, call-site text, the legacy comparator) working on a facts capture; it is
+    bounded by the snapshot, not by the run."""
+    written = 0
+    with Path(jsonl_path).open("a", encoding="utf-8") as out:
+        for rec in iter_snapshot_records(snapshot):
+            out.write(json.dumps(rec, sort_keys=True, default=str) + "\n")
+            written += 1
+    return written
+
+
+@dataclass
+class _MergedFact:
+    q: str | None
+    sym: str | None
+    symq: str | None
+    own: str | None
+    where: dict | None
+    in_json: str
+    widened: bool
+    first_ts: float | None
+    last_ts: float | None
+    outcomes: dict[tuple[str, str], int] = field(default_factory=dict)
+    other: int = 0
+    other_types: dict[tuple[str, str], int] = field(default_factory=dict)
+    other_lost: int = 0
+    count: int = 0
+    dur: list | None = None  # [n, sum, min, max]
+
+    def add_outcome(self, kind: str, payload: str, value: Any, n: int) -> None:
+        key = (kind, payload)
+        if key in self.outcomes:
+            self.outcomes[key] += n
+        elif len(self.outcomes) < MAX_OUTCOMES:
+            self.outcomes[key] = n
+        else:
+            self.add_other(kind, type_label(value) if kind == "return" else payload, n)
+
+    def add_other(self, kind: str, label: str, n: int) -> None:
+        self.other += n
+        key = (kind, label)
+        if key in self.other_types:
+            self.other_types[key] += n
+        elif len(self.other_types) < MAX_OTHER_TYPES:
+            self.other_types[key] = n
+        else:
+            self.other_lost += n
+
+    def to_json(self) -> str:
+        outs = []
+        for (kind, payload), n in self.outcomes.items():
+            if kind == "return":
+                outs.append('{"t":"return","result":' + payload + f',"count":{n}}}')
+            else:
+                outs.append('{"t":"raise","raised":' + _canon(payload) + f',"count":{n}}}')
+        if self.other:
+            types = [{"t": "return", "type": label, "count": n} if kind == "return"
+                     else {"t": "raise", "raised": label, "count": n}
+                     for (kind, label), n in sorted(self.other_types.items())]
+            outs.append(_canon({"t": "other", "count": self.other, "types": types,
+                                "lost": self.other_lost}))
+        head: dict[str, Any] = {"q": self.q, "sym": self.sym, "symq": self.symq,
+                                "own": self.own, "where": self.where, "count": self.count,
+                                "first_ts": self.first_ts, "last_ts": self.last_ts}
+        if self.widened:
+            head["widened"] = True
+        if self.dur is not None:
+            head["dur"] = dict(zip(("n", "sum", "min", "max"), self.dur, strict=True))
+        return '{"in":' + self.in_json + ',"outcomes":[' + ",".join(outs) + "]," + \
+            _canon(head)[1:]
+
+
+def _merge_dur(acc: list | None, d: Any) -> list | None:
+    if not isinstance(d, dict) or not _positive_int(d.get("n")):
+        return acc
+    n, total = d["n"], d.get("sum") or 0.0
+    lo, hi = d.get("min"), d.get("max")
+    if acc is None:
+        return [n, total, lo, hi]
+    acc[0] += n
+    acc[1] += total
+    if lo is not None and (acc[2] is None or lo < acc[2]):
+        acc[2] = lo
+    if hi is not None and (acc[3] is None or hi > acc[3]):
+        acc[3] = hi
+    return acc
+
+
+_PROCESS_KEYS = ("pid", "python", "executable", "mode", "switched_at", "discovered",
+                 "started_at", "ended_at", "backend", "sample_rate")
+
+
+def merge_fact_snapshots(
+    paths: Iterable[str | Path], out_path: str | Path, *, max_facts: int | None = None,
+) -> dict | None:
+    """Merge per-process facts snapshots into one (streaming: one snapshot is read at a time
+    and only the merged tables are held). Returns the merged header, or None when no path
+    was a readable snapshot (nothing is written then).
+
+    Facts with the same key merge (counts, outcome lists under ``MAX_OUTCOMES`` with the
+    overflow kept as "other", duration summaries); tallies sum; numeric counters sum. The
+    merged table is held to ``max_facts`` (default: ``PYMOLT_TRACE_MAX_FACTS`` or 50,000)
+    by evicting the lowest-count facts, which is added to ``counters.evicted`` like a
+    runtime eviction, so the result is incomplete exactly when an input was.
+    """
+    if max_facts is None:
+        try:
+            max_facts = max(1, int(os.environ.get("PYMOLT_TRACE_MAX_FACTS", "50000")))
+        except ValueError:
+            max_facts = 50000
+    facts: dict[tuple, _MergedFact] = {}
+    tallies: dict[tuple, dict] = {}
+    counters: dict[str, int | float] = {}
+    processes: list[dict] = []
+    limits: dict[str, Any] = {}
+    read = 0
+    evicted = evicted_facts = 0
+    for path in paths:
+        if not is_facts_snapshot(path):
+            continue
+        read += 1
+        try:
+            for kind, obj in iter_snapshot(path):
+                if kind == "header":
+                    processes.append({k: obj.get(k) for k in _PROCESS_KEYS if k in obj}
+                                     | {"counters": obj.get("counters") or {}})
+                    for name, value in (obj.get("counters") or {}).items():
+                        if isinstance(value, int | float) and not isinstance(value, bool):
+                            counters[name] = counters.get(name, 0) + value
+                    if isinstance(obj.get("limits"), dict):
+                        limits = obj["limits"]
+                elif kind == "fact":
+                    _merge_fact(facts, obj)
+                else:
+                    _merge_tally(tallies, obj)
+        except OSError as exc:
+            logger.warning("could not read facts snapshot %s: %s", path, exc)
+            continue
+        if len(facts) > max_facts:
+            victims = sorted(facts.items(), key=lambda kv: kv[1].count)[:len(facts) - max_facts]
+            for key, f in victims:
+                del facts[key]
+                evicted += f.count
+                evicted_facts += 1
+    if not read:
+        return None
+    counters["evicted"] = int(counters.get("evicted", 0)) + evicted
+    counters["evicted_facts"] = int(counters.get("evicted_facts", 0)) + evicted_facts
+    counters["facts"] = len(facts)
+    counters["tallies"] = len(tallies)
+    starts = [p["started_at"] for p in processes if isinstance(p.get("started_at"), int | float)]
+    ends = [p["ended_at"] for p in processes if isinstance(p.get("ended_at"), int | float)]
+    header: dict[str, Any] = {
+        "schema": SNAPSHOT_SCHEMA, "merged": True,
+        "started_at": min(starts) if starts else None,
+        "ended_at": max(ends) if ends else None,
+        "counters": counters, "limits": limits, "processes": processes,
+    }
+    for key in ("python", "executable", "mode"):
+        values = {p.get(key) for p in processes if p.get(key) is not None}
+        if len(values) == 1:
+            header[key] = values.pop()
+        elif values:
+            header[key] = "mixed" if key == "mode" else sorted(map(str, values))
+    ordered = sorted(facts.values(), key=lambda f: (f.first_ts is None, f.first_ts or 0.0))
+    write_snapshot_file(str(out_path), header, (f.to_json() for f in ordered),
+                        (_canon(t) for t in tallies.values()))
+    return header
+
+
+def _merge_fact(facts: dict[tuple, _MergedFact], obj: dict) -> None:
+    where = obj.get("where") if isinstance(obj.get("where"), dict) else None
+    q = obj.get("q") if isinstance(obj.get("q"), str) else None
+    sym = obj.get("sym") if isinstance(obj.get("sym"), str) else None
+    in_json = _canon(obj.get("in"))
+    w = where or {}
+    key = (sym or q, w.get("file"), w.get("line"), w.get("func"), in_json)
+    f = facts.get(key)
+    first, last = obj.get("first_ts"), obj.get("last_ts")
+    if f is None:
+        f = facts[key] = _MergedFact(
+            q=q, sym=sym, symq=obj.get("symq") if isinstance(obj.get("symq"), str) else None,
+            own=obj.get("own") if isinstance(obj.get("own"), str) else None, where=where,
+            in_json=in_json, widened=in_json == WIDENED_INPUT or bool(obj.get("widened")),
+            first_ts=first if isinstance(first, int | float) else None,
+            last_ts=last if isinstance(last, int | float) else None)
+    else:
+        if isinstance(first, int | float) and (f.first_ts is None or first < f.first_ts):
+            f.first_ts = first
+        if isinstance(last, int | float) and (f.last_ts is None or last > f.last_ts):
+            f.last_ts = last
+    for o in obj.get("outcomes") or ():
+        if not isinstance(o, dict):
+            continue
+        n = _positive_int(o.get("count"))
+        if not n:
+            continue
+        f.count += n
+        t = o.get("t")
+        if t == "return":
+            f.add_outcome("return", _canon(o.get("result")), o.get("result"), n)
+        elif t == "raise":
+            raised = str(o.get("raised"))
+            f.add_outcome("raise", raised, raised, n)
+        elif t == "other":
+            kept = 0
+            for ty in o.get("types") or ():
+                c = _positive_int(ty.get("count")) if isinstance(ty, dict) else 0
+                if not c:
+                    continue
+                kept += c
+                if ty.get("t") == "raise":
+                    f.add_other("raise", str(ty.get("raised")), c)
+                else:
+                    f.add_other("return", str(ty.get("type") or "object"), c)
+            if n > kept:
+                f.other += n - kept
+                f.other_lost += n - kept
+    f.dur = _merge_dur(f.dur, obj.get("dur"))
+
+
+def _merge_tally(tallies: dict[tuple, dict], obj: dict) -> None:
+    where = obj.get("where") if isinstance(obj.get("where"), dict) else None
+    w = where or {}
+    key = (obj.get("sym") or obj.get("q"), w.get("file"), w.get("line"), w.get("func"))
+    t = tallies.get(key)
+    if t is None:
+        t = tallies[key] = {"q": obj.get("q"), "sym": obj.get("sym"), "where": where,
+                            "count": 0, "returns": 0, "raises": {}}
+    t["count"] += _positive_int(obj.get("count"))
+    t["returns"] += _positive_int(obj.get("returns"))
+    for name, n in (obj.get("raises") or {}).items():
+        t["raises"][name] = t["raises"].get(name, 0) + _positive_int(n)
+    if _positive_int(obj.get("raises_other")):
+        t["raises_other"] = t.get("raises_other", 0) + obj["raises_other"]
+    d = obj.get("dur")
+    merged = _merge_dur(
+        [t["dur"]["n"], t["dur"]["sum"], t["dur"]["min"], t["dur"]["max"]]
+        if "dur" in t else None, d)
+    if merged is not None:
+        hist = t.get("dur", {}).get("hist")
+        new_hist = d.get("hist") if isinstance(d, dict) else None
+        if isinstance(new_hist, list):
+            hist = ([a + b for a, b in zip(hist, new_hist, strict=False)]
+                    if isinstance(hist, list) and len(hist) == len(new_hist) else
+                    (list(new_hist) if hist is None else hist))
+        t["dur"] = dict(zip(("n", "sum", "min", "max"), merged, strict=True))
+        if hist is not None:
+            t["dur"]["hist"] = hist
+
+
+def _positive_int(v: Any) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
 
 
 def load_site_text(trace_path: str | Path) -> dict[str, str]:
@@ -518,6 +1051,11 @@ def fold_facts(
     acc: dict[tuple, _Acc] = {}
     fs = FactSet(source=source, root=root_s, site_text_entries=len(site_text))
     versions: set[int] = set()
+    # Identical inputs / outcomes / call sites recur across facts (one result shared by many
+    # inputs, one input at many sites): keep ONE object per canonical form. Decoded JSON is
+    # ~5 KB per fact otherwise, which made a capped snapshot fold in >500 MB.
+    pool: dict[str, Any] = {}
+    where_pool: dict[tuple, dict] = {}
     for index, raw in enumerate(records):
         ev = _normalize_record(raw)
         if ev is None:
@@ -541,13 +1079,19 @@ def fold_facts(
             if rel is None:
                 rel = rel_cache[abs_file] = _relativize(abs_file, root_s)
         symbol = ev["sym"] or ev["q"]
-        key = (symbol, rel, func, line, _canon(ev["input"]))
+        ikey = _canon(ev["input"])
+        ikey = pool.setdefault("i" + ikey, ikey)
+        key = (symbol, rel, func, line, ikey)
         a = acc.get(key)
         if a is None:
             text = site_text.get(f"{abs_file}:{line}") if abs_file and line is not None else None
+            wkey = (abs_file, where.get("line"), where.get("func"), len(where))
+            shared_where = where_pool.get(wkey) if where else None
+            if where and shared_where is None:
+                shared_where = where_pool[wkey] = dict(where)
             a = acc[key] = _Acc(symbol=symbol, file=rel, func=func, line=line, text=text,
-                                input=ev["input"], first_seen=index,
-                                where=dict(where) if where else None)
+                                input=pool.setdefault("v" + ikey, ev["input"]),
+                                first_seen=index, where=shared_where)
         a.qualnames.add(ev["q"])
         if ev["symq"] and a.symq is None:
             a.symq = ev["symq"]
@@ -558,12 +1102,18 @@ def fold_facts(
         okey = _canon([ev["kind"], ev["value"]])
         slot = a.outcomes.get(okey)
         if slot is None:
-            a.outcomes[okey] = [ev["kind"], ev["value"], ev["count"]]
+            okey = pool.setdefault("o" + okey, okey)
+            a.outcomes[okey] = [ev["kind"], pool.setdefault("w" + okey, ev["value"]),
+                                ev["count"]]
         else:
             slot[2] += ev["count"]
         a.count += ev["count"]
+    pool.clear()
+    where_pool.clear()
     fs.schema_versions = sorted(versions)
-    fs.facts = [_fact_from_acc(a) for a in sorted(acc.values(), key=lambda a: a.first_seen)]
+    ordered = sorted(acc.values(), key=lambda a: a.first_seen)
+    acc.clear()
+    fs.facts = [_fact_from_acc(a) for a in ordered]
     return fs
 
 
@@ -573,15 +1123,131 @@ def load_facts(
     root: str | Path | None = None,
     site_text: Mapping[str, str] | None = None,
 ) -> FactSet:
-    """Load a trace (JSONL or aggregated JSON) and its sidecar ``site_text``, then fold."""
+    """Load a trace (JSONL, aggregated JSON, or a facts snapshot) and its sidecar
+    ``site_text``, then fold.
+
+    A facts snapshot is read when it is the path given, or when the JSONL is absent or empty
+    and ``<trace>.facts.json`` (``find_facts_snapshot``) exists; otherwise the JSONL is folded
+    (a facts capture's JSONL holds the snapshot's projection). Whenever a snapshot belongs to
+    the trace, its quality counters (evicted, widened, outcomes past the cap) and tallies
+    annotate the FactSet."""
+    p = Path(trace_path)
+    if is_facts_snapshot(p):
+        snap: Path | None = p
+        jsonl: Path | None = None
+        base = snapshot_trace_path(p)
+    else:
+        snap, jsonl, base = find_facts_snapshot(p), p, p
+        if snap is not None and _is_blank(p):
+            jsonl = None
     if site_text is None:
-        site_text = load_site_text(trace_path)
+        site_text = load_site_text(base)
     stats = _ReadStats()
-    fs = fold_facts(iter_trace_records(trace_path, stats), root=root, site_text=site_text,
-                    source=str(trace_path))
+    records = iter_snapshot_records(snap) if jsonl is None and snap is not None else \
+        iter_trace_records(trace_path, stats)
+    fs = fold_facts(records, root=root, site_text=site_text, source=str(trace_path))
     fs.invalid_lines = stats.invalid_lines
     fs.aggregated = fs.aggregated or stats.aggregated
+    backends = _backends_of(_read_json(metadata_path(base)))
+    if snap is not None:
+        _annotate_from_snapshot(fs, snap, site_text)
+        if not backends:
+            backends = _backends_of(read_snapshot_header(snap))
+    fs.backends = backends
     return fs
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        with path.open(encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _backends_of(meta: Mapping[str, Any]) -> list[str]:
+    """Backend names in a trace sidecar or snapshot header (``a,b`` lists included)."""
+    names: list[str] = []
+
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            for name in value.split(","):
+                name = name.strip()
+                if name and name not in names:
+                    names.append(name)
+
+    add(meta.get("backend"))
+    for proc in meta.get("processes") or ():
+        if isinstance(proc, dict):
+            add(proc.get("backend"))
+    return names
+
+
+# Backends that see C-implemented dependency calls (``sys.setprofile``'s c_call events) and
+# record their raises as ``{"c_level": true}`` facts; sys.monitoring and wrappers do not.
+_C_LEVEL_BACKENDS = frozenset({"setprofile", "hybrid"})
+
+
+def _annotate_from_snapshot(fs: FactSet, snap: Path,
+                            site_text: Mapping[str, str] | None = None) -> None:
+    header = read_snapshot_header(snap)
+    counters = header.get("counters") if isinstance(header.get("counters"), dict) else {}
+
+    def num(name: str) -> int:
+        return _positive_int(counters.get(name))
+
+    fs.snapshot = True
+    fs.calls = num("calls") if "calls" in counters else None
+    fs.sampled = num("sampled") if "sampled" in counters else None
+    fs.evicted = num("evicted")
+    fs.evicted_facts = num("evicted_facts")
+    fs.widened = num("widened")
+    fs.widened_facts = max(num("widened_facts"),
+                           sum(1 for f in fs.facts if _is_widened_input(f.input)))
+    fs.outcomes_other = num("outcomes_other")
+    if num("tally_overflow"):
+        fs.tally_sites = None  # the tallies are incomplete: no absence can be proven
+        return
+    site_text = site_text or {}
+    sites: set[tuple[str, str, str]] = set()
+    tallies: list[SiteTally] = []
+    rel_cache: dict[str, str] = {}
+    try:
+        for _kind, t in iter_snapshot(snap, kinds=("tally",)):
+            where = t.get("where") if isinstance(t.get("where"), dict) else {}
+            file = where.get("file")
+            count = _positive_int(t.get("count"))
+            if not isinstance(file, str) or not count:
+                continue
+            rel = rel_cache.get(file)
+            if rel is None:
+                rel = rel_cache[file] = _relativize(file, fs.root)
+            symbol = t.get("sym") or t.get("q") or "?"
+            func = where.get("func") if isinstance(where.get("func"), str) else "?"
+            line = where.get("line") if _is_lineno(where.get("line")) else None
+            sites.add((symbol, rel, func))
+            raises: dict[str, int] = {}
+            for name, n in (t.get("raises") or {}).items():
+                name = _raise_name(name)
+                raises[name] = raises.get(name, 0) + _positive_int(n)
+            if _positive_int(t.get("raises_other")):
+                raises["<other>"] = raises.get("<other>", 0) + t["raises_other"]
+            tallies.append(SiteTally(
+                symbol=symbol, file=rel, func=func, line=line,
+                text=site_text.get(f"{file}:{line}") if line is not None else None,
+                count=count, returns=_positive_int(t.get("returns")), raises=raises,
+                where=where))
+    except OSError:
+        fs.tally_sites = None
+        return
+    fs.tally_sites = sites
+    fs.site_tallies = tallies
+    fs.tallies_complete = (
+        "tallied" in counters and "calls" in counters
+        and not num("sampling_dropped") and not num("dropped_events")
+        and not num("write_failures")
+    )
 
 
 def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -597,7 +1263,7 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         inputs = raw.get("in")
         kind = t
         value = raw.get("result") if t == "return" else raw.get("raised")
-        count = 1
+        count = _positive_int(raw.get("count")) or 1  # projected snapshot facts carry counts
     elif "qualname" in raw:
         aggregated = True
         q = raw.get("qualname")
@@ -621,8 +1287,8 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         if isinstance(inputs.get("defaulted"), list):
             defaulted = tuple(sorted({str(n) for n in inputs["defaulted"]}))
         inputs = {k: v for k, v in inputs.items() if k != "defaulted"}
-    if kind == "raise" and not isinstance(value, str):
-        value = str(value)
+    if kind == "raise":
+        value = _raise_name(value)
     v = raw.get("v")
     version = v if isinstance(v, int) and not isinstance(v, bool) else (2 if sym else 1)
     where = raw.get("where") if isinstance(raw.get("where"), dict) else {}
@@ -631,13 +1297,32 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             "count": count, "where": where, "v": version, "aggregated": aggregated}
 
 
+UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise whose type it cannot see
+# One shared "fields set" per model for constructed instances (every field is set): pydantic
+# otherwise keeps a fresh set per instance, ~0.7 KB per fact. Assigning an attribute adds
+# an already-present name, so sharing it is safe.
+_FACT_FIELDS_SET = set(Fact.model_fields)
+_OUTCOME_FIELDS_SET = set(Outcome.model_fields)
+
+
+def _raise_name(value: Any) -> str:
+    """One spelling per exception type: ``builtins.TypeError`` (3.12+ monitoring) and
+    ``TypeError`` (setprofile / wrappers) are the same type."""
+    name = value if isinstance(value, str) else str(value)
+    return name[len("builtins."):] if name.startswith("builtins.") else name
+
+
 def _fact_from_acc(a: _Acc) -> Fact:
+    # ``model_construct``: the fold built these values itself, and validation would copy
+    # every list (~1.6 KB per fact, the bulk of a capped snapshot's fold).
     outcomes = sorted(a.outcomes.items())
-    return Fact(
-        symbol=a.symbol, qualnames=sorted(a.qualnames), symq=a.symq, file=a.file, func=a.func,
+    return Fact.model_construct(
+        _FACT_FIELDS_SET, symbol=a.symbol, qualnames=sorted(a.qualnames), symq=a.symq,
+        file=a.file, func=a.func,
         line=a.line, lines=[a.line] if a.line is not None else [], text=a.text, input=a.input,
         defaulted=None if a.defaulted is None else [list(d) for d in sorted(a.defaulted)],
-        outcomes=[Outcome(kind=k, value=v, count=c) for _, (k, v, c) in outcomes],
+        outcomes=[Outcome.model_construct(_OUTCOME_FIELDS_SET, kind=k, value=v, count=c)
+                  for _, (k, v, c) in outcomes],
         count=a.count, where=a.where, first_seen=a.first_seen,
     )
 
@@ -882,7 +1567,12 @@ def compare_outcomes(
     n_keys = {_canon([o.kind, o.value]) for o in new}
     nondet = len(o_keys) > 1 or len(n_keys) > 1
     notes = ["nondeterministic"] if nondet else []
-    markers = any(_partial(o) for o in (*old, *new))
+    # A raise recorded without its type (setprofile below 3.12) can only be compared as "a
+    # raise": against a typed raise on the other side that is a type-level comparison.
+    untyped = o_keys != n_keys and any(_is_untyped_raise(o) for o in (*old, *new))
+    if untyped:
+        notes.append("exception type unknown on one side")
+    markers = untyped or any(_partial(o) for o in (*old, *new))
     if profile is DiffProfile.EXACT:
         if o_keys == n_keys:
             level = ComparisonLevel.TYPE if markers else ComparisonLevel.EXACT
@@ -925,7 +1615,7 @@ def _outcomes_match(a: Outcome, b: Outcome) -> bool:
     if a.kind != b.kind:
         return False
     if a.kind == "raise":
-        return a.value == b.value
+        return _raises_match(a.value, b.value)
     return _values_match(a.value, b.value)
 
 
@@ -935,8 +1625,19 @@ def _outcome_types_match(a: dict, b: dict) -> bool:
     if ("raise" in a) != ("raise" in b):
         return False
     if "raise" in a:
-        return a["raise"] == b["raise"]
+        return _raises_match(a["raise"], b["raise"])
     return types_match(a["return"], b["return"])
+
+
+def _raises_match(a: Any, b: Any) -> bool:
+    """Same exception type; an untyped raise matches any raise (raise vs return still
+    differs, and two different known types still differ)."""
+    a, b = _raise_name(a), _raise_name(b)
+    return a == b or UNTYPED_RAISE in (a, b)
+
+
+def _is_untyped_raise(o: Outcome) -> bool:
+    return o.kind == "raise" and _raise_name(o.value) == UNTYPED_RAISE
 
 
 def _ambiguous_compatible(a: dict, b: dict) -> bool:
@@ -1054,12 +1755,13 @@ def diff_facts(
 ) -> FactDiff:
     """Compare two FactSets (baseline -> post-migration). See the module docstring."""
     prof = DiffProfile(profile)
-    old_facts, new_facts = old.facts, new.facts
+    old_facts, new_facts, c_level_excluded = _exclude_c_level(old, new)
+    old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
         old_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in old_facts]
         new_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in new_facts]
 
-    modes = _site_modes(old_facts, new_facts)
+    modes = _site_modes(old_facts, new_facts, old.site_tallies, new.site_tallies)
     ov = _views(old_facts, modes)
     nv = _views(new_facts, modes)
 
@@ -1119,9 +1821,268 @@ def diff_facts(
     for v in new_left:
         entries.append(_single_entry(v, old_side=False))
 
+    unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
+    _soften_evicted(entries, old, new)
     entries.sort(key=_entry_sort_key)
+    warnings = _warnings(old, new)
+    if unsampled:
+        warnings.append(
+            f"unsampled:{unsampled}: value facts seen on one side only, at call sites both "
+            "sides' tallies show were called but not fully sampled; not compared")
+    if c_level_excluded:
+        warnings.append(
+            f"c-level-excluded:{c_level_excluded}: C-level raise facts were not compared — "
+            f"one side's backend ({_families(old)} vs {_families(new)}) does not record them")
     return FactDiff(profile=prof, entries=entries, old_summary=old.summary(),
-                    new_summary=new.summary(), warnings=_warnings(old, new))
+                    new_summary=new.summary(), warnings=warnings, unsampled=unsampled)
+
+
+def _site_key(symbol: str, file: str, func: str, line: int | None, text: str | None,
+              modes: dict[str, str]) -> tuple:
+    return (symbol, file, func, text if modes.get(file) == "text" else line)
+
+
+def _tally_index(fs: FactSet, modes: dict[str, str]) -> dict[tuple, dict] | None:
+    """Complete tallies per site key (lines sharing a text merge); None = not usable."""
+    if not fs.tallies_complete or fs.site_tallies is None:
+        return None
+    idx: dict[tuple, dict] = {}
+    for t in fs.site_tallies:
+        k = _site_key(t.symbol, t.file, t.func, t.line, t.text, modes)
+        agg = idx.get(k)
+        if agg is None:
+            agg = idx[k] = {"count": 0, "returns": 0, "raises": {}, "tally": t}
+        agg["count"] += t.count
+        agg["returns"] += t.returns
+        for name, n in t.raises.items():
+            agg["raises"][name] = agg["raises"].get(name, 0) + n
+    return idx
+
+
+def _apply_tallies(entries: list[FactEntry], old: FactSet, new: FactSet, ov: list[_V],
+                   nv: list[_V], modes: dict[str, str]) -> int:
+    """Decide what value sampling cannot, from complete tallies (every call counted).
+
+    * A value fact seen on one side only, at a site the other side's tallies show was
+      called: if that side sampled every call there, the input really is gone (kept,
+      exact); otherwise it was not sampled — dropped from the entries and counted.
+    * ... at a site the other side's tallies never saw: the call is gone (exact).
+    * A site tallied on one side only and with no value facts there: DISAPPEARED/APPEARED.
+    * A site tallied on both sides whose outcome kinds differ (returns on one side only, a
+      raise type on one side only): CHANGED at level ``kind``, unless a value entry already
+      fails there. Proportions are not compared.
+    Returns the number of unsampled facts."""
+    o_idx = _tally_index(old, modes)
+    n_idx = _tally_index(new, modes)
+    if o_idx is None and n_idx is None:
+        return 0
+
+    def sampled_calls(views: list[_V]) -> dict[tuple, int]:
+        out: dict[tuple, int] = defaultdict(int)
+        for v in views:
+            f = v.fact
+            out[(f.symbol, f.file, f.func, v.site_value)] += f.count
+        return out
+
+    o_sampled, n_sampled = sampled_calls(ov), sampled_calls(nv)
+    unsampled = 0
+    kept: list[FactEntry] = []
+    covered_old: set[tuple] = set()
+    covered_new: set[tuple] = set()
+    failing: set[tuple] = set()
+    for e in entries:
+        ok = _entry_key(e, e.old_site, modes) if e.old_site else None
+        nk = _entry_key(e, e.new_site, modes, new_side=True) if e.new_site else None
+        if ok:
+            covered_old.add(ok)
+        if nk:
+            covered_new.add(nk)
+        missing_side = None
+        if e.category is FactCategory.DISAPPEARED and n_idx is not None:
+            missing_side, idx, done, key = "new", n_idx, n_sampled, ok
+        elif e.category is FactCategory.APPEARED and o_idx is not None:
+            missing_side, idx, done, key = "old", o_idx, o_sampled, nk
+        if missing_side is not None:
+            t = idx.get(key)
+            if t is not None and done.get(key, 0) < t["count"]:
+                unsampled += 1
+                continue
+            e.level = ComparisonLevel.EXACT
+            e.notes.append("absent-from-tallies" if t is None else "site-fully-sampled")
+        if e.fails:
+            failing.update(k for k in (ok, nk) if k)
+        kept.append(e)
+    entries[:] = kept
+
+    texts = _function_texts(old, new, ov, nv, modes)
+    if n_idx is not None and o_idx is not None:
+        for k in o_idx.keys() - n_idx.keys():
+            if k not in covered_old and not _rewritten(k, texts, side=0, modes=modes):
+                entries.append(_tally_entry(o_idx[k], None, FactCategory.DISAPPEARED))
+        for k in n_idx.keys() - o_idx.keys():
+            if k not in covered_new and not _rewritten(k, texts, side=1, modes=modes):
+                entries.append(_tally_entry(None, n_idx[k], FactCategory.APPEARED))
+        for k in o_idx.keys() & n_idx.keys():
+            if k in failing:
+                continue
+            o, n = o_idx[k], n_idx[k]
+            if (o["returns"] > 0) != (n["returns"] > 0) or not _raise_sets_match(
+                    o["raises"], n["raises"]):
+                entries.append(_tally_entry(o, n, FactCategory.CHANGED))
+    return unsampled
+
+
+def _entry_key(e: FactEntry, site: SiteRef, modes: dict[str, str], *,
+               new_side: bool = False) -> tuple:
+    symbol = (e.new_symbol or e.symbol) if new_side else e.symbol
+    return _site_key(symbol, site.file, site.func, site.line, site.text, modes)
+
+
+def _function_texts(old: FactSet, new: FactSet, ov: list[_V], nv: list[_V],
+                    modes: dict[str, str]) -> list[dict[tuple, set]]:
+    texts: list[dict[tuple, set]] = [defaultdict(set), defaultdict(set)]
+    for side, (views, fs) in enumerate(((ov, old), (nv, new))):
+        for v in views:
+            if modes.get(v.fact.file) == "text":
+                texts[side][(v.fact.file, v.fact.func)].add(v.site_value)
+        for t in fs.site_tallies or ():
+            if modes.get(t.file) == "text":
+                texts[side][(t.file, t.func)].add(t.text)
+    return texts
+
+
+def _rewritten(k: tuple, texts: list[dict[tuple, set]], *, side: int,
+               modes: dict[str, str]) -> bool:
+    """A tally site whose text is gone from an edited function (REWRITTEN territory)."""
+    _symbol, file, func, value = k
+    if modes.get(file) != "text":
+        return False
+    mine, theirs = texts[side].get((file, func), set()), texts[1 - side].get((file, func), set())
+    return value not in theirs and bool(theirs - mine)
+
+
+def _raise_sets_match(a: Mapping[str, int], b: Mapping[str, int]) -> bool:
+    xs, ys = [k for k, n in a.items() if n], [k for k, n in b.items() if n]
+    if not xs and not ys:
+        return True
+    if not xs or not ys:
+        return False
+    return _cover(xs, ys, _raises_match)
+
+
+def _kind_outcomes(t: dict) -> list[Outcome]:
+    out = []
+    if t["returns"]:
+        out.append(Outcome(kind="return", value={"__opaque__": "<any return>"},
+                           count=t["returns"]))
+    for name, n in sorted(t["raises"].items()):
+        if n:
+            out.append(Outcome(kind="raise", value=name, count=n))
+    return out
+
+
+def _tally_site(t: SiteTally) -> SiteRef:
+    return SiteRef(file=t.file, func=t.func, line=t.line, text=t.text)
+
+
+def _tally_entry(o: dict | None, n: dict | None, category: FactCategory) -> FactEntry:
+    """An entry decided from complete tallies alone (no value facts compared)."""
+    ref = (o or n)["tally"]
+    changed = category is FactCategory.CHANGED
+    return FactEntry(
+        category=category,
+        comparison=Comparison.CHANGED if changed else Comparison.MISSING,
+        level=ComparisonLevel.KIND if changed else ComparisonLevel.EXACT,
+        symbol=ref.symbol,
+        new_symbol=None,
+        old_site=_tally_site(o["tally"]) if o else None,
+        new_site=_tally_site(n["tally"]) if n else None,
+        old=_kind_outcomes(o) if o else None, new=_kind_outcomes(n) if n else None,
+        old_count=o["count"] if o else 0, new_count=n["count"] if n else 0,
+        notes=["from-tallies"],
+        old_where=o["tally"].where if o else None, new_where=n["tally"].where if n else None,
+    )
+
+
+def _is_c_level(f: Fact) -> bool:
+    return isinstance(f.input, dict) and f.input.get("c_level") is True and len(f.input) == 1
+
+
+def _families(fs: FactSet) -> str:
+    return ",".join(fs.backends) or "unknown"
+
+
+def _exclude_c_level(old: FactSet, new: FactSet) -> tuple[list[Fact], list[Fact], int]:
+    """Drop ``{"c_level": true}`` facts from both sides when exactly one side's backends can
+    record them (setprofile vs monitoring): their presence then says which backend ran, not
+    how the dependency behaved. With the same family (or an unknown side) they compare."""
+    if not (old.backends and new.backends):
+        return old.facts, new.facts, 0
+    o_c = bool(_C_LEVEL_BACKENDS.intersection(old.backends))
+    n_c = bool(_C_LEVEL_BACKENDS.intersection(new.backends))
+    if o_c == n_c:
+        return old.facts, new.facts, 0
+    o = [f for f in old.facts if not _is_c_level(f)]
+    n = [f for f in new.facts if not _is_c_level(f)]
+    return o, n, (len(old.facts) - len(o)) + (len(new.facts) - len(n))
+
+_WIDENED = json.loads(WIDENED_INPUT)
+
+
+def _is_widened_input(inputs: Any) -> bool:
+    return isinstance(inputs, dict) and inputs.get("__widened__") is True
+
+
+def _collapse_widened(old_facts: list[Fact], new_facts: list[Fact]) -> tuple[list, list]:
+    """A (symbol, site) that a snapshot widened on either side is compared as one type-level
+    fact on both sides: which inputs kept an exact fact depends on call order, so pairing
+    the exact ones across runs would invent DISAPPEARED/APPEARED facts."""
+    def group(f: Fact) -> tuple:
+        return (f.symbol, f.file, f.func, f.text if f.text is not None else f.line)
+
+    widened = {group(f) for f in (*old_facts, *new_facts) if _is_widened_input(f.input)}
+    if not widened:
+        return old_facts, new_facts
+
+    def collapse(facts: list[Fact]) -> list[Fact]:
+        out: list[Fact] = []
+        groups: dict[tuple, list[Fact]] = defaultdict(list)
+        for f in facts:
+            if group(f) in widened:
+                groups[group(f)].append(f)
+            else:
+                out.append(f)
+        for members in groups.values():
+            reduced = [m.model_copy(update={
+                "input": dict(_WIDENED),
+                "outcomes": [o if o.kind == "raise" else
+                             Outcome(kind="return", value=widen_value(o.value), count=o.count)
+                             for o in m.outcomes],
+            }) for m in members]
+            out.append(_merge_facts(reduced))
+        out.sort(key=lambda f: f.first_seen)
+        return out
+
+    return collapse(old_facts), collapse(new_facts)
+
+
+def _soften_evicted(entries: list[FactEntry], old: FactSet, new: FactSet) -> None:
+    """A fact missing on a side that evicted facts may have been evicted there, not have
+    vanished: when that side's tallies show calls of the symbol in the same function (or the
+    tallies are unknown), the entry is UNCOMPARABLE (inconclusive) instead of failing."""
+    for e in entries:
+        if "absent-from-tallies" in e.notes:
+            continue  # complete tallies proved the call is gone: eviction cannot explain it
+        if e.category is FactCategory.DISAPPEARED and new.evicted:
+            side, fs = "new", new
+        elif e.category is FactCategory.APPEARED and old.evicted:
+            side, fs = "old", old
+        else:
+            continue
+        site = e.site
+        if fs.tally_sites is None or (e.symbol, site.file, site.func) in fs.tally_sites:
+            e.category = FactCategory.UNCOMPARABLE
+            e.notes.append(f"possibly-evicted:{side}")
 
 
 def diff_traces(
@@ -1142,11 +2103,12 @@ def diff_traces(
     return diff_facts(old, new, profile=profile)
 
 
-def _site_modes(old_facts: list[Fact], new_facts: list[Fact]) -> dict[str, str]:
-    """Per file: ``text`` when every fact in it on both sides has its line text, else ``line``
-    (a site key must mean the same thing on both sides)."""
+def _site_modes(old_facts: list[Fact], new_facts: list[Fact],
+                *tallies: list[SiteTally] | None) -> dict[str, str]:
+    """Per file: ``text`` when every fact (and tally) in it on both sides has its line text,
+    else ``line`` (a site key must mean the same thing on both sides)."""
     modes: dict[str, str] = {}
-    for f in (*old_facts, *new_facts):
+    for f in (*old_facts, *new_facts, *(t for ts in tallies if ts for t in ts)):
         if f.text is None:
             modes[f.file] = "line"
         else:
@@ -1235,6 +2197,8 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     else:
         category = FactCategory.EQUAL
     notes = [rewritten] if rewritten else []
+    if _is_widened_input(of.input) or _is_widened_input(nf.input):
+        notes.append("widened")
     if rewritten != "positional":
         if o.input_key != n.input_key:
             notes.append("matched-modulo-defaults")
@@ -1245,8 +2209,8 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     elif not rewritten and o.site_value != n.site_value:
         notes.append("line-moved")  # line mode only: a text-mode move is REWRITTEN
     all_notes = [*notes, *cmp.notes]
-    return FactEntry(
-        category=category, comparison=cmp.comparison, level=cmp.level,
+    return FactEntry.model_construct(  # trusted, typed values: no validation copies
+        _ENTRY_FIELDS_SET, category=category, comparison=cmp.comparison, level=cmp.level,
         symbol=of.symbol, new_symbol=nf.symbol if nf.symbol != of.symbol else None,
         old_site=_site_ref(of), new_site=_site_ref(nf),
         input=of.input, new_input=nf.input if n.input_key != o.input_key else None,
@@ -1266,8 +2230,10 @@ def _single_entry(v: _V, *, old_side: bool) -> FactEntry:
         category = FactCategory.DISAPPEARED if old_side else FactCategory.APPEARED
         notes = []
     outcomes = _cap(f.outcomes, notes, "old" if old_side else "new")
-    return FactEntry(
-        category=category, comparison=Comparison.MISSING, level=None, symbol=f.symbol,
+    return FactEntry.model_construct(
+        _ENTRY_FIELDS_SET, category=category, new_symbol=None, new_input=None,
+        old_types=None, new_types=None, drift=False, comparison=Comparison.MISSING,
+        level=None, symbol=f.symbol,
         old_site=_site_ref(f) if old_side else None,
         new_site=None if old_side else _site_ref(f),
         input=f.input,
@@ -1281,7 +2247,12 @@ def _single_entry(v: _V, *, old_side: bool) -> FactEntry:
 
 
 def _site_ref(f: Fact) -> SiteRef:
-    return SiteRef(file=f.file, func=f.func, line=f.line, text=f.text)
+    return SiteRef.model_construct(_SITE_FIELDS_SET, file=f.file, func=f.func, line=f.line,
+                                   text=f.text)
+
+
+_ENTRY_FIELDS_SET = set(FactEntry.model_fields)
+_SITE_FIELDS_SET = set(SiteRef.model_fields)
 
 
 def _cap(outcomes: list[Outcome], notes: list[str], side: str) -> list[Outcome]:
@@ -1314,6 +2285,16 @@ def _warnings(old: FactSet, new: FactSet) -> list[str]:
             out.append(f"aggregated:{side}: outcome distributions and call order not recorded")
         if fs.invalid_lines:
             out.append(f"invalid-lines:{side}:{fs.invalid_lines}")
+        if fs.evicted:
+            out.append(f"evicted:{side}:{fs.evicted}: the facts snapshot reached its fact cap "
+                       f"and dropped {fs.evicted_facts} fact(s); the evidence is incomplete "
+                       "and cannot PASS")
+        if fs.widened or fs.widened_facts:
+            out.append(f"widened:{side}:{fs.widened}: call sites past the per-site input cap "
+                       "are compared at type level only")
+        if fs.outcomes_other:
+            out.append(f"outcomes-capped:{side}:{fs.outcomes_other}: calls past a fact's "
+                       "distinct-outcome cap are compared by type")
     return out
 
 

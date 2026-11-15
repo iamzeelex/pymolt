@@ -89,3 +89,5 @@ out
 CLAUDE.md
 EDITIONS.md
 services/
+bench/e2e_pandas/.envs/
+bench/e2e_pandas/results/

@@ -1,0 +1,5 @@
+flask
+sqlalchemy
+pydantic>=2,<3
+requests
+waitress

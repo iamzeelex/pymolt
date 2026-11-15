@@ -1,8 +1,10 @@
 """Fact model v2 (host): loading, site text, fold and the categorised fact diff."""
 import json
+from pathlib import Path
 
 import pytest
 
+from pymolt.verify._sinks import FactSink, JsonlSink, write_snapshot_file
 from pymolt.verify.facts import (
     Comparison,
     ComparisonLevel,
@@ -13,9 +15,13 @@ from pymolt.verify.facts import (
     diff_facts,
     diff_traces,
     fold_facts,
+    iter_snapshot,
+    iter_trace_records,
     load_facts,
     load_site_text,
+    merge_fact_snapshots,
     outcome_type,
+    project_snapshot,
     store_site_text,
     value_type,
 )
@@ -526,3 +532,421 @@ def test_fold_accepts_in_memory_records():
     (fact,) = fs.facts
     assert fact.input == {"bound": {"x": 1}} and fact.defaulted == [["y"]]
     assert fact.count == 2 and fact.nondeterministic and fs.events == 2
+
+
+# ── facts snapshots (phase 2: FactSink) ───────────────────────────────────────────────────
+
+
+def play(sink, calls):
+    """Drive a sink the way a backend does: ``(sym, bound, outcome, line[, defaulted])``
+    where ``outcome`` is a result or ``("raise", Type)``."""
+    for call in calls:
+        sym, bound, outcome, line = call[:4]
+        inputs = {"bound": dict(bound)}
+        if len(call) > 4:
+            inputs["defaulted"] = list(call[4])
+        site = {"file": APP, "line": line, "func": "main"}
+        if isinstance(outcome, tuple) and outcome[:1] == ("raise",):
+            sink.on_raise(sym, inputs, outcome[1], site=site, sym=sym, dur=0.001)
+        else:
+            sink.on_return(sym, inputs, outcome, site=site, sym=sym, dur=0.001)
+    sink.close()
+    return sink
+
+
+def snapshot_of(tmp_path, name, calls, **kw):
+    kw.setdefault("flush_seconds", 0)
+    return Path(play(FactSink(str(tmp_path / f"{name}.jsonl"), **kw), calls).path)
+
+
+def jsonl_of(tmp_path, name, calls):
+    return Path(play(JsonlSink(str(tmp_path / f"{name}.jsonl")), calls).path)
+
+
+def categories(d):
+    return sorted((e.category.value, e.symbol, e.site.line) for e in d.entries)
+
+
+OLD_CALLS = [
+    ("m.a", {"x": 1}, 1, 10), ("m.a", {"x": 1}, 1, 10),
+    ("m.b", {"x": 1}, 1, 11),
+    ("m.c", {}, None, 12),
+    ("m.d", {}, "gone", 13),
+    ("m.f", {}, 1, 14), ("m.f", {}, 2, 14), ("m.f", {}, 3, 14),
+    ("m.g", {}, "ok", 15), ("m.g", {}, "ok", 15),
+    ("m.h", {}, 0, 16, ["a"]),
+]
+NEW_CALLS = [
+    ("m.a", {"x": 1}, 1, 10),
+    ("m.b", {"x": 1}, 1.0, 11),
+    ("m.c", {}, ("raise", "TypeError"), 12),
+    ("m.e", {}, "new", 17),
+    ("m.f", {}, 3, 14), ("m.f", {}, 1, 14), ("m.f", {}, 2, 14),
+    ("m.g", {}, "ok", 15), ("m.g", {}, "ok", 15), ("m.g", {}, "ok", 15),
+    ("m.h", {}, 0, 16, ["a", "b"]),
+]
+
+
+def test_diff_of_snapshots_equals_diff_of_the_equivalent_jsonl(tmp_path):
+    from_jsonl = diff_traces(jsonl_of(tmp_path, "jo", OLD_CALLS),
+                             jsonl_of(tmp_path, "jn", NEW_CALLS), root=ROOT)
+    from_facts = diff_traces(snapshot_of(tmp_path, "fo", OLD_CALLS),
+                             snapshot_of(tmp_path, "fn", NEW_CALLS), root=ROOT)
+    assert categories(from_facts) == categories(from_jsonl)
+    assert {c for c, *_ in categories(from_facts)} == {
+        "equal", "changed", "disappeared", "appeared", "drift"}
+    assert from_facts.verdict is from_jsonl.verdict is VerificationVerdict.FAIL
+    equal = {e.symbol: e for e in from_facts.by_category("equal")}
+    assert (equal["m.a"].old_count, equal["m.a"].new_count) == (2, 1)  # counts survive
+
+
+def test_load_facts_reads_a_snapshot_directly_or_behind_an_empty_trace(tmp_path):
+    snap = snapshot_of(tmp_path, "t", OLD_CALLS)
+    direct = load_facts(snap, root=ROOT)
+    trace = tmp_path / "t.jsonl"
+    trace.write_text("")
+    behind = load_facts(trace, root=ROOT)
+    reference = load_facts(jsonl_of(tmp_path, "ref", OLD_CALLS), root=ROOT)
+    for fs in (direct, behind):
+        assert fs.snapshot and fs.calls == len(OLD_CALLS) and fs.evicted == 0
+        assert [(f.symbol, f.line, f.count, [(o.kind, o.value, o.count) for o in f.outcomes])
+                for f in fs.facts] == [
+            (f.symbol, f.line, f.count, [(o.kind, o.value, o.count) for o in f.outcomes])
+            for f in reference.facts]
+    assert list(iter_trace_records(trace))  # snapshot-aware for every JSONL reader
+
+
+def test_projection_into_the_jsonl_loads_like_the_snapshot(tmp_path):
+    snap = snapshot_of(tmp_path, "p", OLD_CALLS)
+    trace = tmp_path / "p.jsonl"
+    written = project_snapshot(snap, trace)
+    assert written == sum(len(f.outcomes) for f in load_facts(snap, root=ROOT).facts)
+    lines = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert all(rec["src"] == "facts" and rec["count"] >= 1 for rec in lines)
+    a = load_facts(trace, root=ROOT)
+    b = load_facts(snap, root=ROOT)
+    assert a.snapshot and b.snapshot
+    assert [f.model_dump() for f in a.facts] == [f.model_dump() for f in b.facts]
+
+
+def test_host_merge_of_two_process_snapshots_sums_counts(tmp_path):
+    p1 = snapshot_of(tmp_path, "trace-1", [
+        ("m.a", {"x": 1}, 1, 10), ("m.a", {"x": 1}, 1, 10),
+        ("m.b", {}, ("raise", "KeyError"), 11),
+    ])
+    p2 = snapshot_of(tmp_path, "trace-2", [
+        ("m.a", {"x": 1}, 1, 10), ("m.a", {"x": 1}, 2, 10), ("m.c", {}, None, 12),
+    ])
+    out = tmp_path / "merged.jsonl.facts.json"
+    header = merge_fact_snapshots([p1, p2], out)
+    assert header["merged"] is True and len(header["processes"]) == 2
+    assert header["counters"]["calls"] == 6 and header["counters"]["facts"] == 3
+    fs = load_facts(out, root=ROOT)
+    a = next(f for f in fs.facts if f.symbol == "m.a")
+    assert a.count == 4
+    assert sorted((o.value, o.count) for o in a.outcomes) == [(1, 3), (2, 1)]
+    tallies = [t for k, t in iter_snapshot(out) if k == "tally"]
+    assert sum(t["count"] for t in tallies) == 6
+    a_tally = next(t for t in tallies if t["sym"] == "m.a")
+    assert a_tally["dur"]["n"] == 4 and sum(a_tally["dur"]["hist"]) == 4
+
+
+def test_host_merge_reapplies_the_outcome_cap_and_the_fact_cap(tmp_path):
+    p1 = snapshot_of(tmp_path, "trace-1", [("m.n", {}, i, 10) for i in range(8)])
+    p2 = snapshot_of(tmp_path, "trace-2", [("m.n", {}, i, 10) for i in range(8, 10)]
+                     + [("m.solo", {}, 1, 20)])
+    out = tmp_path / "m.facts.json"
+    merge_fact_snapshots([p1, p2], out)
+    fs = load_facts(out, root=ROOT)
+    n = next(f for f in fs.facts if f.symbol == "m.n")
+    assert n.count == 10
+    assert {"__opaque__": "int"} in [o.value for o in n.outcomes]  # the overflow, by type
+    capped = merge_fact_snapshots([p1, p2], tmp_path / "c.facts.json", max_facts=1)
+    assert capped["counters"]["facts"] == 1 and capped["counters"]["evicted"] == 1
+
+
+def test_an_evicting_snapshot_never_passes(tmp_path):
+    calls = [("m.keep", {}, 1, 10)] * 5 + [("m.x", {}, 1, line) for line in range(20, 40)]
+    old = load_facts(snapshot_of(tmp_path, "o", calls, max_facts=8), root=ROOT)
+    new = load_facts(snapshot_of(tmp_path, "n", calls, max_facts=8), root=ROOT)
+    assert old.evicted > 0
+    d = diff_facts(old, new)
+    assert d.is_clean() and d.incomplete
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    assert any(w.startswith("evicted:old") for w in d.warnings)
+    assert d.to_json_dict()["incomplete"] is True
+
+
+def test_a_fact_the_evicting_side_dropped_is_unsampled_under_complete_tallies(tmp_path):
+    calls = [("m.keep", {}, 1, 10)] * 5 + [("m.x", {}, 1, line) for line in range(20, 40)]
+    old = load_facts(snapshot_of(tmp_path, "o", calls), root=ROOT)
+    new = load_facts(snapshot_of(tmp_path, "n", calls, max_facts=8), root=ROOT)
+    assert new.tallies_complete
+    d = diff_facts(old, new)
+    assert not d.by_category("disappeared") and d.unsampled > 0
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE  # eviction still blocks PASS
+
+
+def test_a_fact_the_evicting_side_dropped_is_uncomparable_not_disappeared(tmp_path):
+    calls = [("m.keep", {}, 1, 10)] * 5 + [("m.x", {}, 1, line) for line in range(20, 40)]
+    old = load_facts(snapshot_of(tmp_path, "o", calls), root=ROOT)
+    # Overflowing tallies: they cannot prove absence, only eviction explains the gap.
+    new = load_facts(snapshot_of(tmp_path, "n", calls, max_facts=8, max_tallies=1), root=ROOT)
+    assert not new.tallies_complete
+    d = diff_facts(old, new)
+    assert not d.by_category("disappeared")
+    dropped = d.by_category("uncomparable")
+    assert dropped and all("possibly-evicted:new" in e.notes for e in dropped)
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    assert d.to_boundary_diff().skipped_opaque[0]["reason"] == "evicted"
+
+
+def test_a_call_the_tallies_never_saw_still_disappears_under_eviction(tmp_path):
+    common = [("m.keep", {}, 1, 10)] * 5 + [("m.x", {}, 1, line) for line in range(20, 40)]
+    old = load_facts(snapshot_of(tmp_path, "o", common + [("m.gone", {}, 1, 50)]), root=ROOT)
+    new = load_facts(snapshot_of(tmp_path, "n", common, max_facts=8), root=ROOT)
+    d = diff_facts(old, new)
+    gone = only(d, "disappeared")
+    assert gone.symbol == "m.gone"
+    assert d.verdict is VerificationVerdict.FAIL
+
+
+def test_widened_sites_compare_at_type_level_whatever_the_call_order(tmp_path):
+    old = snapshot_of(tmp_path, "o", [("m.get", {"id": i}, i, 10) for i in range(10)],
+                      facts_per_site=4)
+    new = snapshot_of(tmp_path, "n", [("m.get", {"id": i}, i, 10) for i in reversed(range(10))],
+                      facts_per_site=4)
+    d = diff_traces(old, new, root=ROOT)
+    entry = only(d, "equal")
+    assert entry.input == {"__widened__": True}
+    assert entry.level is ComparisonLevel.TYPE and "widened" in entry.notes
+    assert d.verdict is VerificationVerdict.PASS
+    assert any(w.startswith("widened:old") for w in d.warnings)
+
+
+def test_a_type_change_at_a_widened_site_fails(tmp_path):
+    old = snapshot_of(tmp_path, "o", [("m.get", {"id": i}, i, 10) for i in range(10)],
+                      facts_per_site=4)
+    new = snapshot_of(tmp_path, "n", [("m.get", {"id": i}, str(i), 10) for i in range(10)],
+                      facts_per_site=4)
+    d = diff_traces(old, new, root=ROOT)
+    assert only(d, "changed").input == {"__widened__": True}
+
+
+def test_a_widened_baseline_meets_an_exact_jsonl_at_type_level(tmp_path):
+    calls = [("m.get", {"id": i}, i, 10) for i in range(10)]
+    d = diff_traces(snapshot_of(tmp_path, "o", calls, facts_per_site=4),
+                    jsonl_of(tmp_path, "n", calls), root=ROOT)
+    assert only(d, "equal").level is ComparisonLevel.TYPE
+
+
+def test_outcomes_whose_type_was_lost_are_uncomparable(tmp_path):
+    path = tmp_path / "lost.facts.json"
+    fact = {"q": "m.f", "sym": "m.f", "where": {"file": APP, "line": 10, "func": "main"},
+            "in": {"bound": {}}, "count": 12, "first_ts": 1.0,
+            "outcomes": [{"t": "return", "result": 1, "count": 2},
+                         {"t": "other", "count": 10, "types": [
+                             {"t": "return", "type": "int", "count": 4}], "lost": 6}]}
+    write_snapshot_file(str(path), {"schema": "pymolt.facts-snapshot/1", "counters": {}},
+                        [json.dumps(fact)], [])
+    fs = load_facts(path, root=ROOT)
+    (f,) = fs.facts
+    assert sorted(o.count for o in f.outcomes) == [2, 4, 6]
+    d = diff_facts(fs, fs)
+    assert only(d, "uncomparable").comparison is Comparison.UNCOMPARABLE
+
+
+# ── backend families: untyped raises (setprofile < 3.12) and C-level raise facts ──────────
+
+
+def test_untyped_raise_matches_a_typed_raise_at_type_level(tmp_path):
+    d = run_diff(tmp_path, [ev("m.f", raised="<unknown>")],
+                 [ev("m.f", raised="builtins.TypeError")])
+    e = only(d, "equal")
+    assert e.level is ComparisonLevel.TYPE
+    assert "exception type unknown on one side" in e.notes
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_untyped_raise_still_differs_from_a_return(tmp_path):
+    d = run_diff(tmp_path, [ev("m.f", raised="<unknown>")], [ev("m.f", result=None)])
+    assert only(d, "changed").fails
+
+
+def test_known_raise_types_still_differ_and_builtins_spellings_agree(tmp_path):
+    d = run_diff(tmp_path, [ev("m.f", raised="KeyError")], [ev("m.f", raised="TypeError")])
+    assert only(d, "changed")
+    d = run_diff(tmp_path, [ev("m.f", raised="TypeError")],
+                 [ev("m.f", raised="builtins.TypeError")])
+    assert only(d, "equal").level is ComparisonLevel.EXACT
+
+
+def test_untyped_raise_in_a_distribution_matches_at_type_level(tmp_path):
+    old = [ev("m.f", result=1), ev("m.f", raised="<unknown>")]
+    new = [ev("m.f", result=1), ev("m.f", raised="builtins.ValueError")]
+    e = only(run_diff(tmp_path, old, new), "equal")
+    assert e.level is ComparisonLevel.TYPE
+    assert "exception type unknown on one side" in e.notes
+
+
+def _with_backend(tmp_path, name, events, backend, *, processes=False):
+    p = write_trace(tmp_path, name, events)
+    meta = ({"processes": [{"backend": backend}]} if processes else {"backend": backend})
+    (tmp_path / f"{name}.meta.json").write_text(json.dumps(meta))
+    return p
+
+
+C_RAISE = {"t": "raise", "q": "dep._speedups.parse", "sym": "dep._speedups.parse", "v": 2,
+           "in": {"c_level": True}, "raised": "Exception",
+           "where": {"file": APP, "line": 20, "func": "main"}}
+
+
+def test_c_level_facts_are_excluded_across_backend_families(tmp_path):
+    common = [ev("m.f", result=1, sym="m.f")]
+    old = _with_backend(tmp_path, "old.jsonl", common + [C_RAISE], "setprofile")
+    new = _with_backend(tmp_path, "new.jsonl", common, "monitoring", processes=True)
+    d = diff_traces(old, new, root=ROOT)
+    assert d.counts()["disappeared"] == 0
+    assert d.verdict is VerificationVerdict.PASS
+    assert any(w.startswith("c-level-excluded:1") for w in d.warnings)
+
+
+def test_c_level_facts_still_compare_within_one_backend_family(tmp_path):
+    common = [ev("m.f", result=1, sym="m.f")]
+    old = _with_backend(tmp_path, "old.jsonl", common + [C_RAISE], "setprofile")
+    new = _with_backend(tmp_path, "new.jsonl", common, "setprofile")
+    d = diff_traces(old, new, root=ROOT)
+    assert only(d, "disappeared").symbol == "dep._speedups.parse"
+    assert not any(w.startswith("c-level-excluded") for w in d.warnings)
+
+
+def test_snapshot_header_names_the_backend_when_the_trace_has_no_sidecar(tmp_path):
+    sink = FactSink(str(tmp_path / "s.jsonl"), flush_seconds=0)
+    sink.set_metadata(backend="monitoring")
+    sink.on_return("m.f", {"bound": {}}, 1, site={"file": APP, "line": 10, "func": "main"},
+                   sym="m.f")
+    sink.close()
+    (tmp_path / "s.jsonl.meta.json").unlink()
+    assert load_facts(sink.path, root=ROOT).backends == ["monitoring"]
+
+
+# ── tally-aware diff (sampled values, every call counted) ────────────────────────────────
+
+import random as _random  # noqa: E402
+
+
+def sampled_snapshot(tmp_path, monkeypatch, name, calls, *, rate="0.1", first="4", seed=0):
+    """A FactSink driven with the backends' protocol: ``admit(key)`` first; an admitted call
+    records its values, a declined one is tallied."""
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", rate)
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_FIRST", first)
+    _random.seed(seed)
+    sink = FactSink(str(tmp_path / f"{name}.jsonl"), flush_seconds=0)
+    for sym, bound, outcome, line in calls:
+        site = {"file": APP, "line": line, "func": "main"}
+        raising = isinstance(outcome, tuple)
+        if sink.admit(key=(sym, APP, line), force=raising):
+            if raising:
+                sink.on_raise(sym, {"bound": dict(bound)}, outcome[1], site=site,
+                              admitted=True, sym=sym)
+            else:
+                sink.on_return(sym, {"bound": dict(bound)}, outcome, site=site,
+                               admitted=True, sym=sym)
+        else:
+            sink.tally(sym, sym, site, "raise" if raising else "return",
+                       raised=outcome[1] if raising else None)
+    sink.close()
+    monkeypatch.delenv("PYMOLT_TRACE_SAMPLE_RATE")
+    monkeypatch.delenv("PYMOLT_TRACE_SAMPLE_FIRST")
+    return load_facts(sink.path, root=ROOT)
+
+
+WORKLOAD = [("m.get", {"id": i % 40}, i % 40, 10) for i in range(600)] + \
+    [("m.put", {"v": i % 7}, None, 11) for i in range(300)] + \
+    [("m.bad", {}, ("raise", "KeyError"), 12) for _ in range(50)]
+
+
+def test_same_workload_sampled_with_different_seeds_has_no_failures(tmp_path, monkeypatch):
+    old = sampled_snapshot(tmp_path, monkeypatch, "o", WORKLOAD, seed=1)
+    new = sampled_snapshot(tmp_path, monkeypatch, "n", WORKLOAD, seed=2)
+    assert old.tallies_complete and new.tallies_complete
+    assert old.sampled < old.calls  # values really were sampled
+    d = diff_facts(old, new)
+    assert d.failures() == []
+    assert d.unsampled > 0  # inputs one seed sampled and the other did not
+    assert d.verdict is VerificationVerdict.PASS
+    assert d.to_json_dict()["unsampled"] == d.unsampled
+    assert d.old_summary.tallies_complete and d.new_summary.tallies_complete
+
+
+def test_a_vanished_call_site_is_disappeared_exactly(tmp_path, monkeypatch):
+    old = sampled_snapshot(tmp_path, monkeypatch, "o", WORKLOAD)
+    new = sampled_snapshot(tmp_path, monkeypatch, "n",
+                           [c for c in WORKLOAD if c[0] != "m.put"])
+    d = diff_facts(old, new)
+    gone = d.by_category("disappeared")
+    assert gone and {e.symbol for e in gone} == {"m.put"}
+    assert all(e.level is ComparisonLevel.EXACT and "absent-from-tallies" in e.notes
+               for e in gone)
+    assert d.verdict is VerificationVerdict.FAIL
+
+
+def test_a_site_only_tallies_saw_still_disappears(tmp_path, monkeypatch):
+    calls = WORKLOAD + [("m.rare", {}, 1, 13)] * 3
+    old = sampled_snapshot(tmp_path, monkeypatch, "o", calls, first="0", rate="0.0001")
+    new = sampled_snapshot(tmp_path, monkeypatch, "n", WORKLOAD, first="0", rate="0.0001")
+    assert not any(f.symbol == "m.rare" for f in old.facts)  # never sampled
+    e = next(e for e in diff_facts(old, new).by_category("disappeared") if e.symbol == "m.rare")
+    assert "from-tallies" in e.notes and e.old_count == 3
+
+
+def test_outcome_kinds_from_tallies_change_at_kind_level(tmp_path, monkeypatch):
+    old_calls = [("m.f", {"x": i}, i, 10) for i in range(50)] + \
+        [("m.f", {"x": -1}, ("raise", "ValueError"), 10)]
+    new_calls = [("m.f", {"x": -1}, ("raise", "ValueError"), 10)] * 51
+    old = sampled_snapshot(tmp_path, monkeypatch, "o", old_calls, first="0", rate="0.0001")
+    new = sampled_snapshot(tmp_path, monkeypatch, "n", new_calls, first="0", rate="0.0001")
+    e = only(diff_facts(old, new), "changed")
+    assert e.level is ComparisonLevel.KIND and "from-tallies" in e.notes
+    assert [o.kind for o in e.old] == ["return", "raise"]
+    assert [o.kind for o in e.new] == ["raise"]
+
+
+def test_kind_level_untyped_raise_matches_a_typed_one():
+    from pymolt.verify.facts import _raise_sets_match
+
+    assert _raise_sets_match({"<unknown>": 2}, {"TypeError": 2})
+    assert not _raise_sets_match({"KeyError": 1}, {"TypeError": 1})
+    assert not _raise_sets_match({"KeyError": 1}, {})
+
+
+def test_an_input_missing_from_a_fully_sampled_site_is_still_disappeared(tmp_path,
+                                                                         monkeypatch):
+    old = sampled_snapshot(tmp_path, monkeypatch, "o",
+                           [("m.f", {"x": 1}, 1, 10), ("m.f", {"x": 2}, 2, 10)], first="32")
+    new = sampled_snapshot(tmp_path, monkeypatch, "n",
+                           [("m.f", {"x": 1}, 1, 10), ("m.f", {"x": 3}, 3, 10)], first="32")
+    d = diff_facts(old, new)
+    assert only(d, "disappeared").input == {"bound": {"x": 2}}
+    assert "site-fully-sampled" in only(d, "appeared").notes
+    assert d.unsampled == 0
+
+
+def test_without_complete_tallies_the_diff_is_unchanged(tmp_path, monkeypatch):
+    old = sampled_snapshot(tmp_path, monkeypatch, "o", WORKLOAD, seed=1)
+    new = sampled_snapshot(tmp_path, monkeypatch, "n", WORKLOAD, seed=2)
+    new.tallies_complete = False  # e.g. a declined call that was never tallied
+    d = diff_facts(old, new)
+    assert d.by_category("disappeared")  # unsampled inputs look vanished: no PASS
+    assert d.verdict is VerificationVerdict.FAIL
+
+
+def test_untallied_declines_make_the_tallies_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0.0001")
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_FIRST", "0")
+    sink = FactSink(str(tmp_path / "x.jsonl"), flush_seconds=0)
+    assert sink.admit(key=("m.f", APP, 1)) is False  # declined, never tallied
+    sink.on_raise("m.f", {"bound": {}}, "E", site={"file": APP, "line": 1, "func": "main"},
+                  sym="m.f")
+    sink.close()
+    assert not load_facts(sink.path, root=ROOT).tallies_complete
