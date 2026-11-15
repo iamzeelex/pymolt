@@ -197,7 +197,8 @@ _CAPTURE_WHEN = {"baseline": "baseline", "post-migration": "post_migration"}
 def capture(project_dir: str = ".", when: str = "baseline", mode: str = "tests",
             command: list[str] | None = None, force: bool = False,
             impact_targets: list[str] | None = None, deployment_id: str | None = None,
-            request_id: str | None = None, correlation_id: str | None = None) -> dict:
+            request_id: str | None = None, correlation_id: str | None = None,
+            accept_failing: bool = False) -> dict:
     """Run YOUR command with the boundary tracer injected (zero edits to the project)
     and keep what the code called in its dependencies as the baseline or
     post-migration capture. Call this instead of wiring a tracer yourself.
@@ -213,6 +214,7 @@ def capture(project_dir: str = ".", when: str = "baseline", mode: str = "tests",
         force: Replace an existing capture for this side (it is archived, not deleted).
         impact_targets: API symbols to focus on; post-migration defaults to the applied plan.
         deployment_id, request_id, correlation_id: Identities stored for provenance.
+        accept_failing: Keep a run that exited non-zero if it recorded calls (stamped red).
     """
     gate = _require_exec_allowed()
     if gate is not None:
@@ -239,6 +241,7 @@ def capture(project_dir: str = ".", when: str = "baseline", mode: str = "tests",
         slot = service.capture_named_trace(
             p, when_key, capture_mode[mode], command=list(command), impact_targets=impact_targets,
             deployment_id=deployment_id, request_id=request_id, correlation_id=correlation_id,
+            accept_failing=accept_failing,
         )
         return views.capture_view(slot, when=when, state=service.load_contract_state(p))
 

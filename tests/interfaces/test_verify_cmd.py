@@ -99,6 +99,22 @@ def test_failed_test_capture_is_diagnostic_and_fails_cli(tmp_path):
     assert state.diagnostic_captures[-1].validity is CaptureValidity.COMMAND_FAILED
 
 
+def test_accept_failing_keeps_a_red_baseline(tmp_path):
+    app_py = tmp_path / "red.py"
+    app_py.write_text("import json\njson.loads('{}')\nprint('1 failed, 4 passed')\n"
+                      "raise SystemExit(1)\n")
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests", "--accept-failing",
+        "--project-dir", str(tmp_path), "--target", "json",
+        "--", sys.executable, str(app_py),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "RED" in result.output
+    state = ContractState.load(tmp_path / ".pymolt" / "contract_state.json")
+    assert state.baseline.validity is CaptureValidity.VALID
+    assert state.baseline.red["failed"] == 1 and state.baseline.red["returncode"] == 1
+
+
 def test_zero_event_capture_is_inconclusive_and_not_active(tmp_path):
     app_py = _write_app(tmp_path, third_party=False)
     result = runner.invoke(cli, [

@@ -238,6 +238,11 @@ class ContractSlot(BaseModel):
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
     # Processes where tracing was requested but the watcher could not load (untraced).
     activation_failures: list[dict] = Field(default_factory=list)
+    # A "red" baseline: the command exited non-zero (failing tests) but recorded events,
+    # and the capture was accepted on purpose (``--accept-failing``). Holds
+    # ``{"returncode": int, "failed": int | None, "summary": str}``; None = not red.
+    # The slot is still ``valid``; the stamp only says the run was not green.
+    red: dict | None = None
 
 
 class ContractState(BaseModel):

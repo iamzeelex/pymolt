@@ -141,6 +141,35 @@ class TestCaptureNamedTrace:
         assert state.diagnostic_captures == [slot]
         assert "diagnostics" in slot.trace_path
 
+    def test_accept_failing_keeps_a_red_run_that_recorded_events(self, tmp_path):
+        script = _write_script(
+            tmp_path,
+            "import json\njson.loads('{}')\nprint('=== 2 failed, 5 passed in 0.1s ===')\n"
+            "raise SystemExit(1)\n",
+        )
+        refused = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json",
+        )
+        assert refused.validity is CaptureValidity.COMMAND_FAILED and refused.red is None
+
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json", accept_failing=True,
+        )
+        assert slot.validity is CaptureValidity.VALID
+        assert slot.red == {"returncode": 1, "failed": 2, "summary": "2 failed, 5 passed in 0.1s"}
+        assert service.load_contract_state(tmp_path).baseline == slot
+
+    def test_accept_failing_still_refuses_a_run_with_no_events(self, tmp_path):
+        script = _write_script(tmp_path, "raise SystemExit(3)\n")
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json", accept_failing=True,
+        )
+        assert slot.validity is CaptureValidity.COMMAND_FAILED and slot.red is None
+        assert service.load_contract_state(tmp_path).baseline is None
+
     def test_slot_paths_are_stored_relative_and_survive_a_changed_cwd(
             self, tmp_path, monkeypatch):
         script = _write_script(tmp_path, "import json\njson.loads('{}')\n")

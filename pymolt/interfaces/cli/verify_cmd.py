@@ -89,6 +89,10 @@ def capture_cmd(
         False, "--collect", help="Finish a --mode attach capture"),
     force: bool = typer.Option(
         False, "--force", help="Replace an existing capture without asking"),
+    accept_failing: bool = typer.Option(
+        False, "--accept-failing",
+        help="Keep the capture even if CMD exits non-zero (failing tests), provided it "
+             "recorded calls; it is stamped RED. A run that recorded nothing is still refused"),
     privacy: str = typer.Option(
         "auto", "--privacy",
         help="auto (values for tests, shape otherwise) | values | shape (types, no data)",
@@ -229,6 +233,7 @@ def capture_cmd(
         project_dir, when_key, capture_mode, command=command, target=target, backend=backend,
         container=container, workdir=workdir, exclude=exclude, source=source,
         privacy=effective_privacy, sample_rate=sample_rate,
+        accept_failing=accept_failing,
         impact_targets=(
             [item.strip() for item in impact_targets.split(",") if item.strip()]
             if impact_targets else None
@@ -255,6 +260,13 @@ def capture_cmd(
         )
         raise typer.Exit(code=code)
     err.print(f"[green]captured[/green] {slot.events} events -> {slot.trace_path}")
+    if slot.red:
+        failed = slot.red.get("failed")
+        err.print(
+            f"[bold red]RED[/bold red] the command exited {slot.red.get('returncode')} "
+            f"({failed if failed is not None else 'some'} test(s) failed); kept because of "
+            "--accept-failing. The calls from failing tests are compared as usual."
+        )
     if slot.duration_seconds is not None:
         err.print(
             f"[dim]duration={slot.duration_seconds:.3f}s  "
