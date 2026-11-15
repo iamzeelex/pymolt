@@ -23,7 +23,7 @@ MIGRATION_STATE_SCHEMA_VERSION = 1
 
 
 class MigrationReceipt(BaseModel):
-    """A successful ``pymolt migrate --write`` run."""
+    """A successful ``pymolt apply`` run."""
 
     schema_version: int = MIGRATION_STATE_SCHEMA_VERSION
     run_id: str = Field(default_factory=lambda: uuid.uuid4().hex)

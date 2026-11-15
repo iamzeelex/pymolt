@@ -150,3 +150,81 @@ def test_rollback_refuses_to_discard_later_edits(tmp_path, monkeypatch):
     assert result.exit_code == 2
     assert "explicitly pass --force" in result.output
     assert source_path.read_text(encoding="utf-8").endswith("# post migration\n")
+
+
+# ── what `pymolt codemods` showed, now shown by plan ──────────────────────────
+
+def _configured_without_baseline(tmp_path):
+    (tmp_path / "requirements.txt").write_text("flask==2.0.3\n", encoding="utf-8")
+    (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.11", target_python="3.12",
+    ).save(tmp_path / ".pymolt" / "env_config.json")
+
+
+def test_plan_picks_up_the_manifest_assess_wrote(tmp_path, monkeypatch):
+    _configured_without_baseline(tmp_path)
+    seen = {}
+
+    def fake_resolve(project_dir, *, target_dependency_file=None, **kw):
+        seen["target_file"] = target_dependency_file
+        return [], "target dependency file requirements-target.txt"
+
+    monkeypatch.setattr(codemod_service, "resolve_codemod_migrations", fake_resolve)
+
+    result = runner.invoke(app, ["plan", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert seen["target_file"].name == "requirements-target.txt"
+
+
+def test_plan_shows_recipes_diff_and_writes_a_relative_patch(tmp_path, monkeypatch):
+    _configured_without_baseline(tmp_path)
+    path, source = _mock_plan_services(tmp_path, monkeypatch)
+    patch_path = tmp_path / "migration.patch"
+
+    result = runner.invoke(app, ["plan", str(tmp_path), "--patch", str(patch_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "flask.helpers.safe_join → werkzeug.utils.safe_join" in result.output
+    assert "+from werkzeug.utils import safe_join" in result.output
+    patch = patch_path.read_text(encoding="utf-8")
+    assert "--- a/app.py" in patch and "+++ b/app.py" in patch
+    assert str(tmp_path) not in patch
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_plan_names_what_needs_manual_review(tmp_path, monkeypatch):
+    from pymolt.codemods.rules import CodemodRule, RuleAdvisory
+
+    _configured_without_baseline(tmp_path)
+    rule = CodemodRule(
+        library="pandas", from_version="1.0.0", to_version="1.2.0",
+        match="$DF.lookup($ROWS, $COLS)", rewrite=["$RESULT = $DF.to_numpy()"],
+        confidence="heuristic",
+    )
+    advisory = RuleAdvisory(
+        line=5, column=0, site_kind="return", severity="not-applied",
+        reason="call is the return value of a function; not auto-rewritable",
+    )
+    preview = FilePreview(
+        path=str(tmp_path / "app.py"), old_source="return df.lookup(rows, cols)\n",
+        new_source="return df.lookup(rows, cols)\n", sites=0, rules=[rule],
+        advisories=[advisory],
+    )
+    monkeypatch.setattr(
+        codemod_service, "resolve_codemod_migrations",
+        lambda *a, **k: ([DependencyMigration("pandas", "1.0.0", "1.2.0")], "target"),
+    )
+    monkeypatch.setattr(
+        codemod_service, "preview_codemods", lambda *a, **k: ({"pandas": [rule]}, [preview]),
+    )
+
+    result = runner.invoke(app, ["plan", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "$DF.lookup($ROWS, $COLS)" in result.output and "heuristic" in result.output
+    assert "Manual review needed" in result.output
+    assert "not auto-rewritable" in result.output
+    assert "No call sites matched" in result.output

@@ -451,3 +451,89 @@ def preview_codemods(
     return by_pkg, preview_rules_repo(
         root, rules_flat, on_file=on_file, verified_only=auto_apply_only
     )
+
+
+# ── the migration plan ───────────────────────────────────────────────────────
+# `pymolt plan` (CLI and MCP) and `pymolt succession --plan` build the one plan
+# that `pymolt apply` writes. Every source change goes through it.
+
+_TARGET_MANIFESTS = ("requirements-target.txt", "environment-target.yml")
+
+
+class PlanInputError(ValueError):
+    """A plan cannot be built from what is on disk. ``hint`` says what to run."""
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
+def plan_inputs(project_dir: str | Path, target_file: str | Path | None = None):
+    """The saved setup and the target manifest a plan is bound to.
+
+    Returns ``(config, target_path)``; raises :class:`PlanInputError` when setup
+    or assess has not run.
+    """
+    root = Path(project_dir)
+    config = EnvConfig.load(root / ".pymolt" / "env_config.json")
+    if config is None:
+        raise PlanInputError(
+            "pymolt is not configured for this project",
+            "Run `pymolt setup .` and `pymolt assess .` first.",
+        )
+    if not target_file:
+        target_file = next(
+            (name for name in _TARGET_MANIFESTS if (root / name).is_file()), None
+        )
+    if not target_file:
+        raise PlanInputError(
+            "no pinned target manifest is available",
+            "Run `pymolt assess .` before creating a plan.",
+        )
+    target_path = Path(target_file)
+    if not target_path.is_absolute():
+        target_path = root / target_path
+    if not target_path.is_file():
+        raise PlanInputError(f"target manifest does not exist: {target_path}", "")
+    return config, target_path
+
+
+def build_migration_plan(
+    project_dir: str | Path,
+    *,
+    target_file: str | Path | None = None,
+    base_url: str,
+    progress: Callable[[str], None] | None = None,
+):
+    """Preview the verified codemods for the target manifest and freeze them as a plan.
+
+    Returns ``(plan, previews, source_desc, by_pkg)``. Nothing is saved or written:
+    callers save the plan, and only `pymolt apply` changes source files. Raises
+    :class:`PlanInputError`, or ``AxiomGraphError`` when the service is unreachable.
+    """
+    from pymolt.migration_plan import create_migration_plan
+
+    root = Path(project_dir)
+    config, target_path = plan_inputs(root, target_file)
+    migrations, source_desc = resolve_codemod_migrations(
+        root, target_dependency_file=target_path, config=config.model_dump(mode="json"),
+    )
+    scanned: set[str] = set()
+    impacts: dict[str, list[ApiImpact]] = {}
+    by_pkg: dict[str, list[CodemodPattern] | list[CodemodRule]] = {}
+    previews: list[FilePreview] = []
+    if migrations:
+        by_pkg, previews = preview_codemods(
+            root, migrations, base_url=base_url, progress=progress,
+            on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
+            auto_apply_only=True,
+        )
+    plan = create_migration_plan(
+        root, previews, migrations,
+        target_python=config.target_python or "unknown",
+        source_manifest=config.selected_manifest or "unknown",
+        target_manifest_path=target_path,
+        files_scanned=len(scanned),
+        impacts=impacts,
+    )
+    return plan, previews, source_desc, by_pkg
