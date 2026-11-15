@@ -120,10 +120,20 @@ def test_records_capture_the_call_site_in_our_code(target):
     assert isinstance(where["line"], int)
 
 
-def test_select_backend_defaults_to_setprofile():
+def test_select_backend_auto_is_monitoring_on_312_and_setprofile_below():
     be = select_backend("x", MemorySink())
-    assert be.name == "setprofile"
-    assert select_backend("x", MemorySink(), prefer="monitoring").name == "monitoring"
+    expected = "monitoring" if sys.version_info >= (3, 12) else "setprofile"
+    assert be.name == expected
+    assert select_backend("x", MemorySink(), prefer="setprofile").name == "setprofile"
+
+
+def test_select_backend_monitoring_never_raises_below_312(monkeypatch):
+    from pymolt.verify import _backend
+
+    monkeypatch.setattr(_backend, "HAS_MONITORING", False)
+    be = select_backend("x", MemorySink(), prefer="monitoring")
+    assert be.name == "setprofile" and be.note == "monitoring-unavailable"
+    assert select_backend("x", MemorySink()).note is None
 
 
 def test_build_matcher_dispatch():

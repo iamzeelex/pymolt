@@ -193,6 +193,7 @@ def _count_normalize(monkeypatch):
 
 def test_unsampled_calls_skip_input_normalization(target, tmp_path, monkeypatch):
     monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0")
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_FIRST", "0")   # the rate alone, no novelty-first
     calls = _count_normalize(monkeypatch)
     sink = JsonlSink(str(tmp_path / "t.jsonl"))
     _trace(target, lambda m: [m.ok(i) for i in range(20)], sink=sink)
@@ -213,6 +214,7 @@ def test_sampled_calls_are_counted_once(target, tmp_path):
 
 def test_wrap_backend_samples_before_normalizing_but_keeps_raises(target, tmp_path, monkeypatch):
     monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0")
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_FIRST", "0")
     out = tmp_path / "w.jsonl"
     sink = JsonlSink(str(out))
     be = WrapBackend([PREFIX + ".ok", PREFIX + ".boom"], sink, include_internal=True)
@@ -227,6 +229,26 @@ def test_wrap_backend_samples_before_normalizing_but_keeps_raises(target, tmp_pa
     events = [json.loads(line) for line in out.read_text().splitlines()]
     assert [(e["t"], e["raised"]) for e in events] == [("raise", "ValueError")]
     assert sink.metrics["events_seen"] == 11 and sink.metrics["sampling_dropped"] == 10
+
+
+def test_novelty_first_admits_the_first_calls_of_each_symbol_and_site(target, tmp_path,
+                                                                       monkeypatch):
+    """The backend's admission key is (symbol, call site): each new one is recorded first."""
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0")
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_FIRST", "2")
+    out = tmp_path / "n.jsonl"
+    sink = JsonlSink(str(out))
+
+    def body(m):
+        for i in range(10):
+            m.ok(i)                  # one site: the first two are kept
+        m.ok(100)                    # a new site: kept
+
+    _trace(target, body, sink=sink)
+    sink.close()
+    kept = [json.loads(line)["in"]["bound"]["x"] for line in out.read_text().splitlines()]
+    assert kept == [0, 1, 100]
+    assert sink.metrics["events_seen"] == 11
 
 
 def test_memory_sink_admits_everything():
