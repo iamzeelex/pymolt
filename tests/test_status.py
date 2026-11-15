@@ -228,6 +228,20 @@ class TestWorseThanNotDone:
         assert "capture --when baseline" in status.next_command
         assert "no longer describes" in status.next_reason
 
+    def test_a_capture_taken_before_setup_is_stale(self, tmp_path):
+        """It records no environment, so `apply` rejects it — status must not call it done."""
+        _manifest(tmp_path)
+        _capture(tmp_path, "baseline")          # no config yet: no fingerprint
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        assert baseline.state == "stale"
+        assert "before setup" in baseline.detail
+        assert "capture --when baseline" in status.next_command
+
 
 class TestManualMigration:
     """No `pymolt apply` (a migration done by hand or by an agent): bumping pins in the

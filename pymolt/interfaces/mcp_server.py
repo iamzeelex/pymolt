@@ -734,6 +734,11 @@ def contract_capture(
                 "command is required.",
                 hint="Provide a command list, e.g. ['pytest', 'tests/'].",
             )
+        if service.environment_fingerprint(path) is None:
+            return _fail(
+                "pymolt is not configured for this project.",
+                hint="Run setup first. A capture records the environment it was taken in.",
+            )
 
         existing = getattr(service.load_contract_state(str(path)), when_key)
         if existing is not None and not force:

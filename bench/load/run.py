@@ -507,6 +507,13 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
     svc_dir.mkdir()
     shutil.copy2(SERVICE_SRC / "app.py", svc_dir / "app.py")
     shutil.copy2(HERE / "requirements.in", svc_dir / "requirements.txt")
+    # `pymolt contract capture` refuses to run before setup: the capture records the
+    # environment it was taken in.
+    (svc_dir / ".pymolt").mkdir()
+    (svc_dir / ".pymolt" / "env_config.json").write_text(json.dumps({
+        "selected_manifest": "requirements.txt", "selected_tool": "uv",
+        "base_python": PYTHON_VERSION, "target_python": PYTHON_VERSION,
+    }))
     tmp_dir = run_dir / "tmp"
     tmp_dir.mkdir()
 
