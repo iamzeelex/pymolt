@@ -496,6 +496,18 @@ def _resolve_baseline_graph(
         return graph, report, warning
 
 
+def base_python_assumed(config: dict, base_python: str | None) -> bool:
+    """Whether the base Python number is setup's guess rather than a stated fact.
+
+    An explicit ``base_python`` from the caller is a fact, unless it is just setup's
+    recorded guess handed back (an adapter passing the config's own value): then it is
+    still assumed. Without one, trust what setup recorded about where the number came from.
+    """
+    if config.get("base_python_source") != "assumed":
+        return False
+    return base_python is None or base_python == config.get("base_python")
+
+
 def run_assess(
     project_dir: str | Path,
     *,
@@ -599,11 +611,7 @@ def run_assess(
             baseline_resolved=baseline_graph is not None,
             source_fixation=chosen.fixation,
             tests_passed=baseline_tests_passed(project_dir),
-            # An explicit base_python from the caller is a stated fact; otherwise
-            # trust what setup recorded about where the number came from.
-            base_python_assumed=(
-                base_python is None and config.get("base_python_source") == "assumed"
-            ),
+            base_python_assumed=base_python_assumed(config, base_python),
         ).value,
         target_manifest_path=target_manifest_path,
         warnings=report.warnings,
