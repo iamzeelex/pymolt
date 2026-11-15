@@ -32,6 +32,11 @@ The same migration question is put to `claude -p --output-format json` twice:
 | `bare` | `Read,Grep,Glob,Bash` | what an agent costs without PyMolt |
 | `mcp_only` | the same **plus** `mcp__pymolt__*` | will an agent reach for PyMolt on its own? |
 | `plugin` | `mcp_only` **plus** a system prompt telling it to prefer those tools | what installing the plugin actually delivers |
+| `cli_skill` | `Read,Grep,Glob,Bash` + `pymolt` on PATH + the skill in `bench/plugins/pymolt-cli/` (`--plugin-dir`), **no MCP server** | does CLI + Agent Skill match the MCP plugin? |
+
+The `cli_skill` skill is `plugin/skills/migration-contract/SKILL.md` rendered for CLI
+commands with `--json`; only its description is always in context, the body loads
+on demand.
 
 The `plugin` arm is not a thumb on the scale: installing the PyMolt plugin ships
 `plugin/commands/migrate.md` and `plugin/agents/pymolt-migrator.md`, both of
@@ -65,6 +70,20 @@ Controls that make the comparison honest:
 - **Arms interleave** (`bare, pymolt, bare, pymolt…`) so API-side drift hits
   both equally.
 - **`--strict-mcp-config`** so no other MCP server on the machine leaks in.
+- **`--setting-sources project`** (from round 3) so user settings, user skills,
+  user-installed plugins and their hooks stay out of every arm. Rounds 1–2 did not
+  have this: an installed plugin's `SessionStart` hook injected its routing policy
+  into every arm. `--bare` is not a substitute — it needs `ANTHROPIC_API_KEY`, and
+  it still loads installed plugins' skills. `--safe-mode` drops `--plugin-dir`
+  skills too.
+- **PATH control** (round 3): `pymolt` resolves only in `cli_skill`. The child env
+  drops the host session's `CLAUDE*` variables, PATH directories holding a `pymolt`
+  are shadowed, and a per-arm `ZDOTDIR` keeps `~/.zshrc` from re-adding them through
+  Claude Code's shell snapshot. `python bench/bench_mcp.py --probe-isolation` checks
+  all of it per arm (the init-event checks are free; the agent-side `command -v
+  pymolt` check needs auth).
+- **`--budget-usd`** stops before a run that could push summed `total_cost_usd`
+  past the cap; the harness also stops on the first authentication failure.
 - **T0 is a no-op prompt** (`Reply with exactly: OK`) to price the fixed
   overhead of merely attaching the server — that cost is paid on every turn of
   every session and belongs on PyMolt's side of the ledger.
@@ -79,6 +98,7 @@ Fixture: `flasgger` (68 `.py`, ~8k LOC, 3 project roots).
 | `T1_recon` | project roots, manifests, Python-version evidence | 3 roots; `.python-version` = 3.6.1, `Dockerfile` `FROM python:3.6` — **verified directly against the files**, independently of PyMolt |
 | `T2_upgrade` | which deps must move for Python 3.12, and to what | real uv resolve: 77 packages, 31 version changes |
 | `T3_contact` | dependency contact surface | 67 files scanned, 227 contact points, 55 distinct symbols; top: flask 165, simplejson 9, jsonschema 7, werkzeug 6, flask_restful 5 |
+| `T4_contract_risk` | pre-migration risk on the pandas toy app (`bench/e2e_pandas/run.py`, `change` variant; interpreters under `/tmp/pymolt_bench_ws/_envs/`): record dependency calls under the 3.11 suite, list at-risk call sites | `toyapp/core.py:13` `Series.append` (removed in pandas 2), `toyapp/core.py:24` `DataFrame.mean` (numeric_only default change, swallowed `TypeError`); site-level F1 |
 
 **Token counts alone are not a result.** A cheap wrong answer beats an expensive
 right one on every metric here, so `bench/score.py` grades every answer against
