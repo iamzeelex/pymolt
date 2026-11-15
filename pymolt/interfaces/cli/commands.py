@@ -198,6 +198,12 @@ _STATE_MARK = {
     "blocked": ("·", "yellow"),
 }
 
+_CHECK_MARK = {
+    "ok": ("✓", "green"),
+    "warning": ("!", "yellow"),
+    "error": ("✗", "red"),
+}
+
 
 @app.command(rich_help_panel="Migration workflow (preparation)")
 def status(
@@ -206,16 +212,16 @@ def status(
 ):
     """Where this migration stands, and the one command to run next.
 
-    Reads only what is already on disk (config, captures, target manifest) —
-    runs nothing, writes nothing. The funnel is projected, never enforced: every
-    command stays runnable in any order.
+    Reads the config, captures and target manifest, and checks that the
+    configured environments exist. Writes nothing. Every command stays runnable
+    in any order.
     """
     import json as json_lib
 
     from pymolt.status import build_status
 
     project_path = require_project_dir(project_dir, json_output=json_output)
-    report = build_status(project_path)
+    report = build_status(project_path, check_environments=True)
 
     if json_output:
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
@@ -228,6 +234,14 @@ def status(
         detail = phase.blocker or phase.detail
         console.print(f"{line} [{'dim' if phase.state == 'todo' else colour}]{detail}[/]")
 
+    for check in report.checks:
+        glyph, colour = _CHECK_MARK.get(check.state, ("!", "yellow"))
+        detail = check.detail + (f" — {check.hint}" if check.hint else "")
+        console.print(
+            f"  [{colour}]{glyph}[/{colour}] [bold]{check.name:<15}[/bold] "
+            f"[{'dim' if check.state == 'ok' else colour}]{detail}[/]"
+        )
+
     for note in report.notes:
         console.print(f"  [dim]note: {note}[/dim]")
 
@@ -239,49 +253,6 @@ def status(
         ))
     else:
         console.print(f"[yellow]{report.next_reason}[/yellow]")
-
-
-@app.command(rich_help_panel="Migration workflow (preparation)")
-def doctor(
-    project_dir: str = typer.Argument(".", help="Project directory to inspect"),
-    json_output: bool = typer.Option(False, "--json", help="Emit preflight as JSON"),
-):
-    """Read-only preflight: environments, workload, evidence, and migration receipt."""
-    import json as json_lib
-
-    from pymolt.doctor import run_doctor
-
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    report = run_doctor(project_path)
-    if json_output:
-        typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
-        if not report.ready:
-            raise typer.Exit(code=EXIT_INCONCLUSIVE)
-        return
-
-    table = Table(show_header=True)
-    table.add_column("Check", style="bold")
-    table.add_column("State")
-    table.add_column("Detail")
-    marks = {
-        "ok": "[green]✓ ok[/green]",
-        "warning": "[yellow]! warning[/yellow]",
-        "error": "[red]✗ error[/red]",
-    }
-    for check in report.checks:
-        detail = check.detail
-        if check.hint:
-            detail += f"\n[dim]{check.hint}[/dim]"
-        table.add_row(check.name, marks[check.state], detail)
-    console.print(table)
-    if report.workload_command:
-        console.print(
-            "\n[dim]detected workload →[/dim] "
-            f"[white]{' '.join(report.workload_command)}[/white]"
-        )
-    next_step(project_path)
-    if not report.ready:
-        raise typer.Exit(code=EXIT_INCONCLUSIVE)
 
 
 @app.command("verify", rich_help_panel="Behavioural proof")
@@ -2865,3 +2836,40 @@ def forks(
 
     for note in report.notes:
         console.print(f"[dim]note: {note}[/dim]")
+
+
+
+# ── removed commands ──────────────────────────────────────────────────────────
+# Kept for one release so an old script or habit gets the replacement instead
+# of "No such command". Hidden from --help; any arguments are accepted.
+
+
+def _removed(name: str, replacement: str | dict[str, str]) -> None:
+    """Register ``pymolt NAME`` as removed: print what replaces it and exit 2.
+
+    ``replacement`` is the new command, or, for a removed group, a map from each
+    old subcommand to its replacement.
+    """
+
+    def stub(ctx: typer.Context) -> None:
+        sub = ctx.args[0] if ctx.args and isinstance(replacement, dict) else ""
+        if isinstance(replacement, dict):
+            use = replacement.get(sub) or "; ".join(
+                f"{old} → {new}" for old, new in replacement.items()
+            )
+            if sub not in replacement:
+                sub = ""
+        else:
+            use = replacement
+        old = f"pymolt {name}{' ' + sub if sub else ''}"
+        fail(f"`{old}` was removed", hint=f"Use {use}.")
+
+    app.command(
+        name,
+        hidden=True,
+        add_help_option=False,
+        context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    )(stub)
+
+
+_removed("doctor", "`pymolt status`")

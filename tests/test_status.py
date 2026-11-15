@@ -17,7 +17,7 @@ from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app
 from pymolt.migration_plan import create_migration_plan
 from pymolt.migration_state import MigrationReceipt
-from pymolt.status import build_status
+from pymolt.status import build_status, detect_workload_command
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, VerificationVerdict
 from pymolt.verify.report import ContractReport
@@ -353,3 +353,51 @@ class TestStatusCommand:
         result = runner.invoke(app, ["status", str(tmp_path / "nope"), "--json"])
         assert result.exit_code == EXIT_USAGE
         assert json.loads(result.stdout)["ok"] is False
+
+
+class TestEnvironmentChecks:
+    """What `doctor` used to report: whether the configured environments exist."""
+
+    def test_detects_pytest_workload_without_running_it(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+
+        assert detect_workload_command(tmp_path) == ["python", "-m", "pytest"]
+
+    def test_checks_only_when_asked(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+
+        assert build_status(tmp_path).checks == []
+        checks = {c.name: c for c in build_status(tmp_path, check_environments=True).checks}
+
+        assert checks["baseline environment"].state == "warning"
+        assert checks["target environment"].state == "warning"
+        assert "setup" in checks["target environment"].hint
+
+    def test_a_missing_target_environment_is_an_error(self, tmp_path):
+        _manifest(tmp_path)
+        EnvConfig(
+            selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+            base_python="3.11", target_python="3.12",
+            target_env_path=str(tmp_path / ".venv-target"),
+        ).save(tmp_path / ".pymolt" / "env_config.json")
+
+        checks = {c.name: c for c in build_status(tmp_path, check_environments=True).checks}
+
+        assert checks["target environment"].state == "error"
+
+    def test_status_command_prints_the_checks(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+
+        result = runner.invoke(app, ["status", str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert "target environment" in result.stdout
+
+    def test_doctor_points_at_status(self, tmp_path):
+        result = runner.invoke(app, ["doctor", str(tmp_path), "--json"])
+
+        assert result.exit_code == 2
+        assert "pymolt status" in result.output
+
