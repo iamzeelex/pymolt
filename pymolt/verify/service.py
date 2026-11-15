@@ -1242,6 +1242,17 @@ def parse_failed_count(command_log: str | Path | None) -> tuple[int | None, str]
     return None, ""
 
 
+def static_contact_count(project_dir: str | Path) -> int | None:
+    """How many static contacts the project has (None when they cannot be counted)."""
+    try:
+        from pymolt.verify.contact_map import build_contact_map
+
+        return len(build_contact_map(project_dir).contacts)
+    except Exception as exc:  # noqa: BLE001 - a hint detail, never a gate
+        logger.info("could not count static contacts: %s", exc)
+        return None
+
+
 def _red_stamp(result: TraceCaptureResult) -> dict | None:
     """``{"returncode", "failed", "summary"}`` for a non-zero run, else None.
 

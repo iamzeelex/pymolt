@@ -115,6 +115,19 @@ def test_accept_failing_keeps_a_red_baseline(tmp_path):
     assert state.baseline.red["failed"] == 1 and state.baseline.red["returncode"] == 1
 
 
+def test_accept_failing_still_refuses_a_run_that_recorded_nothing(tmp_path):
+    app_py = tmp_path / "dead.py"
+    app_py.write_text("raise SystemExit(4)\n")
+    result = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests", "--accept-failing", "--agent",
+        "--project-dir", str(tmp_path), "--target", "json",
+        "--", sys.executable, str(app_py),
+    ])
+    assert result.exit_code == EXIT_FINDING
+    view = json.loads(result.output.strip().splitlines()[-1])
+    assert view["ok"] is False and view["data"]["accepted"] is False
+
+
 def test_zero_event_capture_is_inconclusive_and_not_active(tmp_path):
     app_py = _write_app(tmp_path, third_party=False)
     result = runner.invoke(cli, [

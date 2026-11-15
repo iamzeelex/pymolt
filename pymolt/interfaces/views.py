@@ -549,12 +549,35 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 # ── capture ──────────────────────────────────────────────────────────────────
 
 
-def capture_view(slot, *, when: str, state) -> dict:
+def capture_refusal_hint(slot, static_contacts: int | None) -> str:
+    """The hint for a capture that was not accepted, by what went wrong."""
+    from pymolt.verify.service import parse_failed_count
+
+    rc = slot.returncode
+    log = f" (see {slot.command_log})" if slot.command_log else ""
+    if rc not in (None, 0) and slot.events > 0:
+        failed, _ = parse_failed_count(slot.command_log)
+        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}). "
+                "Fix or deselect them, or keep a red baseline with --accept-failing.")
+    if rc not in (None, 0):
+        return (f"The command failed (exit {rc}) and recorded no dependency call"
+                f"{log}. Fix the command and capture again; the slot is unchanged.")
+    if slot.events == 0:
+        contacts = f" ({static_contacts} static contacts)" if static_contacts is not None else ""
+        return (f"The command ran (exit {rc if rc is not None else 0}) but called no recorded "
+                f"dependency{contacts}. Run a command that exercises them, or pass --target.")
+    return (f"The recording is not usable: {slot.validity_reason or 'invalid trace'}{log}. "
+            "Fix the command and capture again; the slot is unchanged.")
+
+
+def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
+                 project_dir: str | Path | None = None) -> dict:
     """A capture's ``ContractSlot`` (+ the contract state after it) -> view.
 
     ``when`` is the CLI word: ``baseline`` or ``post-migration``. A capture that is
-    not accepted as evidence is still an answer (``ok`` true, ``accepted`` false):
-    the command ran, and what it recorded cannot stand for that side.
+    not accepted as evidence is ``ok: false`` with ``accepted: false``: the command
+    ran, but what it recorded cannot stand for that side, so no one should read "ok"
+    as "evidence recorded". The hint follows the cause.
     """
     from pymolt.verify.models import CaptureValidity
 
@@ -616,11 +639,17 @@ def capture_view(slot, *, when: str, state) -> dict:
     else:
         lines = [f"NOT accepted as '{when}' evidence: {slot.validity_reason or validity}.",
                  f"Diagnostic artifact: {slot.trace_path}"]
-        hint = "Fix the command (see command_log) and capture again; the slot is unchanged."
+        if static_contacts is None and project_dir is not None and slot.events == 0:
+            from pymolt.verify.service import static_contact_count
+
+            static_contacts = static_contact_count(project_dir)
+        hint = capture_refusal_hint(slot, static_contacts)
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
-    return ok("\n".join(lines), lists.finish(data, warnings),
+    view = ok("\n".join(lines), lists.finish(data, warnings),
               full_report_path=slot.trace_path, hint=hint)
+    view["ok"] = accepted
+    return view
 
 
 def capture_attach_view(instructions, *, when: str, collect_command: str) -> dict:

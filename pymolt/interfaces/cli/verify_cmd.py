@@ -55,7 +55,8 @@ def _emit_capture(slot, when: str, project_dir: str, *, agent: bool, invalid_cod
 
     if agent:
         typer.echo(views.dumps(views.capture_view(
-            slot, when=when, state=service.load_contract_state(project_dir))))
+            slot, when=when, state=service.load_contract_state(project_dir),
+            project_dir=project_dir)))
     else:
         typer.echo(json.dumps(slot.model_dump(mode="json"), indent=2))
     if slot.validity is not CaptureValidity.VALID:
@@ -248,10 +249,14 @@ def capture_cmd(
             else EXIT_INCONCLUSIVE))
         return
     if slot.validity is not CaptureValidity.VALID:
+        from pymolt.interfaces import views
+
         err.print(
             f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
             f"{slot.validity_reason or slot.validity.value}\n"
-            f"diagnostic artifact: {slot.trace_path}"
+            f"diagnostic artifact: {slot.trace_path}\n"
+            + escape(views.capture_refusal_hint(
+                slot, service.static_contact_count(project_dir) if slot.events == 0 else None))
         )
         code = (
             EXIT_FINDING
