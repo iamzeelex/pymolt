@@ -765,3 +765,38 @@ class TestSampledVerdict:
     def test_without_complete_tallies_sampling_still_blocks(self, tmp_path):
         report = self._verdict(tmp_path, complete=False)
         assert any("sampled captures" in r for r in report.verdict_reasons)
+
+
+class TestMissingSideReason:
+    def _reasons(self, tmp_path, trace, used):
+        from pymolt.verify.models import ContractSlot
+        from pymolt.verify.report import ContractReport
+
+        report = ContractReport(root=".")
+        slots = [(name, ContractSlot(
+            trace_path="/x.jsonl", captured_at="2026-11-14T00:00:00+00:00",
+            mode=CaptureMode.TEST_SUITE, validity=CaptureValidity.VALID, dropped_events=0,
+            **({"red": {"returncode": 1, "failed": 3, "summary": "3 failed"}}
+               if name == "baseline" else {})))
+            for name in used]
+        service._stamp_verdict(report, trace, None, slots)
+        return report
+
+    def test_only_the_baseline_recorded(self, tmp_path):
+        trace = tmp_path / "t.jsonl"
+        trace.write_text('{"t": "return", "q": "m.f", "result": 1}\n')
+        report = self._reasons(tmp_path, str(trace), ["baseline"])
+        assert ("no post-migration capture yet (only the baseline is recorded)"
+                in report.verdict_reasons)
+        assert not any("no baseline" in r for r in report.verdict_reasons)
+        assert any(n.startswith("RED:") and "3 failing" in n for n in report.notes)
+
+    def test_only_the_post_migration_capture(self, tmp_path):
+        trace = tmp_path / "t.jsonl"
+        trace.write_text('{"t": "return", "q": "m.f", "result": 1}\n')
+        report = self._reasons(tmp_path, str(trace), ["post-migration"])
+        assert "no baseline capture" in report.verdict_reasons
+
+    def test_no_captures(self, tmp_path):
+        report = self._reasons(tmp_path, None, [])
+        assert "no captures" in report.verdict_reasons

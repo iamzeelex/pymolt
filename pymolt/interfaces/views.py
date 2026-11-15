@@ -793,8 +793,14 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
                      "trusting this verdict.")
-    lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
-                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.")
+    narrowed = bool(getattr(rep, "impact_filter_active", False)) and (
+        getattr(rep, "all_static_targets", rep.static_targets) > rep.static_targets)
+    lines.append(f"Static {rep.static_targets}"
+                 + (f" of {rep.all_static_targets} (narrowed to the plan's packages)"
+                    if narrowed else "")
+                 + f", confirmed {rep.confirmed}, BLIND {rep.blind}, "
+                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%"
+                 + (" (over the narrowed set)." if narrowed else "."))
     lines.extend(f"{note}" for note in rep.notes if note.startswith("RED:"))
     if verdict == "pass" and rep.blind:
         lines.append(f"PASS covers the exercised calls only: {rep.blind} BLIND symbol(s) "

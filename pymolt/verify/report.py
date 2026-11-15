@@ -693,6 +693,13 @@ def build_contract_report(
         report.static_targets = report.impacted_static_targets
         report.observed_targets = report.impacted_observed_targets
         report.by_dep = report.impacted_by_dep
+        if report.impacted_static_targets < report.all_static_targets:
+            pkgs = sorted({sym.dep for sym in report.impacted_symbols if sym.dep})
+            report.notes.append(
+                f"static contacts narrowed to the plan's packages ({', '.join(pkgs) or 'none'}): "
+                f"{report.impacted_static_targets} of {report.all_static_targets} kept; "
+                "trust is computed over the narrowed set"
+            )
     else:
         report.confirmed = report.all_confirmed
         report.blind = report.all_blind
