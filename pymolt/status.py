@@ -114,6 +114,8 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
     if config.target_env_path:
         # Resolved the way `capture` resolves it, so "ok" here means capture finds it.
         target = Path(config.target_env_path)
+        if not target.is_absolute():
+            target = Path(project_dir) / target
         candidates = (target / "bin" / "python", target / "Scripts" / "python.exe")
         interpreter = next((path for path in candidates if path.is_file()), None)
         checks.append(EnvironmentCheck(

@@ -5,6 +5,8 @@ instead of the configured container, corrupting the baseline<->post-migration
 diff. All docker interaction is mocked; no real container is ever touched."""
 from __future__ import annotations
 
+import os
+
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, ContractSlot
@@ -52,9 +54,23 @@ class TestResolveCaptureEnv:
         resolved = service.resolve_capture_env(tmp_path, "post_migration")
         assert resolved["container"] is None
         assert resolved["command_prefix"] is not None
-        assert resolved["command_prefix"][0] == str(python_path.resolve())
+        assert resolved["command_prefix"][0] == os.path.abspath(python_path)
         assert resolved["command_prefix"][1] == "-m"
         assert "target env" in resolved["note"]
+
+    def test_post_migration_keeps_the_venv_link_not_its_target(self, tmp_path):
+        # A venv's bin/python links to the base interpreter; running the link target
+        # would lose the venv (and its pytest): the link path itself must be used.
+        base = tmp_path / "base" / "python3.12"
+        base.parent.mkdir()
+        base.write_text("")
+        link = tmp_path / ".venv-target" / "bin" / "python"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(base)
+        _write_config(tmp_path, target_env_path=".venv-target")
+        resolved = service.resolve_capture_env(tmp_path, "post_migration")
+        assert resolved["command_prefix"][0] == os.path.abspath(link)
+        assert "base" not in resolved["command_prefix"][0]
 
     def test_post_migration_no_venv_runs_locally(self, tmp_path):
         _write_config(tmp_path, target_env_path=str(tmp_path / "nonexistent"))

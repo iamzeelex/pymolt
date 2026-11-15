@@ -250,6 +250,31 @@ class ContractState(BaseModel):
     # either active evidence slot above.
     diagnostic_captures: list[ContractSlot] = Field(default_factory=list)
 
+    def _anchored(self, root: Path) -> dict:
+        """The state as JSON with every slot path stored relative to the project root
+        (``root``), so the file stays valid whatever directory pymolt runs from."""
+        payload = self.model_dump(mode="json")
+        base = Path(root).resolve()
+
+        def relative(value):
+            if not value:
+                return value
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                return value
+            try:
+                return candidate.resolve().relative_to(base).as_posix()
+            except (ValueError, OSError):
+                return value
+
+        slots = [payload.get("baseline"), payload.get("post_migration"),
+                 *(payload.get("diagnostic_captures") or [])]
+        for slot in slots:
+            if isinstance(slot, dict):
+                for key in ("trace_path", "metadata_path", "command_log"):
+                    slot[key] = relative(slot.get(key))
+        return payload
+
     @classmethod
     def load(cls, path: Path) -> "ContractState | None":
         """Read and validate the state file.
@@ -279,7 +304,7 @@ class ContractState(BaseModel):
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.model_dump(mode="json"), stream, indent=2)
+                json.dump(self._anchored(path.parent.parent), stream, indent=2)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())
