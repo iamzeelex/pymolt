@@ -139,7 +139,7 @@ def pymolt(root: Path, *args: str, log: str) -> int:
 
 
 def capture(root: Path, when: str, spec: dict) -> int:
-    return pymolt(root, "contract", "capture", "--when", when, "--mode", "tests",
+    return pymolt(root, "capture", when, "--mode", "tests",
                   "--project-dir", ".", "--force", "--",
                   str(env_python(spec)), "-m", "pytest", "-q", "-p", "no:cacheprovider",
                   log=f"capture_{when}.log")
@@ -159,12 +159,12 @@ def run_scenario(name: str, base: Path) -> dict:
     if upgrade:
         (root / "requirements.txt").write_text("pandas==2.2.3\nrequests\n")
     rc_post = capture(root, "post-migration", NEW)
-    report = subprocess.run([str(PYMOLT), "contract", "report", ".", "--json"], cwd=root,
+    report = subprocess.run([str(PYMOLT), "verify", ".", "--json"], cwd=root,
                             capture_output=True, text=True)
     (root / "report.json").write_text(report.stdout)
     try:
-        rep = json.loads(report.stdout)
-    except ValueError:
+        rep = json.loads(report.stdout).get("contract") or {}
+    except (ValueError, AttributeError):
         rep = {}
     facts = rep.get("fact_diff") or {}
     counts = {k: v for k, v in (facts.get("counts") or {}).items() if v}
@@ -172,15 +172,28 @@ def run_scenario(name: str, base: Path) -> dict:
     verdict = rep.get("verdict")
     ok = rc_base == 0 and rc_post == 0 and verdict == expected
     detail = ""
+    calibration = rep.get("calibration") or {}
     if change:
         mean = [e for e in changed if e.get("symbol", "").endswith("DataFrame.mean")]
         ok = ok and len(changed) == 1 and bool(mean)
         if mean:
             new = mean[0].get("new") or [{}]
             detail = f"mean -> {new[0].get('kind')} {new[0].get('value')}"
+        # The baseline's FutureWarning predicted the break: DataFrame.mean at core.py:24 is a
+        # high-tier prediction, and verify scores it a hit.
+        predicted = [r for r in calibration.get("risks", [])
+                     if r.get("symbol", "").endswith("DataFrame.mean")
+                     and (r.get("site") or {}).get("line") == 24]
+        ok = ok and bool(predicted) and predicted[0].get("tier") == "high" \
+            and predicted[0].get("result") == "hit"
+        if predicted:
+            detail += f"; predicted {predicted[0].get('tier')} -> {predicted[0].get('result')}"
     return {"scenario": name, "expected": expected, "verdict": verdict, "ok": ok,
             "facts": counts, "trust": rep.get("trust"), "reasons": rep.get("verdict_reasons"),
-            "detail": detail, "captures_rc": [rc_base, rc_post]}
+            "detail": detail, "captures_rc": [rc_base, rc_post],
+            "calibration": {k: calibration.get(k) for k in
+                            ("source", "predicted", "hit", "miss",
+                             "not_exercised")}}
 
 
 def run(names: list[str]) -> int:

@@ -304,6 +304,51 @@ def _render_fact_changes(fact_diff: dict | None) -> None:
     console.print(t)
 
 
+_CALIBRATION_LABEL = {
+    "hit": "[bold red]hit[/bold red]",
+    "prevented": "[green]prevented by the plan[/green]",
+    "miss": "[green]miss[/green]",
+    "not_exercised": "[dim]not exercised[/dim]",
+}
+
+
+def _render_calibration(cal) -> None:
+    """Predicted vs observed: each predicted risk against the fact diff, then the failing
+    changes no prediction covered."""
+    if cal is None:
+        return
+    source = ("the plan's predictions" if cal.source == "plan"
+              else "predictions from the baseline's runtime warnings")
+    if cal.risks:
+        prevented = f"{cal.prevented} prevented by the plan, " if cal.prevented else ""
+        t = Table(title=f"Calibration — {source}: {cal.hit} hit, {prevented}{cal.miss} miss, "
+                        f"{cal.not_exercised} not exercised", header_style="bold")
+        t.add_column("Prediction", no_wrap=True)
+        t.add_column("Result", no_wrap=True)
+        t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
+        t.add_column("Call site (your code)", overflow="fold", ratio=2)
+        t.add_column("Observed", overflow="fold", ratio=2)
+        for risk in cal.risks:
+            observed = ", ".join(f"{o.category} {o.symbol.rsplit('.', 1)[-1]}"
+                                 for o in risk.observed) or (risk.note or "—")
+            if risk.fixed_by_plan:
+                observed += " [dim](fixed by the plan)[/dim]"
+            t.add_row(risk.tier.value, _CALIBRATION_LABEL.get(risk.result.value,
+                                                              risk.result.value),
+                      escape(risk.symbol), escape(risk.site.label()), observed)
+        console.print(t)
+    else:
+        console.print(f"[dim]Calibration: {source} named no risk.[/dim]")
+    if cal.unpredicted:
+        console.print(f"[bold yellow]{len(cal.unpredicted)} observed change(s) no prediction "
+                      "covered:[/bold yellow]")
+        for item in cal.unpredicted[:20]:
+            console.print(f"  {item.category} {escape(item.symbol)} at "
+                          f"{escape(item.site.label())}")
+    for note in cal.notes:
+        console.print(f"[dim]  note: {escape(note)}[/dim]")
+
+
 
 def _render_contract_report(rep) -> None:
     trust_pct = round(rep.trust * 100)
@@ -370,6 +415,7 @@ def _render_contract_report(rep) -> None:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
     _render_fact_changes(rep.fact_diff)
+    _render_calibration(getattr(rep, "calibration", None))
 
     visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols
     probed = [s for s in visible_symbols if s.probed]

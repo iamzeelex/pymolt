@@ -1,0 +1,790 @@
+"""Predicted risks: what the migration will probably break, per call site, before it runs.
+
+HOST side (pydantic). Joins the **baseline facts** (symbol, call site, the input with its
+``defaulted`` parameters, outcomes, runtime warnings) with the **delta facts** the local delta
+engine computed for the plan's migrations (``pymolt.delta/1``: REMOVED / MOVED / SIGNATURE /
+DEFAULT / DEPRECATED per symbol and parameter) and rates every call site:
+
+=========  ==============================================================================
+certain    the site's symbol is REMOVED (MOVED is its own, milder kind)
+high       a parameter the site left at its default has a DEFAULT change between concrete
+           values, or one resolved at call time (None / a sentinel) that the site's own
+           baseline warning names; or the site emitted a deprecation-family warning
+medium     a SIGNATURE change touching a parameter the site passes (or a new required one),
+           or a DEFAULT change to or from None / a sentinel that no warning at the site names
+           (a call-time default: the behaviour may well not change)
+low        DEPRECATED in the old version without a recorded warning at the site, MOVED, a
+           class-level SIGNATURE change, or any change on a symbol reached only statically
+           (BLIND: the baseline never ran it)
+=========  ==============================================================================
+
+One risk per (site, symbol) at its strongest tier; ``fact`` is the delta fact that decided
+it (None when the warning alone did), ``facts`` every delta fact that matched, ``evidence``
+the reasons in words. ``fixed_by_plan`` says a planned codemod rewrites the site (the line
+changes and the symbol's name leaves it).
+
+``calibrate`` scores the predictions against the post-migration fact diff, using the
+entries at the risk's site for the risk's own symbol (a line can hold several calls; a
+REWRITTEN entry counts whatever its symbol, since position pairing ignores names): a risk is
+a **hit** when such an entry CHANGED, DISAPPEARED, or was REWRITTEN with a different
+outcome; **prevented** when the plan fixed the site and the rewrite kept the behaviour (the
+prediction is not disproved: the plan acted on it); a **miss** when the site was compared
+and did not change; **not exercised** when the post-migration capture never compared it.
+The other calls on a hit risk's line count as its consequences; failing entries no risk
+covers are listed as **unpredicted**.
+
+Never fabricates: without delta facts the prediction rests on the baseline warnings alone
+and says so (``status``/``notes``); a trace that predates warning capture is noted too.
+"""
+
+from __future__ import annotations
+
+import difflib
+import hashlib
+import logging
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from pymolt.verify.facts import (
+    CallWarning,
+    Comparison,
+    Fact,
+    FactCategory,
+    FactDiff,
+    FactEntry,
+    FactSet,
+    load_facts,
+    warnings_acc,
+)
+
+logger = logging.getLogger(__name__)
+
+RISKS_SCHEMA = "pymolt.risks/1"
+CALIBRATION_SCHEMA = "pymolt.calibration/1"
+_RECEIVERS = ("self", "cls")
+_ABSENT = (None, "", "<absent>", "absent", "missing", "<missing>")
+
+
+def _call_time_default(value: Any) -> bool:
+    """A default resolved when the call runs (``None``, ``<no_default>``, ``<sentinel>``,
+    ``<object object at ...>``) rather than a value: moving to or from one says the
+    parameter's handling changed, not that its effective value did."""
+    if value is None:
+        return False                        # no default recorded at all, not a None default
+    text = str(value).strip()
+    return text == "None" or (text.startswith("<") and text.endswith(">"))
+
+
+class RiskTier(StrEnum):
+    CERTAIN = "certain"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+TIER_ORDER = {RiskTier.CERTAIN: 0, RiskTier.HIGH: 1, RiskTier.MEDIUM: 2, RiskTier.LOW: 3}
+
+
+class RiskSite(BaseModel):
+    file: str
+    func: str
+    line: int | None = None
+    text: str | None = None
+
+    def label(self) -> str:
+        return f"{self.file}:{self.line if self.line is not None else '?'}"
+
+
+class PredictedRisk(BaseModel):
+    id: str                                  # stable: symbol + site
+    tier: RiskTier
+    symbol: str
+    package: str | None = None
+    site: RiskSite
+    basis: Literal["trace", "static"] = "trace"   # observed in the baseline / BLIND
+    reason: str
+    fact: dict[str, Any] | None = None       # the deciding delta fact (schema form)
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    warnings: list[CallWarning] = Field(default_factory=list)  # the site's baseline warnings
+    calls: int = 0                           # baseline calls at the site
+    fixed_by_plan: bool = False
+    fixed_by: list[str] = Field(default_factory=list)  # recipe keys of the planned change
+
+
+class DeltaSummary(BaseModel):
+    package: str
+    from_version: str | None = None
+    to_version: str | None = None
+    quality: str | None = None
+    changes: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
+class PredictionReport(BaseModel):
+    """The risks a plan predicts, and what they rest on."""
+
+    schema_: str = Field(default=RISKS_SCHEMA, alias="schema")
+    # complete: delta facts for every migration and a warning-capturing baseline;
+    # partial: some evidence missing (see notes); unavailable: nothing to predict from.
+    status: Literal["complete", "partial", "unavailable"] = "complete"
+    risks: list[PredictedRisk] = Field(default_factory=list)
+    deltas: list[DeltaSummary] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(serialize_by_alias=True, validate_by_name=True,
+                              validate_by_alias=True)
+
+    @property
+    def fixed(self) -> list[PredictedRisk]:
+        return [r for r in self.risks if r.fixed_by_plan]
+
+    @property
+    def needs_attention(self) -> list[PredictedRisk]:
+        return [r for r in self.risks if not r.fixed_by_plan]
+
+    def counts(self) -> dict[str, int]:
+        out = {t.value: 0 for t in RiskTier}
+        for r in self.risks:
+            out[r.tier.value] += 1
+        return out
+
+
+# ── planned rewrites ──────────────────────────────────────────────────────────────────────
+
+
+class _Block(BaseModel):
+    start: int          # first changed old line (1-based)
+    end: int            # last changed old line (inclusive)
+    old_text: str
+    new_text: str
+    recipes: list[str] = Field(default_factory=list)
+
+
+def planned_rewrites(changes: Iterable[Any]) -> dict[str, list[_Block]]:
+    """Changed line ranges per (project-relative) file of a plan's frozen changes
+    (``PlannedFileChange``-like: ``path``, ``old_source``, ``new_source``, ``recipes``)."""
+    out: dict[str, list[_Block]] = defaultdict(list)
+    for change in changes or ():
+        path = _attr(change, "path")
+        old, new = _attr(change, "old_source"), _attr(change, "new_source")
+        if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str):
+            continue
+        recipes = list(_attr(change, "recipes") or [])
+        old_lines, new_lines = old.splitlines(), new.splitlines()
+        matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in ("replace", "delete") and i2 > i1:
+                out[Path(path).as_posix()].append(_Block(
+                    start=i1 + 1, end=i2, old_text="\n".join(old_lines[i1:i2]),
+                    new_text="\n".join(new_lines[j1:j2]), recipes=recipes))
+    return dict(out)
+
+
+def _leaf(symbol: str) -> str:
+    parts = symbol.split(".")
+    if len(parts) > 1 and parts[-1] in ("__init__", "__new__", "__call__"):
+        return parts[-2]
+    return parts[-1]
+
+
+def _fix_for(site: RiskSite, symbol: str,
+             rewrites: Mapping[str, list[_Block]]) -> _Block | None:
+    """The planned change that rewrites this call: its line changes and the symbol's name is
+    no longer on it. A static site (no line) is fixed when its function's text loses it."""
+    blocks = rewrites.get(site.file) or ()
+    leaf = _leaf(symbol)
+    for block in blocks:
+        if site.line is not None and not (block.start <= site.line <= block.end):
+            continue
+        if site.line is None and leaf not in block.old_text:
+            continue
+        if leaf not in block.new_text:
+            return block
+    return None
+
+
+# ── the join ──────────────────────────────────────────────────────────────────────────────
+
+
+class _SiteGroup:
+    """Every baseline fact of one symbol at one call site."""
+
+    def __init__(self, symbol: str, file: str, func: str, line: int | None, text: str | None):
+        self.symbol, self.file, self.func, self.line, self.text = symbol, file, func, line, text
+        self.calls = 0
+        self.passed: set[str] = set()
+        self.defaulted: set[str] = set()
+        self.defaulted_known = False
+        self.warnings: dict[tuple[str, str], int] = {}
+        self.raised: set[str] = set()
+
+    def add(self, fact: Fact) -> None:
+        self.calls += fact.count
+        self.passed |= _passed_params(fact.input)
+        if fact.defaulted is not None:
+            self.defaulted_known = True
+            for names in fact.defaulted:
+                self.defaulted.update(names)
+        if fact.warnings:
+            for key, n in warnings_acc(fact.warnings).items():
+                self.warnings[key] = self.warnings.get(key, 0) + n
+        if self.text is None and fact.text is not None:
+            self.text = fact.text
+        for o in fact.outcomes:
+            if o.kind == "raise":
+                self.raised.add(str(o.value))
+
+    def left_at_default(self, param: str) -> bool | None:
+        """True if the site left ``param`` at its default (None: defaults not reported and
+        the site did not pass it either, so it was defaulted unless it has no default)."""
+        if param in self.defaulted:
+            return True
+        if param in self.passed:
+            return False
+        return None if not self.defaulted_known else False
+
+    def site(self) -> RiskSite:
+        return RiskSite(file=self.file, func=self.func, line=self.line, text=self.text)
+
+
+def _passed_params(inputs: Any) -> set[str]:
+    """Parameter names a call passed explicitly (``bound`` minus the receiver, plus
+    ``**kwargs`` keys, in either v2 or the wrap fallback form)."""
+    out: set[str] = set()
+    if not isinstance(inputs, dict):
+        return out
+    bound = inputs.get("bound")
+    if isinstance(bound, dict):
+        out.update(k for k in bound if k not in _RECEIVERS)
+    kwargs = inputs.get("kwargs")
+    if isinstance(kwargs, dict):
+        pairs = kwargs.get("__dict__") if "__dict__" in kwargs else list(kwargs.items())
+        for pair in pairs or ():
+            if isinstance(pair, list | tuple) and pair and isinstance(pair[0], str):
+                out.add(pair[0])
+    return out
+
+
+def _attr(obj: Any, name: str) -> Any:
+    return obj.get(name) if isinstance(obj, Mapping) else getattr(obj, name, None)
+
+
+def _as_dict(report: Any) -> dict[str, Any] | None:
+    if isinstance(report, Mapping):
+        return dict(report)
+    dump = getattr(report, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(mode="json")
+        except TypeError:
+            return dump()
+    return None
+
+
+class _DeltaIndex:
+    """Every non-UNCHANGED delta fact by each of its spellings."""
+
+    def __init__(self, reports: Iterable[Mapping[str, Any]]):
+        self.by_name: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+        for rep in reports:
+            package = str(rep.get("package") or "")
+            for fact in rep.get("facts") or ():
+                if not isinstance(fact, Mapping) or fact.get("kind") in (None, "UNCHANGED"):
+                    continue
+                fact = dict(fact)
+                for name in [fact.get("symbol"), *(fact.get("aliases") or ())]:
+                    if isinstance(name, str) and name:
+                        self.by_name[name].append((package, fact))
+
+    def __bool__(self) -> bool:
+        return bool(self.by_name)
+
+    def match(self, symbol: str) -> list[tuple[str, dict, str]]:
+        """``(package, fact, how)`` for every fact about ``symbol``: the symbol itself, the
+        class of a constructor, or an enclosing object (class, module) that was removed."""
+        out: list[tuple[str, dict, str]] = []
+        seen: set[int] = set()
+
+        def add(items: list[tuple[str, dict]], how: str, whole_only: bool) -> None:
+            for package, fact in items:
+                if id(fact) in seen:
+                    continue
+                if whole_only and (fact.get("param") or fact.get("kind") != "REMOVED"):
+                    continue
+                seen.add(id(fact))
+                out.append((package, fact, how))
+
+        add(self.by_name.get(symbol, []), "symbol", False)
+        parts = symbol.split(".")
+        if len(parts) > 2 and parts[-1] in ("__init__", "__new__"):
+            add(self.by_name.get(".".join(parts[:-1]), []), "constructor", False)
+        for i in range(len(parts) - 1, 1, -1):
+            add(self.by_name.get(".".join(parts[:i]), []), "enclosing", True)
+        return out
+
+
+def _fact_label(package: str, fact: Mapping[str, Any]) -> str:
+    kind = fact.get("kind")
+    param = fact.get("param")
+    text = f"delta: {kind} {fact.get('symbol')}"
+    if param:
+        text += f"({param})"
+    if kind == "DEFAULT":
+        text += f" default {fact.get('old')} -> {fact.get('new')}"
+    elif fact.get("successor"):
+        text += f" -> {fact['successor']}"
+    return text + (f" [{package}]" if package else "")
+
+
+def _rate(group: _SiteGroup, package: str, fact: dict, how: str
+          ) -> tuple[RiskTier, str, list[str]] | None:
+    """The tier one delta fact gives one site (None: no risk for this site)."""
+    kind = fact.get("kind")
+    param = fact.get("param")
+    evidence = [_fact_label(package, fact), *(f"delta evidence: {e}" for e in
+                                              fact.get("evidence") or ())]
+    if how != "symbol":
+        evidence.append(f"matched by {how}")
+    if kind == "REMOVED":
+        return RiskTier.CERTAIN, "the symbol is removed in the new version", evidence
+    if kind == "MOVED":
+        where = f" to {fact['successor']}" if fact.get("successor") else ""
+        return RiskTier.LOW, f"the symbol moved{where}; the old spelling may stop working", \
+            evidence
+    if kind == "DEFAULT" and param:
+        left = group.left_at_default(param)
+        if left is False:
+            return None                     # the site passes it: the default never applies
+        how_known = ("left at its default" if left else
+                     "not passed (defaults not reported: inferred left at its default)")
+        evidence.append(f"baseline: {param} {how_known} at this site")
+        change = f"the default of {param} changes ({fact.get('old')} -> {fact.get('new')})"
+        if _call_time_default(fact.get("old")) or _call_time_default(fact.get("new")):
+            if any(param in msg for _cat, msg in group.warnings):
+                return (RiskTier.HIGH, f"{change}, and this site's baseline warning names "
+                        f"{param}", evidence)
+            evidence.append("delta: a call-time default (None or a sentinel) on one side: "
+                            "the effective value may not change")
+            return (RiskTier.MEDIUM, f"{change}; this site relies on it, but the default is "
+                    "resolved at call time", evidence)
+        return RiskTier.HIGH, f"{change} and this site relies on it", evidence
+    if kind == "SIGNATURE":
+        if not param:
+            return RiskTier.LOW, "the class's signature (bases) changed", evidence
+        if param in group.passed:
+            evidence.append(f"baseline: this site passes {param}")
+            return RiskTier.MEDIUM, f"the signature changes for {param}, which this site " \
+                "passes", evidence
+        if fact.get("old") in _ABSENT and fact.get("new") not in _ABSENT:
+            evidence.append(f"baseline: this site does not pass the new parameter {param}")
+            return RiskTier.MEDIUM, f"a new required parameter {param} that this site does " \
+                "not pass", evidence
+        return None
+    if kind == "DEPRECATED":
+        if fact.get("deprecated_in_old"):
+            return (RiskTier.LOW, "deprecated in the old version, no warning recorded at this "
+                    "site", evidence)
+        return RiskTier.LOW, "deprecated in the new version", evidence
+    return None
+
+
+def _risk_id(symbol: str, site: RiskSite) -> str:
+    raw = "|".join((symbol, site.file, site.func, str(site.line), site.text or ""))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _warning_texts(acc: Mapping[tuple[str, str], int]) -> list[str]:
+    return [f"baseline warning: {c}: {m}" + (f" (x{n})" if n > 1 else "")
+            for (c, m), n in sorted(acc.items())]
+
+
+def predict_risks(
+    baseline: FactSet,
+    deltas: Iterable[Any] = (),
+    *,
+    static_contacts: Iterable[Any] | None = None,
+    changes: Iterable[Any] | None = None,
+    root: str | Path | None = None,
+) -> PredictionReport:
+    """Rate every baseline call site against the delta facts (see the module docstring).
+
+    ``deltas``: ``DeltaReport`` objects or their ``model_dump()`` dicts. ``static_contacts``:
+    the contact map's contacts (``target``/``file``/``caller``), for BLIND sites.
+    ``changes``: the plan's frozen file changes, for ``fixed_by_plan``."""
+    report = PredictionReport()
+    if isinstance(deltas, Mapping):              # {package: DeltaReport}
+        deltas = list(deltas.values())
+    reports = [d for d in (_as_dict(r) for r in deltas or ()) if d is not None]
+    for rep in reports:
+        facts = [f for f in rep.get("facts") or () if isinstance(f, Mapping)]
+        report.deltas.append(DeltaSummary(
+            package=str(rep.get("package") or "?"),
+            from_version=rep.get("from") or rep.get("from_version"),
+            to_version=rep.get("to") or rep.get("to_version"),
+            quality=rep.get("quality"),
+            changes=sum(1 for f in facts if f.get("kind") not in (None, "UNCHANGED")),
+            notes=[str(n) for n in rep.get("notes") or ()]))
+        if rep.get("quality") in ("partial", "inconclusive"):
+            report.status = "partial"
+            report.notes.append(
+                f"delta for {rep.get('package')} is {rep.get('quality')}: "
+                + ("; ".join(str(n) for n in rep.get("notes") or ()) or "no reason given"))
+    index = _DeltaIndex(reports)
+    rewrites = planned_rewrites(changes or ())
+
+    groups: dict[tuple, _SiteGroup] = {}
+    for fact in baseline.facts:
+        key = (fact.symbol, fact.file, fact.func, fact.line)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = _SiteGroup(fact.symbol, fact.file, fact.func, fact.line,
+                                             fact.text)
+        group.add(fact)
+    for sw in baseline.unsampled_warnings:
+        key = (sw.symbol, sw.file, sw.func, sw.line)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = _SiteGroup(sw.symbol, sw.file, sw.func, sw.line, sw.text)
+        for k, n in warnings_acc(sw.warnings).items():
+            group.warnings[k] = group.warnings.get(k, 0) + n
+
+    matched_facts: set[int] = set()
+    for group in groups.values():
+        best: tuple[RiskTier, str, dict | None, str | None] | None = None
+        evidence: list[str] = []
+        facts: list[dict] = []
+        if group.warnings:
+            evidence.extend(_warning_texts(group.warnings))
+            (cat, msg), _n = sorted(group.warnings.items())[0]
+            best = (RiskTier.HIGH, f"it emitted {cat} in the baseline: {msg}", None, None)
+        for package, fact, how in index.match(group.symbol) if index else ():
+            matched_facts.add(id(fact))
+            rated = _rate(group, package, fact, how)
+            if rated is None:
+                continue
+            tier, reason, ev = rated
+            if (fact.get("kind") == "DEPRECATED" and fact.get("deprecated_in_old")
+                    and group.warnings):
+                tier = RiskTier.HIGH            # the warning at this site confirms it
+                reason = "deprecated in the old version, and it warned at this site"
+            facts.append(fact)
+            evidence.extend(e for e in ev if e not in evidence)
+            if best is None or TIER_ORDER[tier] < TIER_ORDER[best[0]] or (
+                    best[2] is None and TIER_ORDER[tier] == TIER_ORDER[best[0]]):
+                best = (tier, reason, fact, package)
+        if best is None:
+            continue
+        tier, reason, fact, package = best
+        if fact is not None and group.warnings:
+            reason += "; it warned in the baseline"
+        site = group.site()
+        report.risks.append(PredictedRisk(
+            id=_risk_id(group.symbol, site), tier=tier, symbol=group.symbol,
+            package=package or (_package_of(facts) if facts else None), site=site,
+            basis="trace", reason=reason, fact=fact, facts=facts, evidence=evidence,
+            warnings=[CallWarning(category=c, message=m, count=n)
+                      for (c, m), n in sorted(group.warnings.items())],
+            calls=group.calls))
+
+    if index and static_contacts is not None:
+        _add_static_risks(report, index, matched_facts, static_contacts, root)
+
+    for risk in report.risks:
+        block = _fix_for(risk.site, risk.symbol, rewrites)
+        if block is not None:
+            risk.fixed_by_plan = True
+            risk.fixed_by = list(block.recipes)
+            risk.evidence.append(
+                f"plan: rewrites {risk.site.file}:{block.start}"
+                + (f"-{block.end}" if block.end != block.start else "")
+                + (f" ({', '.join(block.recipes)})" if block.recipes else ""))
+    report.risks.sort(key=lambda r: (r.fixed_by_plan, TIER_ORDER[r.tier], r.site.file,
+                                     r.site.line or 0, r.symbol))
+    if not reports:
+        report.status = "partial" if report.risks or baseline.facts else "unavailable"
+        report.notes.append("no delta facts: risks rest on the baseline's runtime warnings "
+                            "alone")
+    if baseline.warnings_capture != "on":
+        report.status = "partial" if report.status == "complete" else report.status
+        report.notes.append(
+            "the baseline was captured without runtime-warning capture: a site with no "
+            "recorded warning may still have warned" if baseline.warnings_capture is None
+            else f"baseline warning capture: {baseline.warnings_capture}")
+    return report
+
+
+def _package_of(facts: list[dict]) -> str | None:
+    for fact in facts:
+        sym = fact.get("symbol")
+        if isinstance(sym, str) and sym:
+            return sym.split(".", 1)[0]
+    return None
+
+
+def _add_static_risks(report: PredictionReport, index: _DeltaIndex, matched: set[int],
+                      contacts: Iterable[Any], root: str | Path | None) -> None:
+    """LOW risks for changes on symbols reached only statically: a contact whose target has
+    a delta fact no baseline call site matched (the baseline never ran it)."""
+    seen: set[tuple] = set()
+    for contact in contacts:
+        target = _attr(contact, "target")
+        if not isinstance(target, str):
+            continue
+        hits = [(p, f, h) for p, f, h in index.match(target) if id(f) not in matched]
+        if not hits:
+            continue
+        file = _relative(_attr(contact, "file"), root)
+        caller = _attr(contact, "caller") or "?"
+        func = str(caller).rsplit(".", 1)[-1]
+        key = (target, file, func)
+        if key in seen:
+            continue
+        seen.add(key)
+        site = RiskSite(file=file, func=func)
+        evidence = ["reached only statically (BLIND): the baseline never ran this contact"]
+        facts = []
+        for package, fact, how in hits:
+            facts.append(fact)
+            evidence.append(_fact_label(package, fact))
+            if how != "symbol":
+                evidence.append(f"matched by {how}")
+        report.risks.append(PredictedRisk(
+            id=_risk_id(target, site), tier=RiskTier.LOW, symbol=target,
+            package=hits[0][0] or None, site=site, basis="static",
+            reason=f"{hits[0][1].get('kind')} on a symbol the baseline never exercised",
+            fact=hits[0][1], facts=facts, evidence=evidence))
+
+
+def _relative(file: Any, root: str | Path | None) -> str:
+    if not isinstance(file, str) or not file:
+        return "?"
+    p = Path(file)
+    if root is not None and p.is_absolute():
+        try:
+            return p.resolve().relative_to(Path(root).resolve()).as_posix()
+        except ValueError:
+            pass
+    return p.as_posix()
+
+
+# ── the plan's side: compute deltas, then predict ─────────────────────────────────────────
+
+
+def compute_plan_deltas(project_dir: str | Path, migrations: list[Any]) -> tuple[list, list[str]]:
+    """``pymolt.delta.compute_deltas`` for the plan's migrations (offline, cached), or
+    ``([], [why not])`` when the engine is unavailable or fails."""
+    if not migrations:
+        return [], []
+    try:
+        from pymolt.delta import compute_deltas
+    except ImportError as exc:
+        return [], [f"delta engine unavailable ({exc})"]
+    try:
+        return list(compute_deltas(project_dir, migrations, symbols=None, online=False,
+                                   use_cache=True)), []
+    except Exception as exc:  # noqa: BLE001 - a failed delta degrades the prediction only
+        logger.warning("delta computation failed: %s", exc)
+        return [], [f"delta computation failed: {type(exc).__name__}: {exc}"]
+
+
+def predict_plan_risks(
+    project_dir: str | Path,
+    baseline_trace: str | Path,
+    migrations: list[Any],
+    changes: Iterable[Any] = (),
+    *,
+    delta_reports: list[Any] | None = None,
+) -> PredictionReport:
+    """The risks a plan predicts from its baseline capture and its migrations' deltas.
+
+    ``delta_reports`` given: used as they are (tests, a caller that already has them);
+    otherwise computed with ``compute_plan_deltas``. Never raises: a missing input is a note
+    and a lower ``status``."""
+    root = Path(project_dir).resolve()
+    trace = Path(baseline_trace)
+    if not trace.is_absolute():
+        trace = root / trace
+    try:
+        baseline = load_facts(trace, root=root)
+    except OSError as exc:
+        return PredictionReport(status="unavailable",
+                                notes=[f"cannot read the baseline capture: {exc}"])
+    notes: list[str] = []
+    if delta_reports is None:
+        delta_reports, notes = compute_plan_deltas(root, list(migrations or ()))
+    if isinstance(delta_reports, Mapping):
+        delta_reports = list(delta_reports.values())
+    static = None
+    if any((_as_dict(r) or {}).get("facts") for r in delta_reports):
+        try:
+            from pymolt.verify.contact_map import build_contact_map
+
+            static = build_contact_map(root).contacts
+        except Exception as exc:  # noqa: BLE001 - BLIND sites are a refinement
+            notes.append(f"static contacts unavailable: {exc}")
+    report = predict_risks(baseline, delta_reports, static_contacts=static, changes=changes,
+                           root=root)
+    report.notes = notes + report.notes
+    if notes and report.status == "complete":
+        report.status = "partial"
+    return report
+
+
+# ── calibration: predicted vs observed ────────────────────────────────────────────────────
+
+
+class CalibrationResult(StrEnum):
+    HIT = "hit"
+    PREVENTED = "prevented"          # fixed by the plan, and the rewrite kept the behaviour
+    MISS = "miss"
+    NOT_EXERCISED = "not_exercised"
+
+
+class ObservedEntry(BaseModel):
+    category: str
+    comparison: str
+    symbol: str
+    new_symbol: str | None = None
+    site: RiskSite
+
+
+class CalibratedRisk(BaseModel):
+    id: str
+    tier: RiskTier
+    symbol: str
+    site: RiskSite
+    fixed_by_plan: bool = False
+    result: CalibrationResult
+    observed: list[ObservedEntry] = Field(default_factory=list)
+    note: str | None = None
+
+
+class Calibration(BaseModel):
+    schema_: str = Field(default=CALIBRATION_SCHEMA, alias="schema")
+    source: Literal["plan", "baseline"] = "plan"   # where the predictions came from
+    plan_id: str | None = None
+    predicted: int = 0
+    hit: int = 0
+    prevented: int = 0
+    miss: int = 0
+    not_exercised: int = 0
+    by_tier: dict[str, dict[str, int]] = Field(default_factory=dict)
+    risks: list[CalibratedRisk] = Field(default_factory=list)
+    unpredicted: list[ObservedEntry] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(serialize_by_alias=True, validate_by_name=True,
+                              validate_by_alias=True)
+
+
+def _hits(entry: FactEntry) -> bool:
+    if entry.category in (FactCategory.CHANGED, FactCategory.DISAPPEARED):
+        return True
+    return entry.category is FactCategory.REWRITTEN and entry.comparison is Comparison.CHANGED
+
+
+def _compared(entry: FactEntry) -> bool:
+    return entry.comparison in (Comparison.EQUAL, Comparison.CHANGED) or entry.category in (
+        FactCategory.EQUAL, FactCategory.DRIFT)
+
+
+def _same_symbol(risk: PredictedRisk, entry: FactEntry) -> bool:
+    """The entry is about the risk's call, not another call on the same line."""
+    if entry.category is FactCategory.REWRITTEN:
+        return True
+    return risk.symbol in (entry.symbol, entry.new_symbol)
+
+
+def _entry_sites(entry: FactEntry) -> list:
+    return [s for s in (entry.old_site, entry.new_site) if s is not None][:1]
+
+
+def _same_site(risk: PredictedRisk, entry: FactEntry, site: Any) -> bool:
+    rs = risk.site
+    if rs.file != site.file or rs.func != site.func:
+        return False
+    if rs.line is None:                      # a static (function-level) site: same symbol
+        leaf = "." + _leaf(risk.symbol)
+        return any(isinstance(s, str) and (s.endswith(leaf) or leaf + "." in s)
+                   for s in (entry.symbol, entry.new_symbol))
+    if rs.text is not None and site.text is not None:
+        return rs.text == site.text
+    return rs.line == site.line
+
+
+def _observed(entry: FactEntry) -> ObservedEntry:
+    site = entry.old_site or entry.new_site
+    return ObservedEntry(category=entry.category.value, comparison=entry.comparison.value,
+                         symbol=entry.symbol, new_symbol=entry.new_symbol,
+                         site=RiskSite(file=site.file, func=site.func, line=site.line,
+                                       text=site.text))
+
+
+def calibrate(
+    risks: Iterable[PredictedRisk | Mapping[str, Any]],
+    fdiff: FactDiff | None,
+    *,
+    source: Literal["plan", "baseline"] = "plan",
+    plan_id: str | None = None,
+) -> Calibration:
+    """Score each predicted risk against the post-migration fact diff (module docstring)."""
+    cal = Calibration(source=source, plan_id=plan_id)
+    items = [r if isinstance(r, PredictedRisk) else PredictedRisk.model_validate(r)
+             for r in risks or ()]
+    entries = list(fdiff.entries) if fdiff is not None else []
+    if fdiff is None:
+        cal.notes.append("no post-migration fact diff: no prediction could be checked")
+    covered: set[int] = set()
+    for risk in items:
+        on_line = [e for e in entries if any(_same_site(risk, e, s) for s in _entry_sites(e))]
+        at_site = [e for e in on_line if risk.site.line is None or _same_symbol(risk, e)]
+        covered.update(id(e) for e in at_site)
+        if any(_hits(e) for e in at_site):
+            result, note = CalibrationResult.HIT, None
+            # The line's other calls that moved with it (a ``.to_dict()`` that never ran
+            # because ``mean`` now raises) are consequences of the predicted break.
+            covered.update(id(e) for e in on_line)
+            at_site = on_line
+        elif any(_compared(e) for e in at_site):
+            if risk.fixed_by_plan:
+                result = CalibrationResult.PREVENTED
+                note = "fixed by the plan: the rewrite kept the behaviour at this site"
+            else:
+                result, note = CalibrationResult.MISS, None
+        else:
+            result = CalibrationResult.NOT_EXERCISED
+            note = ("only uncomparable/unpaired entries at this site" if at_site else
+                    "the post-migration capture did not compare this site")
+        shown = [e for e in at_site if e.category is not FactCategory.EQUAL or e.notes]
+        cal.risks.append(CalibratedRisk(
+            id=risk.id, tier=risk.tier, symbol=risk.symbol, site=risk.site,
+            fixed_by_plan=risk.fixed_by_plan, result=result,
+            observed=[_observed(e) for e in shown[:10]], note=note))
+        tier = cal.by_tier.setdefault(risk.tier.value, {r.value: 0 for r in CalibrationResult})
+        tier[result.value] += 1
+    cal.predicted = len(cal.risks)
+    cal.hit = sum(1 for r in cal.risks if r.result is CalibrationResult.HIT)
+    cal.prevented = sum(1 for r in cal.risks if r.result is CalibrationResult.PREVENTED)
+    cal.miss = sum(1 for r in cal.risks if r.result is CalibrationResult.MISS)
+    cal.not_exercised = cal.predicted - cal.hit - cal.prevented - cal.miss
+    cal.unpredicted = [_observed(e) for e in entries if e.fails and id(e) not in covered]
+    return cal
+
+
+def baseline_predictions(baseline_trace: str | Path, root: str | Path,
+                         changes: Iterable[Any] = ()) -> PredictionReport:
+    """Predictions from the baseline capture alone (its runtime warnings; no delta facts):
+    what ``verify`` checks when no plan stored predictions. ``changes``: an applied plan's
+    file changes, for ``fixed_by_plan``."""
+    try:
+        baseline = load_facts(baseline_trace, root=root)
+    except OSError as exc:
+        return PredictionReport(status="unavailable",
+                                notes=[f"cannot read the baseline capture: {exc}"])
+    return predict_risks(baseline, (), changes=changes, root=root)

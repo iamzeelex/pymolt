@@ -1824,6 +1824,15 @@ def build_contract_report_from_state(
             trace = _slot_trace(state.baseline)
             used_slots.append(("baseline", state.baseline))
 
+    predictions = None
+    if trace and against:
+        try:
+            predictions = _predictions_to_calibrate(project_dir, state, against)
+        except Exception as exc:  # noqa: BLE001 - calibration is a report section, not a gate
+            logger.warning("could not load the predicted risks: %s", exc)
+            predictions = {"risks": [], "source": "baseline", "plan_id": None,
+                           "notes": [f"predicted risks unavailable: {exc}"]}
+
     report = build_contract_report(
         project_dir,
         trace=trace,
@@ -1832,10 +1841,52 @@ def build_contract_report_from_state(
         changed_api_paths=changed_api_paths,
         comparator_profile=comparator_profile,
         custom_comparator=custom_comparator,
+        predictions=predictions,
     )
     _stamp_staleness(project_dir, report, used_slots)
     _stamp_verdict(report, trace, against, used_slots)
     return report
+
+
+def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> dict:
+    """The predicted risks verify checks against the fact diff.
+
+    The plan's stored predictions when the comparison's baseline side is the baseline that
+    plan was made from (the applied plan first, then the saved one); otherwise predictions
+    from the baseline side's own runtime warnings (no delta facts), marked ``source:
+    "baseline"`` and made by the report from the facts it loads anyway (``risks: None``).
+    Fixed-by-plan comes from the plan's changes either way."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.migration_state import MigrationReceipt
+
+    root = Path(project_dir)
+    notes: list[str] = []
+    baseline = state.baseline
+    is_baseline = False
+    if baseline is not None and baseline.trace_path:
+        slot = Path(baseline.trace_path)
+        slot = slot if slot.is_absolute() else root / slot
+        is_baseline = slot.resolve() == Path(against).resolve()
+    candidates = []
+    receipt = MigrationReceipt.load(root)
+    if receipt is not None and receipt.status == "applied" and receipt.plan_path:
+        candidates.append(MigrationPlan.load(root, receipt.plan_path))
+    candidates.append(MigrationPlan.load(root))
+    bound = [plan for plan in candidates if plan is not None and is_baseline
+             and plan.baseline_trace_path == baseline.trace_path
+             and plan.baseline_captured_at == baseline.captured_at]
+    for plan in bound:
+        if plan.risks is not None and plan.risks.status != "unavailable":
+            return {"risks": plan.risks.risks, "source": "plan", "plan_id": plan.plan_id,
+                    "notes": list(plan.risks.notes)}
+    if any(plan is not None and plan.risks is not None for plan in candidates) and not bound:
+        notes.append("the saved plan's predictions were made from another baseline capture: "
+                     "not used")
+    notes.append("no plan predictions for this baseline: checking the predictions its own "
+                 "runtime warnings make (no delta facts)")
+    # ``risks: None``: the report predicts from the baseline facts it loads for the diff.
+    return {"risks": None, "source": "baseline", "changes": bound[0].changes if bound else (),
+            "plan_id": bound[0].plan_id if bound else None, "notes": notes}
 
 
 def _stamp_verdict(
