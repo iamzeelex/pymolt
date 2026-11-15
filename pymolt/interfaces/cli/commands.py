@@ -510,10 +510,12 @@ def verify_migration(
 def plan(
     project_dir: str = typer.Argument(".", help="Project whose migration to freeze"),
     target_file: str | None = typer.Option(
-        None, "--target-file", help="Pinned target manifest from assess"
+        None, "--target-manifest",
+        help="Target manifest to plan for (default: the one assess wrote)",
     ),
+    target_file_old: str | None = typer.Option(None, "--target-file", hidden=True),
     endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom Cloud Hub / On-Prem endpoint URL"
+        None, "--endpoint", help="Axiom endpoint URL (default: `pymolt axiom endpoint`)"
     ),
     output: str | None = typer.Option(
         None, "--output", "-o", help="Plan JSON path (default: .pymolt/migration_plan.json)"
@@ -535,6 +537,7 @@ def plan(
     from pymolt.config import load_endpoint
 
     project_path = require_project_dir(project_dir, json_output=json_output)
+    target_file = target_file or target_file_old
     try:
         with err.status("Building the migration plan…", spinner="dots") as status:
             migration_plan, previews, source_desc, by_pkg = build_migration_plan(
@@ -1427,15 +1430,24 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
 @app.command(rich_help_panel="Migration workflow (preparation)")
 def assess(
     project_dir: str = typer.Argument(".", help="The target project directory"),
-    target_python: str | None = typer.Option(None, help="Target Python version (e.g. 3.13)"),
-    source_manifest: str | None = typer.Option(None, help="Explicit target source manifest to parse (e.g. requirements.txt)"),
+    target_python: str | None = typer.Option(
+        None, "--target-python", help="The Python to migrate to, e.g. 3.13 (default: setup's)"
+    ),
+    manifest: str | None = typer.Option(
+        None, "--manifest", help="Manifest to resolve, e.g. requirements.txt (default: setup's)"
+    ),
+    source_manifest: str | None = typer.Option(None, "--source-manifest", hidden=True),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show all transitive dependencies"),
     container: str | None = typer.Option(None, "--container", help="Specify Docker container ID or name to run compilation inside"),
     base_python: str | None = typer.Option(
-        None, "--base-python", "--current-python",
-        help="The project's own Python, for baseline resolution "
-             "(--current-python is the old name for this)"),
-    upgrade_constraint: str | None = typer.Option(None, "--upgrade-constraint", "-c", help="Path to a constraint file containing custom upgrade targets (e.g. pandas<2.1)"),
+        None, "--base-python", help="The project's current Python, e.g. 3.8 (default: setup's)"
+    ),
+    current_python_old: str | None = typer.Option(None, "--current-python", hidden=True),
+    upgrade_constraint: str | None = typer.Option(
+        None, "--upgrade-constraint",
+        help="Constraint file with the target versions you want, e.g. pandas<2.1",
+    ),
+    upgrade_constraint_old: str | None = typer.Option(None, "-c", hidden=True),
     json_output: bool = typer.Option(False, "--json", help="Emit the assessment as machine-readable JSON on stdout (suppresses tables/prompts)"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the resolved-graph cache and re-resolve from scratch"),
     no_hashes: bool = typer.Option(False, "--no-hashes", help="Do not fetch PyPI hashes when writing the target requirements file"),
@@ -1459,6 +1471,10 @@ def assess(
     config = _load_or_autodetect_assess_config(project_path)
 
     # Override config defaults with CLI overrides if provided
+    # Older option names, kept hidden for one release.
+    source_manifest = manifest or source_manifest
+    base_python = base_python or current_python_old
+    upgrade_constraint = upgrade_constraint or upgrade_constraint_old
     manifest_name_to_use = source_manifest or config.get("selected_manifest")
     detected_python = base_python or config.get("base_python")
     container_id = container or config.get("container_id")

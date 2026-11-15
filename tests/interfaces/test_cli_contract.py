@@ -313,3 +313,30 @@ class TestNoWrite:
         assert payload["target_manifest_path"] is not None
         assert (project / "requirements-target.txt").is_file()
 
+
+
+# ── one name per option; old names still parse, hidden ───────────────────────
+
+class TestOptionNames:
+    def test_assess_takes_the_setup_names(self, project):
+        result = runner.invoke(app, [
+            "assess", str(project), "--manifest", "requirements.txt",
+            "--base-python", "3.11", "--target-python", "3.12", "--json", "--no-write",
+        ])
+        assert result.exit_code == EXIT_OK, result.output
+        assert json.loads(result.stdout)["source_manifest"] == "requirements.txt"
+
+    def test_old_names_still_parse_but_are_not_listed(self, project):
+        constraint = project / "constraints.txt"
+        constraint.write_text("flask<3\n", encoding="utf-8")
+        result = runner.invoke(app, [
+            "assess", str(project), "--source-manifest", "requirements.txt",
+            "--current-python", "3.11", "--target-python", "3.12", "-c", str(constraint),
+            "--json", "--no-write",
+        ])
+        assert result.exit_code == EXIT_OK, result.output
+
+        listed = runner.invoke(app, ["assess", "--help"]).output
+        for old in ("--source-manifest", "--current-python", "-c "):
+            assert old not in listed
+        assert "--target-file" not in runner.invoke(app, ["plan", "--help"]).output
