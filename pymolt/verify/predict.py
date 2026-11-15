@@ -115,10 +115,29 @@ class PredictedRisk(BaseModel):
     calls: int = 0                           # baseline calls at the site
     fixed_by_plan: bool = False
     fixed_by: list[str] = Field(default_factory=list)  # recipe keys of the planned change
+    # "dependency" (a package's API) or "python" (the stdlib between interpreter versions).
+    scope: str = "dependency"
+    reached_at: Literal["import", "call"] | None = None   # python sites: when it fails
+    guard: dict[str, Any] | None = None      # python sites: the syntactic guard, if any
+    fix: str | None = None                   # python sites: curated fix kind (advisory: manual)
+
+
+class ListedSite(BaseModel):
+    """A python site that is listed, not rated: guarded, version-dead or pre-existing."""
+
+    kind: Literal["guarded", "version-dead", "pre-existing"]
+    symbol: str
+    site: RiskSite
+    scope: str = "python"
+    reached_at: Literal["import", "call"] | None = None
+    guard: dict[str, Any] | None = None
+    reason: str
+    fact: dict[str, Any] | None = None
 
 
 class DeltaSummary(BaseModel):
     package: str
+    subject: str = "dependency"
     from_version: str | None = None
     to_version: str | None = None
     quality: str | None = None
@@ -136,6 +155,10 @@ class PredictionReport(BaseModel):
     risks: list[PredictedRisk] = Field(default_factory=list)
     deltas: list[DeltaSummary] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # python sites listed, not rated (see ListedSite): guarded fallbacks / version-dead
+    # branches, and names absent on the base too (pre-existing, not caused by the migration).
+    guarded: list[ListedSite] = Field(default_factory=list)
+    pre_existing: list[ListedSite] = Field(default_factory=list)
 
     model_config = ConfigDict(serialize_by_alias=True, validate_by_name=True,
                               validate_by_alias=True)
@@ -223,6 +246,9 @@ class _SiteGroup:
         self.defaulted_known = False
         self.warnings: dict[tuple[str, str], int] = {}
         self.raised: set[str] = set()
+        # The site names the symbol by its spelling (python sites): a MOVED fact about that
+        # spelling means the spelling itself vanished (D12).
+        self.spelling_site = False
 
     def add(self, fact: Fact) -> None:
         self.calls += fact.count
@@ -355,6 +381,11 @@ def _rate(group: _SiteGroup, package: str, fact: dict, how: str
         return RiskTier.CERTAIN, "the symbol is removed in the new version", evidence
     if kind == "MOVED":
         where = f" to {fact['successor']}" if fact.get("successor") else ""
+        if group.spelling_site and group.symbol in (fact.get("symbol"),
+                                                    *(fact.get("aliases") or ())):
+            there = f"; the same object is at {fact['successor']}" if fact.get("successor") else ""
+            return (RiskTier.CERTAIN, f"the spelling {group.symbol} no longer exists{there}",
+                    evidence)
         return RiskTier.LOW, f"the symbol moved{where}; the old spelling may stop working", \
             evidence
     if kind == "DEFAULT" and param:
@@ -634,6 +665,230 @@ def predict_plan_risks(
     if notes and report.status == "complete":
         report.status = "partial"
     return report
+
+
+# ── python risks: the stdlib between interpreter versions ─────────────────────────────────
+
+
+def _python_fact(index: dict[str, dict], spelling: str) -> tuple[dict | None, str]:
+    """The python delta fact for a spelling: its own, else the removal of an enclosing
+    module (``imp`` for ``imp.reload``)."""
+    if spelling in index:
+        return index[spelling], "symbol"
+    parts = spelling.split(".")
+    for i in range(len(parts) - 1, 0, -1):
+        fact = index.get(".".join(parts[:i]))
+        if fact is not None and fact.get("kind") == "REMOVED":
+            return fact, "enclosing"
+    return None, "symbol"
+
+
+def _cap(tier: RiskTier, ceiling: RiskTier) -> RiskTier:
+    return ceiling if TIER_ORDER[tier] < TIER_ORDER[ceiling] else tier
+
+
+def _fix_kind(fact: Mapping[str, Any]) -> str | None:
+    for item in fact.get("evidence") or ():
+        if isinstance(item, str) and item.startswith("fix: "):
+            return item[5:].strip() or None
+    return None
+
+
+def predict_python_risks(
+    report: Any,
+    sites: Iterable[Any],
+    *,
+    base: str | None,
+    target: str | None,
+    compile_findings: Iterable[Mapping[str, Any]] | None = None,
+) -> PredictionReport:
+    """Rate the project's stdlib sites against the python delta (``subject="python"``).
+
+    =========  ==============================================================================
+    certain    absent on the probed target, present on the base (probe or data), unguarded
+               (REMOVED, or MOVED whose own spelling vanished: D12); a target SyntaxError the
+               base compiles
+    high       the same with absence from data only (no target interpreter), or a base
+               presence resting only on an import statement; a SyntaxError whose base compile
+               was not observed
+    medium     present on the target only through a third-party shim; under a broad ``except``
+    low        deprecated but present on the target; removed after the target; a SyntaxWarning
+    listed     guarded fallbacks, version-dead branches, absent on the base too
+    =========  ==============================================================================
+
+    Evidence caps the tier, it never rounds up: a data-only absence is never ``certain``.
+    ``fixed_by_plan`` stays False here: fixers are a later wave."""
+    from pymolt.pyversion.guards import evaluate_guard, parse_version
+
+    out = PredictionReport()
+    rep = _as_dict(report) or {}
+    facts = [f for f in rep.get("facts") or () if isinstance(f, Mapping)]
+    index: dict[str, dict] = {}
+    for fact in facts:
+        for name in [fact.get("symbol"), *(fact.get("aliases") or ())]:
+            if isinstance(name, str) and name and (name not in index or
+                                                   fact.get("kind") != "UNCHANGED"):
+                index[name] = dict(fact)
+    quality = rep.get("quality")
+    out.deltas.append(DeltaSummary(
+        package=str(rep.get("package") or "python"), subject="python",
+        from_version=rep.get("from") or base, to_version=rep.get("to") or target,
+        quality=quality,
+        changes=sum(1 for f in facts if f.get("kind") not in (None, "UNCHANGED")),
+        notes=[str(n) for n in rep.get("notes") or ()]))
+    if quality in ("partial", "inconclusive"):
+        out.status = "partial"
+        out.notes.append(f"python delta is {quality}: "
+                         + ("; ".join(str(n) for n in rep.get("notes") or ())
+                            or "no reason given"))
+    target_version = parse_version(target)
+    present = None
+    try:
+        from pymolt.core import stdlib as _stdlib
+
+        def present(dotted: str) -> bool | None:
+            return _stdlib.present_in(dotted, target or "")
+    except ImportError:
+        pass
+
+    seen: set[tuple] = set()
+    for site in sites or ():
+        spelling = _attr(site, "spelling")
+        file, line = _attr(site, "file"), _attr(site, "line")
+        if not isinstance(spelling, str) or not isinstance(file, str):
+            continue
+        key = (spelling, file, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        fact, how = _python_fact(index, spelling)
+        if fact is None:
+            continue
+        risk_site = RiskSite(file=file, func="", line=line if isinstance(line, int) else None)
+        reached = _attr(site, "reached_at")
+        guard = _attr(site, "guard")
+        guard = dict(guard) if isinstance(guard, Mapping) else None
+        if fact.get("kind") == "UNCHANGED":
+            if any("pre-existing" in str(e) for e in fact.get("evidence") or ()):
+                out.pre_existing.append(ListedSite(
+                    kind="pre-existing", symbol=spelling, site=risk_site, reached_at=reached,
+                    guard=guard, fact=fact,
+                    reason=f"{spelling} is absent on the base ({base}) too: not caused by "
+                           "the migration"))
+            continue
+        broad = False
+        if guard is not None:
+            kind = guard.get("kind")
+            if kind == "version":
+                live = (evaluate_guard(str(guard.get("detail") or ""), target_version, present)
+                        if target_version else None)
+                if live is None or live is False:
+                    why = (f"the version test `{guard.get('detail')}` is false on Python "
+                           f"{target}: this branch never runs there" if live is False else
+                           f"guarded by a version test (`{guard.get('detail')}`) that could "
+                           "not be evaluated")
+                    out.guarded.append(ListedSite(
+                        kind="version-dead" if live is False else "guarded", symbol=spelling,
+                        site=risk_site, reached_at=reached, guard=guard, fact=fact, reason=why))
+                    continue
+                guard = {**guard, "live_on_target": True}
+            elif kind == "broad":
+                broad = True
+            else:
+                out.guarded.append(ListedSite(
+                    kind="guarded", symbol=spelling, site=risk_site, reached_at=reached,
+                    guard=guard, fact=fact,
+                    reason=f"{kind}: {guard.get('detail') or 'a try/except around the import'}; "
+                           "the code already handles its absence"))
+                continue
+        group = _SiteGroup(spelling, file, "", risk_site.line, None)
+        group.spelling_site = True
+        rated = _rate(group, "python", fact, how)
+        if rated is None:
+            continue
+        tier, reason, evidence = rated
+        basis = fact.get("basis") or {}
+        origin = fact.get("origin")
+        if fact.get("kind") == "DEPRECATED":
+            if origin and origin != "stdlib":
+                tier = RiskTier.MEDIUM
+                reason = f"present on Python {target} only through {origin}, not the stdlib"
+            elif (fact.get("removed_in") and target_version
+                  and (parse_version(fact["removed_in"]) or (0, 0)) > target_version):
+                tier = RiskTier.LOW
+                reason = (f"deprecated; removed in Python {fact['removed_in']}, after the "
+                          f"target {target}")
+            else:
+                tier = RiskTier.LOW
+                reason = f"deprecated since Python {fact.get('deprecated_in') or '?'}, " \
+                         "still present on the target"
+        else:
+            if fact.get("removed_in"):
+                reason += f" (removed in Python {fact['removed_in']})"
+            if basis.get("new") == "knowledge" and tier is RiskTier.CERTAIN:
+                tier = RiskTier.HIGH
+                reason += "; absence is from data only (the target was not probed)"
+            if basis.get("old") == "import-statement" and tier is RiskTier.CERTAIN:
+                tier = RiskTier.HIGH
+                reason += "; presence on the base rests on the import statement alone"
+            if broad:
+                tier = _cap(tier, RiskTier.MEDIUM)
+                reason += "; under a broad except, so it degrades silently"
+        evidence = [*evidence, f"site: {file}:{line} ({_attr(site, 'kind') or '?'}, "
+                    f"reaches the target at {reached or '?'})"]
+        out.risks.append(PredictedRisk(
+            id=_risk_id(spelling, risk_site), tier=tier, symbol=spelling, package="python",
+            site=risk_site, basis="static", reason=reason, fact=fact, facts=[fact],
+            evidence=evidence, scope="python", reached_at=reached, guard=guard,
+            fix=_fix_kind(fact)))
+
+    for finding in compile_findings or ():
+        file, line = finding.get("file"), finding.get("line")
+        kind = str(finding.get("kind") or "SyntaxError")
+        if not isinstance(file, str):
+            continue
+        risk_site = RiskSite(file=file, func="", line=line if isinstance(line, int) else None)
+        message = str(finding.get("message") or kind)
+        known = finding.get("base")
+        if kind == "SyntaxError" and known is True:
+            out.pre_existing.append(ListedSite(
+                kind="pre-existing", symbol=kind, site=risk_site,
+                reason=f"{message}: the file does not compile on the base either"))
+            continue
+        if kind == "SyntaxError":
+            tier = RiskTier.CERTAIN if known is False else RiskTier.HIGH
+            reason = f"the file does not compile on Python {target}: {message}" + (
+                "" if known is False else "; the base compile was not observed")
+        else:
+            tier, reason = RiskTier.LOW, f"{kind} on Python {target}: {message}"
+        out.risks.append(PredictedRisk(
+            id=_risk_id(kind, risk_site), tier=tier, symbol=kind, package="python",
+            site=risk_site, basis="static", reason=reason, scope="python",
+            reached_at="import",
+            evidence=[f"compile check on Python {finding.get('python') or target}"]))
+
+    out.risks.sort(key=lambda r: (TIER_ORDER[r.tier], r.site.file, r.site.line or 0, r.symbol))
+    return out
+
+
+def merge_python_risks(dependency: PredictionReport | None,
+                       python: PredictionReport) -> PredictionReport:
+    """One report for a plan: the dependency risks (None: no baseline) plus the python ones."""
+    if dependency is None:
+        merged = PredictionReport(status="partial", notes=[
+            "no baseline capture: dependency risks were not predicted (python risks need none)"])
+    else:
+        merged = dependency
+    merged.risks.extend(python.risks)
+    merged.deltas.extend(python.deltas)
+    merged.guarded.extend(python.guarded)
+    merged.pre_existing.extend(python.pre_existing)
+    merged.notes.extend(python.notes)
+    if python.status != "complete" and merged.status == "complete":
+        merged.status = "partial"
+    if dependency is not None and dependency.status == "unavailable" and python.risks:
+        merged.status = "partial"
+    return merged
 
 
 # ── calibration: predicted vs observed ────────────────────────────────────────────────────

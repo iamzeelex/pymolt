@@ -513,3 +513,160 @@ def test_predict_plan_risks_degrades_when_the_delta_engine_is_missing(captured, 
     assert report.status == "partial"
     assert any("delta engine unavailable" in n for n in report.notes)
     assert report.risks[0].tier is RiskTier.HIGH        # the warning still predicts it
+
+
+# ── python risks: the stdlib between interpreter versions ────────────────────────────────
+
+
+def _pyfact(symbol, kind="REMOVED", *, old="knowledge", new="probe", successor=None,
+            removed_in="3.10", origin=None, evidence=(), aliases=()):
+    return {"symbol": symbol, "aliases": list(aliases), "kind": kind, "successor": successor,
+            "basis": {"old": old, "new": new}, "removed_in": removed_in, "origin": origin,
+            "evidence": list(evidence)}
+
+
+def _pyreport(*facts, quality="partial"):
+    return {"package": "python", "from": "3.6", "to": "3.12", "subject": "python",
+            "quality": quality, "facts": list(facts), "notes": ["the base was not probed"]}
+
+
+def _site(spelling, line=1, file="app.py", kind="from", reached="import", guard=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(spelling=spelling, module=spelling.split(".")[0], file=file,
+                           line=line, kind=kind, reached_at=reached, guard=guard)
+
+
+def _python_risks(report, sites, target="3.12"):
+    from pymolt.verify.predict import predict_python_risks
+
+    return predict_python_risks(report, sites, base="3.6", target=target)
+
+
+def test_a_removed_name_probed_absent_on_the_target_is_certain():
+    out = _python_risks(_pyreport(_pyfact("ssl.wrap_socket", evidence=["fix: advisory"])),
+                        [_site("ssl.wrap_socket", 71, "test/test_ssl_socket.py", "call", "call")])
+    (risk,) = out.risks
+    assert risk.tier is RiskTier.CERTAIN and risk.scope == "python"
+    assert risk.reached_at == "call" and risk.fixed_by_plan is False and risk.fix == "advisory"
+    assert risk.site.label() == "test/test_ssl_socket.py:71"
+
+
+def test_d12_a_moved_name_is_certain_when_its_own_spelling_vanished():
+    fact = _pyfact("collections.Iterable", "MOVED", successor="collections.abc.Iterable")
+    (risk,) = _python_risks(_pyreport(fact), [_site("collections.Iterable")]).risks
+    assert risk.tier is RiskTier.CERTAIN
+    assert "collections.abc.Iterable" in risk.reason
+
+
+def test_d12_leaves_dependency_moves_low():
+    from pymolt.verify.predict import _rate, _SiteGroup
+
+    fact = {"kind": "MOVED", "symbol": "pkg.old", "successor": "pkg.new"}
+    group = _SiteGroup("pkg.old", "a.py", "f", 3, None)       # a trace site, not a spelling
+    assert _rate(group, "pkg", fact, "symbol")[0] is RiskTier.LOW
+    group.spelling_site = True
+    assert _rate(group, "pkg", fact, "symbol")[0] is RiskTier.CERTAIN
+
+
+def test_data_only_absence_is_never_certain():
+    fact = _pyfact("collections.Iterable", "MOVED", new="knowledge",
+                   successor="collections.abc.Iterable")
+    (risk,) = _python_risks(_pyreport(fact), [_site("collections.Iterable")]).risks
+    assert risk.tier is RiskTier.HIGH and "data only" in risk.reason
+
+
+def test_base_presence_resting_on_the_import_statement_is_high():
+    fact = _pyfact("imp", old="import-statement")
+    (risk,) = _python_risks(_pyreport(fact), [_site("imp", kind="import")]).risks
+    assert risk.tier is RiskTier.HIGH
+
+
+def test_a_shimmed_name_is_medium():
+    fact = _pyfact("distutils", "DEPRECATED", origin="site-packages:setuptools")
+    (risk,) = _python_risks(_pyreport(fact), [_site("distutils", kind="import")]).risks
+    assert risk.tier is RiskTier.MEDIUM and "setuptools" in risk.reason
+
+
+def test_deprecated_but_present_and_removed_after_the_target_are_low():
+    deprecated = _pyfact("logging.Logger.warn", "DEPRECATED", removed_in=None)
+    ahead = _pyfact("x.y", "DEPRECATED", removed_in="3.14")
+    out = _python_risks(_pyreport(deprecated, ahead),
+                        [_site("logging.Logger.warn", 1), _site("x.y", 2)])
+    assert {r.symbol: r.tier for r in out.risks} == {"logging.Logger.warn": RiskTier.LOW,
+                                                     "x.y": RiskTier.LOW}
+    assert any("after the target" in r.reason for r in out.risks)
+
+
+def test_a_broad_except_caps_at_medium():
+    guard = {"kind": "broad", "detail": "except Exception: pass, line 4"}
+    (risk,) = _python_risks(_pyreport(_pyfact("ssl.wrap_socket")),
+                            [_site("ssl.wrap_socket", guard=guard)]).risks
+    assert risk.tier is RiskTier.MEDIUM and risk.guard == guard
+
+
+@pytest.mark.parametrize("kind", ["fallback", "guarded-fallback"])
+def test_guarded_fallbacks_are_listed_not_rated(kind):
+    guard = {"kind": kind, "detail": "except ImportError handler, line 15"}
+    out = _python_risks(_pyreport(_pyfact("collections.Iterable", "MOVED",
+                                          successor="collections.abc.Iterable")),
+                        [_site("collections.Iterable", guard=guard)])
+    assert out.risks == [] and len(out.guarded) == 1
+    assert out.guarded[0].guard == guard and out.guarded[0].kind == "guarded"
+
+
+def test_a_version_dead_branch_is_listed_and_a_live_one_is_rated():
+    dead = {"kind": "version", "detail": "sys.version_info < (3, 3)"}
+    live = {"kind": "version", "detail": "sys.version_info >= (3, 0)"}
+    out = _python_risks(_pyreport(_pyfact("imp")),
+                        [_site("imp", 1, guard=dead), _site("imp", 2, guard=live)])
+    assert [r.site.line for r in out.risks] == [2]
+    assert [(g.kind, g.site.line) for g in out.guarded] == [("version-dead", 1)]
+
+
+def test_absent_on_the_base_too_is_pre_existing_not_a_risk():
+    fact = {"symbol": "urllib2", "kind": "UNCHANGED", "evidence": ["absent on both: pre-existing"]}
+    out = _python_risks(_pyreport(fact), [_site("urllib2", kind="import")])
+    assert out.risks == [] and [p.symbol for p in out.pre_existing] == ["urllib2"]
+
+
+def test_an_enclosing_module_removal_rates_its_members():
+    out = _python_risks(_pyreport(_pyfact("imp", removed_in="3.12")),
+                        [_site("imp.reload", 12, kind="attr", reached="call")])
+    (risk,) = out.risks
+    assert risk.symbol == "imp.reload" and risk.tier is RiskTier.CERTAIN
+
+
+def test_compile_findings_rate_by_what_the_base_did():
+    findings = [
+        {"file": "a.py", "line": 1, "kind": "SyntaxError", "message": "m", "base": False},
+        {"file": "b.py", "line": 2, "kind": "SyntaxError", "message": "m", "base": None},
+        {"file": "c.py", "line": 3, "kind": "SyntaxError", "message": "py2", "base": True},
+        {"file": "d.py", "line": 4, "kind": "SyntaxWarning", "message": "escape", "base": None},
+    ]
+    from pymolt.verify.predict import predict_python_risks
+
+    out = predict_python_risks(_pyreport(), [], base="3.6", target="3.12",
+                               compile_findings=findings)
+    assert {r.site.file: r.tier for r in out.risks} == {
+        "a.py": RiskTier.CERTAIN, "b.py": RiskTier.HIGH, "d.py": RiskTier.LOW}
+    assert [p.site.file for p in out.pre_existing] == ["c.py"]
+
+
+def test_the_python_delta_summary_is_marked_and_a_partial_delta_caps_the_status():
+    out = _python_risks(_pyreport(), [])
+    assert out.deltas[0].subject == "python" and out.status == "partial"
+
+
+def test_merging_keeps_dependency_risks_and_adds_python_ones_even_with_no_baseline():
+    from pymolt.verify.predict import merge_python_risks
+
+    python = _python_risks(_pyreport(_pyfact("imp")), [_site("imp", kind="import")])
+    merged = merge_python_risks(None, python)
+    assert [r.scope for r in merged.risks] == ["python"]
+    assert merged.status == "partial" and any("no baseline" in n for n in merged.notes)
+    assert python.risks[0].id == merged.risks[0].id
+
+
+def test_dependency_risks_default_to_the_dependency_scope():
+    assert PredictionReport().guarded == [] and PredictionReport().pre_existing == []

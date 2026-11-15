@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 from pydantic_core import ValidationError
@@ -209,6 +209,11 @@ class MigrationPlan(BaseModel):
     # Predicted risks per call site (baseline facts x the migrations' delta facts), each
     # marked fixed by this plan or not; None when there was no baseline to predict from.
     risks: PredictionReport | None = None
+    # The python pseudo-migration: {from, to, quality, sides, ...}; None when the plan does
+    # not move Python. Its risks are in ``risks`` (scope "python"); the target interpreter's
+    # SyntaxError / SyntaxWarning findings are here.
+    python: dict[str, Any] | None = None
+    compile_findings: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("plan_id")
     @classmethod
@@ -260,6 +265,7 @@ def create_migration_plan(
     impacts: dict[str, list[ApiImpact]] | None = None,
     delta_reports: list | None = None,
     predict: bool = True,
+    python_move: tuple[str, str] | None = None,
 ) -> MigrationPlan:
     """Freeze a locally verified preview into an exact, portable project plan.
 
@@ -324,6 +330,9 @@ def create_migration_plan(
     risks = None
     if predict and baseline_path is not None:
         risks = _predict_risks(root, baseline_path, list(migrations), changes, delta_reports)
+    python, compile_findings = None, []
+    if predict and python_move is not None:
+        risks, python, compile_findings = _python_part(root, python_move, risks)
 
     return MigrationPlan(
         target_python=target_python,
@@ -351,7 +360,29 @@ def create_migration_plan(
         changes=changes,
         advisories=advisories,
         risks=risks,
+        python=python,
+        compile_findings=compile_findings,
     )
+
+
+def _python_part(root: Path, move: tuple[str, str], risks: PredictionReport | None):
+    """The python move's risks merged into ``risks`` (also with no baseline), its summary and
+    its compile findings. A failure becomes a note: the plan stands without it."""
+    from pymolt.verify.predict import merge_python_risks
+
+    base_python, target_python = move
+    try:
+        from pymolt.pyversion.plan import plan_python
+
+        python, python_risks, findings = plan_python(root, base_python, target_python)
+    except Exception as exc:  # noqa: BLE001
+        note = f"python risk prediction failed: {type(exc).__name__}: {exc}"
+        if risks is None:
+            risks = PredictionReport(status="partial")
+        risks.notes.append(note)
+        return risks, {"from": base_python, "to": target_python, "quality": "inconclusive",
+                       "sides": {}, "notes": [note]}, []
+    return merge_python_risks(risks, python_risks), python, findings
 
 
 def _predict_risks(root: Path, baseline_path: Path, migrations: list,
