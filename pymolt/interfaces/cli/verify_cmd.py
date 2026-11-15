@@ -54,31 +54,31 @@ def capture_cmd(
     command: list[str] = typer.Argument(
         None, help="Command to run after --, e.g. -- pytest tests/ (omit for --mode attach)"),
     mode: str = typer.Option(
-        "command", "--mode", help="tests (run your suite) | command (run your app) | attach "
-                                   "(you run it yourself, pymolt just watches)"),
+        "command", "--mode", help="tests (your test suite) | command (your app) | attach "
+                                   "(you run the command; pymolt records)"),
     project_dir: str = typer.Option(
-        ".", "--project-dir", help="Project root (state lives in .pymolt/)"),
+        ".", "--project-dir", help="Project directory"),
     target: str = typer.Option(
         "all", "--target", "-t",
         help="Dependencies to record: all (default), or a list such as flask,werkzeug"),
     backend: str = typer.Option(
-        "auto", "--backend", help="auto | setprofile | monitoring | wrap | hybrid"),
-    exclude: str = typer.Option("", "--exclude", "-x", help="Comma-separated top-levels to skip"),
+        "auto", "--backend", help="Tracer: auto | setprofile | monitoring | wrap | hybrid"),
+    exclude: str = typer.Option(
+        "", "--exclude", "-x", help="Top-level packages not to record, comma-separated"),
     source: str = typer.Option(
-        "", "--source", "-s", help="YOUR code (near side). Default: auto-detect"),
+        "", "--source", "-s", help="Your code's top-level packages (default: detected)"),
     container: str | None = typer.Option(
         None, "--container", "-c",
-        help="Run CMD in a running container. Defaults to the configured env for "
-             "this slot (.pymolt/env_config.json) when omitted."),
+        help="Running container to run CMD in (default: the one setup configured)"),
     workdir: str | None = typer.Option(
-        None, "--workdir", "-w", help="Working dir inside the container"),
+        None, "--workdir", "-w", help="Working directory inside the container"),
     collect: bool = typer.Option(
-        False, "--collect", help="Finalize a --mode attach capture (reads whatever was written)"),
+        False, "--collect", help="Finish a --mode attach capture"),
     force: bool = typer.Option(
-        False, "--force", help="Overwrite an existing baseline/post-migration capture, no prompt"),
+        False, "--force", help="Replace an existing capture without asking"),
     privacy: str = typer.Option(
         "auto", "--privacy",
-        help="auto (values for tests, shape for live) | values | shape",
+        help="auto (values for tests, shape otherwise) | values | shape (types, no data)",
     ),
     sample_rate: float | None = typer.Option(
         None, "--sample-rate", min=0.000001, max=1.0,
@@ -88,7 +88,7 @@ def capture_cmd(
     ),
     impact_targets: str | None = typer.Option(
         None, "--impact-targets",
-        help="Affected API symbols; post-migration defaults to the applied Axiom plan",
+        help="Dependency symbols to focus on (post-migration default: the applied plan's)",
     ),
     deployment_id: str | None = typer.Option(
         None, "--deployment-id", help="Deployment id to store with the capture (stage/canary)"),

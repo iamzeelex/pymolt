@@ -176,7 +176,7 @@ class TestProgression:
 
         assert _state(status, "report") == "done"
         assert status.next_command is None
-        assert "complete" in status.next_reason.lower()
+        assert "PASS" in status.next_reason
 
     def test_post_capture_without_receipt_is_stale(self, tmp_path):
         _manifest(tmp_path)
@@ -226,7 +226,7 @@ class TestWorseThanNotDone:
 
         assert _state(status, "baseline") == "stale"
         assert "capture baseline" in status.next_command
-        assert "no longer describes" in status.next_reason
+        assert "does not match" in status.next_reason
 
     def test_a_capture_taken_before_setup_is_stale(self, tmp_path):
         """It records no environment, so `apply` rejects it — status must not call it done."""
