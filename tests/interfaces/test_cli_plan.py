@@ -228,3 +228,20 @@ def test_plan_names_what_needs_manual_review(tmp_path, monkeypatch):
     assert "Manual review needed" in result.output
     assert "not auto-rewritable" in result.output
     assert "No call sites matched" in result.output
+
+
+def test_plan_agent_prints_a_json_failure_when_the_resolver_fails(tmp_path, monkeypatch):
+    _configured_project(tmp_path)
+
+    def failing(*args, **kwargs):
+        raise codemod_service.PlanInputError(
+            "the target manifest requirements-target.txt does not resolve: Failed to build `x`",
+            "Culprit(s): x. Fix or loosen them.")
+
+    monkeypatch.setattr(codemod_service, "resolve_codemod_migrations", failing)
+    result = runner.invoke(app, ["plan", str(tmp_path), "--agent"])
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False and "does not resolve" in payload["error"]
+    assert "Culprit(s): x" in payload["hint"]
