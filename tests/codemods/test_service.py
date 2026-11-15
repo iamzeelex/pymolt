@@ -306,3 +306,55 @@ def test_preview_codemods_defaults_to_the_local_provider(tmp_path, monkeypatch):
     )
     assert seen == {"project_dir": tmp_path, "online": True}
     assert by_pkg == {"flask": []} and previews == []
+
+
+# ── from-versions witnessed by the baseline capture ─────────────────────────
+
+
+def test_the_baseline_capture_version_beats_a_reresolved_unpinned_manifest():
+    from pymolt.codemods.service import migrations_from_rows, witness_rows
+
+    rows = [
+        {"name": "pandas", "status": "upgrade", "baseline_version": "3.1.1",
+         "target_version": "2.2.3"},
+        {"name": "Requests", "status": "unchanged", "baseline_version": "2.34.2",
+         "target_version": "2.34.2"},
+        {"name": "pytz", "status": "unchanged", "baseline_version": "2026.6",
+         "target_version": "2026.6"},
+        {"name": "attrs", "status": "upgrade", "baseline_version": "23.1",
+         "target_version": "24.2"},
+    ]
+    witnessed = {"pandas": "1.5.3", "requests": "2.31.0", "pytz": "2026.6"}
+    out, notes = witness_rows(rows, witnessed)
+    assert [(m.name, m.from_version, m.to_version) for m in migrations_from_rows(out)] == [
+        ("pandas", "1.5.3", "2.2.3"), ("Requests", "2.31.0", "2.34.2"),
+        ("attrs", "23.1", "24.2")]
+    assert notes == [
+        "pandas: the baseline capture ran 1.5.3 (the baseline manifest resolves to 3.1.1 today)",
+        "Requests: the baseline capture ran 2.31.0 (the baseline manifest resolves to "
+        "2.34.2 today)"]
+    assert witness_rows(rows, None) == (rows, [])
+
+
+def test_witnessed_distributions_reads_the_baseline_capture_record(tmp_path):
+    import json
+
+    from pymolt.verify.models import ContractSlot, ContractState
+    from pymolt.verify.service import _state_path, witnessed_distributions
+
+    traces = tmp_path / ".pymolt" / "contract_traces"
+    traces.mkdir(parents=True)
+    meta = traces / "baseline.jsonl.meta.json"
+    meta.write_text(json.dumps({"processes": [
+        {"pid": 1, "distributions": {"pandas": "1.5.3", "NumPy": "1.26.4"}},
+        {"pid": 2, "distributions": {"pandas": "1.5.3", "numpy": "2.0.0"}},
+        {"pid": 3},
+    ]}))
+    state = ContractState(baseline=ContractSlot(
+        trace_path=".pymolt/contract_traces/baseline.jsonl", captured_at="now",
+        mode="test_suite", metadata_path=".pymolt/contract_traces/baseline.jsonl.meta.json"))
+    state.save(_state_path(tmp_path))
+    # numpy ran at two versions across processes: ambiguous, left out.
+    assert witnessed_distributions(tmp_path) == {"pandas": "1.5.3"}
+    meta.write_text(json.dumps({"processes": [{"pid": 1}]}))
+    assert witnessed_distributions(tmp_path) is None      # a capture that predates it

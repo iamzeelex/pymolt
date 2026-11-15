@@ -1002,6 +1002,45 @@ def load_contract_state(project_dir: str | Path) -> ContractState:
     return ContractState.load(_state_path(project_dir)) or ContractState()
 
 
+def witnessed_distributions(
+    project_dir: str | Path, slot: str = "baseline",
+) -> dict[str, str] | None:
+    """``{normalized distribution name: version}`` the slot's capture actually ran against.
+
+    Read from the per-process record the runtime writes at exit (``distributions`` in the
+    capture's metadata). That is witnessed state, unlike a manifest re-resolved today: an
+    unpinned ``pandas`` resolves to the newest release, while the baseline may have run
+    1.5. A distribution that processes loaded at different versions is left out
+    (ambiguous). None when there is no such capture or it predates the record.
+    """
+    from packaging.utils import canonicalize_name
+
+    root = Path(project_dir)
+    captured = getattr(load_contract_state(root), slot, None)
+    if captured is None or not captured.metadata_path:
+        return None
+    meta_path = Path(captured.metadata_path)
+    if not meta_path.is_absolute():
+        meta_path = root / meta_path
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    seen: dict[str, set[str]] = {}
+    recorded = False
+    for process in (meta.get("processes") or []) if isinstance(meta, dict) else []:
+        dists = process.get("distributions") if isinstance(process, dict) else None
+        if not isinstance(dists, dict):
+            continue
+        recorded = True
+        for name, version in dists.items():
+            if isinstance(name, str) and isinstance(version, str) and version:
+                seen.setdefault(canonicalize_name(name), set()).add(version)
+    if not recorded:
+        return None
+    return {name: versions.pop() for name, versions in seen.items() if len(versions) == 1}
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 

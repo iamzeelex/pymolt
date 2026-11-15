@@ -79,6 +79,7 @@ from ._backend import (
     SetProfileBackend,
     _warnings_disabled,
     build_matcher,
+    loaded_distributions,
     select_backend,
 )
 from ._sinks import JsonlSink, MemorySink
@@ -680,6 +681,12 @@ def activate():
                 sink.set_metadata(instrumentation_skipped=[
                     {"target": item[0], "reason": item[1]} for item in skipped
                 ])
+            try:
+                # What this process ran against: the host takes a migration's from-side
+                # versions from the baseline's record, not from re-resolving a manifest.
+                sink.set_metadata(distributions=loaded_distributions())
+            except Exception:
+                pass
             sink.close()
 
     atexit.register(_shutdown)

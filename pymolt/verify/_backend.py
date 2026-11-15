@@ -115,6 +115,131 @@ def _site_roots():
     return tuple(os.path.normpath(r) + os.sep for r in roots if r)
 
 
+def _norm_dist(name):
+    """PEP 503 normalization (``Foo_Bar.baz`` -> ``foo-bar-baz``) without ``re``."""
+    out = []
+    for ch in name.lower():
+        out.append("-" if ch in "-_." else ch)
+    return "-".join(part for part in "".join(out).split("-") if part)
+
+
+def _dist_header(path):
+    """``(Name, Version)`` from a dist-info METADATA / egg-info PKG-INFO, or None."""
+    for leaf in ("METADATA", "PKG-INFO"):
+        try:
+            with open(os.path.join(path, leaf), encoding="utf-8", errors="replace") as fh:
+                name = version = None
+                for line in fh:
+                    if not line.strip():
+                        break  # end of the header block
+                    if line.startswith("Name:"):
+                        name = line[5:].strip()
+                    elif line.startswith("Version:"):
+                        version = line[8:].strip()
+                if name and version:
+                    return name, version
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _dist_tops(path):
+    """Top-level import names a distribution provides (top_level.txt, else its RECORD)."""
+    tops = set()
+    try:
+        with open(os.path.join(path, "top_level.txt"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    tops.add(line.strip().replace("/", "."))
+        return tops
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(os.path.join(path, "RECORD"), encoding="utf-8") as fh:
+            for line in fh:
+                first = line.split(",", 1)[0].split("/", 1)[0]
+                if not first or first.endswith((".dist-info", ".egg-info", ".data")) \
+                        or first.startswith(".."):
+                    continue
+                if first.endswith(".py"):
+                    first = first[:-3]
+                elif "." in first:  # foo.cpython-312-darwin.so -> foo
+                    first = first.split(".", 1)[0]
+                tops.add(first)
+    except (OSError, ValueError):
+        pass
+    return tops
+
+
+def loaded_distributions(modules=None, roots=None, limit=1000):
+    """``{distribution: version}`` for the installed distributions with a module loaded.
+
+    What a capture actually ran against, as opposed to what a manifest says (an unpinned
+    ``pandas`` resolves to whatever is newest today): the host takes a migration's
+    ``from`` side from the baseline's record. Read from the ``*.dist-info`` /
+    ``*.egg-info`` directories in the site roots by plain file reads, never by importing
+    ``importlib.metadata`` or ``pkg_resources``, so it behaves the same on 3.6 and costs a
+    directory listing plus one small read per loaded distribution. A distribution whose
+    name is not its import name (``yaml`` -> PyYAML) is found through its top_level.txt or
+    RECORD, read only while some loaded module is still unattributed."""
+    roots = _site_roots() if roots is None else roots
+    modules = sys.modules if modules is None else modules
+    tops = set()
+    for name, module in list(modules.items()):
+        if "." in name or module is None:
+            continue
+        path = getattr(module, "__file__", None)
+        if not path:
+            continue
+        path = os.path.normpath(path)
+        if any(path.startswith(root) for root in roots):
+            tops.add(name)
+    if not tops:
+        return {}
+    infos = []  # (normalized stem name, metadata dir)
+    for root in roots:
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.endswith(".dist-info"):
+                stem = entry[:-len(".dist-info")]
+            elif entry.endswith(".egg-info"):
+                stem = entry[:-len(".egg-info")]
+            else:
+                continue
+            infos.append((_norm_dist(stem.split("-", 1)[0]), os.path.join(root, entry)))
+    found = {}
+    pending = set(tops)
+    unmatched = []
+    by_name = {}
+    for norm, path in infos:
+        by_name.setdefault(norm, path)
+    for top in sorted(tops):
+        path = by_name.get(_norm_dist(top))
+        if path is None:
+            continue
+        header = _dist_header(path)
+        if header is not None:
+            found[header[0]] = header[1]
+            pending.discard(top)
+    if pending:
+        matched = set(by_name.get(_norm_dist(t)) for t in tops)
+        unmatched = [path for _norm, path in infos if path not in matched]
+    for path in unmatched:
+        if not pending or len(found) >= limit:
+            break
+        provided = _dist_tops(path) & pending
+        if not provided:
+            continue
+        header = _dist_header(path)
+        if header is not None:
+            found[header[0]] = header[1]
+            pending.difference_update(provided)
+    return found
+
+
 def _stdlib_roots():
     """Directories where the standard library lives (to exclude stdlib from 'our code')."""
     roots = set()
