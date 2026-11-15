@@ -10,8 +10,8 @@ uv run --with tiktoken python bench/bench_cli.py --offline-only         # determ
 ```
 
 Measures wall-clock (warmup + N repeats, min/p50/max/stdev) and stdout size in
-bytes and tokens (tiktoken `cl100k_base`) for `status`, `scan`, `contract map`
-and `assess` across the `tests/artifacts/*` fixtures.
+bytes and tokens (tiktoken `cl100k_base`) for `status`, `scan` (which includes
+the contact map that `contract map` printed before 0.2) and `assess` across the `tests/artifacts/*` fixtures.
 
 **What "cold" and "warm" mean for `assess`.** Cold = PyMolt's own
 `.pymolt_cache/` removed. It does *not* clear uv's global cache

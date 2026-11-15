@@ -41,12 +41,12 @@ args = ["mcp"]
 
 ## What you get
 
-- **Proof tools** — `contract_map` (every call site into a dependency, resolved through
-  imports and scopes), `contract_capture` (runs *your* command with a tracer injected,
-  zero edits), `contract_report` (confirmed / BLIND / trust %, and what changed).
-- **Preparation tools** — `scan`, `setup_options`, `setup_apply`, `assess`,
-  `codemods_preview`, `codemods`, `env_hint`, `status`, `migrate`. For approved source changes,
-  use the CLI `pymolt plan` → `pymolt apply`; `pymolt rollback` retains the recovery path.
+- **Tools**, named after the CLI commands: `status`, `scan` (every call site into a
+  dependency, resolved through imports and scopes), `setup`, `assess`, `capture` (runs *your*
+  command with a tracer injected, zero edits), `plan` (the codemods as a plan and diffs; writes
+  no source), `verify` (PASS / FAIL / INCONCLUSIVE, confirmed / BLIND / trust %, and what
+  changed). Source changes are applied by a person with the CLI `pymolt apply`;
+  `pymolt rollback` undoes them.
 - **Skill**: `migration-contract` — loads automatically when you ask about a Python or
   dependency upgrade, so the agent captures a baseline *before* it starts editing.
 - **Slash command**: `/pymolt:migrate [project-dir]` — walk the funnel honestly.

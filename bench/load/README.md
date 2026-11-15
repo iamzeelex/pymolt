@@ -1,7 +1,7 @@
 # bench/load: the phase-2 load gate
 
 A reproducible load test for PyMolt's long-run capture: a small but realistic HTTP service,
-driven by a seeded load generator, run with and without `pymolt contract capture`, scored
+driven by a seeded load generator, run with and without `pymolt capture`, scored
 against the gate in [docs/design/tier1-observation-substrate.md](../../docs/design/tier1-observation-substrate.md#gate-phase-2-is-done-when).
 
 Everything is stdlib Python except the service, which gets its own venv. Outputs go to
@@ -25,7 +25,7 @@ snapshot of a commit while `pymolt/` is being edited, see "Measuring a fixed com
 | `setup` | creates `bench/load/.venv` with uv (Python 3.12) and `uv pip sync`s `requirements.txt`; skips work when the lock hash is unchanged |
 | `nocap --duration S --rate R` | service without capture + load |
 | `hook --duration S --rate R` | control: service under a no-op `sys.setprofile` hook (`control/sitecustomize.py`), no pymolt |
-| `capture --duration S --rate R [--steady-warmup auto\|S\|off] [--env K=V ...] [-- <pymolt capture args>]` | `pymolt contract capture --when baseline --mode command --project-dir <run>/svc --force <args> -- <svc python> app.py`, load, then SIGINT to the service process only, then waits for pymolt to finalize. `--steady-warmup` defaults to `off` here |
+| `capture --duration S --rate R [--steady-warmup auto\|S\|off] [--env K=V ...] [-- <pymolt capture args>]` | `pymolt capture baseline --mode command --project-dir <run>/svc --force <args> -- <svc python> app.py`, load, then SIGINT to the service process only, then waits for pymolt to finalize. `--steady-warmup` defaults to `off` here |
 | `report <run-or-session-dir> [--nocap DIR ...] [--no-fold] [--refold]` | summary per run (`report.json`, `summary.md`); a capture/hook run is compared with the mean of the given nocap runs (default: every matching nocap run in its session); capture runs also get the host fold |
 | `gate [--duration 60] [--paced-rate 200] [--repeat N] [--steady-warmup auto\|S\|off] [--env K=V ...] [--control] [--no-recall] [--wait-quiet S] [-- <capture args>]` | `nocap-sat-0, capture-sat-1, [hook-sat-1], nocap-sat-1, ... capture-sat-N, nocap-sat-N`, then `nocap-paced, capture-paced`, then the recall reference `capture-discover`, then the PASS/FAIL table |
 
@@ -38,7 +38,7 @@ nocap run), `--mix name=weight,...` (diagnostics: drive selected endpoints only)
 
 `--env` sets variables for the capture runs (e.g. `--env PYMOLT_TRACE_DISCOVER_QUIET=10`);
 variables pymolt does not know are passed through and ignored. Anything after `--` is appended
-to the `pymolt contract capture` command line (e.g. `-- --backend setprofile`). The gate itself
+to the `pymolt capture` command line (e.g. `-- --backend setprofile`). The gate itself
 passes nothing: it measures capture's defaults (backend, mode, sink, sample rate). Do not set
 `PYMOLT_TRACE_SAMPLE_RATE` through `--env`; `capture` sets it from `--sample-rate`, so pass that
 after `--` if you want a different rate.
@@ -132,7 +132,7 @@ results/<UTC stamp>-<label>/          # one session (gate, or a standalone nocap
   <run>/run.json                      # config, provenance, host load, timings, loadgen result, capture facts
   <run>/report.json, summary.md       # written by `report` / `gate`
   <run>/loadgen.json, *.log           # raw load result, service/capture/stub logs
-  <run>/fold.json, fold.time          # capture runs: `contract report --json` output + /usr/bin/time -l
+  <run>/fold.json, fold.time          # capture runs: `verify --json` output + /usr/bin/time -l
   <run>/svc/                          # the run's project dir (app.py, orders.db, .pymolt/)
 ```
 
@@ -162,7 +162,7 @@ A 60 s phase-1 saturated capture leaves ~20-60 MB of trace; delete old sessions 
 | `bytes_per_day` | `bytes at window start + in_window x 86400 / window_seconds + at_exit`: what the steady state writes scales with time, startup, discover and exit output happen once. A rewritten facts snapshot counts by its growth. Gate criterion 3a |
 | `bytes_per_day_linear` | `out_bytes x 86400 / load_seconds`, the naive upper bound |
 | `capture_wall_s` / `capture_finalize_s` | pymolt capture process lifetime / from service exit to pymolt exit (merge + metadata + site text) |
-| `fold` | `/usr/bin/time -l pymolt contract report <svc> --json`: `max_rss_bytes` (gate 3b), `seconds`, exit code (non-zero exit codes are findings, not harness errors), whether the JSON parsed |
+| `fold` | `/usr/bin/time -l pymolt verify <svc> --json`: `max_rss_bytes` (gate 3b), `seconds`, exit code (non-zero exit codes are findings, not harness errors), whether the JSON parsed |
 | `host_load` | load average and the other processes' summed %CPU right before the run, top consumers |
 
 ### Gate thresholds (`GATE` in run.py)

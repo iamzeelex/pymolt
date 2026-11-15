@@ -36,17 +36,99 @@ class PhaseState(BaseModel):
     blocker: str = ""   # why this cannot run yet (state == blocked)
 
 
+class EnvironmentCheck(BaseModel):
+    """Whether one configured environment exists."""
+
+    name: str           # baseline environment | target environment
+    state: str          # ok | warning | error
+    detail: str
+    hint: str | None = None
+
+
 class FunnelStatus(BaseModel):
     """The whole projection: every phase, plus what to do next."""
 
     project_dir: str
     phases: list[PhaseState] = Field(default_factory=list)
+    checks: list[EnvironmentCheck] = Field(default_factory=list)
     next_command: str | None = None
     next_reason: str = ""
     notes: list[str] = Field(default_factory=list)
 
     def phase(self, name: str) -> PhaseState | None:
         return next((p for p in self.phases if p.phase == name), None)
+
+
+def detect_workload_command(project_dir: str | Path) -> list[str]:
+    """Return the most likely repeatable workload, without executing anything."""
+    root = Path(project_dir)
+    pyproject = root / "pyproject.toml"
+    has_pytest_config = any(
+        (root / name).is_file()
+        for name in ("pytest.ini", "setup.cfg")
+    )
+    if pyproject.is_file():
+        try:
+            has_pytest_config = has_pytest_config or "[tool.pytest" in pyproject.read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            pass
+    if has_pytest_config or (root / "tests").is_dir():
+        return ["python", "-m", "pytest"]
+    if (root / "tox.ini").is_file():
+        return ["tox"]
+    if (root / "noxfile.py").is_file():
+        return ["nox"]
+    return []
+
+
+def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck]:
+    """Whether the configured baseline and target environments exist.
+
+    Writes nothing. A container baseline is checked with ``docker inspect``, which
+    is why ``build_status`` runs this only when asked.
+    """
+    from pymolt.verify.service import container_is_running
+
+    if config is None:
+        return []
+    checks: list[EnvironmentCheck] = []
+    if config.selected_tool and config.selected_tool.value == "container":
+        running = bool(config.container_id and container_is_running(config.container_id))
+        checks.append(EnvironmentCheck(
+            name="baseline environment",
+            state="ok" if running else "error",
+            detail=(
+                f"container {config.container_id[:12]} is running"
+                if running else f"container {config.container_id or '?'} is not running"
+            ),
+            hint=None if running else "Start the container or re-run setup.",
+        ))
+    else:
+        checks.append(EnvironmentCheck(
+            name="baseline environment", state="warning",
+            detail=f"local Python {config.base_python or '?'}; interpreter not pinned",
+        ))
+
+    if config.target_env_path:
+        # Resolved the way `capture` resolves it, so "ok" here means capture finds it.
+        target = Path(config.target_env_path)
+        candidates = (target / "bin" / "python", target / "Scripts" / "python.exe")
+        interpreter = next((path for path in candidates if path.is_file()), None)
+        checks.append(EnvironmentCheck(
+            name="target environment",
+            state="ok" if interpreter else "error",
+            detail=str(interpreter or target),
+            hint=None if interpreter else "Build the configured target environment.",
+        ))
+    else:
+        checks.append(EnvironmentCheck(
+            name="target environment", state="warning",
+            detail="no target environment configured",
+            hint="Build it, then re-run `pymolt setup . --target-env PATH`.",
+        ))
+    return checks
 
 
 def _age(iso_timestamp: str | None) -> str:
@@ -106,6 +188,13 @@ def _capture_phase(
         return PhaseState(
             phase=label, state=STALE,
             detail=f"{detail} — capture validity is {reason}",
+        )
+    if current_fingerprint is not None and slot.env_fingerprint is None:
+        # Taken before setup: it records no environment, so it cannot be checked
+        # against this one, and `apply` rejects it as a baseline.
+        return PhaseState(
+            phase=label, state=STALE,
+            detail=f"{detail} — taken before setup, so it records no environment",
         )
     if (current_fingerprint is not None and slot.env_fingerprint is not None
             and slot.env_fingerprint != current_fingerprint):
@@ -287,9 +376,13 @@ def _capture_precedes(captured_at: str, applied_at: str) -> bool:
         return True
 
 
-def build_status(project_dir: str | Path) -> FunnelStatus:
-    """Read the project's funnel state. Pure: opens files, writes none."""
-    from pymolt.doctor import detect_workload_command
+def build_status(project_dir: str | Path, *, check_environments: bool = False) -> FunnelStatus:
+    """Read the project's funnel state. Opens files, writes none.
+
+    ``check_environments`` also reports whether the configured environments exist
+    (``docker inspect`` for a container). Off by default: the ``next →`` line every
+    command prints must stay cheap.
+    """
     from pymolt.ingestion.config import EnvConfig
     from pymolt.ingestion.detect import detect_sources
     from pymolt.migration_state import MigrationReceipt
@@ -414,6 +507,8 @@ def build_status(project_dir: str | Path) -> FunnelStatus:
         )
     status.phases.append(report)
 
+    if check_environments:
+        status.checks = environment_checks(project_path, config)
     workload = detect_workload_command(project_path)
     _decide_next(
         status, config, baseline, plan, migration, post, report,
@@ -457,7 +552,7 @@ def _decide_next(
     migrated_without_baseline = receipt is not None and receipt.allow_no_baseline
     if baseline.state == TODO and not migrated_without_baseline:
         status.next_command = (
-            f"pymolt contract capture --when baseline --mode tests -- {workload_text}"
+            f"pymolt capture baseline --mode tests -- {workload_text}"
         )
         status.next_reason = (
             "Record how the code behaves BEFORE migrating — this is the one step that "
@@ -466,7 +561,7 @@ def _decide_next(
         return
     if baseline.state == STALE and not migrated_without_baseline:
         status.next_command = (
-            f"pymolt contract capture --when baseline --mode tests -- {workload_text}"
+            f"pymolt capture baseline --mode tests -- {workload_text}"
         )
         status.next_reason = (
             "The baseline no longer describes this project — re-capture before trusting "
@@ -487,7 +582,7 @@ def _decide_next(
         return
     if post.state in {TODO, STALE}:
         status.next_command = (
-            f"pymolt contract capture --when post-migration --mode tests -- {workload_text}"
+            f"pymolt capture post-migration --mode tests -- {workload_text}"
         )
         status.next_reason = "Record the new behavior after the recorded migration."
         return

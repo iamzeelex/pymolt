@@ -63,31 +63,29 @@ _EXEC_ENV_VAR = "PYMOLT_MCP_ALLOW_EXEC"
 
 _INSTRUCTIONS = """\
 PyMolt proves whether a Python migration changed your program's behaviour.
+The tools have the names of the pymolt CLI commands.
 
-START HERE — the two tools nothing else can replace:
-  contract_map     every call site into a dependency, resolved through imports
-                   and scopes (LibCST). Grepping imports finds modules, not the
-                   symbols actually called, and undercounts the surface severalfold.
-  contract_capture / contract_report
-                   record what the code really calls at runtime before AND after
-                   the migration, then report what changed: results, raises,
-                   symbols that vanished. This cannot be derived by reading files
-                   or by resolving dependencies — it requires the recorded traces.
+Two answers only these tools give:
+  scan             every project root, and every call site into a dependency,
+                   resolved through imports and scopes (LibCST). Grepping imports
+                   finds modules, not the symbols called, and undercounts the
+                   surface severalfold.
+  capture, verify  record what the code calls at runtime before AND after the
+                   migration, then report what changed: results, raises, calls
+                   that vanished. Reading files or resolving dependencies cannot
+                   tell you this; it takes the two recordings.
 
-Supporting phases, in order:  scan -> setup_options/setup_apply -> assess -> env_hint
-  These prepare the migration; assess resolves baseline vs target and tells you
-  which versions move. A successful resolve is NOT evidence the program still
-  works — it is an input to the contract, never the conclusion.
+Order (status says where the project is and which tool is next):
+  scan -> setup -> assess -> capture(when='baseline')
+  -> change the code -> capture(when='post-migration') -> verify
+  capture needs setup: it records the environment it ran in. Repeat code
+  changes + post-migration capture until verify says PASS. A successful assess
+  is not evidence the program still works.
 
-Typical run:
-  contract_capture(when='baseline')  BEFORE editing anything
-  -> assess -> engineer/agent edits code and builds the target env
-  -> contract_capture(when='post-migration') -> contract_report
-  Repeat edits + post-migration capture until contract_report is clean.
-
-codemods_preview is a DRY RUN: it never applies changes.
-Applying codemods requires explicit human approval via the CLI,
-outside this server.
+Changing the code: plan saves the codemods as the migration plan and returns
+the diffs; it writes no source file. A person applies the plan with
+`pymolt apply` in the project, outside this server. You may also edit the code
+yourself.
 """
 
 mcp = FastMCP("pymolt", instructions=_INSTRUCTIONS)
@@ -193,8 +191,9 @@ def _fail(error: str, hint: str | None = None) -> dict:
 
 @mcp.tool()
 def status(project_dir: str = ".") -> dict:
-    """Report where the project stands in the migration funnel and what single
-    command to run next. Call this anytime to orient your agent workflow.
+    """Report where the project stands in the migration funnel, whether the
+    configured environments exist, and the single command to run next. Call this
+    anytime to orient your agent workflow.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -203,7 +202,7 @@ def status(project_dir: str = ".") -> dict:
         path = _resolve_dir(project_dir)
         from pymolt.status import build_status
 
-        funnel = build_status(str(path))
+        funnel = build_status(str(path), check_environments=True)
         full = funnel.model_dump(mode="json")
         full_path = _write_full_report(path, "status", full)
 
@@ -213,6 +212,7 @@ def status(project_dir: str = ".") -> dict:
         ]
         data = {
             "phases": phases_out,
+            "checks": [check.model_dump(mode="json") for check in funnel.checks],
             "next_command": funnel.next_command,
             "next_reason": funnel.next_reason,
             "notes": funnel.notes,
@@ -235,7 +235,8 @@ def status(project_dir: str = ".") -> dict:
 @mcp.tool()
 def scan(project_dir: str = ".") -> dict:
     """Find EVERY project root in the repo, with its manifests, Python-version
-    evidence and dependency edges — offline, no resolution.
+    evidence and dependency edges, and every call site where the code enters a
+    third-party dependency — offline, no resolution, no runtime.
 
     Assume the repo is a monorepo until this tool says otherwise. A nested
     directory whose only marker is its own requirements.txt is a separate project
@@ -243,6 +244,11 @@ def scan(project_dir: str = ".") -> dict:
     when the tree is walked by hand looking for setup.py/pyproject.toml. This also
     reports where roots *disagree* about the target Python — divergence a
     file-by-file read does not surface.
+
+    Call sites are resolved through imports and scopes with LibCST. Do not
+    reconstruct them by grepping imports: an import says a module is present, not
+    which symbols are called, and undercounts the contact surface severalfold. They
+    are the denominator every coverage and trust number is measured against.
 
     Args:
         project_dir: Project/repo directory to scan (default: current directory).
@@ -304,6 +310,28 @@ def scan(project_dir: str = ".") -> dict:
         summary_lines = [
             f"{len(surfaces.project_roots)} project root(s), {total_edges} dependency edge(s).",
         ]
+        cmap = report.contact_map
+        if cmap is not None:
+            per_dep = sorted(
+                ((dep, len(targets)) for dep, targets in cmap.by_dep.items()),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+            per_dep_capped, per_dep_trunc = _fit_answer([f"{d} {c}" for d, c in per_dep])
+            distinct = len({c.target for c in cmap.contacts})
+            data["contacts"] = {
+                "total": len(cmap.contacts),
+                "distinct_symbols": distinct,
+                "files_scanned": cmap.files_scanned,
+                "per_dependency_format": "dep distinct_symbol_count",
+                "per_dependency": per_dep_capped,
+            }
+            if per_dep_trunc:
+                data["contacts"]["truncated"] = per_dep_trunc
+            summary_lines.append(
+                f"{len(cmap.contacts)} call site(s) into {len(cmap.by_dep)} dependency(ies), "
+                f"{distinct} distinct symbol(s), {cmap.files_scanned} file(s) scanned. "
+                + _truncation_note(len(per_dep_capped), per_dep_trunc, full_path)
+            )
         if divergences:
             summary_lines.append(f"{len(divergences)} root(s) with Python-version divergence.")
         else:
@@ -323,154 +351,119 @@ def scan(project_dir: str = ".") -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. setup_options
+# 2. setup
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def setup_options(project_dir: str = ".") -> dict:
-    """List the exact choices setup_apply accepts: available manifests, resolution
-    tools, interpreters, and candidate target Python versions. Call this instead
-    of guessing manifest/tool/version strings.
-
-    Args:
-        project_dir: Project directory (default: current directory).
-
-    Use before setup_apply — the returned string values are what you pass in.
-    """
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.setup.service import gather_setup_options
-
-        options = gather_setup_options(path)
-        full = options.model_dump(mode="json")
-        full_path = _write_full_report(path, "setup_options", full)
-
-        manifests = [m.name for m in options.manifests]
-        tools = [t.name for t in options.tools if t.available]
-        target_versions = [v.version for v in options.target_versions]
-        data = {
-            "manifests": manifests,
-            "default_manifest": options.default_manifest,
-            "tools": tools,
-            "default_tool": options.default_tool,
-            "interpreters": options.interpreters[:LIST_CAP],
-            "base_python_default": options.base_python_default,
-            "target_python_options": target_versions[:LIST_CAP],
-            "default_target_python": options.default_target,
-        }
-
-        if not manifests:
-            return _fail(
-                "No Python dependency manifests detected.",
-                hint="Point `project_dir` at a project with requirements.txt / pyproject.toml / "
-                     "environment.yml, then re-run setup_options.",
-            )
-
-        summary = (
-            f"Manifests: {', '.join(manifests)}.\n"
-            f"Tools: {', '.join(tools)} (default {options.default_tool}).\n"
-            f"Base Python: {options.base_python_default}.\n"
-            f"Target options: {', '.join(target_versions) or 'none'}."
-        )
-        return _ok(
-            summary,
-            data,
-            full_report_path=full_path,
-            hint="Call setup_apply with a manifest, tool, base_python, and target_python "
-                 "from these exact values.",
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(f"setup_options failed: {e}",
-                     hint="Check that `project_dir` is a readable project directory.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. setup_apply
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def setup_apply(
+def setup(
     project_dir: str = ".",
     manifest: str = "",
     tool: str = "",
     base_python: str = "",
     target_python: str = "",
     container_id: str | None = None,
+    target_env: str | None = None,
 ) -> dict:
-    """Persist the migration configuration to .pymolt/env_config.json (manifest,
-    tool, base+target Python). Deterministic: pass values from setup_options; an
-    invalid choice returns ok:false listing the valid ones.
+    """Choose the manifest, resolution tool and Python versions, and save them to
+    .pymolt/env_config.json. Every later tool reads this file.
+
+    Called with no choices, it returns the valid ones (manifests, tools,
+    interpreters, target Pythons, with defaults) and saves nothing. Called with
+    manifest, tool, base_python and target_python, it checks them and saves. An
+    invalid value returns ok:false naming the valid ones. Do not guess the strings.
 
     Args:
         project_dir: Project directory (default: current directory).
-        manifest: Manifest file name (from setup_options.manifests).
-        tool: Resolution tool (from setup_options.tools, e.g. uv/conda/poetry/system).
-        base_python: Baseline Python version (e.g. "3.6").
-        target_python: Target Python version (from setup_options.target_python_options).
-        container_id: Docker container id, required only when tool == "container".
-
-    Use after setup_options, before assess.
+        manifest: Manifest file name, from the returned manifests.
+        tool: Resolution tool, from the returned tools (uv/conda/poetry/container/system).
+        base_python: The project's current Python (e.g. "3.6").
+        target_python: Python to migrate to, from the returned target_python_options.
+        container_id: Docker container id; required only when tool == "container".
+        target_env: Path of an existing target environment (venv), if one is built.
     """
     try:
         path = _resolve_dir(project_dir)
         from pymolt.ingestion.config import ToolChoice
-        from pymolt.setup.service import SetupChoices, apply_setup, gather_setup_options
+        from pymolt.setup.service import (
+            SetupChoices,
+            SetupError,
+            apply_setup,
+            check_setup_values,
+            gather_setup_options,
+        )
 
         options = gather_setup_options(path)
-        valid_manifests = [m.name for m in options.manifests]
-        valid_tools = [t.name for t in options.tools if t.available]
-        valid_targets = [v.version for v in options.target_versions]
+        manifests = [m.name for m in options.manifests]
+        if not manifests:
+            return _fail(
+                "No Python dependency manifests detected.",
+                hint="Point `project_dir` at a project with requirements.txt / pyproject.toml / "
+                     "environment.yml.",
+            )
+        tools = [t.name for t in options.tools if t.available]
+        target_versions = [v.version for v in options.target_versions]
 
-        if not manifest or manifest not in valid_manifests:
-            return _fail(
-                f"Invalid or missing manifest {manifest!r}.",
-                hint=f"Valid manifests: {valid_manifests}",
+        given = {"manifest": manifest, "tool": tool, "base_python": base_python,
+                 "target_python": target_python}
+        if not any(given.values()):
+            full_path = _write_full_report(path, "setup", options.model_dump(mode="json"))
+            data = {
+                "manifests": manifests,
+                "default_manifest": options.default_manifest,
+                "tools": tools,
+                "default_tool": options.default_tool,
+                "interpreters": options.interpreters[:LIST_CAP],
+                "base_python_default": options.base_python_default,
+                "target_python_options": target_versions[:LIST_CAP],
+                "default_target_python": options.default_target,
+            }
+            summary = (
+                f"Nothing saved. Manifests: {', '.join(manifests)}.\n"
+                f"Tools: {', '.join(tools)} (default {options.default_tool}).\n"
+                f"Base Python: {options.base_python_default}.\n"
+                f"Target options: {', '.join(target_versions) or 'none'}."
             )
-        if not tool or tool not in valid_tools:
-            return _fail(
-                f"Invalid or missing tool {tool!r}.",
-                hint=f"Valid tools: {valid_tools}",
+            return _ok(summary, data, full_report_path=full_path,
+                       hint="Call setup again with manifest, tool, base_python and "
+                            "target_python from these values.")
+
+        missing = [name for name, value in given.items() if not value]
+        if missing:
+            return _fail(f"Missing: {', '.join(missing)}.",
+                         hint="Call setup with no choices to list the valid values.")
+        try:
+            check_setup_values(
+                options, manifest=manifest, tool=tool, base_python=base_python,
+                target_python=target_python, container_id=container_id,
             )
-        if not base_python:
+        except SetupError as exc:
+            return _fail(f"{exc}.", hint=exc.hint)
+        if target_versions and target_python not in target_versions:
             return _fail(
-                "base_python is required.",
-                hint=f"Suggested base_python: {options.base_python_default}",
-            )
-        if not target_python or (valid_targets and target_python not in valid_targets):
-            return _fail(
-                f"Invalid or missing target_python {target_python!r}.",
-                hint=f"Valid target_python values: {valid_targets}",
-            )
-        if tool == "container" and not container_id:
-            return _fail(
-                "container_id is required when tool == 'container'.",
-                hint=f"Running containers: {[c.id for c in options.containers]}",
+                f"Invalid target_python {target_python!r}.",
+                hint=f"Valid target_python values: {target_versions}",
             )
 
-        choices = SetupChoices(
+        config = apply_setup(path, SetupChoices(
             selected_manifest=manifest,
             selected_tool=ToolChoice(tool),
             base_python=base_python,
             target_python=target_python,
             container_id=container_id,
-        )
-        config = apply_setup(path, choices)
+            target_env_created=bool(target_env),
+            target_env_path=target_env,
+        ))
         config_path = str(path / ".pymolt" / "env_config.json")
-        data = {"config": config.model_dump(mode="json"), "config_path": config_path}
-        summary = (
-            f"Saved config to {config_path}.\n"
-            f"Manifest {manifest}, tool {tool}, {base_python} -> {target_python}."
-        )
         return _ok(
-            summary,
-            data,
+            f"Saved config to {config_path}.\n"
+            f"Manifest {manifest}, tool {tool}, {base_python} -> {target_python}.",
+            {"config": config.model_dump(mode="json"), "config_path": config_path},
             full_report_path=config_path,
             hint="Run assess to compare baseline vs target dependency graphs.",
         )
     except Exception as e:  # noqa: BLE001
-        return _fail(f"setup_apply failed: {e}", hint="Re-run setup_options for valid values.")
+        return _fail(f"setup failed: {e}", hint="Call setup with no choices for valid values.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -493,7 +486,7 @@ def assess(
 
     A successful resolve is an INPUT to the migration, not evidence it worked.
     Never report "the migration is feasible" from this tool alone — cite the
-    baseline tier, and get behavioural proof from contract_report.
+    baseline tier, and get behavioural proof from verify.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -501,6 +494,10 @@ def assess(
         risk: When true, assess per-package migration risk (CVEs, wheels,
             abandonment). This does NETWORK calls (cached) and can take a while.
         no_cache: Bypass the resolved-graph cache and re-resolve from scratch.
+
+    On a successful resolve it also returns `target_env`: the uv commands (and a
+    Dockerfile derived from the project's, if it has one) that build the target
+    environment. pymolt builds nothing; you or the engineer build it.
 
     Use after setup. Requires `uv` on PATH.
     """
@@ -514,7 +511,7 @@ def assess(
         if not effective_target:
             return _fail(
                 "No target_python given and none configured.",
-                hint="Pass target_python (e.g. '3.13') or run setup_apply first.",
+                hint="Pass target_python (e.g. '3.13') or run setup first.",
             )
 
         tool = config.get("selected_tool", "uv")
@@ -575,6 +572,15 @@ def assess(
         }
         if rows_trunc:
             data["truncated"] = rows_trunc
+        if result.target_resolved:
+            from pymolt.setup.target_hint import build_target_hint
+
+            hint = build_target_hint(path, effective_target, manifest=target_manifest)
+            data["target_env"] = {
+                "suggested_uv_commands": hint.suggested_uv_commands,
+                "suggested_dockerfile": hint.suggested_dockerfile,
+                "notes": hint.notes,
+            }
 
         if result.target_resolved:
             head = f"Target Python {effective_target}: resolution feasible."
@@ -593,7 +599,7 @@ def assess(
             summary,
             data,
             full_report_path=full_path,
-            hint="Capture a baseline contract (contract_capture when='baseline') before "
+            hint="Capture a baseline contract (capture when='baseline') before "
                  "editing code, then edit, then capture post-migration.",
         )
     except Exception as e:  # noqa: BLE001
@@ -604,77 +610,14 @@ def assess(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. contract_map
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def contract_map(project_dir: str = ".") -> dict:
-    """Every call site where this project's code enters a third-party dependency,
-    resolved through imports and scopes with LibCST. Cheap, static, no runtime.
-
-    Do not try to reconstruct this by reading files or grepping imports: an import
-    tells you a module is present, not which symbols are called or how often, and
-    counting imports undercounts the real contact surface severalfold. This is the
-    denominator every coverage and trust number is measured against.
-
-    Args:
-        project_dir: Project directory (default: current directory).
-
-    Returns total call sites, distinct symbols, and per-dependency ranking.
-    Run it before migrating, to see the surface a change could break.
-    """
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.verify.contact_map import build_contact_map
-
-        cmap = build_contact_map(str(path))
-        full = cmap.model_dump(mode="json")
-        full_path = _write_full_report(path, "contract_map", full)
-
-        per_dep = sorted(
-            ((dep, len(targets)) for dep, targets in cmap.by_dep.items()),
-            key=lambda kv: (-kv[1], kv[0]),
-        )
-        per_dep_capped, per_dep_trunc = _fit_answer([f"{d} {c}" for d, c in per_dep])
-        data: dict[str, Any] = {
-            "total_contacts": len(cmap.contacts),
-            "distinct_symbols": len({c.target for c in cmap.contacts}),
-            "files_scanned": cmap.files_scanned,
-            "per_dependency_format": "dep distinct_symbol_count",
-            "per_dependency": per_dep_capped,
-        }
-        if per_dep_trunc:
-            data["truncated"] = per_dep_trunc
-
-        summary = (
-            f"{len(cmap.contacts)} static contact(s) — call sites — across "
-            f"{len(cmap.by_dep)} dependency(ies) and "
-            f"{len({c.target for c in cmap.contacts})} distinct symbol(s), "
-            f"{cmap.files_scanned} file(s) scanned.\n"
-            f"Ranked by distinct symbols per dependency. "
-            + _truncation_note(len(per_dep_capped), per_dep_trunc, full_path)
-        )
-        return _ok(
-            summary,
-            data,
-            full_report_path=full_path,
-            hint="Capture baseline + post-migration traces, then run contract_report.",
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(f"contract_map failed: {e}",
-                     hint="Check that `project_dir` is a readable project directory.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. contract_capture
+# 6. capture
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CAPTURE_WHEN = {"baseline": "baseline", "post-migration": "post_migration"}
 
 
 @mcp.tool()
-def contract_capture(
+def capture(
     project_dir: str = ".",
     when: str = "baseline",
     mode: str = "tests",
@@ -704,7 +647,7 @@ def contract_capture(
         request_id: Request identity for correlation.
         correlation_id: Cross-system correlation identity.
 
-    Use baseline before editing code, post-migration after — contract_report diffs them.
+    Use baseline before editing code, post-migration after — verify compares them.
     """
     gate = _require_exec_allowed()
     if gate is not None:
@@ -733,6 +676,11 @@ def contract_capture(
             return _fail(
                 "command is required.",
                 hint="Provide a command list, e.g. ['pytest', 'tests/'].",
+            )
+        if service.environment_fingerprint(path) is None:
+            return _fail(
+                "pymolt is not configured for this project.",
+                hint="Run setup first. A capture records the environment it was taken in.",
             )
 
         existing = getattr(service.load_contract_state(str(path)), when_key)
@@ -780,482 +728,194 @@ def contract_capture(
             data,
             full_report_path=slot.trace_path,
             hint=("Edit the project's code, then capture when='post-migration'."
-                  if need_post else "Run contract_report to diff baseline vs post-migration."),
+                  if need_post else "Run verify to compare baseline and post-migration."),
         )
     except Exception as e:  # noqa: BLE001
         return _fail(
-            f"contract_capture failed: {e}",
+            f"capture failed: {e}",
             hint="Ensure `command` runs from `project_dir` and exits (e.g. a test suite).",
         )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. contract_report
+# 7. verify
 # ─────────────────────────────────────────────────────────────────────────────
+
+_CHANGE_CATEGORIES = ("changed", "disappeared", "appeared", "uncomparable", "rewritten")
 
 
 @mcp.tool()
-def contract_report(project_dir: str = ".") -> dict:
+def verify(project_dir: str = ".") -> dict:
     """The verdict on whether the migration changed your program's behaviour:
-    static contact map × recorded runtime traces → confirmed / BLIND coverage,
-    a trust %, and exactly which dependency calls now return something else,
-    raise something else, or stopped happening.
+    PASS, FAIL or INCONCLUSIVE, with the reasons, the coverage of the static
+    contact map (confirmed / BLIND, trust %), and exactly which dependency calls
+    now return something else, raise something else, or stopped happening.
 
     This is the one question no amount of file reading, type checking or
     dependency resolution can answer — it requires the baseline and
-    post-migration traces from contract_capture. A green test suite and a clean
-    resolve are not substitutes: they do not tell you a call started returning an
-    empty generator instead of None.
+    post-migration captures from capture. A green test suite and a
+    clean resolve are not substitutes: they do not tell you a call started
+    returning an empty generator instead of None.
 
     Args:
         project_dir: Project directory (default: current directory).
 
-    Auto-sources baseline/post-migration from contract_capture. Repeat edits +
-    post-migration capture until no result_changed remains.
+    Same verdict as `pymolt verify`, saved to .pymolt/ so status counts it.
+    Repeat edits + post-migration capture until the verdict is PASS.
     """
     try:
         path = _resolve_dir(project_dir)
+        from pymolt.migration_state import MigrationReceipt
         from pymolt.verify import service
-        from pymolt.verify.diff import build_boundary_diff
+        from pymolt.verify.unified import build_unified_verification
 
         rep = service.build_contract_report_from_state(str(path))
-        full = rep.model_dump(mode="json")
-        full_path = _write_full_report(path, "contract_report", full)
+        receipt = MigrationReceipt.load(path)
+        unified = build_unified_verification(
+            rep, run_id=receipt.run_id if receipt is not None else None,
+        )
+        unified.save(path)
+        full_path = _write_full_report(path, "verify", rep.model_dump(mode="json"))
 
         trust_pct = round(rep.trust * 100)
         data: dict[str, Any] = {
+            "verdict": unified.verdict.value,
+            "reasons": rep.verdict_reasons,
             "static_targets": rep.static_targets,
             "confirmed": rep.confirmed,
             "blind": rep.blind,
             "dynamic_only": rep.dynamic_only,
             "trust_pct": trust_pct,
         }
-
-        # Behavioral verdicts + NEEDS_ACTION come from the baseline->post BoundaryDiff.
-        # rep.diff carries only counts; rebuild the diff for the symbol lists,
-        # mirroring how the CLI report auto-sources the two named slots.
-        state = service.load_contract_state(str(path))
-        post_captured = state.post_migration is not None
-        if rep.diff is not None and state.baseline is not None and state.post_migration is not None:
-            bdiff = build_boundary_diff(state.baseline.trace_path, state.post_migration.trace_path)
-
-            def _names(entries: list[dict]) -> tuple[list[str], int]:
-                names = [e.get("qualname", "?") for e in entries]
-                return _fit_answer(names)
-
-            rc, rc_t = _names(bdiff.result_changed)
-            rk, rk_t = _names(bdiff.raise_changed)
-            dp, dp_t = _names(bdiff.disappeared)
-            nh, nh_t = _names(bdiff.skipped_opaque)
-            # True totals, independent of what fit in the payload — the summary
-            # below must never report a truncated length as the finding count.
-            totals = {
-                "result_changed": len(bdiff.result_changed),
-                "raise_changed": len(bdiff.raise_changed),
-                "disappeared": len(bdiff.disappeared),
-                "needs_action": len(bdiff.skipped_opaque),
-            }
-            data["behavioral"] = {
-                "result_changed": rc,
-                "raise_changed": rk,
-                "disappeared": dp,
-                "needs_action": nh,
-                "counts": totals,
-                "clean": bdiff.is_clean(),
-            }
-            for key, trunc in (("result_changed", rc_t), ("raise_changed", rk_t),
-                               ("disappeared", dp_t), ("needs_action", nh_t)):
-                if trunc:
-                    data["behavioral"][f"{key}_truncated"] = trunc
-
         summary_lines = [
+            f"VERDICT: {unified.verdict.value.upper()}"
+            + (f" — {'; '.join(rep.verdict_reasons)}" if rep.verdict_reasons else ""),
             f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
-            f"dynamic-only {rep.dynamic_only}.",
-            f"Contract trust: {trust_pct}%.",
+            f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.",
         ]
-        behavioral = data.get("behavioral")
-        if behavioral is not None:
-            c = behavioral["counts"]
-            summary_lines.append(
-                f"Behavior: result_changed {c['result_changed']}, "
-                f"raise_changed {c['raise_changed']}, "
-                f"disappeared {c['disappeared']} "
-                f"({'clean' if behavioral['clean'] else 'CHANGED'})."
-            )
-            dropped = sum(t for t in (rc_t, rk_t, dp_t, nh_t))
+
+        fact_diff = rep.fact_diff or {}
+        entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
+        if fact_diff:
+            changes: dict[str, Any] = {}
+            dropped = 0
+            for category in _CHANGE_CATEGORIES:
+                names = [e.get("symbol", "?") for e in entries if e.get("category") == category]
+                if names:
+                    shown, cut = _fit_answer(names)
+                    changes[category] = shown
+                    dropped += cut
+            data["changes"] = changes
+            data["change_counts"] = {
+                k: v for k, v in (fact_diff.get("counts") or {}).items() if v
+            }
+            counted = ", ".join(f"{k} {v}" for k, v in data["change_counts"].items())
+            summary_lines.append(f"Calls: {counted or 'nothing moved'}.")
             if dropped:
                 summary_lines.append(
-                    f"{dropped} symbol name(s) omitted from the lists below — "
-                    f"full report: {full_path}"
+                    f"{dropped} symbol name(s) omitted from the lists — full report: {full_path}"
                 )
 
+        state = service.load_contract_state(str(path))
         hint = None
-        if not post_captured:
+        if state.post_migration is None:
             hint = ("No post-migration capture yet — edit the code, then "
-                    "contract_capture when='post-migration'.")
-        elif behavioral is not None and not behavioral["clean"]:
-            hint = ("Behavior changed — fix the flagged symbols, re-capture "
-                    "post-migration, re-report.")
+                    "capture when='post-migration'.")
+        elif unified.verdict.value == "fail":
+            hint = ("Behaviour changed — fix the listed calls, re-capture "
+                    "post-migration, verify again.")
 
         return _ok("\n".join(summary_lines), data, full_report_path=full_path, hint=hint)
     except Exception as e:  # noqa: BLE001
         return _fail(
-            f"contract_report failed: {e}",
-            hint="Capture at least a baseline trace with contract_capture first.",
+            f"verify failed: {e}",
+            hint="Capture at least a baseline with capture first.",
         )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. codemods & codemods_preview
+# 8. plan
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @mcp.tool()
-def codemods_preview(project_dir: str = ".", endpoint: str | None = None) -> dict:
-    """Preview the LibCST codemods that would rewrite call sites for the upgrades
-    found by assess (dry-run). Returns modified file diffs and affected packages.
+def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
+    """Save the verified code changes for the target manifest as the migration plan,
+    and return them as diffs. Writes .pymolt/migration_plan.json and no source file.
+
+    The changes are LibCST codemods fetched for the dependency versions assess
+    pinned. Only `pymolt apply`, run in the project by a person, writes them: it
+    applies exactly this plan and refuses it if a planned file changed since.
 
     Args:
         project_dir: Project directory (default: current directory).
         endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
+
+    Use after setup, assess and the baseline capture.
     """
-    return codemods(project_dir=project_dir, write=False, endpoint=endpoint)
-
-
-@mcp.tool()
-def codemods(
-    project_dir: str = ".",
-    write: bool = False,
-    endpoint: str | None = None,
-) -> dict:
-    """Fetch AST transformation rules and return an exact local preview.
-
-    MCP is intentionally read-only for source mutations: use the CLI's
-    ``plan``/``apply`` pair after human review.
-
-    Args:
-        project_dir: Project directory (default: current directory).
-        write: Deprecated mutation request; always rejected for safety.
-        endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
-    """
-    if write:
-        return _fail(
-            "MCP codemod writes are disabled: mutation requires the baseline-gated CLI.",
-            hint="Create a plan with `pymolt plan .`, then run `pymolt apply .` in the project.",
-        )
     try:
         import difflib
         path = _resolve_dir(project_dir)
         from pymolt.codemods.models import CodemodPattern
-        from pymolt.codemods.service import (
-            preview_codemods,
-            resolve_codemod_migrations,
-        )
+        from pymolt.codemods.service import PlanInputError, build_migration_plan
         from pymolt.config import load_endpoint
-        from pymolt.ingestion.config import EnvConfig
 
-        effective_endpoint = load_endpoint(endpoint)
-        cfg = EnvConfig.load(path / ".pymolt" / "env_config.json")
-        config = cfg.model_dump(mode="json") if cfg else None
         try:
-            migrations, source_desc = resolve_codemod_migrations(str(path), config=config)
-        except ValueError as exc:
-            return _fail(
-                f"No migration set available: {exc}",
-                hint="Run assess first so codemods can derive the changed packages.",
+            migration_plan, previews, source_desc, by_pkg = build_migration_plan(
+                path, base_url=load_endpoint(endpoint),
             )
+        except PlanInputError as exc:
+            return _fail(str(exc), hint=exc.hint or None)
+        plan_path = migration_plan.save(path)
 
-        by_pkg, previews = preview_codemods(
-            str(path), migrations, base_url=effective_endpoint, auto_apply_only=True
-        )
-        changed_files = sorted({p.path for p in previews if p.old_source != p.new_source})
+        changed = [p for p in previews if p.old_source != p.new_source]
         diffs = []
-        for p in previews:
-            if p.old_source != p.new_source:
-                diff_lines = list(difflib.unified_diff(
-                    p.old_source.splitlines(keepends=True),
-                    p.new_source.splitlines(keepends=True),
-                    fromfile=f"a/{p.path}",
-                    tofile=f"b/{p.path}",
-                ))
-                diffs.append({"path": p.path, "diff": "".join(diff_lines)})
-
-        files_capped, files_trunc = _fit_answer(changed_files)
+        for p in changed:
+            diffs.append({"path": p.path, "diff": "".join(difflib.unified_diff(
+                p.old_source.splitlines(keepends=True),
+                p.new_source.splitlines(keepends=True),
+                fromfile=f"a/{p.path}", tofile=f"b/{p.path}",
+            ))})
+        files_capped, files_trunc = _fit_answer(sorted(p.path for p in changed))
         diffs_capped, diffs_trunc = _fit_answer(
             [json.dumps(d) for d in diffs], budget=ANSWER_BUDGET_CHARS * 2
         )
-        diffs_capped = [json.loads(d) for d in diffs_capped]
-
         per_package = []
         for pkg, items in by_pkg.items():
-            conf_mix: dict[str, int] = {}
-            rules = patterns = 0
-            for item in items:
-                if isinstance(item, CodemodPattern):
-                    patterns += 1
-                else:
-                    rules += 1
-                conf = getattr(item, "confidence", "unknown")
-                conf_mix[conf] = conf_mix.get(conf, 0) + 1
-            per_package.append({
-                "package": pkg,
-                "rules": rules,
-                "patterns": patterns,
-                "confidence_mix": conf_mix,
-            })
-        per_package_capped, pkg_trunc = _fit_answer([
-            f"{e['package']} rules={e['rules']} patterns={e['patterns']} "
-            + ",".join(f"{k}:{v}" for k, v in sorted(e["confidence_mix"].items()))
-            for e in per_package
-        ])
-
-        full = {
-            "write": write,
-            "source": source_desc,
-            "per_package": per_package,
-            "files_changed": changed_files,
-            "diffs": diffs,
-        }
-        full_path = _write_full_report(path, "codemods", full)
+            patterns = sum(1 for item in items if isinstance(item, CodemodPattern))
+            per_package.append(f"{pkg} rules={len(items) - patterns} patterns={patterns}")
+        full_path = _write_full_report(path, "plan", {
+            "plan_id": migration_plan.plan_id, "source": source_desc,
+            "per_package": per_package, "diffs": diffs,
+        })
 
         data: dict[str, Any] = {
-            "write": write,
+            "plan_id": migration_plan.plan_id,
+            "plan_path": str(plan_path),
             "source": source_desc,
-            "per_package": per_package_capped,
-            "files_changed": files_capped,
-            "diffs": diffs_capped,
+            "per_package": per_package,
+            "files_to_change": files_capped,
+            "rewrite_sites": sum(item.sites for item in migration_plan.changes),
+            "diffs": [json.loads(d) for d in diffs_capped],
         }
-        if pkg_trunc:
-            data["per_package_truncated"] = pkg_trunc
         if files_trunc:
             data["files_truncated"] = files_trunc
         if diffs_trunc:
             data["diffs_truncated"] = diffs_trunc
-
-        action_desc = "DRY-RUN preview"
         summary = (
-            f"Codemods ({action_desc}):\n"
-            f"{len(per_package)} package(s) from {source_desc}; "
-            f"{len(changed_files)} file(s) would change.\n"
+            f"Plan {migration_plan.plan_id[:8]} saved: {len(changed)} file(s) to change, "
+            f"{data['rewrite_sites']} site(s), from {source_desc}.\n"
             + _truncation_note(len(files_capped), files_trunc, full_path)
         )
         return _ok(
-            summary,
-            data,
-            full_report_path=full_path,
-            hint="Create a plan with `pymolt plan .`, review it, then apply via the baseline-gated CLI.",
+            summary, data, full_report_path=full_path,
+            hint="Review the diffs, then run `pymolt apply .` in the project.",
         )
     except Exception as e:  # noqa: BLE001
         return _fail(
-            f"codemods failed: {e}",
-            hint="Check that Axiom Cloud Hub is reachable and API token is configured.",
+            f"plan failed: {e}",
+            hint="Check that Axiom Cloud Hub is reachable and an API token is configured.",
         )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. migrate (end-to-end macro tool)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def migrate(
-    project_dir: str = ".",
-    target_python: str | None = None,
-    manifest: str | None = None,
-    write: bool = False,
-    endpoint: str | None = None,
-) -> dict:
-    """Run the complete end-to-end Python migration workflow for an agent in one call.
-
-    Orchestrates: Setup/Discovery -> Assess (dependency resolution) -> LibCST Codemods.
-
-    Args:
-        project_dir: Project directory (default: current directory).
-        target_python: Target Python version (e.g. '3.12' or '3.13'). Defaults to 3.12.
-        manifest: Manifest path (e.g. 'requirements.txt'). Defaults to detected manifest.
-        write: Deprecated mutation request; always rejected. Use CLI plan/apply for writes.
-        endpoint: Custom Axiom Cloud Hub URL.
-    """
-    if write:
-        return _fail(
-            "MCP migration writes are disabled: mutation requires the baseline-gated CLI.",
-            hint="Capture a baseline, then run `pymolt plan .` and `pymolt apply .` after human review.",
-        )
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.assess.service import run_assess
-        from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations
-        from pymolt.config import load_endpoint
-        from pymolt.ingestion.config import EnvConfig
-        from pymolt.ingestion.detect import detect_sources
-
-        sources = detect_sources(path)
-        if not sources:
-            return _fail(
-                f"No Python dependency sources detected in {path}",
-                hint="Add a requirements.txt, pyproject.toml, Pipfile, environment.yml or setup.py.",
-            )
-
-        config_file = path / ".pymolt" / "env_config.json"
-        cfg = EnvConfig.load(config_file) if config_file.is_file() else None
-        config = cfg.model_dump(mode="json") if cfg else {}
-
-        target_py = target_python or config.get("target_python", "3.12")
-        selected_manifest = manifest or config.get("selected_manifest")
-        if not selected_manifest:
-            lock_sources = [s for s in sources if s.is_lock]
-            selected_manifest = lock_sources[0].path.name if lock_sources else sources[0].path.name
-
-        tool = config.get("selected_tool", "uv")
-        if hasattr(tool, "value"):
-            tool = tool.value
-
-        assess_res = run_assess(
-            str(path),
-            target_python=target_py,
-            source_manifest=selected_manifest,
-            config=config,
-            tool=tool,
-            base_python=config.get("base_python"),
-            container_id=config.get("container_id"),
-            write_manifest=False,
-        )
-
-        if not assess_res.target_resolved:
-            return _fail(
-                f"Target dependency resolution failed: {assess_res.target_error or 'Dependency conflict'}",
-                hint="Check that packages support the target Python version.",
-            )
-
-        target_manifest = assess_res.target_manifest_path or "preview only — not written"
-        degrade_warnings: list[str] = []
-        try:
-            migrations, source_desc = resolve_codemod_migrations(
-                str(path),
-                assess_result=assess_res,
-                config=config,
-                warnings=degrade_warnings,
-            )
-        except Exception:
-            migrations = []
-
-        effective_endpoint = load_endpoint(endpoint)
-        by_pkg, previews = preview_codemods(
-            str(path), migrations, base_url=effective_endpoint, auto_apply_only=True
-        )
-
-        total_patterns = sum(len(items) for items in by_pkg.values())
-        changed_files = [
-            preview.path for preview in previews
-            if preview.old_source != preview.new_source
-        ]
-        full_data = {
-            "target_python": target_py,
-            "target_manifest": target_manifest,
-            "packages_assessed": len(assess_res.rows),
-            "upgrades": len(migrations),
-            "codemods_count": total_patterns,
-            "files_changed": changed_files,
-            "write": write,
-        }
-        full_path = _write_full_report(path, "migrate", full_data)
-
-        summary = (
-            f"Migrate ({'APPLIED' if write else 'PREVIEW'}):\n"
-            f"Target Python: {target_py} | Assessed: {len(assess_res.rows)} packages | "
-            f"Upgrades: {len(migrations)} | Codemods: {total_patterns} across {len(changed_files)} file(s)."
-        )
-        return _ok(
-            summary,
-            full_data,
-            full_report_path=full_path,
-            hint="Capture baseline, then create a plan with `pymolt plan .` and apply it with `pymolt apply .`.",
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(f"migrate failed: {e}", hint="Ensure project directory and dependencies are accessible.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. env_hint
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def env_hint(
-    project_dir: str = ".",
-    target_python: str | None = None,
-    manifest: str | None = None,
-) -> dict:
-    """Suggests how to build a runnable target-Python environment (a derived Dockerfile
-    and/or `uv venv` + `uv pip install` commands) from the assess target manifest — run
-    assess first. This is a SUGGESTION only: pymolt never builds the environment, it only
-    tells you what to build. Build it yourself, then point pymolt at it (`pymolt setup`'s
-    target environment prompt, or --container on contract capture).
-
-    Args:
-        project_dir: Project directory (default: current directory).
-        target_python: Target Python (e.g. "3.13"); falls back to setup config.
-        manifest: Target manifest path; defaults to requirements-target.txt.
-
-    Use after assess, before contract_capture(when='post-migration'). Runs nothing — no
-    exec opt-in required.
-    """
-    try:
-        path = _resolve_dir(project_dir)
-        from pymolt.ingestion.config import EnvConfig
-        from pymolt.setup.target_hint import build_target_hint
-
-        cfg = EnvConfig.load(path / ".pymolt" / "env_config.json")
-        effective_target_python = target_python or (cfg.target_python if cfg else None)
-        if not effective_target_python:
-            return _fail(
-                "target_python is required (no --target-python given and none configured).",
-                hint="Run `pymolt setup` or `pymolt assess` first, or pass target_python "
-                     "explicitly.",
-            )
-
-        effective_manifest = manifest
-        if effective_manifest is None:
-            default_target_manifest = path / "requirements-target.txt"
-            if default_target_manifest.is_file():
-                effective_manifest = default_target_manifest.name
-            elif cfg is not None and cfg.selected_manifest:
-                effective_manifest = cfg.selected_manifest
-
-        hint = build_target_hint(path, effective_target_python, manifest=effective_manifest)
-        full = hint.model_dump(mode="json")
-        full_path = _write_full_report(path, "env_hint", full)
-
-        data: dict[str, Any] = {
-            "target_python": hint.target_python,
-            "manifest": hint.manifest,
-            "suggested_dockerfile": hint.suggested_dockerfile,
-            "suggested_uv_commands": hint.suggested_uv_commands,
-            "notes": hint.notes,
-        }
-        summary_lines = [
-            f"Target-env suggestion for Python {hint.target_python} (build it yourself)."
-        ]
-        if hint.suggested_dockerfile:
-            summary_lines.append("Derived Dockerfile suggested (see full_report_path).")
-        if hint.notes:
-            summary_lines.append("Notes: " + "; ".join(hint.notes))
-        return _ok(
-            "\n".join(summary_lines),
-            data,
-            full_report_path=full_path,
-            hint=hint.capture_hint,
-        )
-    except Exception as e:  # noqa: BLE001
-        return _fail(
-            f"env_hint failed: {e}",
-            hint="Run assess first so a target manifest exists, or pass target_python explicitly.",
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def run() -> None:

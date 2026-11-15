@@ -32,28 +32,28 @@ server whose command is `pymolt mcp`. The server name is `pymolt`.
 
 ## Tools
 
-Every tool takes `dir: str = "."` (the project directory).
+The tools have the names of the CLI commands. Every tool takes
+`project_dir: str = "."` (the project directory).
 
 | Tool | Mirrors | What it does |
 |------|---------|--------------|
-| `scan` | `pymolt scan` | Project roots, Python-version evidence + divergence, dependency edges (offline, no resolution). Use instead of reading Dockerfiles/lockfiles/tox by hand. |
-| `setup_options` | `pymolt setup` (detection) | Lists the exact manifest / tool / interpreter / target-Python strings `setup_apply` accepts. |
-| `setup_apply` | `pymolt setup` (apply) | Writes `.pymolt/env_config.json`. Deterministic: an invalid choice returns `ok:false` with the valid values. |
-| `assess` | `pymolt assess` | Resolves baseline vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest. `risk=true` does cached network calls. |
-| `env_create` | `pymolt env create` | Provisions the target migration environment (uv venv or derived Dockerfile) from the assess target manifest. Run assess first. |
-| `contract_map` | `pymolt contract map` | Static dependency boundary: calls, attributes, decorators, bases, contexts, constants and protocols. |
-| `contract_capture` | `pymolt contract capture` | Runs YOUR command with the boundary tracer injected; post-migration automatically targets APIs from the applied Axiom plan and records runtime/loss metadata. |
-| `contract_report` | `pymolt contract report` | The verification oracle: static × dynamic → confirmed / BLIND / trust %, plus the behavioral verdict (result_changed / raise_changed / disappeared) across the migration. |
-| `codemods_preview` | `pymolt codemods` (dry-run) | Dry-run preview of the codemods that would rewrite call sites. Never writes files. |
+| `status` | `pymolt status` | Where the project stands, whether the configured environments exist, and the one tool to run next. |
+| `scan` | `pymolt scan` | Project roots, Python-version evidence + divergence, dependency edges, and every call site into a dependency (offline, no resolution). Use instead of reading Dockerfiles/lockfiles or grepping imports. |
+| `setup` | `pymolt setup` | With no choices: the exact manifest / tool / interpreter / target-Python strings it accepts. With them: writes `.pymolt/env_config.json`; an invalid choice returns `ok:false` with the valid values. |
+| `assess` | `pymolt assess` | Resolves baseline vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest, and returns how to build the target environment. `risk=true` does cached network calls. |
+| `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Opt-in: `PYMOLT_MCP_ALLOW_EXEC=1`. |
+| `plan` | `pymolt plan` | Saves the codemods for the target manifest as the migration plan and returns the diffs. Writes no source. |
+| `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND / trust %, and the calls that changed. Saved like the CLI's. |
 
 ### Workflow
 
 ```
-scan  ->  (setup_options -> setup_apply)  ->  assess  ->  env_create
-->  [human/agent edits the project's code]
-->  contract_capture(when='baseline'  BEFORE editing)
-->  contract_capture(when='post-migration'  AFTER editing)
-->  pymolt verify .   (CLI: unified persisted verdict and optional canary policy)
+status (any time: which tool is next)
+scan  ->  setup  ->  assess
+->  capture(when='baseline'  BEFORE editing)
+->  plan  ->  [a person runs `pymolt apply .`]   (or the agent edits the code)
+->  capture(when='post-migration'  AFTER editing)
+->  verify
 ```
 
 This is also encoded in the server's `instructions`, which the client surfaces
@@ -84,10 +84,9 @@ with a sibling `"truncated": <N>` when cut; the full payload is written under
 `.pymolt/mcp/<tool>.json` and its path returned in `full_report_path`. Output is
 plain text — no rich/ANSI.
 
-## The preview rule
+## No source writes
 
-`codemods_preview` is a **dry run**: it never writes files to disk. Applying
-codemods always requires explicit human approval through the CLI plan/apply
-workflow (`pymolt plan .` then `pymolt apply .`), outside this server. Agents
-preview and recommend; humans apply. The applied plan retains durable rollback
-data (`pymolt rollback .`).
+`plan` saves the plan and returns the diffs; no tool writes a source file.
+Applying a plan always requires explicit human approval through the CLI
+(`pymolt apply .`), outside this server. Agents plan and recommend; humans
+apply. The applied plan retains rollback data (`pymolt rollback .`).

@@ -338,6 +338,53 @@ def build_target_options(base_python: str) -> list[PythonTargetOption]:
     ]
 
 
+
+class SetupError(ValueError):
+    """A setup value pymolt cannot act on. ``hint`` names the valid ones."""
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
+def is_python_version(value: str) -> bool:
+    """`3`, `3.12`, `3.12.1` — and nothing else."""
+    parts = value.split(".")
+    return 1 <= len(parts) <= 3 and all(p.isdigit() for p in parts)
+
+
+def check_setup_values(
+    options: SetupOptions,
+    *,
+    manifest: str | None = None,
+    tool: str | None = None,
+    base_python: str | None = None,
+    target_python: str | None = None,
+    container_id: str | None = None,
+) -> None:
+    """Reject a given value that later phases could not act on. ``None`` = not given.
+
+    Whether a well-formed target Python must also be on the offered list is the
+    caller's policy: uv may provision interpreters the list does not show.
+    """
+    manifests = [m.name for m in options.manifests]
+    if manifest is not None and manifest not in manifests:
+        raise SetupError(f"unknown manifest {manifest!r}", f"Detected: {', '.join(manifests)}.")
+    available = [t.name for t in options.tools if t.available]
+    if tool is not None and tool not in available:
+        raise SetupError(
+            f"tool {tool!r} is not available here", f"Available: {', '.join(available)}.",
+        )
+    for label, value in (("base Python", base_python), ("target Python", target_python)):
+        if value is not None and not is_python_version(value):
+            raise SetupError(
+                f"{label} {value!r} is not a Python version", "Expected e.g. 3.11 or 3.6.1.",
+            )
+    if tool == "container" and not container_id:
+        running = ", ".join(c.id for c in options.containers) or "none running"
+        raise SetupError("a container is required with the container tool", f"Running: {running}.")
+
+
 def apply_setup(project_dir: str | Path, choices: SetupChoices) -> EnvConfig:
     """Persist the chosen config to ``.pymolt/env_config.json`` and return it.
 

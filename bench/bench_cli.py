@@ -107,8 +107,8 @@ def main() -> int:
 
         offline = [
             ("status", [PYMOLT, "status", str(fdir), "--json"]),
+            # scan includes the static contact map (`contract map` before 0.2).
             ("scan", [PYMOLT, "scan", str(fdir), "--json"]),
-            ("contract map", [PYMOLT, "contract", "map", str(fdir), "--json"]),
         ]
         for name, argv in offline:
             r = measure(name, argv, REPO, args.repeats)

@@ -20,16 +20,11 @@ from pymolt.interfaces import mcp_server  # noqa: E402
 _EXPECTED_TOOLS = {
     "status",
     "scan",
-    "setup_options",
-    "setup_apply",
+    "setup",
     "assess",
-    "contract_map",
-    "contract_capture",
-    "contract_report",
-    "codemods",
-    "codemods_preview",
-    "migrate",
-    "env_hint",
+    "capture",
+    "verify",
+    "plan",
 }
 
 
@@ -57,11 +52,12 @@ def _no_exec_env(monkeypatch):
     monkeypatch.delenv("PYMOLT_MCP_ALLOW_EXEC", raising=False)
 
 
-# ── (a) module imports and all 8 tools are registered ────────────────────────
-def test_all_eight_tools_registered():
+# ── (a) module imports and its tools are registered ──────────────────────────
+def test_the_tools_are_the_cli_commands():
+    """One name per action, the same in the CLI and here."""
     tools = asyncio.run(mcp_server.mcp.list_tools())
     names = {t.name for t in tools}
-    assert _EXPECTED_TOOLS <= names, f"missing tools: {_EXPECTED_TOOLS - names}"
+    assert names == _EXPECTED_TOOLS
 
 
 def test_tool_functions_are_importable_and_callable():
@@ -76,8 +72,7 @@ def test_dir_taking_tools_use_project_dir_param():
     and scan the server's own cwd instead of the target — regression guard."""
     import inspect
 
-    dir_tools = ["scan", "setup_options", "setup_apply", "assess",
-                 "contract_map", "contract_capture", "contract_report", "codemods_preview"]
+    dir_tools = ["scan", "setup", "assess", "capture", "verify", "plan"]
     for name in dir_tools:
         params = inspect.signature(getattr(mcp_server, name)).parameters
         assert "project_dir" in params, f"{name} lost its project_dir param"
@@ -105,6 +100,15 @@ def test_scan_returns_contract_shape_and_writes_report(tmp_path):
     json.loads(written.read_text(encoding="utf-8"))  # must parse
 
 
+def test_scan_reports_the_call_sites_into_dependencies(tmp_path):
+    result = mcp_server.scan(project_dir=str(_make_project(tmp_path)))
+
+    contacts = result["data"]["contacts"]
+    assert contacts["total"] >= 1
+    assert any(row.startswith("requests ") for row in contacts["per_dependency"])
+    assert "call site" in result["summary"]
+
+
 def test_scan_result_is_json_serializable(tmp_path):
     result = mcp_server.scan(project_dir=str(_make_project(tmp_path)))
     json.dumps(result)  # no non-serializable objects leak into the contract
@@ -125,18 +129,13 @@ def test_every_tool_handles_nonexistent_dir(tmp_path):
     missing = str(tmp_path / "nope")
     calls = {
         "scan": lambda: mcp_server.scan(project_dir=missing),
-        "setup_options": lambda: mcp_server.setup_options(project_dir=missing),
-        "setup_apply": lambda: mcp_server.setup_apply(
-            project_dir=missing, manifest="requirements.txt", tool="uv",
-            base_python="3.8", target_python="3.12",
-        ),
+        "setup": lambda: mcp_server.setup(project_dir=missing),
         "assess": lambda: mcp_server.assess(project_dir=missing),
-        "contract_map": lambda: mcp_server.contract_map(project_dir=missing),
-        "contract_capture": lambda: mcp_server.contract_capture(
+        "capture": lambda: mcp_server.capture(
             project_dir=missing, when="baseline", mode="tests", command=["pytest"],
         ),
-        "contract_report": lambda: mcp_server.contract_report(project_dir=missing),
-        "codemods_preview": lambda: mcp_server.codemods_preview(project_dir=missing),
+        "verify": lambda: mcp_server.verify(project_dir=missing),
+        "plan": lambda: mcp_server.plan(project_dir=missing),
     }
     for name, call in calls.items():
         result = call()
@@ -161,21 +160,42 @@ def test_cap_list_truncates_and_reports_remainder():
 
 
 # ── contract-shape helpers ───────────────────────────────────────────────────
-def test_setup_options_happy_path_lists_choices(tmp_path):
-    result = mcp_server.setup_options(project_dir=str(_make_project(tmp_path)))
+def test_setup_without_choices_lists_them_and_saves_nothing(tmp_path):
+    project = _make_project(tmp_path)
+    result = mcp_server.setup(project_dir=str(project))
     assert result["ok"] is True
     assert "requirements.txt" in result["data"]["manifests"]
     assert result["data"]["default_tool"]
+    assert not (project / ".pymolt" / "env_config.json").exists()
 
 
-def test_setup_apply_rejects_invalid_manifest(tmp_path):
+def test_setup_rejects_invalid_manifest(tmp_path):
     project = _make_project(tmp_path)
-    result = mcp_server.setup_apply(
+    result = mcp_server.setup(
         project_dir=str(project), manifest="bogus.txt", tool="uv",
         base_python="3.8", target_python="3.12",
     )
     assert result["ok"] is False
     assert "requirements.txt" in str(result["hint"])
+
+
+def test_setup_names_missing_choices(tmp_path):
+    result = mcp_server.setup(project_dir=str(_make_project(tmp_path)), manifest="requirements.txt")
+    assert result["ok"] is False
+    assert "tool" in result["error"] and "target_python" in result["error"]
+
+
+def test_setup_saves_valid_choices(tmp_path):
+    project = _make_project(tmp_path)
+    options = mcp_server.setup(project_dir=str(project))["data"]
+    result = mcp_server.setup(
+        project_dir=str(project), manifest="requirements.txt", tool=options["tools"][0],
+        base_python="3.8", target_python=options["target_python_options"][0],
+        target_env=".venv-target",
+    )
+    assert result["ok"] is True, result
+    saved = json.loads((project / ".pymolt" / "env_config.json").read_text(encoding="utf-8"))
+    assert saved["target_env_path"] == ".venv-target"
 
 
 # ── workspace confinement (_resolve_dir + _WORKSPACE_ROOT) ──────────────────
@@ -223,24 +243,56 @@ def test_require_exec_allowed_permits_when_env_var_set(monkeypatch):
     assert mcp_server._require_exec_allowed() is None
 
 
-def test_contract_capture_blocked_without_exec_opt_in(tmp_path):
+def test_capture_blocked_without_exec_opt_in(tmp_path):
     project = _make_project(tmp_path)
-    result = mcp_server.contract_capture(
+    result = mcp_server.capture(
         project_dir=str(project), when="baseline", mode="tests", command=["pytest"],
     )
     assert result["ok"] is False
     assert "PYMOLT_MCP_ALLOW_EXEC" in result["hint"]
 
 
-def test_env_hint_not_gated_returns_hint(tmp_path):
-    """env_hint runs nothing (it only suggests a Dockerfile/uv commands), so it must work
-    without PYMOLT_MCP_ALLOW_EXEC set at all — unlike contract_capture."""
+def test_capture_before_setup_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
+    project = _make_project(tmp_path)
+    result = mcp_server.capture(
+        project_dir=str(project), when="baseline", mode="tests", command=["pytest"],
+    )
+    assert result["ok"] is False
+    assert "not configured" in result["error"]
+    assert not (project / ".pymolt" / "contract_state.json").exists()
+
+
+def test_assess_says_how_to_build_the_target_environment(tmp_path, monkeypatch):
+    """What env_hint used to answer comes with the resolve it depends on."""
     project = _make_project(tmp_path)
     (project / "Dockerfile").write_text("FROM python:3.6\n", encoding="utf-8")
-    result = mcp_server.env_hint(project_dir=str(project), target_python="3.13")
-    assert result["ok"] is True
-    assert result["data"]["suggested_dockerfile"] is not None
-    assert "pymolt contract capture --when post-migration" in result["hint"]
+
+    class _Result:
+        target_resolved = True
+        target_error = None
+        manual_zone: list = []
+        risk = None
+        target_manifest_path = "requirements-target.txt"
+        rows: list = []
+
+        def counts_by_status(self):
+            return {}
+
+        def model_dump(self, mode="json"):
+            return {}
+
+    monkeypatch.setattr("pymolt.assess.service.run_assess", lambda *a, **k: _Result())
+    monkeypatch.setattr(
+        "pymolt.interfaces.cli.commands._load_or_autodetect_assess_config",
+        lambda *a, **k: {"target_python": "3.13", "selected_tool": "uv"},
+    )
+
+    result = mcp_server.assess(project_dir=str(project), target_python="3.13")
+
+    env = result["data"]["target_env"]
+    assert "python:3.13" in env["suggested_dockerfile"]
+    assert any("requirements-target.txt" in cmd for cmd in env["suggested_uv_commands"])
 
 
 def test_scan_not_gated_by_exec_check(tmp_path):
@@ -258,60 +310,50 @@ def test_status_tool_returns_funnel_projection(tmp_path):
     assert "next_command" in result["data"]
 
 
-def test_codemods_tool_dry_run_and_write(tmp_path, monkeypatch):
-    from unittest.mock import MagicMock, patch
+def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch):
+    from pymolt.codemods import service as codemod_service
+    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import CodemodPattern, FilePreview
+    from pymolt.ingestion.config import EnvConfig, ToolChoice
+
     project = _make_project(tmp_path)
-    fake_pattern = MagicMock()
-    fake_pattern.old_qualname = "flask.json.JSONEncoder"
-    fake_pattern.new_qualname = "json.JSONEncoder"
-    fake_pattern.confidence = "high"
-
-    with patch("pymolt.codemods.service.resolve_codemod_migrations", return_value=([MagicMock()], "flask 2.0.3 -> 3.0.0")), \
-         patch("pymolt.codemods.service.preview_codemods", return_value=({"flask": [fake_pattern]}, [])):
-        res = mcp_server.codemods(project_dir=str(project), write=False)
-        assert res["ok"] is True
-        assert res["data"]["write"] is False
-        assert "DRY-RUN preview" in res["summary"]
-
-    refused = mcp_server.codemods(project_dir=str(project), write=True)
-    assert refused["ok"] is False
-    assert "baseline-gated CLI" in refused["error"]
-
-
-def test_migrate_tool_executes_pipeline(tmp_path):
-    from unittest.mock import MagicMock, patch
-
-    from pymolt.assess.service import AssessResult
-    project = _make_project(tmp_path)
-
-    fake_assess = AssessResult(
-        project_dir=str(project),
-        source_manifest="requirements.txt",
-        target_python="3.12",
-        target_resolved=True,
-        target_manifest_path=str(project / "requirements-target.txt"),
-        rows=[{"package": "requests", "legacy_version": "2.31.0", "target_version": "2.32.0", "status": "upgrade"}],
+    (project / "requirements-target.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.11", target_python="3.12",
+    ).save(project / ".pymolt" / "env_config.json")
+    source = (project / "app.py").read_text(encoding="utf-8")
+    pattern = CodemodPattern(
+        old_qualname="requests.get", new_qualname="requests.api.get", kind="rewrite-import",
+    )
+    preview = FilePreview(
+        path=str(project / "app.py"), old_source=source,
+        new_source=source.replace("requests.get", "requests.api.get"), sites=1,
+        patterns=[pattern],
+    )
+    monkeypatch.setattr(
+        codemod_service, "resolve_codemod_migrations",
+        lambda *a, **k: ([DependencyMigration("requests", "2.31.0", "2.32.0")], "target"),
+    )
+    monkeypatch.setattr(
+        codemod_service, "preview_codemods", lambda *a, **k: ({"requests": [pattern]}, [preview]),
     )
 
-    with patch("pymolt.assess.service.run_assess", return_value=fake_assess), \
-         patch("pymolt.codemods.service.run_codemods", return_value=({"requests": []}, MagicMock(changes=[]))):
-        res = mcp_server.migrate(project_dir=str(project), target_python="3.12", write=False)
-        assert res["ok"] is True
-        assert "Migrate (PREVIEW)" in res["summary"]
-        assert res["data"]["packages_assessed"] == 1
+    result = mcp_server.plan(project_dir=str(project))
 
-    refused = mcp_server.migrate(project_dir=str(project), target_python="3.12", write=True)
-    assert refused["ok"] is False
-    assert "baseline-gated CLI" in refused["error"]
+    assert result["ok"] is True, result
+    assert (project / ".pymolt" / "migration_plan.json").is_file()
+    assert result["data"]["files_to_change"] == [str(project / "app.py")]
+    assert "requests.api.get" in result["data"]["diffs"][0]["diff"]
+    assert (project / "app.py").read_text(encoding="utf-8") == source
+    assert "pymolt apply" in result["hint"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Answer lists are budgeted, not clipped
-#
-# Regression cover for the benchmarked failure: capping an answer list at a
-# fixed item count made agents answer from a partial list, and the summary
-# reported the truncated length as the finding count.
-# ─────────────────────────────────────────────────────────────────────────────
+def test_plan_before_setup_says_what_to_run(tmp_path):
+    result = mcp_server.plan(project_dir=str(_make_project(tmp_path)))
+    assert result["ok"] is False
+    assert "not configured" in result["error"]
+    assert "setup" in result["hint"]
 
 
 def test_fit_answer_keeps_everything_that_fits():

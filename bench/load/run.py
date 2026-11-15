@@ -4,7 +4,7 @@
     python3 bench/load/run.py setup
     python3 bench/load/run.py nocap   --duration 60 --rate 0
     python3 bench/load/run.py capture --duration 60 --rate 0 [--env K=V ...]
-                                      [-- <extra pymolt contract capture args>]
+                                      [-- <extra pymolt capture args>]
     python3 bench/load/run.py report  <run-dir | session-dir> [--nocap RUN_DIR] [--no-fold]
     python3 bench/load/run.py gate    [--duration 60] [--paced-rate 200]
 
@@ -72,7 +72,7 @@ GATE = {
     "max_dropped": 0,           # dropped calls/events across every capture run
     "max_bytes_per_day": 1 * GB,
     "max_p99_ratio": 2.0,       # paced p99 (capture) <= 2x paced p99 (no capture)
-    "max_fold_rss": 500 * MIB,  # host `contract report` peak RSS
+    "max_fold_rss": 500 * MIB,  # host `verify` peak RSS
 }
 
 def _utcnow() -> datetime:
@@ -476,7 +476,7 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
             mix: str | None = None, wait_quiet: float = 0.0,
             steady: str | None = None) -> Path:
     """Run the service bare (nocap), under a no-op profile hook (hook, a control) or under
-    `pymolt contract capture` (capture), and drive load.
+    `pymolt capture` (capture), and drive load.
 
     ``steady`` (capture only): None/"off" measures right after the short warmup; "auto"
     keeps the load running until the watcher has switched discover -> watch (live sidecar
@@ -507,6 +507,13 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
     svc_dir.mkdir()
     shutil.copy2(SERVICE_SRC / "app.py", svc_dir / "app.py")
     shutil.copy2(HERE / "requirements.in", svc_dir / "requirements.txt")
+    # `pymolt capture` refuses to run before setup: the capture records the
+    # environment it was taken in.
+    (svc_dir / ".pymolt").mkdir()
+    (svc_dir / ".pymolt" / "env_config.json").write_text(json.dumps({
+        "selected_manifest": "requirements.txt", "selected_tool": "uv",
+        "base_python": PYTHON_VERSION, "target_python": PYTHON_VERSION,
+    }))
     tmp_dir = run_dir / "tmp"
     tmp_dir.mkdir()
 
@@ -557,7 +564,7 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
             cmd = [SVC_PY, "app.py"]
         else:
             log = run_dir / "capture.log"
-            cmd = [PYMOLT, "contract", "capture", "--when", "baseline", "--mode", "command",
+            cmd = [PYMOLT, "capture", "baseline", "--mode", "command",
                    "--project-dir", svc_dir, "--force", *capture_args, "--", SVC_PY, "app.py"]
         record["command"] = [str(c) for c in cmd]
         # The load generator starts together with the service: it builds its request
@@ -976,11 +983,11 @@ def _print_run_line(record: dict) -> None:
 
 
 def measure_fold(run_dir: Path) -> dict:
-    """`pymolt contract report <svc> --json` under /usr/bin/time: peak RSS and seconds."""
+    """`pymolt verify <svc> --json` under /usr/bin/time: peak RSS and seconds."""
     _require_pymolt()
     svc_dir = run_dir / "svc"
     flag = "-l" if sys.platform == "darwin" else "-v"
-    cmd = ["/usr/bin/time", flag, str(PYMOLT), "contract", "report", str(svc_dir), "--json"]
+    cmd = ["/usr/bin/time", flag, str(PYMOLT), "verify", str(svc_dir), "--json"]
     out_path, err_path = run_dir / "fold.json", run_dir / "fold.time"
     started = time.monotonic()
     try:
@@ -1083,7 +1090,7 @@ def summarize_run(run_dir: Path, nocap_dirs: list[Path] | None = None, fold: boo
     if run.get("kind") == "capture" and fold and not run.get("error") and (
         refold or "fold" not in run
     ):
-        print(f"[{run_dir.name}] host fold: pymolt contract report ...", flush=True)
+        print(f"[{run_dir.name}] host fold: pymolt verify ...", flush=True)
         run["fold"] = measure_fold(run_dir)
         (run_dir / "run.json").write_text(json.dumps(run, indent=2) + "\n")
     load = run.get("load") or {}
@@ -1355,7 +1362,7 @@ def evaluate_gate(runs: dict[str, dict], triplets: list[dict], paced: tuple[str,
         else max(vols) < GATE["max_bytes_per_day"])
     folds = [(c["name"], (c.get("fold") or {}).get("max_rss_bytes"),
               (c.get("fold") or {}).get("seconds")) for c in caps]
-    row("3b host fold (contract report max RSS)", f"< {_fmt_mib(GATE['max_fold_rss'])}",
+    row("3b host fold (verify max RSS)", f"< {_fmt_mib(GATE['max_fold_rss'])}",
         " / ".join(f"{n}: {_fmt_mib(r)}, {sec} s" for n, r, sec in folds) or "n/a",
         None if not folds or any(r is None for _, r, _ in folds)
         else max(r for _, r, _ in folds) < GATE["max_fold_rss"])
@@ -1608,7 +1615,7 @@ def main(argv: list[str] | None = None) -> int:
     load_opts(p)
     p = sub.add_parser("hook", help="control: the service under a no-op sys.setprofile hook")
     load_opts(p)
-    p = sub.add_parser("capture", help="run the service under `pymolt contract capture`")
+    p = sub.add_parser("capture", help="run the service under `pymolt capture`")
     load_opts(p)
     p.add_argument("--steady-warmup", default="off", metavar="auto|S|off", type=_steady_arg,
                    help="measure steady state: auto = keep the load running until the watcher "

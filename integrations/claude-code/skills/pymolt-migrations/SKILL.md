@@ -10,32 +10,31 @@ with provenance instead of token-hungry repo spelunking and API guesswork.
 
 ## Prefer the MCP tools
 
-If the `pymolt` MCP server is connected, use its tools (`scan`,
-`setup_options`/`setup_apply`, `assess`, `contract_map`, `contract_capture`,
-`contract_report`, `codemods_preview`). Otherwise every command below works in
-the shell with `--json`.
+If the `pymolt` MCP server is connected, use its tools (`status`, `scan`,
+`setup`, `assess`, `capture`, `plan`, `verify`): the same names as the CLI
+commands. Otherwise every command below works in the shell with `--json`.
 
 ## Workflow
 
 1. **Facts first — never spelunk.** `scan` gives every surface, Python-version
-   divergence and dependency edge with provenance (~2k tokens). Do not read
-   Dockerfiles/lockfiles/tox configs manually for this.
-2. **Pin the migration.** `setup_options` → pick manifest/tool/base+target →
-   `setup_apply`.
+   divergence, dependency edge and call site into a dependency, with provenance.
+   Do not read Dockerfiles/lockfiles/tox configs manually for this.
+2. **Pin the migration.** `setup` with no choices lists them; `setup` with
+   manifest/tool/base+target saves them.
 3. **Feasibility + risk.** `assess` (with risk) — real lock-first resolution
    and live CVE / wheel / abandonment data. Never guess package versions from
    memory.
 4. **Baseline before touching code.**
-   `contract_capture when=baseline mode=tests command=<test cmd>`.
-5. **Edit code** (yours or the human's changes).
-6. **Close the loop.** `contract_capture when=post-migration …` then
-   `contract_report`. Iterate until no `result_changed` / `raise_changed`
-   remains. Green tests are not the oracle — the contract report is.
+   `capture when=baseline mode=tests command=<test cmd>`.
+5. **Change the code.** `plan` returns the codemods as diffs and saves them as
+   the plan; the human applies it with `pymolt apply`. Or edit the code yourself.
+6. **Close the loop.** `capture when=post-migration …` then `verify`. Iterate
+   until verify says PASS. Green tests are not the oracle — verify is.
 
 ## Hard rules
 
 - A fact from PyMolt carries provenance + confidence — cite it, don't re-derive it.
 - BLIND zones in the report are honest gaps: exercise them with tests or flag
   them to the human, never paper over them.
-- **Dry-run safety:** `codemods_preview` is always safe (dry-run, read-only preview).
-  Applying codemods to disk requires the human's explicit approval via CLI (`pymolt codemods ... --write`).
+- **No source writes from the agent loop:** `plan` writes no source. Applying it
+  requires the human's explicit approval via the CLI (`pymolt apply`).
