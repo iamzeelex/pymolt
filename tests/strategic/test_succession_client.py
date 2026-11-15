@@ -283,3 +283,48 @@ def test_endpoint_in_environment_switches_to_remote(monkeypatch):
     monkeypatch.setattr(client_mod.httpx, "post", fake_post)
     assert client_mod.SuccessionClient().fetch(["keras"]) == []
     assert captured["url"] == "http://svc:8000/succession"
+
+
+# ── C8: an honest "not in pymolt's knowledge" ─────────────────────────────────
+
+def test_plausible_frameworks_drops_plain_libraries():
+    from pymolt.strategic.succession.detect import plausible_frameworks
+
+    declared = ["theano", "scipy", "six", "numpy", "Keras>=2", "nose"]
+    assert plausible_frameworks(declared) == ["Keras>=2", "nose", "theano"]
+    assert plausible_frameworks(["scipy", "six"]) == []
+
+
+def test_knowledge_coverage_names_what_the_curated_catalog_knows():
+    from pymolt.strategic.succession.detect import knowledge_coverage
+
+    assert {"keras", "tensorflow"} <= set(knowledge_coverage())
+
+
+def test_cli_says_a_framework_is_not_in_knowledge(tmp_path):
+    from typer.testing import CliRunner
+
+    from pymolt.interfaces.cli.commands import app
+
+    (tmp_path / "requirements.txt").write_text("theano\nscipy\nsix\n", encoding="utf-8")
+    out = CliRunner().invoke(app, ["succession", str(tmp_path)]).output
+    assert "Frameworks detected: theano" in out and "scipy" not in out
+    assert "not in pymolt's succession knowledge" in out and "keras" in out
+    assert "No known succession path" not in out
+
+
+def test_cli_says_it_checked_every_dependency(tmp_path):
+    import json
+
+    from typer.testing import CliRunner
+
+    from pymolt.interfaces.cli.commands import app
+
+    (tmp_path / "requirements.txt").write_text("scipy\nsix\n", encoding="utf-8")
+    runner = CliRunner()
+    out = runner.invoke(app, ["succession", str(tmp_path)]).output
+    assert "No framework among the 2 declared dependencies" in out
+    assert "Checked all 2 declared dependencies" in out
+    payload = json.loads(runner.invoke(app, ["succession", str(tmp_path), "--json"]).stdout)
+    assert payload["frameworks"] == [] and payload["checked_dependencies"] == 2
+    assert "keras" in payload["knowledge_covers"]
