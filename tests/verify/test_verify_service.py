@@ -465,6 +465,39 @@ class TestFactsCapture:
         assert "sink" not in calls[0] and "trace_mode" not in calls[0]  # jsonl + discover
         assert (calls[1]["sink"], calls[1]["trace_mode"]) == ("facts", "auto")
 
+    def test_widened_impact_targets_keep_the_default_mode(self, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_MODE", raising=False)
+        env = service.trace_env("m", "auto", "", "", False, impact_targets=["m.f"],
+                                trace_mode="discover", widen_targets=True)
+        assert env["PYMOLT_TRACE_MODE"] == "discover"
+        assert json.loads(env["PYMOLT_TRACE_IMPACT_TARGETS"]) == ["m.f"]
+
+    def test_post_migration_arms_the_applied_plan_on_top_of_the_usual_capture(
+            self, tmp_path, monkeypatch):
+        # A capture narrowed to the plan's symbols reported every other baseline call as
+        # DISAPPEARED: the plan's targets widen the capture, never replace it.
+        calls = []
+
+        def fake_capture(target, command, out_path, backend, **kwargs):
+            calls.append(kwargs)
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_text('{"q": "m.f"}\n')
+            return service.TraceCaptureResult(out_path=str(out_path), events=1, processes=1,
+                                              where="local")
+
+        monkeypatch.delenv("PYMOLT_TRACE_IMPACT_TARGETS", raising=False)
+        monkeypatch.setattr(service, "capture_trace", fake_capture)
+        monkeypatch.setattr(service, "_applied_plan_impact_targets",
+                            lambda _root: ["pandas.concat"])
+        service.capture_named_trace(tmp_path, "post_migration", CaptureMode.TEST_SUITE,
+                                    command=["pytest"])
+        service.capture_named_trace(tmp_path, "post_migration", CaptureMode.TEST_SUITE,
+                                    command=["pytest"], impact_targets=["m.f"])
+        assert calls[0]["impact_targets"] == ["pandas.concat"]
+        assert calls[0]["widen_targets"] is True
+        # Explicit targets keep meaning a targeted capture.
+        assert calls[1]["impact_targets"] == ["m.f"] and "widen_targets" not in calls[1]
+
     def test_local_test_capture_defaults_to_jsonl_discover(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PYMOLT_TRACE_SINK", raising=False)
         monkeypatch.delenv("PYMOLT_TRACE_MODE", raising=False)

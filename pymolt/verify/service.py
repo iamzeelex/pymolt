@@ -144,6 +144,7 @@ def trace_env(
     sink: str | None = None,
     trace_mode: str | None = None,
     sample_first: int | None = None,
+    widen_targets: bool = False,
 ) -> dict:
     """The PYMOLT_TRACE_* variables that drive the watcher (shared by local + container).
 
@@ -154,8 +155,10 @@ def trace_env(
     ``PYMOLT_TRACE_MODE`` (``TEST_SINK``/``TEST_TRACE_MODE`` for a test suite,
     ``LONG_RUN_SINK``/``LONG_RUN_TRACE_MODE`` for command/attach); a value set in the
     caller's own environment wins. With impact targets the mode is left to the caller's
-    environment (unset = the watcher's targeted capture). The facts sink's tunables are
-    forwarded when set, so a container capture honours them too."""
+    environment (unset = the watcher's targeted capture), unless ``widen_targets``: then the
+    default mode stays and the targets are armed on top of it (what a post-migration capture
+    needs to diff against a full baseline). The facts sink's tunables are forwarded when
+    set, so a container capture honours them too."""
     if privacy not in {"values", "shape"}:
         raise ValueError("privacy must be 'values' or 'shape'")
     if not 0 < sample_rate <= 1:
@@ -186,7 +189,7 @@ def trace_env(
         env["PYMOLT_TRACE_SOURCE"] = source
     if include_internal:
         env["PYMOLT_TRACE_INTERNAL"] = "1"
-    if normalized_targets:
+    if normalized_targets and not widen_targets:
         # Impact targets with no explicit mode keep meaning a targeted capture from the start
         # (the watcher's own rule for an unset PYMOLT_TRACE_MODE): no default mode here.
         trace_mode = None
@@ -362,6 +365,7 @@ def capture_trace_local(
     sink: str | None = None,
     trace_mode: str | None = None,
     sample_first: int | None = None,
+    widen_targets: bool = False,
 ) -> tuple[list[str], int | None]:
     """Inject the watcher into a locally-run command via PYTHONPATH + env.
 
@@ -394,7 +398,7 @@ def capture_trace_local(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
         sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
-        sample_first=sample_first,
+        sample_first=sample_first, widen_targets=widen_targets,
     ))
 
     log_file = None
@@ -462,6 +466,7 @@ def capture_trace_in_container(
     sink: str | None = None,
     trace_mode: str | None = None,
     sample_first: int | None = None,
+    widen_targets: bool = False,
 ) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
@@ -482,7 +487,7 @@ def capture_trace_in_container(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
         sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
-        sample_first=sample_first,
+        sample_first=sample_first, widen_targets=widen_targets,
     ).items():
         exec_args += ["-e", f"{key}={val}"]
     if workdir:
@@ -616,9 +621,11 @@ def _merge_traces(produced: list[str], out_path: Path) -> int:
 
 
 def _sink_kwargs(sink: str | None, trace_mode: str | None,
-                 sample_first: int | None = None) -> dict:
+                 sample_first: int | None = None, widen_targets: bool = False) -> dict:
     """Only pass the phase-2 keywords when set (test doubles predate them)."""
     out: dict = {}
+    if widen_targets:
+        out["widen_targets"] = True
     if sink is not None:
         out["sink"] = sink
     if trace_mode is not None:
@@ -853,6 +860,7 @@ def capture_trace(
     sink: str | None = None,
     trace_mode: str | None = None,
     sample_first: int | None = None,
+    widen_targets: bool = False,
 ) -> TraceCaptureResult:
     """Run ``command`` with the watcher injected; merge produced JSONL into ``out_path``.
 
@@ -891,7 +899,7 @@ def capture_trace(
                 container, workdir, exclude, source, include_internal,
                 privacy, sample_rate, impact_targets,
                 deployment_id, request_id, correlation_id,
-                **_sink_kwargs(sink, trace_mode, sample_first),
+                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets),
             )
         else:
             # Keep the log next to the durable trace artifact (out_path), not the
@@ -904,7 +912,8 @@ def capture_trace(
                 cwd=cwd, log_path=log_path, privacy=privacy, sample_rate=sample_rate,
                 impact_targets=impact_targets, deployment_id=deployment_id,
                 request_id=request_id, correlation_id=correlation_id,
-                interrupted=interrupted, **_sink_kwargs(sink, trace_mode, sample_first),
+                interrupted=interrupted,
+                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets),
             )
             command_log = str(log_path) if log_path.exists() else None
 
@@ -1263,12 +1272,18 @@ def capture_named_trace(
     sampling_source = "caller"
     if sample_rate is None:
         sample_rate, sampling_source = default_sample_rate(mode), "default"
+    widen_targets = False
     if (
         impact_targets is None
         and when == "post_migration"
         and not os.environ.get("PYMOLT_TRACE_IMPACT_TARGETS")
     ):
+        # The applied plan's symbols are armed from the start ON TOP of the usual
+        # observation, never instead of it: the post-migration capture is diffed against a
+        # full baseline, and a capture narrowed to the plan's symbols would report every
+        # other baseline call as DISAPPEARED (and hide what nobody predicted).
         impact_targets = _applied_plan_impact_targets(project_dir)
+        widen_targets = bool(impact_targets)
     normalized_targets = _normalize_impact_targets(impact_targets)
     # Validate before creating staging paths or spawning the target.
     trace_env(
@@ -1321,6 +1336,8 @@ def capture_named_trace(
         # predate P2: only send the new keyword arguments when actually used.
         if normalized_targets:
             capture_kwargs["impact_targets"] = normalized_targets
+        if widen_targets:
+            capture_kwargs["widen_targets"] = True
         if deployment_id is not None:
             capture_kwargs["deployment_id"] = deployment_id
         if request_id is not None:
