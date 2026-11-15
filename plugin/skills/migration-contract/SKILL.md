@@ -20,7 +20,7 @@ commit, or proceed with static-only evidence and label it as such.
 
 **2. A successful resolve is not proof.** Never tell the user a migration is
 "feasible" or "done" because `assess` resolved or the tests passed. Cite the
-**medallion baseline tier** — gold (pinned, production-exact) · silver (unpinned
+**medallion base tier** (`baseline_tier`) — gold (pinned, production-exact) · silver (unpinned
 but tests pass) · bronze (unpinned, unvalidated) · none (no legacy interpreter) —
 and point at the behavioural evidence.
 
@@ -63,6 +63,6 @@ until verify says PASS. Each report gives three numbers; read all three to the u
 For a project built on a dead framework (TF1 + standalone Keras, say), present
 both strategies and let the user choose: an in-place shim (living corpse — cheap,
 low ceiling, e.g. `compat.v1`) or a transplant (durable, effortful, e.g. Keras →
-torchvision with an `.h5` → `.pth` weight port). If the baseline tier is `none`,
-surface the baseline-env hint `assess` returns and stop — either build that legacy
-environment in a container, or hand it back. Never fabricate a baseline.
+torchvision with an `.h5` → `.pth` weight port). If the base tier is `none`,
+surface the base-environment hint `assess` returns and stop — either build that legacy
+environment in a container, or hand it back. Never fabricate a base environment.

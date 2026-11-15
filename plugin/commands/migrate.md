@@ -17,8 +17,8 @@ user where a human decision or a build step is required.
 3. **capture(when='baseline')** — before any edit. It is the only artifact here that cannot be
    reconstructed later. If the project has already been edited, say so and offer to capture
    from a clean pre-migration checkout.
-4. **assess** with a target Python — read the **medallion baseline tier** and the honest verdict:
-   - `none` (no legacy interpreter): surface the baseline-env hint and STOP — the user (or an
+4. **assess** with a target Python — read the **medallion base tier** (`baseline_tier`) and the honest verdict:
+   - `none` (no legacy interpreter): surface the base-environment hint and STOP — the user (or an
      agent) must stand up the legacy env, then re-run with `--container`.
    - `bronze`: unpinned/unvalidated — say so; do not call the migration "feasible".
    - `silver`/`gold`: proceed.
@@ -28,9 +28,9 @@ user where a human decision or a build step is required.
 6. **capture(when='post-migration')** then **verify** — the verdict. Report all three numbers:
    confirmed, **BLIND** (surface the run never touched — a green suite with high BLIND proves
    little, say so), and trust %. Loop edit → re-capture → verify until PASS.
-   A passing test run promotes a bronze baseline to **silver**.
+   A passing test run promotes a bronze base to **silver**.
 
 Rules: never claim "upgrade feasible" or "migration done" from a successful resolve or a green
-test run alone — cite the baseline tier and the verify verdict. If a tool's `summary` says its
+test run alone — cite the base tier and the verify verdict. If a tool's `summary` says its
 list was truncated, read the `full_report_path` file before answering. For a dead-framework project (TF1 + standalone Keras), note that in-place shims are the
 cheap path and a transplant (torchvision) is the durable one.

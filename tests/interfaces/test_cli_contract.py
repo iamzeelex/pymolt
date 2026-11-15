@@ -237,7 +237,7 @@ class TestRendering:
 
     def test_help_lists_the_preparation_phases_in_funnel_order(self):
         result = runner.invoke(app, ["--help"])
-        funnel = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
+        funnel = result.output.split("╭─ Migration ")[1].split("╰")[0]
         order = [name for name in ("scan", "setup", "assess", "plan", "apply") if name in funnel]
         positions = [funnel.index(name) for name in order]
         assert positions == sorted(positions), f"funnel out of order: {order}"
@@ -255,7 +255,7 @@ class TestRendering:
         assert "╭─ Behavioural proof" in result.output
         proof = result.output.split("╭─ Behavioural proof")[1].split("╰")[0]
         assert "capture" in proof and "verify" in proof
-        prep = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
+        prep = result.output.split("╭─ Migration ")[1].split("╰")[0]
         assert "capture" not in prep and "verify" not in prep
 
     def test_help_leads_with_capturing_a_baseline_first(self):
@@ -263,7 +263,7 @@ class TestRendering:
         result = runner.invoke(app, ["--help"])
         lead = result.output.split("╭─ Options")[0]
         assert "pymolt capture baseline" in lead
-        assert "BEFORE" in lead
+        assert "before any code change" in lead
 
     def test_version_diff_is_prose_not_a_python_dict(self, tmp_path):
         from pymolt.interfaces.cli.verify_cmd import _render_contract_report
@@ -313,3 +313,30 @@ class TestNoWrite:
         assert payload["target_manifest_path"] is not None
         assert (project / "requirements-target.txt").is_file()
 
+
+
+# ── one name per option; old names still parse, hidden ───────────────────────
+
+class TestOptionNames:
+    def test_assess_takes_the_setup_names(self, project):
+        result = runner.invoke(app, [
+            "assess", str(project), "--manifest", "requirements.txt",
+            "--base-python", "3.11", "--target-python", "3.12", "--json", "--no-write",
+        ])
+        assert result.exit_code == EXIT_OK, result.output
+        assert json.loads(result.stdout)["source_manifest"] == "requirements.txt"
+
+    def test_old_names_still_parse_but_are_not_listed(self, project):
+        constraint = project / "constraints.txt"
+        constraint.write_text("flask<3\n", encoding="utf-8")
+        result = runner.invoke(app, [
+            "assess", str(project), "--source-manifest", "requirements.txt",
+            "--current-python", "3.11", "--target-python", "3.12", "-c", str(constraint),
+            "--json", "--no-write",
+        ])
+        assert result.exit_code == EXIT_OK, result.output
+
+        listed = runner.invoke(app, ["assess", "--help"]).output
+        for old in ("--source-manifest", "--current-python", "-c "):
+            assert old not in listed
+        assert "--target-file" not in runner.invoke(app, ["plan", "--help"]).output

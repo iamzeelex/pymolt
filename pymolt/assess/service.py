@@ -346,7 +346,7 @@ def compatibility_verdict(
 
     Never claims "upgrade feasible" from a resolve alone: a resolve only proves that
     *some* versions satisfying the constraints install on the target Python. What the
-    verdict can honestly say is bounded by the baseline's medallion tier — Gold/Silver
+    verdict can honestly say is bounded by the base's medallion tier — Gold/Silver
     earn a green verdict, Bronze/None stay amber — and it always points at
     ``pymolt capture`` + ``pymolt verify`` for behavioural proof. Bronze→Silver is an
     explicit upgrade path (run the baseline's tests), not a dead end.
@@ -363,33 +363,33 @@ def compatibility_verdict(
         )
     if baseline_tier == BaselineTier.NONE:
         return (
-            f"⚠ Not a feasibility verdict — no baseline (Python {tp})",
+            f"⚠ Not a feasibility verdict — no base (Python {tp})",
             f"The newest versions matching your constraints install on Python {tp}, but the "
-            "legacy baseline could not be established (no interpreter) — there is nothing to "
+            "base dependencies could not be resolved (no interpreter) — there is nothing to "
             "compare against. Build the legacy environment (hint above), re-run with "
             "--container, then capture and verify (`pymolt capture`, `pymolt verify`).",
             "yellow",
         )
     if baseline_tier == BaselineTier.BRONZE:
         return (
-            f"⚠ BRONZE baseline — resolves, migration unproven (Python {tp})",
+            f"⚠ BRONZE base — resolves, migration unproven (Python {tp})",
             f"The latest releases matching your UNPINNED bounds install on Python {tp} — not "
-            "evidence the code migrates, and the baseline is an unvalidated reconstruction "
-            "(e.g. `tensorflow>=1.3` → 2.x). Capture and verify: if the baseline's tests "
+            "evidence the code migrates, and the base is an unvalidated reconstruction "
+            "(e.g. `tensorflow>=1.3` → 2.x). Capture and verify: if the project's tests "
             "pass it becomes SILVER; pin the manifest to reach GOLD.",
             "yellow",
         )
     if baseline_tier == BaselineTier.SILVER:
         return (
-            f"✔ SILVER baseline — resolves on Python {tp}",
-            "Not pinned, but its tests pass, so the baseline is behaviourally validated (not "
+            f"✔ SILVER base — resolves on Python {tp}",
+            "Not pinned, but its tests pass, so the base is validated by them (not "
             f"pin-exact GOLD). Dependencies resolve on Python {tp}; capture and verify "
             "against the target to confirm the behaviour carries over.",
             "green",
         )
     return (
-        f"✔ GOLD baseline — resolves on Python {tp}",
-        f"Pinned, production-exact baseline; resolves cleanly on Python {tp} with no conflicts. "
+        f"✔ GOLD base — resolves on Python {tp}",
+        f"Pinned, production-exact base; resolves cleanly on Python {tp} with no conflicts. "
         "Capture and verify (`pymolt capture`, `pymolt verify`) to check runtime "
         "behaviour.",
         "green",
@@ -451,9 +451,9 @@ def _resolve_baseline_graph(
 
             first_line = str(exc).splitlines()[0] if str(exc) else str(exc)
             warning = (
-                f"baseline unresolved: {first_line} The legacy dependency graph was NOT "
-                "reconstructed — build the legacy environment and re-run with --container "
-                "for a real baseline (see the hint)."
+                f"base unresolved: {first_line} The base dependency graph was NOT "
+                "reconstructed — build the base environment and re-run with --container "
+                "(see the hint)."
             )
             stub = IngestionReport(
                 resolution_quality="unresolved",
@@ -489,7 +489,7 @@ def _resolve_baseline_graph(
                 f"Fallback error: {fallback_exc}"
             ) from fallback_exc
         warning = (
-            f"configured container {container_id} not running — baseline resolved "
+            f"configured container {container_id} not running — base resolved "
             "from manifest/lock; re-run setup to refresh."
         )
         report.warnings.append(warning)

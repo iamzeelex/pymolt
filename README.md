@@ -64,7 +64,7 @@ The two captures bracket the code change. Everything before them prepares it:
 |---|---|---|
 | scan | `pymolt scan .` | Manifests, Python-version divergence, dependency edges, and every call site into a dependency. Offline. |
 | setup | `pymolt setup .` | Manifest, resolution tool, base and target Python. Options or prompts. |
-| assess | `pymolt assess . --risk` | Lock-first resolution of baseline vs target, CVE deltas, the pinned target manifest, and how to build the target environment. |
+| assess | `pymolt assess . --risk` | Lock-first resolution of base vs target, CVE deltas, the pinned target manifest, and how to build the target environment. |
 | capture | `pymolt capture baseline -- pytest tests/` | Records the calls your code makes into its dependencies. Needs setup. The one step you cannot do later. |
 | plan | `pymolt plan .` | The verified codemods as a plan, with the diff. Writes no source. |
 | apply | `pymolt apply .` | Writes exactly the plan; refuses it if a planned file changed since. Keeps rollback data. |
@@ -105,14 +105,14 @@ The tools have the names of the CLI commands. None of them writes source: `plan`
 | `status` | Where the project stands, whether its environments exist, and the single next tool. |
 | `scan` | Project roots, dependency edges, Python-version divergence, and every call site into a dependency, resolved through imports and scopes. Import greps undercount this severalfold. |
 | `setup` | With no choices, the valid manifests, tools and Python versions; with them, the saved configuration. |
-| `assess` | Baseline vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment — plus optional risk scoring. An input to the contract, never the conclusion. |
+| `assess` | Base vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment — plus optional risk scoring. An input to the contract, never the conclusion. |
 | `capture` | Runs *your* test or app command with a boundary tracer injected — zero edits to the project — and keeps it as the `baseline` or `post-migration` capture. |
 | `plan` | The codemods for the target manifest as a saved plan and unified diffs. |
 | `verify` | The verdict: PASS / FAIL / INCONCLUSIVE, confirmed / BLIND coverage, trust %, and exactly which dependency calls changed result, changed raise, or disappeared. |
 
 ---
 
-## Behavioral Contract Verification
+## Behavioural Contract Verification
 
 Static type checkers catch signature changes. They cannot tell you that a method started returning an empty generator instead of `None`, that a call now raises `KeyError` where it used to raise nothing, or that a dependency call your code used to make simply stopped happening.
 
@@ -141,15 +141,15 @@ CI exit codes are stable: `0` = passed policy, `1` = incompatibility or failed c
 
 ---
 
-## AST Codemods & Axiom Cloud Hub
+## Codemods and Axiom
 
-Regex replacements break code; large language models frequently hallucinate non-existent API flags. PyMolt uses **LibCST (Concrete Syntax Trees)** paired with **Axiom Cloud Hub** recipes.
+`pymolt plan` rewrites code with **LibCST** codemods that it gets from **Axiom**, a service that knows which APIs changed between two versions of a package.
 
-- **Non-destructive AST edits**: Preserves your formatting, indentation, and comments exactly as written.
-- **Typed Metavariables**: Declarative match/rewrite templates (e.g., `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`).
-- **Client Verification**: PyMolt locally re-verifies every rule before applying it to your repository.
-- **Transactional apply**: every changed file is prepared and parsed before the first replacement; an interrupted or failed mixed rule/pattern batch rolls all replacements back.
-- **Free Public Cloud Hub**: Recipes are fetched on demand from Axiom Cloud Hub. Custom/private on-prem instances are supported via `pymolt axiom endpoint <url>`, `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT`.
+- **Formatting kept**: indentation and comments stay as written.
+- **Templates**: a codemod is a match/rewrite template, e.g. `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`.
+- **Checked locally**: pymolt re-checks every rule before it goes into a plan; rules it cannot check are listed for manual review.
+- **All or nothing**: `apply` prepares and parses every changed file before the first write; a failed apply restores them all.
+- **Endpoint**: the public Axiom is the default. Point pymolt at another one with `pymolt axiom endpoint <url>`, `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT`. Only package names and versions are sent, never code.
 
 ---
 
@@ -162,7 +162,7 @@ Regex replacements break code; large language models frequently hallucinate non-
 | `pymolt status [dir]` | Where the project stands, whether its environments exist, and the next command. |
 | `pymolt scan [dir]` | Manifests, Python-version divergence, dependency edges and call sites into dependencies. |
 | `pymolt setup [dir]` | Manifest, tool, base and target Python: `--manifest`, `--tool`, `--base-python`, `--target-python`, `--container`, `--target-env`, or prompts. |
-| `pymolt assess [dir]` | Baseline vs target resolution, CVE deltas, pinned target manifest, target-environment commands. |
+| `pymolt assess [dir]` | Base vs target resolution, CVE deltas, pinned target manifest, target-environment commands. |
 | `pymolt capture baseline\|post-migration -- <cmd>` | Runs your command and keeps only a valid recording; failed/empty captures remain diagnostic artifacts. |
 | `pymolt plan [dir]` | The codemods as a plan with the diff; `--patch FILE` exports it. Writes no source. |
 | `pymolt apply [dir]` | Writes only the saved plan; validates hashes and retains rollback data. |
@@ -181,7 +181,28 @@ Commands removed in this version print their replacement: `doctor` → `status`;
 
 ---
 
+## Glossary
+
+One word per thing, in the CLI, the MCP tools and these docs.
+
+| Term | Meaning |
+|---|---|
+| **base** / **target** | The project as it is today (base Python, base dependencies) and as it will be after the migration. |
+| **manifest** | The file that declares dependencies: `requirements.txt`, `pyproject.toml`, `environment.yml`… setup picks one; assess writes the **target manifest** (`requirements-target.txt` or `environment-target.yml`). |
+| **capture** | The calls your code made into its dependencies while a command ran, recorded without changing the code. |
+| **baseline** | The capture taken before the migration. Nothing else is called baseline. |
+| **post-migration** | The capture taken after the migration, in the target environment. |
+| **call site** | A place in your code that calls into a dependency. `scan` lists them (the contact map). |
+| **BLIND** | A call site that no capture exercised. |
+| **codemod** | A rewrite rule for one dependency version change, from Axiom. |
+| **plan** | The codemods applied to your files as a diff, saved for `apply`. |
+| **verdict** | `PASS`, `FAIL` or `INCONCLUSIVE`, from `verify`. |
+| **base tier** | How far the base dependencies can be trusted: gold (pinned), silver (tests pass), bronze (unvalidated), none. JSON key: `baseline_tier`. |
+| **Axiom** | The service pymolt gets codemods from. |
+
+---
+
 ## License
 
 PyMolt is open-source software licensed under the [Apache License, Version 2.0](LICENSE).
-Axiom Cloud Hub recipes are provided under the Business Source License 1.1 with free public community access.
+Axiom codemods are provided under the Business Source License 1.1 with free public access.
