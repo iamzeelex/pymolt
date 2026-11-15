@@ -25,9 +25,7 @@ _EXPECTED_TOOLS = {
     "assess",
     "contract_capture",
     "verify",
-    "codemods",
-    "codemods_preview",
-    "migrate",
+    "plan",
 }
 
 
@@ -75,7 +73,7 @@ def test_dir_taking_tools_use_project_dir_param():
     import inspect
 
     dir_tools = ["scan", "setup_options", "setup_apply", "assess",
-                 "contract_capture", "verify", "codemods_preview"]
+                 "contract_capture", "verify", "plan"]
     for name in dir_tools:
         params = inspect.signature(getattr(mcp_server, name)).parameters
         assert "project_dir" in params, f"{name} lost its project_dir param"
@@ -142,7 +140,7 @@ def test_every_tool_handles_nonexistent_dir(tmp_path):
             project_dir=missing, when="baseline", mode="tests", command=["pytest"],
         ),
         "verify": lambda: mcp_server.verify(project_dir=missing),
-        "codemods_preview": lambda: mcp_server.codemods_preview(project_dir=missing),
+        "plan": lambda: mcp_server.plan(project_dir=missing),
     }
     for name, call in calls.items():
         result = call()
@@ -296,60 +294,50 @@ def test_status_tool_returns_funnel_projection(tmp_path):
     assert "next_command" in result["data"]
 
 
-def test_codemods_tool_dry_run_and_write(tmp_path, monkeypatch):
-    from unittest.mock import MagicMock, patch
+def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch):
+    from pymolt.codemods import service as codemod_service
+    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import CodemodPattern, FilePreview
+    from pymolt.ingestion.config import EnvConfig, ToolChoice
+
     project = _make_project(tmp_path)
-    fake_pattern = MagicMock()
-    fake_pattern.old_qualname = "flask.json.JSONEncoder"
-    fake_pattern.new_qualname = "json.JSONEncoder"
-    fake_pattern.confidence = "high"
-
-    with patch("pymolt.codemods.service.resolve_codemod_migrations", return_value=([MagicMock()], "flask 2.0.3 -> 3.0.0")), \
-         patch("pymolt.codemods.service.preview_codemods", return_value=({"flask": [fake_pattern]}, [])):
-        res = mcp_server.codemods(project_dir=str(project), write=False)
-        assert res["ok"] is True
-        assert res["data"]["write"] is False
-        assert "DRY-RUN preview" in res["summary"]
-
-    refused = mcp_server.codemods(project_dir=str(project), write=True)
-    assert refused["ok"] is False
-    assert "baseline-gated CLI" in refused["error"]
-
-
-def test_migrate_tool_executes_pipeline(tmp_path):
-    from unittest.mock import MagicMock, patch
-
-    from pymolt.assess.service import AssessResult
-    project = _make_project(tmp_path)
-
-    fake_assess = AssessResult(
-        project_dir=str(project),
-        source_manifest="requirements.txt",
-        target_python="3.12",
-        target_resolved=True,
-        target_manifest_path=str(project / "requirements-target.txt"),
-        rows=[{"package": "requests", "legacy_version": "2.31.0", "target_version": "2.32.0", "status": "upgrade"}],
+    (project / "requirements-target.txt").write_text("requests==2.32.0\n", encoding="utf-8")
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.11", target_python="3.12",
+    ).save(project / ".pymolt" / "env_config.json")
+    source = (project / "app.py").read_text(encoding="utf-8")
+    pattern = CodemodPattern(
+        old_qualname="requests.get", new_qualname="requests.api.get", kind="rewrite-import",
+    )
+    preview = FilePreview(
+        path=str(project / "app.py"), old_source=source,
+        new_source=source.replace("requests.get", "requests.api.get"), sites=1,
+        patterns=[pattern],
+    )
+    monkeypatch.setattr(
+        codemod_service, "resolve_codemod_migrations",
+        lambda *a, **k: ([DependencyMigration("requests", "2.31.0", "2.32.0")], "target"),
+    )
+    monkeypatch.setattr(
+        codemod_service, "preview_codemods", lambda *a, **k: ({"requests": [pattern]}, [preview]),
     )
 
-    with patch("pymolt.assess.service.run_assess", return_value=fake_assess), \
-         patch("pymolt.codemods.service.run_codemods", return_value=({"requests": []}, MagicMock(changes=[]))):
-        res = mcp_server.migrate(project_dir=str(project), target_python="3.12", write=False)
-        assert res["ok"] is True
-        assert "Migrate (PREVIEW)" in res["summary"]
-        assert res["data"]["packages_assessed"] == 1
+    result = mcp_server.plan(project_dir=str(project))
 
-    refused = mcp_server.migrate(project_dir=str(project), target_python="3.12", write=True)
-    assert refused["ok"] is False
-    assert "baseline-gated CLI" in refused["error"]
+    assert result["ok"] is True, result
+    assert (project / ".pymolt" / "migration_plan.json").is_file()
+    assert result["data"]["files_to_change"] == [str(project / "app.py")]
+    assert "requests.api.get" in result["data"]["diffs"][0]["diff"]
+    assert (project / "app.py").read_text(encoding="utf-8") == source
+    assert "pymolt apply" in result["hint"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Answer lists are budgeted, not clipped
-#
-# Regression cover for the benchmarked failure: capping an answer list at a
-# fixed item count made agents answer from a partial list, and the summary
-# reported the truncated length as the finding count.
-# ─────────────────────────────────────────────────────────────────────────────
+def test_plan_before_setup_says_what_to_run(tmp_path):
+    result = mcp_server.plan(project_dir=str(_make_project(tmp_path)))
+    assert result["ok"] is False
+    assert "not configured" in result["error"]
+    assert "setup" in result["hint"]
 
 
 def test_fit_answer_keeps_everything_that_fits():

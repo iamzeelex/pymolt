@@ -129,7 +129,7 @@ class TestExitCodes:
             ["scan", missing],
             ["assess", missing, "--target-python", "3.12"],
             ["setup", missing],
-            ["codemods", missing, "-p", "flask", "--from", "1", "--to", "2"],
+            ["plan", missing],
             ["succession", missing],
             ["verify", missing],
         ):
@@ -176,15 +176,24 @@ class TestExitCodes:
 
     def test_dead_service_is_environment_not_usage(self, project, monkeypatch):
         from pymolt.codemods import service as codemods_service
-        from pymolt.codemods.client import AxiomGraphError
+        from pymolt.codemods.client import AxiomGraphError, DependencyMigration
+        from pymolt.ingestion.config import EnvConfig, ToolChoice
+
+        (project / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        EnvConfig(
+            selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+            base_python="3.11", target_python="3.12",
+        ).save(project / ".pymolt" / "env_config.json")
 
         def boom(*a, **k):
             raise AxiomGraphError("connection refused")
 
-        monkeypatch.setattr(codemods_service, "run_codemods", boom)
-        result = runner.invoke(
-            app, ["codemods", str(project), "-p", "flask", "--from", "2.0.3", "--to", "3.0.0"]
+        monkeypatch.setattr(
+            codemods_service, "resolve_codemod_migrations",
+            lambda *a, **k: ([DependencyMigration("flask", "2.0.3", "3.0.0")], "target"),
         )
+        monkeypatch.setattr(codemods_service, "preview_codemods", boom)
+        result = runner.invoke(app, ["plan", str(project)])
         assert result.exit_code == EXIT_ENVIRONMENT
 
 
@@ -229,7 +238,7 @@ class TestRendering:
     def test_help_lists_the_preparation_phases_in_funnel_order(self):
         result = runner.invoke(app, ["--help"])
         funnel = result.output.split("╭─ Migration workflow")[1].split("╰")[0]
-        order = [name for name in ("scan", "setup", "assess", "codemods") if name in funnel]
+        order = [name for name in ("scan", "setup", "assess", "plan", "apply") if name in funnel]
         positions = [funnel.index(name) for name in order]
         assert positions == sorted(positions), f"funnel out of order: {order}"
         # scan is Phase 1 and must not sit below the phase that consumes it

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from typer.testing import CliRunner
 
 import pymolt.strategic.succession.client as client_mod
@@ -117,12 +119,46 @@ def test_run_succession_applies_in_place_shim(tmp_path):
     assert "from keras.layers import Conv2D" in (tmp_path / "app.py").read_text()
 
 
-def test_run_succession_write_applies_to_disk(tmp_path):
-    (tmp_path / "requirements.txt").write_text("keras>=2.0.8\n", encoding="utf-8")
+def test_in_place_previews_are_what_a_plan_holds(tmp_path):
+    from pymolt.strategic.succession.service import in_place_previews
+
     (tmp_path / "app.py").write_text("from keras.layers import Conv2D\n", encoding="utf-8")
 
-    run_succession(tmp_path, base_url="http://x", write=True, client=_FakeClient([_keras_shim()]))
-    assert "from tensorflow.keras.layers import Conv2D" in (tmp_path / "app.py").read_text()
+    previews = in_place_previews(tmp_path, [_keras_shim(), _transplant()])
+
+    assert [p.new_source for p in previews] == ["from tensorflow.keras.layers import Conv2D\n"]
+    assert (tmp_path / "app.py").read_text() == "from keras.layers import Conv2D\n"
+
+
+def test_cli_succession_plan_is_applied_by_apply_only(tmp_path, monkeypatch):
+    from pymolt.ingestion.config import EnvConfig, ToolChoice
+    from pymolt.migration_plan import MigrationPlan
+
+    (tmp_path / "requirements.txt").write_text("keras>=2.0.8\n", encoding="utf-8")
+    (tmp_path / "requirements-target.txt").write_text("tensorflow==2.15.0\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("from keras.layers import Conv2D\n", encoding="utf-8")
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.11", target_python="3.12",
+    ).save(tmp_path / ".pymolt" / "env_config.json")
+    monkeypatch.setattr(
+        "pymolt.strategic.succession.service.run_succession",
+        lambda *a, **k: ([_keras_shim()], None),
+    )
+
+    result = runner.invoke(commands.app, ["succession", str(tmp_path), "--plan", "--json"])
+
+    assert result.exit_code == 0, result.output
+    plan = MigrationPlan.load(tmp_path)
+    assert plan is not None and [c.path for c in plan.changes] == ["app.py"]
+    assert json.loads(result.stdout)["plan_path"]
+    assert (tmp_path / "app.py").read_text() == "from keras.layers import Conv2D\n"
+
+
+def test_cli_succession_write_names_its_replacement(tmp_path):
+    result = runner.invoke(commands.app, ["succession", str(tmp_path), "--write"])
+    assert result.exit_code == 2
+    assert "--plan" in result.output and "pymolt apply" in result.output
 
 
 def test_run_succession_never_applies_transplant(tmp_path):
@@ -131,7 +167,7 @@ def test_run_succession_never_applies_transplant(tmp_path):
     (tmp_path / "app.py").write_text(src, encoding="utf-8")
 
     edges, result = run_succession(
-        tmp_path, base_url="http://x", write=True, client=_FakeClient([_transplant()])
+        tmp_path, base_url="http://x", client=_FakeClient([_transplant()])
     )
     assert edges[0].is_transplant
     assert result is None  # nothing in-place to apply
