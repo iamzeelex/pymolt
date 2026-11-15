@@ -31,7 +31,7 @@ CMD ["sleep", "infinity"]
 
 
 class BaselineHint(BaseModel):
-    """How to establish the legacy baseline environment pymolt could not resolve."""
+    """How to build the base environment pymolt could not resolve."""
 
     base_python: str
     reason: str

@@ -370,7 +370,7 @@ class TestEnvironmentChecks:
         assert build_status(tmp_path).checks == []
         checks = {c.name: c for c in build_status(tmp_path, check_environments=True).checks}
 
-        assert checks["baseline environment"].state == "warning"
+        assert checks["base environment"].state == "warning"
         assert checks["target environment"].state == "warning"
         assert "setup" in checks["target environment"].hint
 

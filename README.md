@@ -64,7 +64,7 @@ The two captures bracket the code change. Everything before them prepares it:
 |---|---|---|
 | scan | `pymolt scan .` | Manifests, Python-version divergence, dependency edges, and every call site into a dependency. Offline. |
 | setup | `pymolt setup .` | Manifest, resolution tool, base and target Python. Options or prompts. |
-| assess | `pymolt assess . --risk` | Lock-first resolution of baseline vs target, CVE deltas, the pinned target manifest, and how to build the target environment. |
+| assess | `pymolt assess . --risk` | Lock-first resolution of base vs target, CVE deltas, the pinned target manifest, and how to build the target environment. |
 | capture | `pymolt capture baseline -- pytest tests/` | Records the calls your code makes into its dependencies. Needs setup. The one step you cannot do later. |
 | plan | `pymolt plan .` | The verified codemods as a plan, with the diff. Writes no source. |
 | apply | `pymolt apply .` | Writes exactly the plan; refuses it if a planned file changed since. Keeps rollback data. |
@@ -105,7 +105,7 @@ The tools have the names of the CLI commands. None of them writes source: `plan`
 | `status` | Where the project stands, whether its environments exist, and the single next tool. |
 | `scan` | Project roots, dependency edges, Python-version divergence, and every call site into a dependency, resolved through imports and scopes. Import greps undercount this severalfold. |
 | `setup` | With no choices, the valid manifests, tools and Python versions; with them, the saved configuration. |
-| `assess` | Baseline vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment — plus optional risk scoring. An input to the contract, never the conclusion. |
+| `assess` | Base vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment — plus optional risk scoring. An input to the contract, never the conclusion. |
 | `capture` | Runs *your* test or app command with a boundary tracer injected — zero edits to the project — and keeps it as the `baseline` or `post-migration` capture. |
 | `plan` | The codemods for the target manifest as a saved plan and unified diffs. |
 | `verify` | The verdict: PASS / FAIL / INCONCLUSIVE, confirmed / BLIND coverage, trust %, and exactly which dependency calls changed result, changed raise, or disappeared. |
@@ -162,7 +162,7 @@ Regex replacements break code; large language models frequently hallucinate non-
 | `pymolt status [dir]` | Where the project stands, whether its environments exist, and the next command. |
 | `pymolt scan [dir]` | Manifests, Python-version divergence, dependency edges and call sites into dependencies. |
 | `pymolt setup [dir]` | Manifest, tool, base and target Python: `--manifest`, `--tool`, `--base-python`, `--target-python`, `--container`, `--target-env`, or prompts. |
-| `pymolt assess [dir]` | Baseline vs target resolution, CVE deltas, pinned target manifest, target-environment commands. |
+| `pymolt assess [dir]` | Base vs target resolution, CVE deltas, pinned target manifest, target-environment commands. |
 | `pymolt capture baseline\|post-migration -- <cmd>` | Runs your command and keeps only a valid recording; failed/empty captures remain diagnostic artifacts. |
 | `pymolt plan [dir]` | The codemods as a plan with the diff; `--patch FILE` exports it. Writes no source. |
 | `pymolt apply [dir]` | Writes only the saved plan; validates hashes and retains rollback data. |

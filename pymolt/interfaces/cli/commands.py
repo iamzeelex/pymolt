@@ -1230,7 +1230,7 @@ def _render_assess_header(
         f"Source manifest:    [magenta]{chosen_source.path.name}[/magenta] "
         f"[dim](as declared: {chosen_source.fixation.value})[/dim]\n"
         "\n"
-        "[bold cyan]Baseline (the project as it is today)[/bold cyan]\n"
+        "[bold cyan]Base (the project as it is today)[/bold cyan]\n"
         f"  Python:           [green]{python_display}[/green]\n"
         f"  Interpreter:      [dim]{legacy_interpreter_display}[/dim]\n"
         "\n"
@@ -1273,10 +1273,10 @@ def _render_comparison_table(rows, verbose):
     restated the two versions already shown beside it. The move is one column now,
     and ecosystem origin — almost always plain PyPI — is shown only when it is not.
     """
-    table = Table(title="Resolved Comparative Baseline")
+    table = Table(title="Base vs target")
     table.add_column("Package", style="bold cyan", no_wrap=True)
     table.add_column("Declared", style="green")
-    table.add_column("Baseline → Target", style="blue", no_wrap=True)
+    table.add_column("Base → Target", style="blue", no_wrap=True)
     table.add_column("Role")
     table.add_column("Status")
 
@@ -1377,7 +1377,7 @@ def _render_manual_zone(report):
         # twins *from*. Printing the all-clear here contradicted the panel at
         # the top of the same run and was the last thing the reader saw.
         console.print(
-            "[yellow]No manual zone to resolve — there is no baseline to compare "
+            "[yellow]No manual zone to resolve — there is no base to compare "
             "against (see above).[/yellow]"
         )
     else:
@@ -1401,7 +1401,7 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             override = config.get("target_overrides", {}).get(pkg_name, "")
             override_str = f" [cyan](override: {override})[/cyan]" if override else ""
             console.print(
-                f"  {idx}. {pkg_name} (baseline: {b_ver}, resolved target: {t_ver}){override_str}"
+                f"  {idx}. {pkg_name} (base: {b_ver}, target: {t_ver}){override_str}"
             )
 
         choice_str = typer.prompt(
@@ -1542,8 +1542,8 @@ def assess(
         detected_python = current_python
     if base_python_assumed:
         warn(
-            f"no Python version is declared in this project — resolving the legacy "
-            f"baseline against {detected_python or current_python}, the interpreter "
+            f"no Python version is declared in this project — resolving the base "
+            f"dependencies against {detected_python or current_python}, the interpreter "
             "pymolt runs on.",
             hint="Pass --base-python (or run 'pymolt setup') if the project targets another.",
         )
@@ -1731,7 +1731,7 @@ def assess(
             details_msg = "Showing all direct and transitive dependencies."
 
         console.print(
-            f"[bold]Comparative Dependency Map (Baseline vs Target Python {target_python_to_use or ''}):[/bold]\n"
+            f"[bold]Base vs target dependencies (Python {target_python_to_use or ''}):[/bold]\n"
             f"This side-by-side view compares the resolved versions in your legacy environment against target resolution.\n"
             f"[dim]{details_msg}[/dim]"
         )
@@ -1788,7 +1788,7 @@ def assess(
                 if getattr(report, "resolution_quality", None) == "unresolved":
                     console.print(
                         f"[yellow]✓ Target manifest written: {written.name}  "
-                        "— target-only snapshot; no baseline was resolved, so "
+                        "— target-only snapshot; no base was resolved, so "
                         "this is not a comparison.[/yellow]"
                     )
                 else:
@@ -1841,7 +1841,7 @@ def _render_target_hint(hint) -> None:
 
 
 def _render_baseline_hint(hint) -> None:
-    """Show how to establish the legacy baseline env pymolt could not resolve.
+    """Show how to build the base environment pymolt could not resolve.
 
     Two audiences: a copy-paste Docker recipe for a human, and a self-contained
     brief an LLM agent can execute to stand up the interpreter and hand control back.
@@ -1849,12 +1849,12 @@ def _render_baseline_hint(hint) -> None:
     console.print(Panel(
         f"[yellow]{hint.reason}[/yellow]\n\n"
         "pymolt will not fabricate the legacy graph (resolving your unpinned constraints to "
-        "their latest releases would be a fiction). Establish the real baseline, then re-run.\n\n"
+        "their latest releases would be a fiction). Build the base environment, then re-run.\n\n"
         "[bold]1) Save this as Dockerfile.pymolt-legacy:[/bold]\n"
         f"[dim]{hint.suggested_dockerfile}[/dim]"
         "[bold]2) Build, run, and re-point assess:[/bold]\n"
         + "\n".join(f"  [white]{c}[/white]" for c in hint.suggested_commands),
-        title=f"Baseline environment needed — Python {hint.base_python}",
+        title=f"Base environment needed — Python {hint.base_python}",
         border_style="yellow", expand=False,
     ))
     console.print(Panel(

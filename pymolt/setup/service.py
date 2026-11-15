@@ -211,8 +211,8 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
         notes.append(
             f"No Python version is declared anywhere in this project — assuming "
             f"{current_python}, the interpreter pymolt is running on. If the project "
-            "actually targets an older Python, set it explicitly: the legacy baseline "
-            "is resolved against this number."
+            "actually targets an older Python, set it explicitly: the base dependencies "
+            "are resolved against this number."
         )
 
     # Call the lister unconditionally — it self-guards on docker availability, so

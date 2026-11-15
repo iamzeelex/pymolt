@@ -74,7 +74,7 @@ def test_verdict_blocked_on_target_error():
 
 def test_verdict_none_tier_is_not_feasible():
     title, body, style = compatibility_verdict("3.12", None, BaselineTier.NONE)
-    assert style == "yellow" and "no baseline" in title and "nothing to compare" in body
+    assert style == "yellow" and "no base" in title and "nothing to compare" in body
 
 
 def test_verdict_bronze_is_amber_with_upgrade_path():

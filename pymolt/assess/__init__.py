@@ -1,4 +1,4 @@
-"""Phase 3 — assess: resolve lock-first, compare baseline vs target, rank risk.
+"""Phase 3 — assess: resolve lock-first, compare base vs target, rank risk.
 
 The compute core is UI-agnostic: :func:`run_assess` resolves both graphs, builds
 the comparison rows and (optionally) the risk report, returning an
