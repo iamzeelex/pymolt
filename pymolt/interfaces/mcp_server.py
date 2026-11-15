@@ -460,7 +460,7 @@ def setup(
             f"Manifest {manifest}, tool {tool}, {base_python} -> {target_python}.",
             {"config": config.model_dump(mode="json"), "config_path": config_path},
             full_report_path=config_path,
-            hint="Run assess to compare baseline vs target dependency graphs.",
+            hint="Run assess to compare base vs target dependency graphs.",
         )
     except Exception as e:  # noqa: BLE001
         return _fail(f"setup failed: {e}", hint="Call setup with no choices for valid values.")
@@ -478,15 +478,15 @@ def assess(
     risk: bool = False,
     no_cache: bool = False,
 ) -> dict:
-    """Resolve baseline vs target dependency graphs and compare them: which package
+    """Resolve base vs target dependency graphs and compare them: which package
     versions move, which conflict, which enter the manual zone, and where the pinned
     target manifest lands. Faster and more reproducible than driving uv/pip by hand,
-    and it records the honesty markers (fixation, resolution quality, baseline tier)
+    and it records the honesty markers (fixation, resolution quality, base tier)
     that a hand-run resolve loses.
 
     A successful resolve is an INPUT to the migration, not evidence it worked.
     Never report "the migration is feasible" from this tool alone — cite the
-    baseline tier, and get behavioural proof from verify.
+    base tier (`baseline_tier`), and get behavioural proof from verify.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -563,7 +563,7 @@ def assess(
             "target_python": effective_target,
             "target_resolved": result.target_resolved,
             "target_error": result.target_error,
-            "changes_format": "name baseline>target status" + (" risk=tier" if risk else ""),
+            "changes_format": "name base>target status" + (" risk=tier" if risk else ""),
             "changes": pkg_rows,
             "status_counts": counts,
             "conflicts": counts.get("conflict", 0),
@@ -590,7 +590,7 @@ def assess(
             f"{head}\n"
             f"Upgrades: {counts.get('upgrade', 0)}, added: {counts.get('added', 0)}, "
             f"conflicts: {counts.get('conflict', 0)}, manual-zone: {len(result.manual_zone)}.\n"
-            f"{len(rows_sorted)} package(s) differ between baseline and target. "
+            f"{len(rows_sorted)} package(s) differ between base and target. "
             + _truncation_note(len(pkg_rows), rows_trunc, full_path)
         )
         if target_manifest:
@@ -849,7 +849,7 @@ def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
 
     Args:
         project_dir: Project directory (default: current directory).
-        endpoint: Custom Axiom Cloud Hub / On-Prem URL (default: configured endpoint).
+        endpoint: Axiom endpoint URL (default: the configured one).
 
     Use after setup, assess and the baseline capture.
     """
@@ -914,7 +914,7 @@ def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
     except Exception as e:  # noqa: BLE001
         return _fail(
             f"plan failed: {e}",
-            hint="Check that Axiom Cloud Hub is reachable and an API token is configured.",
+            hint="Check `pymolt axiom status`: the endpoint must answer and a token be set.",
         )
 
 

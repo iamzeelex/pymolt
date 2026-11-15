@@ -40,7 +40,7 @@ The tools have the names of the CLI commands. Every tool takes
 | `status` | `pymolt status` | Where the project stands, whether the configured environments exist, and the one tool to run next. |
 | `scan` | `pymolt scan` | Project roots, Python-version evidence + divergence, dependency edges, and every call site into a dependency (offline, no resolution). Use instead of reading Dockerfiles/lockfiles or grepping imports. |
 | `setup` | `pymolt setup` | With no choices: the exact manifest / tool / interpreter / target-Python strings it accepts. With them: writes `.pymolt/env_config.json`; an invalid choice returns `ok:false` with the valid values. |
-| `assess` | `pymolt assess` | Resolves baseline vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest, and returns how to build the target environment. `risk=true` does cached network calls. |
+| `assess` | `pymolt assess` | Resolves base vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest, and returns how to build the target environment. `risk=true` does cached network calls. |
 | `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Opt-in: `PYMOLT_MCP_ALLOW_EXEC=1`. |
 | `plan` | `pymolt plan` | Saves the codemods for the target manifest as the migration plan and returns the diffs. Writes no source. |
 | `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND / trust %, and the calls that changed. Saved like the CLI's. |
