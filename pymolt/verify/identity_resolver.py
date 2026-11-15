@@ -46,6 +46,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from pymolt.adapters.python_runner import RunnerSpec, run_in, runner_available, to_container
+
 logger = logging.getLogger(__name__)
 
 # Bump when the probe's output semantics change: cached answers from an older
@@ -407,8 +409,11 @@ class IdentityResolution(BaseModel):
 
 class InterpreterChoice(BaseModel):
     executable: str
-    source: str  # probe-python | trace-metadata | host
+    source: str  # probe-python | trace-metadata | host | runner | runner-unavailable
     note: str | None = None
+    # Set when the capture's interpreter lives in a container: the probe runs there
+    # (``executable`` is then the path *inside* it).
+    runner: RunnerSpec | None = None
 
 
 def _trace_processes(trace: str | Path) -> list[dict]:
@@ -428,7 +433,13 @@ def _runnable(executable: str) -> bool:
 def select_interpreter(
     probe_python: str | None = None, trace: str | Path | None = None
 ) -> InterpreterChoice:
-    """Explicit ``probe_python`` > the trace's recorded interpreter > ``sys.executable``."""
+    """Explicit ``probe_python`` > the capture's container runner > the trace's recorded
+    interpreter > ``sys.executable``.
+
+    A trace captured in a container resolves *in that container* (``source="runner"``). When
+    the runner is recorded but not running, the choice is ``runner-unavailable``: identities
+    are then left unresolved with a note, never resolved against the host's different
+    packages."""
     if probe_python:
         found = probe_python if os.sep in probe_python else shutil.which(probe_python)
         return InterpreterChoice(executable=found or probe_python, source="probe-python")
@@ -447,6 +458,9 @@ def select_interpreter(
                 events if isinstance(events, int) and events > 0 else 0
             )
     ranked = sorted(recorded, key=lambda exe: -recorded[exe])  # stable: ties keep order
+    runner_choice = _runner_choice(trace, ranked[0] if ranked else None)
+    if runner_choice is not None:
+        return runner_choice
     for executable in ranked:
         if _runnable(executable):
             distinct = {os.path.realpath(exe) for exe in recorded}
@@ -470,6 +484,32 @@ def select_interpreter(
             "no capture interpreter, so dependency versions may differ from the capture's"
         )
     return InterpreterChoice(executable=sys.executable, source="host", note=note)
+
+
+def _runner_choice(trace: str | Path | None, executable: str | None) -> InterpreterChoice | None:
+    """The container choice for a trace captured in one; ``None`` for a host capture."""
+    if trace is None:
+        return None
+    from pymolt.verify.facts import runner_for_trace
+
+    spec, origin = runner_for_trace(trace)
+    if spec is None:
+        return None
+    # A config-level runner says where the project's container is, not that this trace ran
+    # there: it counts only when the recorded interpreter does not exist on this host.
+    if origin != "slot" and executable and _runnable(executable):
+        return None
+    exe = executable or spec.executable
+    usable, why = runner_available(spec)
+    if not usable:
+        return InterpreterChoice(
+            executable=exe, source="runner-unavailable", runner=spec,
+            note=(f"the capture ran in container {spec.name} and it is not available "
+                  f"({why}): static identities are left unresolved rather than resolved "
+                  "against the host's packages"))
+    return InterpreterChoice(
+        executable=exe, source="runner", runner=spec,
+        note=f"static identities resolved inside container {spec.name} ({exe})")
 
 
 # ─── cache ────────────────────────────────────────────────────────────────────
@@ -584,38 +624,58 @@ def _run_probe(
     paths: list[str],
     timeout: float,
     per_path_timeout: float,
+    runner: RunnerSpec | None = None,
 ) -> tuple[dict, dict[str, ResolvedIdentity], list[str]]:
     """(meta, results, notes); paths the child never answered are transient errors."""
     notes: list[str] = []
+    root_arg: str | None = str(root)
+    if runner is not None:
+        root_arg = to_container(runner, str(root))
+        if root_arg is None:
+            failure = f"{root} is not mounted into container {runner.name}"
+            notes.append(failure)
+            return {}, {p: ResolvedIdentity(error=failure, transient=True) for p in paths}, notes
     request = json.dumps(
-        {"root": str(root), "paths": paths, "per_path_timeout": per_path_timeout}
+        {"root": root_arg, "paths": paths, "per_path_timeout": per_path_timeout}
     )
     stdout = ""
     stderr = ""
     failure: str | None = None
-    try:
-        proc = subprocess.Popen(
-            [interpreter, "-B", "-c", _PROBE_SOURCE],
-            cwd=str(root),
-            env=_child_env(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except OSError as exc:
-        failure = f"could not start {interpreter}: {exc}"
+    if runner is not None:
+        try:
+            proc = run_in(runner, [interpreter, "-B", "-c", _PROBE_SOURCE], stdin=request,
+                          cwd=root_arg, timeout=timeout)
+            stdout, stderr = proc.stdout or "", proc.stderr or ""
+            if proc.returncode not in (0, None):
+                failure = f"identity resolver exited with code {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            failure = f"identity resolver timed out after {timeout:g}s"
+        except OSError as exc:
+            failure = f"could not run {interpreter} in {runner.name}: {exc}"
     else:
         try:
-            stdout, stderr = proc.communicate(request, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
-            failure = f"identity resolver timed out after {timeout:g}s"
-        if failure is None and proc.returncode not in (0, None):
-            failure = f"identity resolver exited with code {proc.returncode}"
+            proc = subprocess.Popen(
+                [interpreter, "-B", "-c", _PROBE_SOURCE],
+                cwd=str(root),
+                env=_child_env(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            failure = f"could not start {interpreter}: {exc}"
+        else:
+            try:
+                stdout, stderr = proc.communicate(request, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                failure = f"identity resolver timed out after {timeout:g}s"
+            if failure is None and proc.returncode not in (0, None):
+                failure = f"identity resolver exited with code {proc.returncode}"
 
     meta: dict = {}
     results: dict[str, ResolvedIdentity] = {}
@@ -685,6 +745,12 @@ def resolve_identities(
     wanted = sorted({p.strip() for p in paths if isinstance(p, str) and p.strip()})
     if not wanted:
         return resolution
+    if choice.source == "runner-unavailable":
+        for name in wanted:
+            resolution.results[name] = ResolvedIdentity(
+                error="the capture's container is not available", transient=True)
+        return resolution
+    use_cache = use_cache and choice.runner is None  # a container's packages change unseen
 
     try:
         cached: dict[str, ResolvedIdentity] = {}
@@ -703,8 +769,9 @@ def resolve_identities(
         fresh: dict[str, ResolvedIdentity] = {}
         meta: dict = {}
         if todo:
+            extra = {"runner": choice.runner} if choice.runner is not None else {}
             meta, fresh, notes = _run_probe(
-                choice.executable, root, todo, timeout, per_path_timeout
+                choice.executable, root, todo, timeout, per_path_timeout, **extra
             )
             resolution.notes.extend(notes)
             if isinstance(meta.get("python"), str):

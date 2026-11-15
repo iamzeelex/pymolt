@@ -1438,7 +1438,7 @@ def capture_named_trace(
                 capture_kwargs["sample_first"] = LONG_RUN_SAMPLE_FIRST
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
         _record_sampling(staged_path, sample_rate, sampling_source)
-        _record_site_text(staged_path, project_dir)
+        _record_site_text(staged_path, project_dir, runner_spec)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
@@ -1745,7 +1745,7 @@ def poll_attached_capture(out_path: str | Path) -> int:
 _PROJECTED = '"src": "facts"'  # how project_snapshot marks its lines
 
 
-def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
+def _record_site_text(trace_path: str | Path, project_dir: str | Path, runner=None) -> None:
     """Keep the source text of every call site with the trace.
 
     The project's code changes between the baseline and the post-migration capture, so
@@ -1754,7 +1754,7 @@ def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
     effort — without it the diff falls back to line numbers.
     """
     try:
-        record_site_text(trace_path, project_dir)
+        record_site_text(trace_path, project_dir, runner)
     except Exception as exc:  # noqa: BLE001 - never fail a capture over annotation
         logger.warning("could not record call-site text for %s: %s", trace_path, exc)
 
