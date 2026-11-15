@@ -1,14 +1,19 @@
 """
 pymolt/codemods/service.py
 
-UI-agnostic codemod orchestration: turn an upgrade set
-into codemod patterns/rules (via the Axiom Graph service) and apply them
-locally.
+UI-agnostic codemod orchestration: turn an upgrade set into codemod
+patterns/rules and apply them locally.
 
-Migration policy (per package): if the server returned Tier-2 rules, apply
+The provider is local by default: ``pymolt.delta.provider.LocalDeltaProvider``
+computes the API changes from the old and new environments on this machine. A
+remote Axiom Graph service is used only when an endpoint is explicitly configured
+(``base_url`` from ``--endpoint`` / ``PYMOLT_AXIOM_ENDPOINT``); there is no
+default endpoint.
+
+Migration policy (per package): if the provider returned Tier-2 rules, apply
 RULES ONLY for that package (its Tier-1 patterns are re-expressed as kind-
-tagged rules server-side — applying both would double-apply). If it returned no
-rules (old server), the Tier-1 patterns path runs unchanged.
+tagged rules — applying both would double-apply). If it returned no rules,
+the Tier-1 patterns path runs unchanged.
 
 No printing / prompting here — callers own their I/O.
 """
@@ -84,7 +89,9 @@ def _config_value(config: dict | EnvConfig | None, key: str, default=None):
     return getattr(config, key, default)
 
 
-def _match_source(sources: list[DiscoveredSource], source_ref: str | Path) -> DiscoveredSource | None:
+def _match_source(
+    sources: list[DiscoveredSource], source_ref: str | Path
+) -> DiscoveredSource | None:
     ref = Path(source_ref).expanduser()
     ref_name = ref.name
     for src in sources:
@@ -210,7 +217,9 @@ def migrations_from_dependency_file(
             # CWD — especially then: that is the case that silently succeeds
             # with another repo's manifest instead of failing loudly.
             target_dependency_file = candidate
-    cfg = config if config is not None else EnvConfig.load(project_path / ".pymolt" / "env_config.json")
+    cfg = config if config is not None else EnvConfig.load(
+        project_path / ".pymolt" / "env_config.json"
+    )
 
     baseline_manifest = _config_value(cfg, "selected_manifest")
     baseline_tool = _config_value(cfg, "selected_tool", "uv")
@@ -246,7 +255,9 @@ def migrations_from_dependency_file(
             if w:
                 warnings.append(w)
 
-    rows = build_comparison_rows(baseline_graph, target_graph, target_python="target", target_error=None)
+    rows = build_comparison_rows(
+        baseline_graph, target_graph, target_python="target", target_error=None
+    )
     return migrations_from_rows(rows)
 
 
@@ -282,6 +293,23 @@ def resolve_codemod_migrations(
         "No cached assess result is available; provide a target dependency file "
         "(for example requirements-target.txt or environment-target.yml)."
     )
+
+
+def codemod_provider(
+    project_dir: str | Path, base_url: str | None = None, *, online: bool = False
+):
+    """The codemod source for a project: local delta facts, or Axiom if configured.
+
+    ``base_url`` is an explicitly configured endpoint (``--endpoint`` or
+    ``PYMOLT_AXIOM_ENDPOINT``, see ``pymolt.config.load_endpoint``); ``None`` means the
+    local provider. ``online`` lets the local provider fetch intermediate releases
+    (package names and versions only).
+    """
+    if base_url:
+        return AxiomGraphClient(base_url)
+    from pymolt.delta.provider import LocalDeltaProvider
+
+    return LocalDeltaProvider(project_dir, online=online)
 
 
 def _split_bundles(
@@ -351,25 +379,27 @@ def run_codemods(
     root: str | Path,
     migrations: list[DependencyMigration],
     *,
-    base_url: str,
+    base_url: str | None = None,
     write: bool = False,
-    client: AxiomGraphClient | None = None,
+    client=None,
     progress: Callable[[str], None] | None = None,
+    online: bool = False,
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], CodemodRunResult]:
     """
-    Fetch patterns/rules for `migrations` from Axiom Graph and apply them under
-    `root` (per package: rules if the server returned any, else patterns).
+    Compute patterns/rules for `migrations` (locally, or from Axiom when `base_url`
+    is a configured endpoint) and apply them under `root` (per package: rules if the
+    provider returned any, else patterns).
 
     Returns (by_package, run_result). Dry-run unless write=True. Auto-apply
     only writes confidence=="verified" rules (see `apply.apply_rules_to_repo`);
-    `run_result.downgraded` carries the rules the client downgraded on fetch.
-    Raises AxiomGraphError if the service is unreachable (caller decides UX).
+    `run_result.downgraded` carries the rules the provider downgraded.
+    Raises AxiomGraphError if a configured service is unreachable (caller decides UX).
 
     `progress`, if given, is called with human-readable status lines as each
     phase (fetch → local verify → apply) starts, so an interface can show that work
-    is happening instead of appearing to hang on a long server-side analysis.
+    is happening instead of appearing to hang.
     """
-    client = client or AxiomGraphClient(base_url)
+    client = client or codemod_provider(root, base_url, online=online)
     bundles = client.fetch_bundle(migrations, progress=progress)
     by_pkg, rules_flat, patterns_flat, downgraded = _split_bundles(bundles)
 
@@ -396,13 +426,14 @@ def preview_codemods(
     root: str | Path,
     migrations: list[DependencyMigration],
     *,
-    base_url: str,
-    client: AxiomGraphClient | None = None,
+    base_url: str | None = None,
+    client=None,
     progress: Callable[[str], None] | None = None,
     on_recipes: Callable[[dict[str, list[CodemodPattern] | list[CodemodRule]]], None] | None = None,
     on_impacts: Callable[[dict[str, list[ApiImpact]]], None] | None = None,
     on_file: ProgressSink = None,
     auto_apply_only: bool = False,
+    online: bool = False,
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], list[FilePreview]]:
     """
     Fetch patterns/rules for `migrations` and compute per-file before/after
@@ -422,13 +453,14 @@ def preview_codemods(
     over the fetched recipe set the moment it is known (before the walk starts,
     so an interface can show what is about to be applied), and `on_file`
     reports every file the walk scans. ``on_impacts`` exposes the structured
-    Axiom delta paths for persistence in the local migration plan. All four are
+    API-change paths for persistence in the local migration plan. All four are
     pure observers — none of
     them changes what is returned.
 
-    Raises AxiomGraphError if the service is unreachable (caller decides UX).
+    The provider is local unless `base_url` names a configured Axiom endpoint.
+    Raises AxiomGraphError if a configured service is unreachable (caller decides UX).
     """
-    client = client or AxiomGraphClient(base_url)
+    client = client or codemod_provider(root, base_url, online=online)
     bundles = client.fetch_bundle(migrations, progress=progress)
     by_pkg, rules_flat, patterns_flat, _downgraded = _split_bundles(bundles)
 
@@ -502,14 +534,18 @@ def build_migration_plan(
     project_dir: str | Path,
     *,
     target_file: str | Path | None = None,
-    base_url: str,
+    base_url: str | None = None,
     progress: Callable[[str], None] | None = None,
+    online: bool = False,
 ):
     """Preview the verified codemods for the target manifest and freeze them as a plan.
 
     Returns ``(plan, previews, source_desc, by_pkg)``. Nothing is saved or written:
-    callers save the plan, and only `pymolt apply` changes source files. Raises
-    :class:`PlanInputError`, or ``AxiomGraphError`` when the service is unreachable.
+    callers save the plan, and only `pymolt apply` changes source files. The API
+    changes are computed locally unless `base_url` names a configured Axiom endpoint;
+    `online` lets the local engine fetch intermediate releases (names and versions
+    only). Raises :class:`PlanInputError`, or ``AxiomGraphError`` when a configured
+    service is unreachable.
     """
     from pymolt.migration_plan import create_migration_plan
 
@@ -522,12 +558,16 @@ def build_migration_plan(
     impacts: dict[str, list[ApiImpact]] = {}
     by_pkg: dict[str, list[CodemodPattern] | list[CodemodRule]] = {}
     previews: list[FilePreview] = []
+    provider = codemod_provider(root, base_url, online=online)
     if migrations:
         by_pkg, previews = preview_codemods(
-            root, migrations, base_url=base_url, progress=progress,
+            root, migrations, client=provider, progress=progress,
             on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
             auto_apply_only=True,
         )
+    # The local provider's delta reports feed the plan's risk prediction as-is, so the
+    # facts are computed once; a remote provider has none and prediction computes them.
+    delta_reports = getattr(provider, "reports", None) or None
     plan = create_migration_plan(
         root, previews, migrations,
         target_python=config.target_python or "unknown",
@@ -535,5 +575,6 @@ def build_migration_plan(
         target_manifest_path=target_path,
         files_scanned=len(scanned),
         impacts=impacts,
+        delta_reports=delta_reports,
     )
     return plan, previews, source_desc, by_pkg

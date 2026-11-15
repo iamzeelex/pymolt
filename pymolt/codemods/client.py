@@ -1,7 +1,10 @@
 """
 pymolt/codemods/client.py
 
-Client for the Axiom Graph codemod service.
+Client for a REMOTE Axiom Graph codemod service — used only when an endpoint is
+explicitly configured (``--endpoint`` or ``PYMOLT_AXIOM_ENDPOINT``). By default
+``pymolt plan`` computes API changes locally (``pymolt.delta.provider``), and there
+is no default endpoint.
 
 Sends dependency names + versions, receives Tier-1 codemod patterns AND Tier-2
 codemod rules. USER CODE IS NEVER SENT — only the migration spec crosses the
@@ -24,7 +27,7 @@ import httpx
 from pymolt.codemods.models import ApiImpact, CodemodBundle, CodemodPattern
 from pymolt.codemods.rules import CodemodRule, verify_rule
 from pymolt.config import (
-    DEFAULT_ENDPOINT,
+    ENV_ENDPOINT,
     get_cached_delta,
     load_endpoint,
     load_token,
@@ -32,8 +35,6 @@ from pymolt.config import (
 )
 
 log = logging.getLogger(__name__)
-
-DEFAULT_BASE_URL = DEFAULT_ENDPOINT
 
 
 class AxiomGraphError(RuntimeError):
@@ -73,7 +74,10 @@ def _rule_label(rule: CodemodRule) -> str:
 
 
 class AxiomGraphClient:
-    """Thin HTTP client over the Axiom Graph API with local offline cache."""
+    """Thin HTTP client over a configured Axiom Graph API, with a local cache.
+
+    Raises :class:`AxiomGraphError` on construction when no endpoint is configured.
+    """
 
     #: Dependencies per request. The server's cost is per release chain, so a
     #: large batch is a single long request that either lands or times out
@@ -89,7 +93,13 @@ class AxiomGraphClient:
         use_cache: bool = True,
     ) -> None:
         import os
-        self.base_url = (base_url or load_endpoint()).rstrip("/")
+        resolved = (base_url or load_endpoint() or "").strip().rstrip("/")
+        if not resolved:
+            raise AxiomGraphError(
+                "no Axiom endpoint is configured (pass --endpoint URL or set "
+                f"{ENV_ENDPOINT}); without one pymolt computes API changes locally"
+            )
+        self.base_url = resolved
         self.timeout = timeout
         self.token = token or load_token()
         self.use_cache = use_cache and not os.environ.get("PYMOLT_NO_CACHE")
@@ -126,7 +136,7 @@ class AxiomGraphClient:
         rules) keyed by package.
 
         Checks local offline cache first. Uncached migrations are sent to the
-        Axiom Cloud Hub in chunks, and results are cached locally.
+        configured Axiom endpoint in chunks, and results are cached locally.
         """
         if not migrations:
             return {}
@@ -143,7 +153,8 @@ class AxiomGraphClient:
                     try:
                         bundle = CodemodBundle.model_validate(cached_raw)
                         out[m.name] = bundle
-                        log.debug("Local delta cache hit for %s %s->%s", m.name, m.from_version, m.to_version)
+                        log.debug("Local delta cache hit for %s %s->%s",
+                                  m.name, m.from_version, m.to_version)
                     except Exception as c_exc:
                         log.debug("Cache validation failed for %s: %s", m.name, c_exc)
                         uncached.append(m)

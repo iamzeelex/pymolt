@@ -1,0 +1,724 @@
+# ruff: noqa: UP030, UP031, UP032  -- runs inside legacy interpreters (down to 3.6): stdlib only
+"""Scoped API-fact probe. Runs INSIDE one environment's interpreter, as a subprocess.
+
+Pure stdlib and 3.6-compatible syntax (no f-strings, no walrus, no annotations): it runs
+in the baseline capture's interpreter, which may be a legacy Python. It never imports
+pymolt. The host (``pymolt.delta.engine``) sends one JSON request on stdin::
+
+    {"paths": [...], "dists": ["Flask", ...], "roots": [...], "any_root": false,
+     "contexts": ["<setup code>", ...], "per_path_timeout": 15}
+
+and reads one line per answer, each prefixed with ``@@pymolt-delta@@ ``::
+
+    {"meta": {"python": "3.9.23", "executable": ..., "site_dirs": [...],
+              "dists": {"Flask": {"version": "2.0.3", "roots": ["flask"]}},
+              "roots": [...], "contexts": [...]}}
+    {"path": "flask.request.headers.get", "result": {...}}     # one per path
+    {"done": true}
+
+A path is a public import path, possibly continued through attributes
+(``flask.request.headers.get``). It is resolved by importing the longest importable
+prefix and walking the rest with getattr. Each dependency-owned step reports existence,
+kind, owner (the class or module that really defines the attribute), canonical name
+(spelled as a profile-backend trace spells it), signature, bases, deprecation evidence
+(``warnings.warn`` prose in its own source, the PEP 562 ``__getattr__`` branch serving
+it, PEP 702 ``__deprecated__``, ``.. deprecated::`` docstring lines), warnings raised on
+access, and its forwarding target (``__wrapped__`` or a one-line ``return f(...)``).
+The walk stops at the first step owned by something that is not one of ``roots``
+(``request.method.lower`` ends at ``method``).
+"""
+
+import ast
+import importlib
+import inspect
+import json
+import os
+import re
+import signal
+import sys
+import textwrap
+import threading
+import time
+import types
+import warnings
+
+PROBE_VERSION = 1
+MARK = "@@pymolt-delta@@ "
+_ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
+_MAX_MSG = 400
+_HAS_CONSTANT = sys.version_info >= (3, 8)  # ast.Str is deprecated (and warns) on 3.12+
+
+_DEP_ROOTS = set()
+_ANY_ROOT = [False]
+
+
+class _Timeout(BaseException):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise _Timeout()
+
+
+def _norm(text):
+    return _ADDR.sub("", text)
+
+
+# ── objects ───────────────────────────────────────────────────────────────────────────
+
+
+def _unproxy(obj):
+    getter = getattr(type(obj), "_get_current_object", None)
+    if getter is not None:
+        try:
+            return obj._get_current_object()
+        except Exception:
+            return obj
+    return obj
+
+
+def _owner_path(real, attr):
+    """Where ``attr`` is really defined for this object: ('<module>.<Qual>.<attr>', module)."""
+    if inspect.ismodule(real):
+        return real.__name__ + "." + attr, real.__name__
+    cls = real if inspect.isclass(real) else type(real)
+    try:
+        mro = inspect.getmro(cls)
+    except Exception:
+        mro = (cls,)
+    for klass in mro:
+        try:
+            if attr in vars(klass):
+                return "%s.%s.%s" % (klass.__module__, klass.__qualname__, attr), klass.__module__
+        except TypeError:
+            continue
+    return "%s.%s.%s" % (cls.__module__, cls.__qualname__, attr), cls.__module__
+
+
+def _receiver_path(real, attr):
+    if inspect.ismodule(real):
+        return real.__name__ + "." + attr
+    cls = real if inspect.isclass(real) else type(real)
+    return "%s.%s.%s" % (cls.__module__, cls.__qualname__, attr)
+
+
+def _is_dep(module_name):
+    if _ANY_ROOT[0]:
+        return True
+    return (module_name or "").split(".")[0] in _DEP_ROOTS
+
+
+def _kind(obj):
+    if inspect.isclass(obj):
+        return "class"
+    if inspect.ismodule(obj):
+        return "module"
+    if callable(obj):
+        return "callable"
+    return type(obj).__name__
+
+
+def _shape(obj):
+    target = obj
+    if inspect.isclass(obj):
+        target = obj.__init__
+    try:
+        sig = inspect.signature(target)
+    except (TypeError, ValueError):
+        return None
+    except Exception:
+        return None
+    out = []
+    for p in sig.parameters.values():
+        if p.default is inspect.Parameter.empty:
+            default = None
+        else:
+            try:
+                default = _norm(repr(p.default))[:80]
+            except Exception:
+                default = "<unrepresentable>"
+        out.append([p.name, str(p.kind).split(".")[-1], default])
+    return out
+
+
+# canonical names, spelled like pymolt.verify.identity_resolver (a profile-backend trace)
+
+
+def _qual(obj):
+    try:
+        module = getattr(obj, "__module__", None)
+        if not isinstance(module, str):
+            owner = getattr(obj, "__objclass__", None)
+            module = getattr(owner, "__module__", None)
+        qualname = getattr(obj, "__qualname__", None)
+        if not isinstance(qualname, str):
+            qualname = getattr(obj, "__name__", None)
+    except Exception:
+        return None
+    if isinstance(module, str) and module and isinstance(qualname, str) and qualname:
+        return module + "." + qualname
+    return None
+
+
+def _target(obj):
+    if isinstance(obj, property) and obj.fget is not None:
+        obj = obj.fget
+    if isinstance(obj, (staticmethod, classmethod)):
+        obj = obj.__func__
+    try:
+        import functools
+
+        if isinstance(obj, functools.partial):
+            obj = obj.func
+    except Exception:
+        pass
+    if inspect.ismethod(obj):
+        obj = obj.__func__
+    if not inspect.isclass(obj) and not isinstance(obj, types.ModuleType):
+        try:
+            obj = inspect.unwrap(obj)
+        except Exception:
+            pass
+    return obj
+
+
+def _code_qualname(func):
+    code = getattr(func, "__code__", None)
+    qualname = getattr(code, "co_qualname", None)  # 3.11+; immune to __qualname__ rewrites
+    if not isinstance(qualname, str):
+        qualname = getattr(func, "__qualname__", None)
+    return qualname if isinstance(qualname, str) else None
+
+
+def _frame_module(func):
+    globs = getattr(func, "__globals__", None)
+    name = globs.get("__name__") if isinstance(globs, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def _function_sym(func):
+    module = _frame_module(func)
+    qualname = _code_qualname(func)
+    if module and qualname:
+        return module + "." + qualname
+    return _qual(func)
+
+
+def _class_functions(cls):
+    try:
+        members = list(vars(cls).values())
+    except Exception:
+        return
+    for member in members:
+        if isinstance(member, property):
+            for accessor in (member.fget, member.fset, member.fdel):
+                if accessor is not None:
+                    yield accessor
+            continue
+        if isinstance(member, (staticmethod, classmethod)):
+            member = member.__func__
+        if isinstance(member, types.FunctionType):
+            yield member
+
+
+def _class_sym(cls):
+    qualname = getattr(cls, "__qualname__", None)
+    if isinstance(qualname, str):
+        for func in _class_functions(cls):
+            code_qualname = _code_qualname(func)
+            module = _frame_module(func)
+            if module and code_qualname and code_qualname.startswith(qualname + "."):
+                return module + "." + qualname
+    return _qual(cls)
+
+
+def _canonical(obj, owner, in_class=False):
+    """The object's canonical name; the defining owner path for plain values.
+
+    A factory-made method (``cls.mean = mean`` with ``mean`` defined in a function body) is
+    named after the class that holds it, as the boundary tracer names it.
+    """
+    try:
+        target = _target(obj)
+    except Exception:
+        target = obj
+    try:
+        if inspect.isclass(target):
+            return _class_sym(target) or owner
+        if inspect.ismodule(target):
+            return target.__name__
+        if inspect.isroutine(target):
+            sym = _function_sym(target) or owner
+            code = getattr(target, "__code__", None)
+            if in_class and owner and sym and "<locals>" in sym and code is not None:
+                return owner.rsplit(".", 1)[0] + "." + code.co_name
+            return sym
+    except Exception:
+        return owner
+    return owner
+
+
+# ── static mining ─────────────────────────────────────────────────────────────────────
+
+
+def _const_str(node):
+    if _HAS_CONSTANT:
+        if isinstance(node, ast.Constant):
+            return node.value if isinstance(node.value, str) else None
+    elif isinstance(node, ast.Str):
+        return node.s
+    if isinstance(node, ast.JoinedStr):
+        return "".join(_const_str(v) or "{...}" for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        left, right = _const_str(node.left), _const_str(node.right)
+        if left or right:
+            return (left or "{...}") + (right or "")
+    if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "format":
+        return _const_str(node.func.value)
+    return None
+
+
+def _name(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _name(node.value)
+        return (base + "." if base else "") + node.attr
+    if isinstance(node, ast.Call):
+        return _name(node.func)
+    return None
+
+
+def _warn_calls(tree):
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (_name(node.func) or "").split(".")[-1] in (
+            "warn",
+            "warn_deprecated",
+            "_warn",
+        ):
+            msg = _const_str(node.args[0]) if node.args else None
+            cat = _name(node.args[1]) if len(node.args) > 1 else None
+            for kw in node.keywords:
+                if kw.arg == "category":
+                    cat = _name(kw.value)
+            if msg:
+                out.append({"category": cat, "message": msg[:_MAX_MSG]})
+    return out
+
+
+def _mine(obj):
+    """Static facts from the object's own source: warn() prose, one-line forwarding."""
+    fn = getattr(obj, "fget", obj)
+    try:
+        fn = inspect.unwrap(fn)
+        src = textwrap.dedent(inspect.getsource(fn))
+        tree = ast.parse(src)
+    except Exception:
+        return {}
+    node = tree.body[0] if tree.body else None
+    decorators = [_name(d) for d in getattr(node, "decorator_list", [])]
+    forwards = None
+    func_types = (ast.FunctionDef, getattr(ast, "AsyncFunctionDef", ast.FunctionDef))
+    if isinstance(node, func_types):
+        body = [
+            s
+            for s in node.body
+            if not (
+                isinstance(s, ast.Expr)
+                and (
+                    _const_str(s.value) is not None
+                    or (
+                        isinstance(s.value, ast.Call)
+                        and (_name(s.value.func) or "").endswith("warn")
+                    )
+                )
+            )
+        ]
+        if (
+            len(body) == 1
+            and isinstance(body[0], ast.Return)
+            and isinstance(body[0].value, ast.Call)
+        ):
+            forwards = _name(body[0].value.func)
+    out = {}
+    warns = _warn_calls(tree)
+    if warns:
+        out["warns"] = warns
+    if forwards:
+        out["forwards_to"] = forwards
+    decorators = [d for d in decorators if d]
+    if decorators:
+        out["decorators"] = decorators
+    return out
+
+
+def _module_getattr_warns(module, attr):
+    """Warnings in a PEP 562 ``__getattr__`` branch that serves ``attr``."""
+    hook = vars(module).get("__getattr__") if inspect.ismodule(module) else None
+    if hook is None:
+        return []
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(hook)))
+    except Exception:
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            consts = [_const_str(c) for c in ast.walk(node.test)]
+            if attr in consts:
+                for stmt in node.body:
+                    out.extend(_warn_calls(stmt))
+    return out
+
+
+_SECTION = re.compile(
+    r"^\s*(Parameters|Returns|Yields|Raises|Warns|Examples?|Notes|See Also|Attributes|"
+    r"Methods|Other Parameters|Args|Arguments|Keyword Arguments|Kwargs)\s*:?\s*$"
+)
+_UNDERLINE = re.compile(r"^\s*[-=~^]{3,}\s*$")
+_DEPRECATED_WORD = re.compile(r"\bdeprecated\b", re.IGNORECASE)
+
+
+def _doc_deprecations(obj):
+    """Deprecation lines of the object's own docstring.
+
+    ``directive``: a ``.. deprecated::`` block (or a summary line starting "Deprecated")
+    before the first section header, i.e. about the object itself. ``mentions``: every
+    other line saying "deprecated" (parameter-level, or prose), hint material only.
+    """
+    doc = getattr(obj, "__doc__", None)
+    if not isinstance(doc, str) or "eprecat" not in doc:
+        return {}
+    lines = inspect.cleandoc(doc).splitlines()
+    directive, mentions = [], []
+    in_sections = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if _SECTION.match(line) and (_UNDERLINE.match(nxt) or line.rstrip().endswith(":")):
+            in_sections = True
+        if ".. deprecated::" in line:
+            block = [line.strip()]
+            j = i + 1
+            indent = len(line) - len(line.lstrip())
+            while j < len(lines) and len(block) < 4:
+                cont = lines[j]
+                if cont.strip() and (len(cont) - len(cont.lstrip())) > indent:
+                    block.append(cont.strip())
+                    j += 1
+                elif not cont.strip() and len(block) == 1:
+                    j += 1
+                else:
+                    break
+            text = " ".join(block)[:300]
+            (mentions if in_sections else directive).append(text)
+            i = j
+            continue
+        if _DEPRECATED_WORD.search(line):
+            text = line.strip()[:300]
+            if not in_sections and i == 0 and text.lower().startswith("deprecated"):
+                directive.append(text)
+            else:
+                mentions.append(text)
+        i += 1
+    out = {}
+    if directive:
+        out["directive"] = directive[:5]
+    if mentions:
+        out["mentions"] = mentions[:5]
+    return out
+
+
+def _rel_file(module_name):
+    """``pkg/sub/mod.py``: the module's file relative to its top-level package's parent."""
+    try:
+        module = sys.modules.get(module_name)
+        path = getattr(module, "__file__", None)
+        root = sys.modules.get(module_name.split(".")[0])
+        root_file = getattr(root, "__file__", None)
+        if not path or not root_file:
+            return None
+        base = os.path.dirname(root_file)
+        if hasattr(root, "__path__"):
+            base = os.path.dirname(base)
+        rel = os.path.relpath(path, base).replace(os.sep, "/")
+        if rel.endswith(".pyc"):
+            rel = rel[:-1]
+        return rel if not rel.startswith("..") else None
+    except Exception:
+        return None
+
+
+def _w(w):
+    return {"category": w.category.__name__, "message": _norm(str(w.message))[:_MAX_MSG]}
+
+
+# ── resolution ────────────────────────────────────────────────────────────────────────
+
+
+def _describe(step, nxt, in_class):
+    real_next = _unproxy(nxt)
+    kind = _kind(real_next)
+    step["kind"] = kind
+    canonical = _canonical(real_next, step["owner"], in_class)
+    if canonical:
+        step["canonical"] = canonical
+    mod = getattr(real_next, "__module__", None)
+    qual = getattr(real_next, "__qualname__", None)
+    if kind in ("class", "callable") and isinstance(mod, str) and isinstance(qual, str):
+        step["defined_as"] = mod + "." + qual
+    if kind in ("class", "callable"):
+        step["shape"] = _shape(real_next)
+        step.update(_mine(real_next))
+        doc = _doc_deprecations(real_next)
+        if doc:
+            step["doc"] = doc
+        try:
+            inner = inspect.unwrap(real_next)
+        except Exception:
+            inner = real_next
+        if inner is not real_next:
+            wrapped = _canonical(inner, None)
+            if wrapped and wrapped != canonical:
+                step["wrapped"] = wrapped
+    try:
+        dep_attr = getattr(real_next, "__deprecated__", None)
+    except Exception:
+        dep_attr = None
+    if isinstance(dep_attr, str) and dep_attr:
+        step["deprecated_attr"] = dep_attr[:_MAX_MSG]
+    if kind == "class":
+        try:
+            step["bases"] = ["%s.%s" % (b.__module__, b.__qualname__) for b in real_next.__bases__]
+        except Exception:
+            pass
+    return real_next
+
+
+def resolve(path):
+    parts = path.split(".")
+    module, i = None, 0
+    for i in range(len(parts), 0, -1):
+        try:
+            module = importlib.import_module(".".join(parts[:i]))
+            break
+        except _Timeout:
+            raise
+        except BaseException:
+            continue
+    if module is None:
+        return {"exists": False, "error": "no importable prefix", "steps": [], "module": None}
+    out = {"module": module.__name__, "steps": []}
+    rel = _rel_file(module.__name__)
+    if rel:
+        out["module_file"] = rel
+    cur = module
+    caught = []
+    for attr in parts[i:]:
+        real = _unproxy(cur)
+        owner, owner_mod = _owner_path(real, attr)
+        if not _is_dep(owner_mod):
+            out["steps"].append({"attr": attr, "owner": owner, "dep": False})
+            break
+        step = {
+            "attr": attr,
+            "owner": owner,
+            "owner_module": owner_mod,
+            "dep": True,
+            "receiver_path": _receiver_path(real, attr),
+        }
+        owner_file = _rel_file(owner_mod)
+        if owner_file:
+            step["owner_file"] = owner_file
+        getattr_warns = _module_getattr_warns(real, attr)
+        if getattr_warns:
+            step["getattr_warns"] = getattr_warns
+        try:
+            with warnings.catch_warnings(record=True) as got:
+                warnings.simplefilter("always")
+                try:
+                    nxt = getattr(real, attr)
+                finally:
+                    caught.extend(got)
+        except _Timeout:
+            raise
+        except BaseException as exc:  # the answer IS the exception
+            step["exists"] = False
+            try:
+                detail = _norm(str(exc))[:200]
+            except Exception:
+                detail = "<unprintable>"
+            step["error"] = type(exc).__name__ + ": " + detail
+            out["steps"].append(step)
+            out["exists"] = False
+            out["runtime_warnings"] = [_w(w) for w in caught]
+            return out
+        step["exists"] = True
+        _describe(step, nxt, not inspect.ismodule(real))
+        out["steps"].append(step)
+        cur = nxt
+    out["exists"] = True
+    if caught:
+        out["runtime_warnings"] = [_w(w) for w in caught]
+    return out
+
+
+# ── distributions ─────────────────────────────────────────────────────────────────────
+
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _norm_dist(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _dist_info(name):
+    version, roots = None, []
+    metadata = None
+    try:
+        from importlib import metadata  # noqa: F811 (3.8+)
+    except ImportError:
+        try:
+            import importlib_metadata as metadata
+        except ImportError:
+            metadata = None
+    if metadata is not None:
+        try:
+            dist = metadata.distribution(name)
+        except Exception:
+            dist = None
+        if dist is not None:
+            version = dist.version
+            top = None
+            try:
+                top = dist.read_text("top_level.txt")
+            except Exception:
+                top = None
+            if top:
+                roots = [line.strip() for line in top.splitlines() if _IDENT.match(line.strip())]
+            if not roots:
+                found = set()
+                for f in dist.files or []:
+                    parts = str(f).replace("\\", "/").split("/")
+                    head = parts[0]
+                    if head.endswith((".dist-info", ".egg-info", ".data")) or head in (
+                        "..", "__pycache__", "bin"):
+                        continue
+                    if len(parts) == 1:
+                        if head.endswith(".py"):
+                            head = head[:-3]
+                        else:
+                            continue
+                    if _IDENT.match(head):
+                        found.add(head)
+                roots = sorted(found)
+    if version is None:
+        try:
+            import pkg_resources
+
+            dist = pkg_resources.get_distribution(name)
+            version = dist.version
+            try:
+                top = dist.get_metadata("top_level.txt")
+                roots = [line.strip() for line in top.splitlines() if _IDENT.match(line.strip())]
+            except Exception:
+                pass
+        except Exception:
+            pass
+    if not roots:
+        roots = [_norm_dist(name).replace("-", "_")]
+    return {"version": version, "roots": roots}
+
+
+# ── main ──────────────────────────────────────────────────────────────────────────────
+
+
+def _emit(out, payload):
+    out.write(MARK + json.dumps(payload, sort_keys=True) + "\n")
+    out.flush()
+
+
+def main():
+    out = os.fdopen(os.dup(1), "w")
+    try:
+        os.dup2(2, 1)  # anything an import prints goes to stderr, not the protocol
+    except Exception:
+        pass
+    sys.stdout = sys.stderr
+    request = json.loads(sys.stdin.read() or "{}")
+    try:
+        sys.stdin = open(os.devnull)
+    except Exception:
+        pass
+    # The project is the cwd, but its own modules must never shadow the dependency.
+    cwd = os.getcwd()
+    sys.path[:] = [p for p in sys.path if p not in ("", ".", cwd)]
+    t0 = time.time()
+    dists = {}
+    for name in request.get("dists") or []:
+        try:
+            dists[name] = _dist_info(name)
+        except Exception as exc:
+            dists[name] = {"version": None, "roots": [], "error": str(exc)[:200]}
+    roots = set(request.get("roots") or [])
+    for info in dists.values():
+        roots.update(info.get("roots") or [])
+    _DEP_ROOTS.update(roots)
+    _ANY_ROOT[0] = bool(request.get("any_root"))
+    site_dirs = []
+    for entry in sys.path:
+        if entry and os.path.basename(entry.rstrip(os.sep)) in ("site-packages", "dist-packages"):
+            if os.path.isdir(entry) and entry not in site_dirs:
+                site_dirs.append(entry)
+    contexts = []
+    for code in request.get("contexts") or []:
+        try:
+            exec(compile(code, "<pymolt-probe-context>", "exec"), {"__name__": "pymolt_probe_ctx"})
+            contexts.append({"ok": True})
+        except BaseException as exc:
+            contexts.append({"ok": False, "error": (type(exc).__name__ + ": " + str(exc))[:200]})
+    _emit(out, {"meta": {
+        "python": "{0}.{1}.{2}".format(*sys.version_info[:3]),
+        "executable": sys.executable,
+        "site_dirs": site_dirs,
+        "dists": dists,
+        "roots": sorted(roots),
+        "contexts": contexts,
+        "setup_s": round(time.time() - t0, 3),
+    }})
+    per_path = float(request.get("per_path_timeout") or 0)
+    use_alarm = (per_path > 0 and hasattr(signal, "setitimer")
+                 and threading.current_thread() is threading.main_thread())
+    if use_alarm:
+        signal.signal(signal.SIGALRM, _on_alarm)
+    for path in request.get("paths") or []:
+        if not _ANY_ROOT[0] and path.split(".")[0] not in _DEP_ROOTS:
+            continue
+        try:
+            if use_alarm:
+                signal.setitimer(signal.ITIMER_REAL, per_path)
+            try:
+                result = resolve(path)
+            finally:
+                if use_alarm:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+        except _Timeout:
+            result = {"error": "timeout: resolving took longer than {0}s".format(per_path),
+                      "transient": True, "steps": [], "module": None}
+        except BaseException as exc:  # a module may raise anything, SystemExit included
+            try:
+                detail = str(exc)
+            except Exception:
+                detail = "<unprintable>"
+            result = {"error": "{0}: {1}".format(type(exc).__name__, detail)[:300],
+                      "steps": [], "module": None}
+        _emit(out, {"path": path, "result": result})
+    _emit(out, {"done": True, "probe_s": round(time.time() - t0, 3)})
+    out.flush()
+    os._exit(0)  # never wait on threads or atexit hooks a dependency started
+
+
+if __name__ == "__main__":
+    main()

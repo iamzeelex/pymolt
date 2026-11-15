@@ -191,10 +191,6 @@ def _select_target_python_interactive(
 # evidence the rest of the funnel exists to produce.
 app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
-axiom_app = typer.Typer(
-    help="Axiom, the service pymolt gets codemods from: login, endpoint, local cache."
-)
-app.add_typer(axiom_app, name="axiom", rich_help_panel="Tools")
 
 
 _STATE_MARK = {
@@ -516,7 +512,13 @@ def plan(
     ),
     target_file_old: str | None = typer.Option(None, "--target-file", hidden=True),
     endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom endpoint URL (default: `pymolt axiom endpoint`)"
+        None, "--endpoint",
+        help="Use a remote Axiom at this URL (default: none, API changes are computed locally)",
+    ),
+    online: bool = typer.Option(
+        False, "--online",
+        help="Let the local engine read intermediate releases from PyPI for successor hints "
+             "(package names and versions only)",
     ),
     output: str | None = typer.Option(
         None, "--output", "-o", help="Where to save the plan (default: .pymolt/migration_plan.json)"
@@ -546,6 +548,7 @@ def plan(
                 target_file=target_file,
                 base_url=load_endpoint(endpoint),
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
+                online=online,
             )
         saved_path = migration_plan.save(project_path, output)
     except PlanInputError as exc:
@@ -2127,7 +2130,8 @@ def mcp(
 def succession(
     project_dir: str = typer.Argument(".", help="Project directory"),
     endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom endpoint URL (default: `pymolt axiom endpoint`)"
+        None, "--endpoint",
+        help="Ask a remote Axiom at this URL (default: none, pymolt's curated knowledge)",
     ),
     save_plan: bool = typer.Option(
         False, "--plan", help="Save the in-place codemods as the plan for `pymolt apply`"
@@ -2137,7 +2141,8 @@ def succession(
 ):
     """Find where a deprecated framework's code should go (e.g. TF1/Keras).
 
-    Detects the frameworks and asks Axiom where they went. In-place paths (e.g.
+    Detects the frameworks and looks up where they went in pymolt's curated
+    knowledge (or a remote Axiom given with --endpoint). In-place paths (e.g.
     keras → tensorflow.keras) are shown as file changes; --plan saves them as the
     plan for `pymolt apply`. Transplant paths (e.g. keras → torch) are shown as
     steps to follow, never applied. Writes no source file.
@@ -2169,7 +2174,7 @@ def succession(
         console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
 
     try:
-        with err.status("Querying Axiom Graph for succession…", spinner="dots") as status:
+        with err.status("Looking up framework succession…", spinner="dots") as status:
             edges, result = run_succession(
                 project_dir, base_url=load_endpoint(endpoint),
                 progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
@@ -2177,7 +2182,8 @@ def succession(
     except SuccessionError as exc:
         fail(
             f"Axiom Graph unavailable: {exc}",
-            hint="Check `pymolt axiom status`; set another endpoint with --endpoint.",
+            hint="Check the --endpoint URL (or PYMOLT_AXIOM_ENDPOINT); without one, pymolt "
+                 "uses its curated knowledge.",
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
@@ -2290,106 +2296,6 @@ def _render_transplant_plan(plan) -> None:
             console.print(f"  [{style}]{escape(cmd)}[/{style}]")
     for note in plan.notes:
         console.print(f"[dim]note: {escape(note)}[/dim]")
-
-
-# ---------------------------------------------------------------------------
-# Axiom commands (`pymolt axiom ...`)
-# ---------------------------------------------------------------------------
-
-@axiom_app.command("status")
-def axiom_status_cmd(
-    json_output: bool = typer.Option(False, "--json", help="Print the status as JSON"),
-):
-    """Show the endpoint and whether it answers, the login, and the local cache."""
-    from pymolt.codemods.client import AxiomGraphClient
-    from pymolt.config import config_show
-
-    info = config_show()
-    info["online"] = AxiomGraphClient(base_url=info["endpoint"]).health()
-    if json_output:
-        import json
-        typer.echo(json.dumps(info, indent=2))
-        return
-
-    online = "[green]online[/green]" if info["online"] else "[yellow]unreachable[/yellow]"
-    default = " (default)" if info["is_default_endpoint"] else ""
-    login_state = (f"logged in ({info['token_preview']})" if info["token_configured"]
-                   else "not logged in")
-    c = info["cache"]
-    console.print(f"Endpoint  [cyan]{info['endpoint']}[/cyan]{default} — {online}")
-    console.print(f"Login     {login_state}")
-    console.print(f"Cache     {c['packages']} package(s), {c['total_files']} file(s), "
-                  f"{round(c['total_size_bytes'] / 1024, 1)} KB  [dim]{c['path']}[/dim]")
-    console.print(f"Config    [dim]{info['config_file']}[/dim]")
-
-
-@axiom_app.command("endpoint")
-def axiom_endpoint_cmd(
-    url: str | None = typer.Argument(
-        None, help="Endpoint URL, e.g. https://hub.internal.corp or http://localhost:8000"
-    ),
-    reset: bool = typer.Option(False, "--reset", help="Go back to the default public endpoint"),
-):
-    """Show or set the Axiom endpoint. Saved in the user config."""
-    from pymolt.config import DEFAULT_ENDPOINT, clear_endpoint, load_endpoint, save_endpoint
-
-    if url and reset:
-        fail("give a URL or --reset, not both")
-    if reset:
-        clear_endpoint()
-        console.print(f"Endpoint reset to the default: [cyan]{DEFAULT_ENDPOINT}[/cyan]")
-        return
-    if not url:
-        console.print(load_endpoint())
-        return
-    clean_url = url.strip().rstrip("/")
-    if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-        fail("invalid endpoint URL", hint="It must start with http:// or https://.")
-    path = save_endpoint(clean_url)
-    console.print(f"Endpoint set to [cyan]{clean_url}[/cyan] [dim](saved to {path})[/dim]")
-
-
-@axiom_app.command("clear-cache")
-def axiom_clear_cache_cmd():
-    """Delete the locally cached Axiom data."""
-    from pymolt.config import clear_delta_cache
-
-    count = clear_delta_cache()
-    console.print(f"Cleared the local cache ({count} package folder(s) removed).")
-
-
-@axiom_app.command("login")
-def axiom_login_cmd(
-    token: str | None = typer.Option(
-        None, "--token", help="API token (pmk_…); omit to get a link that issues one"),
-):
-    """Log in to Axiom. Saves the token in the user config (mode 0600)."""
-    import secrets
-
-    from pymolt.config import load_endpoint, save_token
-
-    endpoint = load_endpoint()
-    auth_url = f"{endpoint}/cli/auth?session=pm_sess_{secrets.token_hex(8)}"
-    if token:
-        tok = token.strip()
-    else:
-        console.print(f"Get a token at:\n  [bold]{auth_url}[/bold]\n")
-        tok = typer.prompt("Paste your API token (pmk_…)", hide_input=True).strip()
-    if not tok:
-        fail("no token provided", hint=f"Get one at {auth_url}")
-    path = save_token(tok)
-    console.print(f"Logged in. Token saved to [cyan]{path}[/cyan].")
-
-
-@axiom_app.command("logout")
-def axiom_logout_cmd():
-    """Remove the saved Axiom token."""
-    from pymolt.config import clear_token
-
-    if clear_token():
-        console.print("Logged out. The saved token was removed.")
-    else:
-        console.print("[dim]No saved token.[/dim]")
 
 
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
@@ -2517,18 +2423,30 @@ _removed("contract", {
     "diff": "`pymolt verify --baseline OLD --post-migration NEW`",
 })
 _removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})
-_removed("auth", {
-    "login": "`pymolt axiom login`",
-    "status": "`pymolt axiom status`",
-    "logout": "`pymolt axiom logout`",
+# Axiom is no longer a service pymolt needs: `pymolt plan` computes API changes locally, and a
+# remote endpoint is used only when given explicitly (--endpoint / PYMOLT_AXIOM_ENDPOINT).
+_AXIOM_STATUS = ("`pymolt plan` (it computes API changes locally; a remote Axiom is used only "
+                 "with `--endpoint URL` or `PYMOLT_AXIOM_ENDPOINT`)")
+_AXIOM_ENDPOINT = "`pymolt plan --endpoint URL` or `PYMOLT_AXIOM_ENDPOINT` (none is the default)"
+_AXIOM_LOGIN = ("`PYMOLT_API_TOKEN` (sent only to an endpoint given with `--endpoint` or "
+                "`PYMOLT_AXIOM_ENDPOINT`)")
+_AXIOM_LOGOUT = "`unset PYMOLT_API_TOKEN`"
+_AXIOM_CACHE = "`rm -r .pymolt/cache/delta` in the project (the local API-change cache)"
+_removed("axiom", {
+    "status": _AXIOM_STATUS,
+    "endpoint": _AXIOM_ENDPOINT,
+    "login": _AXIOM_LOGIN,
+    "logout": _AXIOM_LOGOUT,
+    "clear-cache": _AXIOM_CACHE,
 })
+_removed("auth", {"login": _AXIOM_LOGIN, "status": _AXIOM_STATUS, "logout": _AXIOM_LOGOUT})
 _removed("config", {
-    "show": "`pymolt axiom status`",
-    "set-endpoint": "`pymolt axiom endpoint URL`",
-    "reset-endpoint": "`pymolt axiom endpoint --reset`",
-    "clear-cache": "`pymolt axiom clear-cache`",
+    "show": _AXIOM_STATUS,
+    "set-endpoint": _AXIOM_ENDPOINT,
+    "reset-endpoint": "`unset PYMOLT_AXIOM_ENDPOINT` (no endpoint is the default)",
+    "clear-cache": _AXIOM_CACHE,
 })
-_removed("login", "`pymolt axiom login`")
-_removed("logout", "`pymolt axiom logout`")
+_removed("login", _AXIOM_LOGIN)
+_removed("logout", _AXIOM_LOGOUT)
 _removed("migrate", "`pymolt plan`, then `pymolt apply` (status shows the steps before them)")
 _removed("codemods", "`pymolt plan` to see the changes, then `pymolt apply`")
