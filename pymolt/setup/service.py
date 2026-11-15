@@ -18,6 +18,7 @@ from pymolt.core.enums import Mode
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.ingestion.detect import (
     detect_local_environments,
+    detect_manifest,
     detect_project_python_version,
     detect_sources,
     detect_system_tools,
@@ -35,7 +36,7 @@ _TOOL_ORDER = ["uv", "conda", "poetry", "container", "system"]
 
 
 class ManifestOption(BaseModel):
-    name: str            # the manifest file name (source of truth)
+    name: str            # the manifest's path relative to the project (its identity)
     mode: str            # Mode value (pip / conda / ...)
     fixation: str        # SourceFixation value
     is_lock: bool
@@ -156,7 +157,10 @@ def _manifest_rank(source) -> tuple:
     # "310" / "39" / "py38" — a per-interpreter row, not the project.
     version_specific = any(w.replace("py", "").replace(".", "").isdigit() for w in words)
 
-    if source.is_lock:
+    if source.subroot:
+        # A part of the repo, not the project at its top: never assumed.
+        tier = 5
+    elif source.is_lock:
         tier = 0
     elif lowered in _UNCLASSIFIED_MANIFESTS:
         tier = 4
@@ -179,11 +183,11 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
     project_path = Path(project_dir)
     notes: list[str] = []
 
-    sources = detect_sources(project_path)
+    sources = detect_sources(project_path, include_subroots=True)
     default_source = _pick_default_manifest(sources)
     manifests = [
         ManifestOption(
-            name=src.path.name,
+            name=src.ref(project_path),
             mode=src.mode.value,
             fixation=src.fixation.value,
             is_lock=src.is_lock,
@@ -194,9 +198,9 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
     if not sources:
         notes.append(f"No Python dependency sources detected in {project_path}.")
     elif len(sources) > 1 and default_source is not None:
-        others = [s.path.name for s in sources if s is not default_source]
+        others = [s.ref(project_path) for s in sources if s is not default_source]
         notes.append(
-            f"{len(sources)} manifests here; assuming {default_source.path.name} is the "
+            f"{len(sources)} manifests here; assuming {default_source.ref(project_path)} is the "
             f"source of truth. Others: {', '.join(others)}."
         )
 
@@ -369,7 +373,20 @@ def check_setup_values(
     """
     manifests = [m.name for m in options.manifests]
     if manifest is not None and manifest not in manifests:
-        raise SetupError(f"unknown manifest {manifest!r}", f"Detected: {', '.join(manifests)}.")
+        # A path the scan did not list is still fine if it is a supported manifest
+        # inside the project (e.g. a lock under a directory scan does not treat as a root).
+        project = options.project_dir
+        if Path(manifest).is_absolute() or ".." in Path(manifest).parts:
+            example = manifests[0] if manifests else "requirements.txt"
+            raise SetupError(f"manifest {manifest!r} must be a path inside the project",
+                             f"Give it relative to {project}, e.g. {example}.")
+        if not (Path(project) / manifest).is_file():
+            raise SetupError(f"unknown manifest {manifest!r}: no such file in the project",
+                             f"Detected: {', '.join(manifests)}.")
+        if detect_manifest(project, manifest) is None:
+            raise SetupError(f"manifest {manifest!r} is not a supported format",
+                             "Supported: requirements*.txt/.in, pyproject.toml, Pipfile, "
+                             "setup.py/setup.cfg, environment.yml, and the lock files.")
     available = [t.name for t in options.tools if t.available]
     if tool is not None and tool not in available:
         raise SetupError(

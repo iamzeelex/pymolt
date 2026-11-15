@@ -22,6 +22,20 @@ class DiscoveredSource(BaseModel):
     mode: Mode
     is_lock: bool
     fixation: SourceFixation
+    #: Lives in a project root below the one being scanned (a monorepo part, or
+    #: zipline's ``etc/``) rather than beside it. Never the assumed default.
+    subroot: bool = False
+
+    def ref(self, project_dir: str | Path) -> str:
+        """How a manifest is named in setup and the config: its file name, or — for one
+        in a sub-root — its path relative to ``project_dir`` (posix), which keeps
+        ``etc/requirements.txt`` apart from the top-level ``requirements.txt``."""
+        if not self.subroot:
+            return self.path.name
+        try:
+            return self.path.resolve().relative_to(Path(project_dir).resolve()).as_posix()
+        except ValueError:
+            return self.path.name
 
 
 def _spec_is_pinned(spec: str) -> bool | None:
@@ -141,11 +155,80 @@ def _source_priority(s: DiscoveredSource) -> tuple[int, int, str]:
     return (1, 3, name)
 
 
-def detect_sources(project_dir: str | Path, *, include_generated: bool = False) -> list[DiscoveredSource]:
+def _subroot_sources(project_path: Path, include_generated: bool) -> list[DiscoveredSource]:
+    """Manifests in the project roots scan's surface map finds below ``project_path``."""
+    from pymolt.discovery.discover import build_surface_map
+
+    out: list[DiscoveredSource] = []
+    for root in build_surface_map(project_path).project_roots:
+        if root.path in ("", "."):
+            continue
+        for name in root.manifests:
+            item = project_path / root.path / name
+            if not include_generated and is_pymolt_generated(item):
+                continue
+            classified = _classify_manifest(item)
+            if classified:
+                classified.subroot = True
+                out.append(classified)
+    out.sort(key=lambda s: (s.path.parent.as_posix(), _source_priority(s)))
+    return out
+
+
+def detect_manifest(project_dir: str | Path, ref: str) -> DiscoveredSource | None:
+    """The manifest at ``ref`` (relative to ``project_dir``), or None.
+
+    None when it does not exist, lies outside the project, or is not a supported
+    manifest format.
+    """
+    project_path = Path(project_dir).resolve()
+    candidate = Path(ref)
+    candidate = candidate if candidate.is_absolute() else project_path / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(project_path)
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    classified = _classify_manifest(resolved)
+    if classified is not None:
+        classified.subroot = resolved.parent != project_path
+    return classified
+
+
+def find_source(
+    sources: list[DiscoveredSource], ref: str, project_dir: str | Path,
+) -> DiscoveredSource | None:
+    """The source ``ref`` names: by :meth:`DiscoveredSource.ref`, by relative path, by
+    file name (case-insensitive), else any supported manifest at that path."""
+    low = ref.lower()
+    for src in sources:
+        if src.ref(project_dir).lower() == low:
+            return src
+    project_path = Path(project_dir).resolve()
+    for src in sources:
+        try:
+            if src.path.resolve().relative_to(project_path).as_posix().lower() == low:
+                return src
+        except ValueError:
+            continue
+    for src in sources:
+        if src.path.name.lower() == low:
+            return src
+    return detect_manifest(project_dir, ref)
+
+
+def detect_sources(
+    project_dir: str | Path, *, include_generated: bool = False, include_subroots: bool = False,
+) -> list[DiscoveredSource]:
     """Scan the project directory for supported dependency manifests and lockfiles.
-    
+
     Searches the immediate project directory (and standard locations like requirements/)
-    for lock files and raw manifests across PyPI and Conda ecosystems.
+    for lock files and raw manifests across PyPI and Conda ecosystems. With
+    ``include_subroots`` it also lists the manifests of the project roots below it
+    that scan's surface map finds (``etc/requirements_py36_locked.txt``), after the
+    top-level ones and flagged ``subroot``.
     """
     project_path = Path(project_dir)
     sources = []
@@ -179,6 +262,10 @@ def detect_sources(project_dir: str | Path, *, include_generated: bool = False) 
 
     # Sort sources: lock files first (is_lock=True), then standard manifests (requirements, pyproject, setup.py > setup.cfg)
     sources.sort(key=_source_priority)
+    if include_subroots:
+        seen = {s.path.resolve() for s in sources}
+        sources.extend(s for s in _subroot_sources(project_path, include_generated)
+                       if s.path.resolve() not in seen)
     return sources
 
 

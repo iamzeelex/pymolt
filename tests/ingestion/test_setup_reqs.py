@@ -1,4 +1,9 @@
-from pymolt.ingestion.detect import extract_declared_requirements
+from pymolt.ingestion.detect import (
+    detect_manifest,
+    detect_sources,
+    extract_declared_requirements,
+    find_source,
+)
 from pymolt.ingestion.setup_reqs import parse_setup_cfg, parse_setup_py
 
 
@@ -111,3 +116,36 @@ reqs = ['Foo_Bar>=1']
 setup(install_requires=reqs, extras_require={'x': ['extra']})
 """)
     assert extract_declared_requirements(p) == {"foo-bar": "Foo_Bar>=1"}
+
+
+def test_detect_sources_lists_subroot_manifests_only_on_request(tmp_path):
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "requirements_py36_locked.txt").write_text("numpy==1.15.0\n")
+    assert [s.path.name for s in detect_sources(tmp_path)] == ["setup.py"]
+    sources = detect_sources(tmp_path, include_subroots=True)
+    assert [s.ref(tmp_path) for s in sources] == ["setup.py", "etc/requirements_py36_locked.txt"]
+    assert [s.subroot for s in sources] == [False, True]
+
+
+def test_find_source_by_relative_path_and_by_name(tmp_path):
+    (tmp_path / "requirements.txt").write_text("a\n")
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "requirements.txt").write_text("b==1\n")
+    sources = detect_sources(tmp_path, include_subroots=True)
+    top = find_source(sources, "requirements.txt", tmp_path)
+    assert top.path == tmp_path / "requirements.txt"
+    assert find_source(sources, "etc/requirements.txt", tmp_path).subroot is True
+    assert find_source(sources, "etc/missing.txt", tmp_path) is None
+
+
+def test_detect_manifest_rejects_outside_missing_and_unsupported(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "README.rst").write_text("x")
+    (tmp_path / "requirements.txt").write_text("a\n")
+    (proj / "requirements.txt").write_text("a\n")
+    assert detect_manifest(proj, "README.rst") is None
+    assert detect_manifest(proj, "nope.txt") is None
+    assert detect_manifest(proj, "../requirements.txt") is None
+    assert detect_manifest(proj, "requirements.txt") is not None
