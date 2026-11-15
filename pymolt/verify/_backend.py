@@ -179,8 +179,13 @@ class SitePackagesMatcher(object):
         cached = self._cache.get(module)
         if cached is not None:
             return cached
-        # Frameless callers (C functions) fall back to the module's own file.
-        filename = frame.f_code.co_filename if frame is not None else _module_file(module)
+        # The decision is cached per MODULE, so it is made from the module's own file: the
+        # first frame seen may run generated code (dataclass / namedtuple methods are exec'd in
+        # the module's globals with ``co_filename == "<string>"``), and deciding from it marked
+        # whole dependency modules (pydantic.fields, sqlalchemy.orm.attributes) as not ones.
+        filename = _module_file(module)
+        if not filename and frame is not None:
+            filename = frame.f_code.co_filename
         ok = bool(filename) and filename.startswith(self._roots)
         self._cache[module] = ok
         return ok
@@ -240,14 +245,19 @@ class AppMatcher(object):
         cached = self._cache.get(module)
         if cached is not None:
             return cached
-        filename = frame.f_code.co_filename or ""
         # "our code" = a real file that is NOT under site-packages or the stdlib.
         # `<frozen importlib._bootstrap>` and friends are the interpreter's own
-        # bootstrap: they have no real file, so the path test above cannot reject
+        # bootstrap: they have no real file, so the path test cannot reject
         # them, and left alone they masquerade as the project's code — which made
         # every C call the import machinery happens to make look like a contact.
-        ok = (bool(filename) and not filename.startswith("<frozen ")
-              and not filename.startswith(self._dep_roots))
+        frame_file = frame.f_code.co_filename or ""
+        if frame_file.startswith("<frozen "):
+            ok = False
+        else:
+            # Per-module decision from the module's own file (see SitePackagesMatcher): a
+            # dependency's generated code (``"<string>"``) must not make it "our code".
+            filename = _module_file(module) or frame_file
+            ok = bool(filename) and not filename.startswith(self._dep_roots)
         self._cache[module] = ok
         return ok
 
@@ -534,6 +544,12 @@ class FrameBackend(TraceBackend):
         self.observed_syms = set()
         self.first_seen_at = None   # monotonic
         self.last_new_at = None     # monotonic
+        # While two instrumentations can both deliver one start (the incremental settle), a
+        # start is recorded once: both callbacks for an event run back to back in the same
+        # thread, so the thread's last recorded frame (held, so its id cannot be reused)
+        # identifies the duplicate exactly. Off (0.0) otherwise: holding frames costs memory.
+        self._dedupe_until = 0.0
+        self._last_start = {}       # tid -> frame of the last recorded start
 
     def _target_module(self, module, frame):
         """Far-side decision for a module (cached per code by the callers)."""
@@ -650,6 +666,15 @@ class FrameBackend(TraceBackend):
 
         A function call becomes a pending entry completed by its return/raise event; a
         generator-like call is complete at its first start and is emitted at once."""
+        if self._dedupe_until:
+            if _monotonic() < self._dedupe_until:
+                tid = _get_ident()
+                if self._last_start.get(tid) is frame:
+                    return False            # the same start, delivered by the other tool
+                self._last_start[tid] = frame
+            else:
+                self._dedupe_until = 0.0
+                self._last_start = {}
         ci, sym, symq, loc, inner = self._call_identity(frame, ent)
         site = self._site(frame.f_back)
         # Sampling before any normalize: an unsampled call never pays for its values. The

@@ -1,6 +1,7 @@
 """Load generator for the orders service (stdlib only).
 
-    python loadgen.py DURATION THREADS RATE --url http://127.0.0.1:PORT [--seed 42]
+    python loadgen.py DURATION THREADS RATE (--url http://127.0.0.1:PORT | --ready-file F)
+                      [--seed 42]
                       [--warmup 2] [--out result.json]
 
 RATE 0 = saturated: every thread is a closed loop (send, wait, send).
@@ -203,13 +204,26 @@ def _wait_healthy(host: str, port: int, timeout: float) -> None:
             last = f"HTTP {resp.status}"
         except OSError as exc:
             last = repr(exc)
-        time.sleep(0.2)
+        time.sleep(0.05)
     raise SystemExit(f"service not healthy after {timeout}s: {last}")
 
 
-def run(url: str, duration: float, threads: int, rate: float, seed: int, warmup: float,
-        timeout: float = 30.0, grace: float = 10.0, mix=MIX, warmup_until: str | None = None,
-        max_warmup: float | None = None) -> dict:
+def _url_from_ready_file(path: str, timeout: float) -> str:
+    """Wait for the service's ready file ({"port": ...}) and return its URL."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(path) as fh:
+                return f"http://127.0.0.1:{int(json.load(fh)['port'])}"
+        except (OSError, ValueError, KeyError):
+            time.sleep(0.02)
+    raise SystemExit(f"no ready file {path} after {timeout}s")
+
+
+def run(url: str | None, duration: float, threads: int, rate: float, seed: int,
+        warmup: float, timeout: float = 30.0, grace: float = 10.0, mix=MIX,
+        warmup_until: str | None = None, max_warmup: float | None = None,
+        ready_file: str | None = None, ready_timeout: float = 180.0) -> dict:
     """Drive load; the measured window starts after ``warmup`` s, or later: with
     ``warmup_until`` it starts when that file exists (at least ``warmup``, at most
     ``max_warmup`` s after t0). Load never pauses at the boundary."""
@@ -218,10 +232,14 @@ def run(url: str, duration: float, threads: int, rate: float, seed: int, warmup:
     sys.setswitchinterval(SWITCH_INTERVAL_S)
     max_warmup = warmup if max_warmup is None or warmup_until is None else max(warmup,
                                                                                 max_warmup)
+    # Build the request sequence first: with --ready-file the generator is started together
+    # with the service, so load begins the moment the service answers (startup measurements).
+    specs = build_specs(seed, mix=mix)
+    if url is None:
+        url = _url_from_ready_file(ready_file, ready_timeout)
     parts = urlsplit(url)
     host, port = parts.hostname or "127.0.0.1", parts.port or 80
     _wait_healthy(host, port, 30.0)
-    specs = build_specs(seed, mix=mix)
     n_specs = len(specs)
     paced = rate > 0
     shared = _Shared()
@@ -387,7 +405,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("duration", type=float, help="measured seconds (after warmup)")
     ap.add_argument("threads", type=int)
     ap.add_argument("rate", type=float, help="requests/s across all threads; 0 = saturated")
-    ap.add_argument("--url", required=True)
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--url")
+    src.add_argument("--ready-file", help="wait for the service's ready file and use its port")
+    ap.add_argument("--ready-timeout", type=float, default=180.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--warmup", type=float, default=2.0)
     ap.add_argument("--timeout", type=float, default=30.0, help="per-request socket timeout")
@@ -402,7 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("duration and threads must be > 0, rate >= 0")
     result = run(args.url, args.duration, args.threads, args.rate, args.seed, args.warmup,
                  timeout=args.timeout, mix=parse_mix(args.mix),
-                 warmup_until=args.warmup_until, max_warmup=args.max_warmup)
+                 warmup_until=args.warmup_until, max_warmup=args.max_warmup,
+                 ready_file=args.ready_file, ready_timeout=args.ready_timeout)
     text = json.dumps(result, indent=2)
     if args.out:
         with open(args.out, "w") as fh:

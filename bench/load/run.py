@@ -66,6 +66,8 @@ LIVE_META_GRACE_S = 20.0    # no live sidecar metadata by then -> the fixed fall
 GB = 1_000_000_000
 MIB = 1024 * 1024
 GATE = {
+    "min_startup_ratio": 0.50,  # saturated rps over the first 30 s >= 50% of nocap
+    "min_recall": 0.95,         # (sym, site) seen by default mode vs a discover reference
     "max_rps_loss": 0.20,       # saturated capture rps >= 80% of no-capture
     "max_dropped": 0,           # dropped calls/events across every capture run
     "max_bytes_per_day": 1 * GB,
@@ -558,9 +560,30 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
             cmd = [PYMOLT, "contract", "capture", "--when", "baseline", "--mode", "command",
                    "--project-dir", svc_dir, "--force", *capture_args, "--", SVC_PY, "app.py"]
         record["command"] = [str(c) for c in cmd]
+        # The load generator starts together with the service: it builds its request
+        # sequence, waits for the ready file and starts the load the moment the service
+        # answers, so the per-second counts show the startup as the clients see it.
+        go_file = run_dir / "measure.go"
+        lg_cmd = [SVC_PY, HERE / "loadgen.py", f"{duration:g}", str(threads), f"{rate:g}",
+                  "--ready-file", run_dir / "svc.ready",
+                  "--ready-timeout", f"{READY_TIMEOUT_S:g}", "--seed", str(seed),
+                  "--out", run_dir / "loadgen.json"]
+        if steady_cfg and steady_cfg["mode"] == "auto":
+            lg_cmd += ["--warmup", f"{warmup:g}", "--warmup-until", go_file,
+                       "--max-warmup", f"{max_warmup:g}"]
+        else:
+            lg_cmd += ["--warmup", f"{max_warmup:g}"]
+        if mix:
+            lg_cmd += ["--mix", mix]
+        record["load_avg_before"] = [round(x, 2) for x in os.getloadavg()]
         main = _spawn(cmd, cwd=svc_dir, env=env, log=log)
         procs.append(main)
-        svc_info = _wait_ready(run_dir / "svc.ready", [(kind, main, log)], READY_TIMEOUT_S)
+        t["load_start"] = time.monotonic()
+        lg_proc = _spawn(lg_cmd, log=run_dir / "loadgen.log")
+        procs.append(lg_proc)
+        svc_info = _wait_ready(run_dir / "svc.ready",
+                               [(kind, main, log), ("loadgen", lg_proc, run_dir / "loadgen.log")],
+                               READY_TIMEOUT_S)
         t["ready"] = time.monotonic()
         wall["ready"] = time.time()
         svc_pid = int(svc_info["pid"])
@@ -583,7 +606,6 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
                     return
 
         # Steady state: tell the load generator when the measured window may start.
-        go_file = run_dir / "measure.go"
         steady_state: dict = {}
 
         def steady_watcher() -> None:
@@ -596,6 +618,24 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
                     fallback_at = None
                     info = _switch_info(meta)
                     steady_state["live_source"] = meta.get("_source")
+                    if info["mode"] == "incremental":
+                        # Incremental mode has no discover window (switched_at = start),
+                        # but it settles: its startup-only instrumentation turns off once
+                        # nothing new has been armed for incremental_settle seconds. Steady
+                        # state begins after that, unless settling is disabled (0).
+                        settle_cfg = _first_key(meta, "incremental_settle")
+                        settled = _first_key(meta, "settled_at")
+                        if isinstance(settled, (int, float)):
+                            steady_state.update(signal="settle", settled_at=settled,
+                                                switched_at=info["switched_at"])
+                            target = settled + STEADY_SETTLE_S
+                            while time.time() < target and not stop_sampling.is_set():
+                                time.sleep(0.05)
+                            break
+                        if settle_cfg not in (0, 0.0, "0") and \
+                                now - started < float(settle_cfg or 30) + 90:
+                            stop_sampling.wait(1.0)
+                            continue
                     if info["switched_at"] is not None:
                         steady_state.update(signal="switch", switch_reason=info["switch_reason"],
                                             switched_at=info["switched_at"])
@@ -624,33 +664,21 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
                 helpers.append(threading.Thread(target=steady_watcher, daemon=True))
         for helper in helpers:
             helper.start()
-        record["load_avg_before"] = [round(x, 2) for x in os.getloadavg()]
-        lg_cmd = [SVC_PY, HERE / "loadgen.py", f"{duration:g}", str(threads), f"{rate:g}",
-                  "--url", f"http://127.0.0.1:{svc_info['port']}", "--seed", str(seed),
-                  "--out", run_dir / "loadgen.json"]
-        if steady_cfg and steady_cfg["mode"] == "auto":
-            lg_cmd += ["--warmup", f"{warmup:g}", "--warmup-until", go_file,
-                       "--max-warmup", f"{max_warmup:g}"]
-        else:
-            lg_cmd += ["--warmup", f"{max_warmup:g}"]
-        if mix:
-            lg_cmd += ["--mix", mix]
         if steady_cfg:
             print(f"[{run_dir.name}] steady state: {steady_cfg['mode']} warmup (up to "
                   f"{max_warmup:g} s) before the {duration:g} s window", flush=True)
-        t["load_start"] = time.monotonic()
-        with open(run_dir / "loadgen.log", "wb") as lg_log:
-            lg = subprocess.run([str(c) for c in lg_cmd], stdout=lg_log,
-                                stderr=subprocess.STDOUT,
-                                timeout=max_warmup + duration + 240)
+        try:
+            lg_rc = lg_proc.wait(timeout=max_warmup + duration + 240)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("loadgen did not finish in time") from None
         t["load_end"] = time.monotonic()
         stop_sampling.set()
         for helper in helpers:
             helper.join()
         if steady_cfg:
             record["steady"] = steady_state
-        if lg.returncode != 0:
-            raise RuntimeError(f"loadgen failed ({lg.returncode}):\n"
+        if lg_rc != 0:
+            raise RuntimeError(f"loadgen failed ({lg_rc}):\n"
                                f"{_tail(run_dir / 'loadgen.log')}")
         record["load"] = json.loads((run_dir / "loadgen.json").read_text())
 
@@ -828,6 +856,98 @@ def _collect_capture(run_dir: Path, svc_dir: Path, record: dict) -> dict:
         "bytes_per_event": round(trace_bytes / meta["events"], 1)
         if trace_bytes and meta.get("events") else None,
         "discover": discover,
+        "watcher_started_at": info["started_at"],
+    }
+
+
+def site_keys(svc_dir: Path) -> tuple[set, str | None]:
+    """(sym, call-site file relative to the project, line) of every call the capture
+    recorded or counted: facts + tallies of the merged facts snapshot, else the JSONL."""
+    ct = svc_dir / ".pymolt" / "contract_traces"
+    root = svc_dir.resolve()
+    keys: set = set()
+
+    def add(item: dict) -> None:
+        where = item.get("where") or {}
+        path = where.get("file")
+        if path:
+            try:
+                path = str(Path(path).resolve().relative_to(root))
+            except (ValueError, OSError):
+                pass
+        keys.add((item.get("sym") or item.get("q"), path, where.get("line")))
+
+    snapshots = sorted(ct.glob("*.facts.json")) if ct.is_dir() else []
+    if snapshots:
+        for snap in snapshots:
+            try:
+                data = json.loads(snap.read_text())
+            except (OSError, ValueError):
+                continue
+            for item in list(data.get("facts") or []) + list(data.get("tallies") or []):
+                if isinstance(item, dict):
+                    add(item)
+        return keys, "facts"
+    traces = sorted(ct.glob("*.jsonl")) if ct.is_dir() else []
+    for trace in traces:
+        with open(trace, errors="replace") as fh:
+            for line in fh:
+                try:
+                    add(json.loads(line))
+                except ValueError:
+                    continue
+    return keys, ("jsonl" if traces else None)
+
+
+STARTUP_WINDOW_S = 30.0
+RECALL_REFERENCE = "capture-discover"
+
+
+def startup_curve(run: dict) -> dict | None:
+    """The first STARTUP_WINDOW_S seconds from the watcher start (capture) or the process
+    spawn (nocap/hook): rps over them (seconds before the service answered count as 0), the
+    slowest 5-s window of the load, and when a 5-s window first reached 80% of the run's
+    steady-state rps."""
+    load = run.get("load") or {}
+    per_second = load.get("per_second")
+    t0w = load.get("t0_wall")
+    if not per_second or t0w is None or not load.get("rps"):
+        return None
+    cap = run.get("capture") or {}
+    origin = cap.get("watcher_started_at")
+    label = "watcher start"
+    if origin is None:
+        origin = (run.get("wall") or {}).get("spawn")
+        label = "process spawn" if run.get("kind") != "capture" else "process spawn (no "\
+            "watcher start in the metadata)"
+    if origin is None:
+        return None
+    boot = max(0.0, t0w - origin)
+
+    def started_before(rel: float) -> float:
+        if rel <= 0:
+            return 0.0
+        whole = int(rel)
+        n = float(sum(per_second[:whole]))
+        if whole < len(per_second):
+            n += per_second[whole] * (rel - whole)
+        return n
+
+    full = per_second[:-1] if len(per_second) > 6 else per_second  # last second is partial
+    windows = [sum(full[i:i + 5]) / 5.0 for i in range(0, max(1, len(full) - 4))]
+    target = 0.8 * load["rps"]
+    reach = next((i for i, w in enumerate(windows) if w >= target), None)
+    covered = boot + len(full) >= STARTUP_WINDOW_S  # the load lasted past the window
+    return {
+        "origin": label,
+        "boot_s": round(boot, 2),
+        "window_s": STARTUP_WINDOW_S,
+        "rps_first_window": round(started_before(STARTUP_WINDOW_S - boot) / STARTUP_WINDOW_S, 2)
+        if covered else None,
+        "note": None if covered else "load ended before the startup window did",
+        "min_5s_rps": round(min(windows), 2) if windows else None,
+        "t80_s": round(boot + reach + 5, 1) if reach is not None else None,
+        "steady_rps": load["rps"],
     }
 
 
@@ -1003,6 +1123,8 @@ def summarize_run(run_dir: Path, nocap_dirs: list[Path] | None = None, fold: boo
         s["capture_finalize_s"] = (run.get("timings_s") or {}).get("finalize")
     if run.get("fold"):
         s["fold"] = run["fold"]
+    if run["config"]["rate"] == 0:
+        s["startup"] = startup_curve(run)
     if nocap_dirs is None:
         nocap_dirs = _matching_nocap(run_dir, run) if run["kind"] != "nocap" else []
     if nocap_dirs:
@@ -1044,6 +1166,14 @@ def _run_md(s: dict) -> str:
                                                  if 'p99_ratio' in s else ""))
     lines.append(f"- status codes: {s.get('status_counts')}; per minute: {s.get('per_minute')}; "
                  f"client CPU {s.get('client_cpu_pct')}%")
+    st = s.get("startup") or {}
+    if st:
+        first = (f"{st['rps_first_window']} rps" if st.get("rps_first_window") is not None
+                 else f"n/a ({st.get('note')})")
+        lines.append(f"- startup (from {st['origin']}): {first} over the "
+                     f"first {st['window_s']:g} s (service answered after {st['boot_s']} s), "
+                     f"slowest 5-s window {st['min_5s_rps']} rps, 80% of steady "
+                     f"({st['steady_rps']} rps) after {st['t80_s']} s")
     host = s.get("host_load") or {}
     if host:
         top = ", ".join(f"{t['comm']} {t['cpu']:.0f}%" for t in host.get("top", [])[:3])
@@ -1129,12 +1259,49 @@ def _triplet_stats(runs: dict[str, dict], triplets: list[dict]) -> list[dict]:
             "steady_state": (cap.get("discover") or {}).get("steady_state"),
             "hook_rps": hook.get("rps"),
             "hook_loss": loss(hook) if hook else None,
+            "startup": cap.get("startup"),
+            "startup_ratio": round((cap.get("startup") or {}).get("rps_first_window") / mean, 4)
+            if mean and (cap.get("startup") or {}).get("rps_first_window") is not None
+            else None,
         })
     return out
 
 
-def evaluate_gate(runs: dict[str, dict], triplets: list[dict], paced: tuple[str, str]
-                  ) -> tuple[list[dict], list[dict]]:
+def recall_check(session: Path, default_runs: list[str], reference: str) -> dict | None:
+    """|default ∩ reference| / |reference| over (sym, site file, line), where the reference
+    is a capture in discover mode (wide for the whole run)."""
+    ref_dir = session / reference / "svc"
+    if not ref_dir.is_dir():
+        return None
+    ref, ref_src = site_keys(ref_dir)
+    union: set = set()
+    sources = {}
+    for name in default_runs:
+        if (session / name / "svc").is_dir():
+            keys, src = site_keys(session / name / "svc")
+            union |= keys
+            sources[name] = src
+    if not ref:
+        return {"reference": reference, "reference_keys": 0, "recall": None,
+                "reference_source": ref_src, "default_sources": sources, "missing": []}
+    hit = ref & union
+    missing = sorted(ref - union, key=lambda k: tuple("" if v is None else str(v) for v in k))
+    return {
+        "reference": reference,
+        "reference_source": ref_src,
+        "reference_keys": len(ref),
+        "default_runs": default_runs,
+        "default_sources": sources,
+        "default_keys": len(union),
+        "matched": len(hit),
+        "recall": round(len(hit) / len(ref), 4),
+        "missing": [list(k) for k in missing],
+        "extra_in_default": len(union - ref),
+    }
+
+
+def evaluate_gate(runs: dict[str, dict], triplets: list[dict], paced: tuple[str, str],
+                  recall: dict | None = None) -> tuple[list[dict], list[dict]]:
     stats = _triplet_stats(runs, triplets)
     np_, cp = runs.get(paced[0], {}), runs.get(paced[1], {})
     caps = [runs[t["capture"]] for t in triplets if t["capture"] in runs] + ([cp] if cp else [])
@@ -1197,6 +1364,28 @@ def evaluate_gate(runs: dict[str, dict], triplets: list[dict], paced: tuple[str,
         f"{np_.get('p99_ms')} -> {cp.get('p99_ms')} ms (x{ratio})" if ratio is not None
         else "n/a",
         None if ratio is None else ratio <= GATE["max_p99_ratio"])
+    ratios = [t["startup_ratio"] for t in stats]
+    startup = _median(ratios)
+    row(f"6 startup (saturated rps, first {STARTUP_WINDOW_S:g} s from watcher start)",
+        f">= {100 * GATE['min_startup_ratio']:.0f}% of nocap",
+        " / ".join(
+            f"{t['capture']}: "
+            + (f"{(t['startup'] or {}).get('rps_first_window')} rps = {pct(t['startup_ratio'])}"
+               if t["startup_ratio"] is not None
+               else f"n/a ({(t['startup'] or {}).get('note') or 'no per-second counts'})")
+            + f" (slowest 5 s {(t['startup'] or {}).get('min_5s_rps')} rps, 80% of steady after "
+            f"{(t['startup'] or {}).get('t80_s')} s)" for t in stats) or "n/a",
+        None if startup is None or any(r is None for r in ratios)
+        else startup >= GATE["min_startup_ratio"])
+    if recall is not None:
+        missing = recall.get("missing") or []
+        shown = ", ".join(f"{k[0]} @ {k[1]}:{k[2]}" for k in missing[:5])
+        row("7 recall ((sym, site) vs discover-mode reference)",
+            f">= {100 * GATE['min_recall']:.0f}%",
+            f"{recall.get('matched')}/{recall.get('reference_keys')} = {pct(recall.get('recall'))}"
+            + (f"; missing {len(missing)}: {shown}" + (" ..." if len(missing) > 5 else "")
+               if missing else ""),
+            None if recall.get("recall") is None else recall["recall"] >= GATE["min_recall"])
     return rows, stats
 
 
@@ -1205,7 +1394,7 @@ def _verdict(rows: list[dict]) -> str:
 
 
 def _gate_md(session: Path, rows: list[dict], stats: list[dict], runs: dict[str, dict],
-             order: list[str], prov: dict) -> str:
+             order: list[str], prov: dict, recall: dict | None = None) -> str:
     host = prov.get("host", {})
     dirty = prov.get("pymolt_dirty_files") or []
     state = (f"dirty ({len(dirty)} files, tree {prov.get('pymolt_tree_hash')})" if dirty
@@ -1236,6 +1425,9 @@ def _gate_md(session: Path, rows: list[dict], stats: list[dict], runs: dict[str,
         hl = f"{100 * t['hook_loss']:.1f}%" if t.get("hook_loss") is not None else ""
         lines.append(f"| {t['capture']} | {nb} | {na} | {sp} | {t['capture_rps']} | {lo} | "
                      f"{t['steady_state']} | {t.get('hook_rps') or ''} | {hl} |")
+    if recall and recall.get("missing"):
+        lines += ["", f"Missing from the default-mode captures (in `{recall['reference']}`):", ""]
+        lines += [f"- `{k[0]}` at `{k[1]}:{k[2]}`" for k in recall["missing"]]
     lines += [
         "",
         "| run | rps | p50 ms | p95 ms | p99 ms | p99 sched ms | 5xx | warmup s | events | "
@@ -1266,7 +1458,8 @@ def _gate_md(session: Path, rows: list[dict], stats: list[dict], runs: dict[str,
     return "\n".join(lines)
 
 
-def gate_plan(repeat: int, paced_rate: float, control: bool) -> tuple[list, list, tuple]:
+def gate_plan(repeat: int, paced_rate: float, control: bool,
+              recall: bool = True) -> tuple[list, list, tuple]:
     """nocap-sat-0, capture-sat-1, [hook-sat-1], nocap-sat-1, capture-sat-2, ... so every
     saturated capture has a nocap run right before and right after it; then the paced pair."""
     plan = [("nocap-sat-0", "nocap", 0.0)]
@@ -1280,6 +1473,8 @@ def gate_plan(repeat: int, paced_rate: float, control: bool) -> tuple[list, list
                          "hook": f"hook-sat-{i}" if control else None,
                          "post": f"nocap-sat-{i}"})
     plan += [("nocap-paced", "nocap", paced_rate), ("capture-paced", "capture", paced_rate)]
+    if recall:  # reference for criterion 7: wide (discover) for the whole run, paced
+        plan.append((RECALL_REFERENCE, "capture", paced_rate))
     return plan, triplets, ("nocap-paced", "capture-paced")
 
 
@@ -1290,14 +1485,18 @@ def cmd_gate(args) -> int:
         sys.exit("--repeat must be >= 1")
     session = _session_dir("gate", args.session)
     env = _parse_env(args.env)
-    plan, triplets, paced = gate_plan(args.repeat, args.paced_rate, args.control)
+    plan, triplets, paced = gate_plan(args.repeat, args.paced_rate, args.control,
+                                      recall=not args.no_recall)
     print(f"gate session: {session}", flush=True)
     for i, (name, kind, rate) in enumerate(plan):
         if i:
             time.sleep(COOLDOWN_S)
+        run_env = env if kind == "capture" else {}
+        if name == RECALL_REFERENCE:
+            run_env = {**env, "PYMOLT_TRACE_MODE": "discover"}
         run_one(kind, session, duration=args.duration, rate=rate, threads=None,
                 seed=args.seed, warmup=args.warmup, name=name,
-                env_overrides=env if kind == "capture" else {},
+                env_overrides=run_env,
                 capture_args=args.capture_args if kind == "capture" else [],
                 wait_quiet=args.wait_quiet,
                 steady=args.steady_warmup if kind == "capture" else None)
@@ -1314,16 +1513,18 @@ def cmd_gate(args) -> int:
             continue
         nocaps = [session / n for n in neighbours.get(name, [])
                   if (session / n / "run.json").is_file()]
-        runs[name] = summarize_run(rd, nocap_dirs=nocaps)
+        runs[name] = summarize_run(rd, nocap_dirs=nocaps, fold=name != RECALL_REFERENCE)
         (rd / "report.json").write_text(json.dumps(runs[name], indent=2) + "\n")
-    rows, stats = evaluate_gate(runs, triplets, paced)
+    defaults = [t["capture"] for t in triplets] + [paced[1]]
+    recall = None if args.no_recall else recall_check(session, defaults, RECALL_REFERENCE)
+    rows, stats = evaluate_gate(runs, triplets, paced, recall)
     prov = _provenance()
     order = [name for name, _k, _r in plan]
-    md = _gate_md(session, rows, stats, runs, order, prov)
+    md = _gate_md(session, rows, stats, runs, order, prov, recall)
     verdict = _verdict(rows)
     (session / "gate.json").write_text(json.dumps({
         "verdict": verdict, "thresholds": GATE, "criteria": rows, "triplets": stats,
-        "runs": runs, "provenance": prov,
+        "recall": recall, "runs": runs, "provenance": prov,
         "config": {"duration_s": args.duration, "paced_rate": args.paced_rate,
                    "repeat": args.repeat, "steady_warmup": args.steady_warmup,
                    "seed": args.seed, "warmup_s": args.warmup, "env": env,
@@ -1432,6 +1633,8 @@ def main(argv: list[str] | None = None) -> int:
                         "150%% CPU (the wait and the load are recorded)")
     p.add_argument("--control", action="store_true",
                    help="also run a saturated no-op-profile-hook control (informational)")
+    p.add_argument("--no-recall", action="store_true",
+                   help="skip the discover-mode reference run (criterion 7)")
     p.add_argument("--repeat", type=int, default=1, metavar="N",
                    help="saturated captures, each between two nocap runs (medians are gated)")
     p.add_argument("--steady-warmup", default="auto", metavar="auto|S|off", type=_steady_arg,

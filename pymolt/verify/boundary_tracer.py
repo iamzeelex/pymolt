@@ -30,15 +30,25 @@ Watcher environment:
   PYMOLT_TRACE_OUT      output path template; "{pid}" -> PID (default ./pymolt-trace-{pid}.jsonl)
   PYMOLT_TRACE_BACKEND  auto | setprofile | monitoring | wrap | hybrid (default auto: monitoring on
                         3.12+, setprofile below; monitoring below 3.12 falls back to setprofile)
-  PYMOLT_TRACE_MODE     discover | watch | auto. discover: wide for the whole run. watch: narrow
-                        from the start, on PYMOLT_TRACE_IMPACT_TARGETS. auto: discover until the
-                        observed dependency symbols saturate, then watch on observed ∪ impact
-                        targets (the switch is recorded in the metadata). Unset: auto, except
-                        that impact targets alone keep the targeted capture they always meant
-                        (wrappers for exact symbols, no process-wide hook).
-  PYMOLT_TRACE_DISCOVER_QUIET  seconds without a new symbol that count as saturated (default 30;
+  PYMOLT_TRACE_MODE     discover | watch | auto | incremental. discover: wide for the whole run.
+                        watch: narrow from the start, on PYMOLT_TRACE_IMPACT_TARGETS. auto, 3.12+:
+                        incremental (the watch set grows as our code calls new dependency code,
+                        no discover window; recorded as mode "incremental"). auto below 3.12 (or
+                        when incremental cannot start): discover until the observed symbols
+                        saturate, then watch on observed ∪ impact targets (the switch is recorded
+                        in the metadata). Unset: auto, except that impact targets alone keep the
+                        targeted capture they always meant (wrappers for exact symbols, no
+                        process-wide hook).
+  PYMOLT_TRACE_INCREMENTAL  "0" makes 3.12+ auto use discover -> watch instead (default "1")
+  PYMOLT_TRACE_INCREMENTAL_SETTLE  seconds without a newly armed code after which incremental
+                        mode frees its second tool (the global PY_START for dunders, properties
+                        and generators); default 30, 0 = never. Contacts seen so far stay
+                        watched and plain calls are still found later, but a protocol, dunder or
+                        property contact FIRST used after the settle is missed (metadata:
+                        ``settled_at``, ``settle_reason``).
+  PYMOLT_TRACE_DISCOVER_QUIET  seconds without a new symbol that count as saturated (default 5;
                         the clock starts at the first observed symbol)
-  PYMOLT_TRACE_DISCOVER_MAX    seconds after which auto switches regardless (default 300)
+  PYMOLT_TRACE_DISCOVER_MAX    seconds after which discover -> watch switches anyway (default 60)
   PYMOLT_TRACE_SINK     jsonl | facts (default jsonl). facts: the aggregating FactSink, writing
                         PYMOLT_TRACE_OUT with its ``.jsonl`` suffix replaced by ``.facts.json``
   PYMOLT_TRACE_PRIVACY  values | shape (default values)
@@ -82,11 +92,15 @@ ENV_MODE = "PYMOLT_TRACE_MODE"
 ENV_QUIET = "PYMOLT_TRACE_DISCOVER_QUIET"
 ENV_MAX = "PYMOLT_TRACE_DISCOVER_MAX"
 ENV_SINK = "PYMOLT_TRACE_SINK"
+ENV_INCREMENTAL = "PYMOLT_TRACE_INCREMENTAL"
+ENV_SETTLE = "PYMOLT_TRACE_INCREMENTAL_SETTLE"
 DEFAULT_OUT = "./pymolt-trace-{pid}.jsonl"
-MODES = ("discover", "watch", "auto")
+MODES = ("discover", "watch", "auto", "incremental")
 DEFAULT_MODE = "auto"
-DEFAULT_QUIET = 30.0
-DEFAULT_MAX = 300.0
+DEFAULT_QUIET = 5.0
+DEFAULT_MAX = 60.0
+REFRESH_SECONDS = 2.0       # incremental: how often the running discovered count is noted
+DEFAULT_SETTLE = 30.0       # incremental: seconds without a newly armed code -> free tool B
 
 
 def _split_excludes(raw):
@@ -173,7 +187,14 @@ def _partition(impact_targets):
 
 
 class Controller(object):
-    """Mode B backend driver: ``discover``, ``watch``, or ``auto`` (discover -> watch).
+    """Mode B backend driver: ``discover``, ``watch``, ``incremental`` or ``auto``.
+
+    ``auto`` on 3.12+ is ``incremental``: one ``MonitoringBackend`` whose watch set grows from
+    the call sites in our code (``_monitoring``), so there is no discover window and no
+    switch; the metadata says ``mode="incremental"`` with ``switched_at`` = its start (so a
+    tool waiting for a switch never hangs) and a running ``discovered`` count. When it cannot
+    start (two free tool ids are needed) or ``PYMOLT_TRACE_INCREMENTAL=0``, ``auto`` is
+    discover -> watch:
 
     3.12+: discover and watch are one ``MonitoringBackend`` switched in place
     (``enter_watch``). Below 3.12 (or ``PYMOLT_TRACE_BACKEND=setprofile``): discover is
@@ -190,7 +211,8 @@ class Controller(object):
 
     def __init__(self, target, sink, mode=DEFAULT_MODE, prefer="auto", exclude=(), source=None,
                  include_internal=False, impact_targets=(), quiet=DEFAULT_QUIET,
-                 max_seconds=DEFAULT_MAX, legacy_watch=False):
+                 max_seconds=DEFAULT_MAX, legacy_watch=False, incremental=True,
+                 settle=DEFAULT_SETTLE):
         self.target = target
         self.sink = sink
         self.requested_mode = mode
@@ -203,6 +225,8 @@ class Controller(object):
         self.quiet = quiet
         self.max_seconds = max_seconds
         self.legacy_watch = legacy_watch    # watch through today's targeted backend selection
+        self.incremental = incremental      # 3.12+ auto -> incremental
+        self.settle = settle                # incremental: free tool B after this quiet (0: never)
         self.notes = []
         if mode not in MODES:
             self.notes.append("unknown-mode: " + str(mode))
@@ -252,6 +276,16 @@ class Controller(object):
         if self.mode == "auto":
             meta["discover_quiet"] = self.quiet
             meta["discover_max"] = self.max_seconds
+        elif self.mode == "incremental":
+            be = self.discover
+            meta["switched_at"] = self.switched_at
+            meta["discovered"] = self.discovered
+            meta["armed"] = getattr(be, "armed", None)
+            meta["incremental_settle"] = self.settle
+            meta["settled_at"] = getattr(be, "settled_at", None)
+            meta["settle_reason"] = getattr(be, "settle_reason", None)
+            if getattr(be, "settled_at", None) is not None:
+                meta["handed_over"] = getattr(be, "handed_over", None)
         notes = list(self.notes)
         for be in (self.discover, self.watch):
             note = getattr(be, "note", None)
@@ -305,6 +339,26 @@ class Controller(object):
                 self.source, self.include_internal)
             self.watch.start()
             return
+        if mode == "incremental" and not (monitoring and self.incremental):
+            self.notes.append("incremental-unavailable: discover -> watch")
+            mode = self.mode = "auto"
+        if mode in ("auto", "incremental") and monitoring and self.incremental:
+            from ._monitoring import MonitoringBackend
+            be = MonitoringBackend(self.target, *args, mode="incremental",
+                                   watch_targets=self.impact_targets)
+            try:
+                be.start()
+            except RuntimeError as exc:
+                self.notes.append("incremental-unavailable: " + str(exc))
+                mode = self.mode = "auto"
+            else:
+                self.discover = be
+                self.mode = "incremental"
+                self._switched = True       # nothing to switch: watching from the start
+                self.switched_at = time.time()
+                self._t0 = time.monotonic()
+                self._start_thread()        # keeps the running discovered count noted
+                return
         # Impact targets are observed in discover too (one outside the target would otherwise
         # be invisible until the switch): exact local events on 3.12+, their top-level
         # packages added to the setprofile matcher below.
@@ -348,8 +402,33 @@ class Controller(object):
             return "quiet"
         return None
 
+    def settled(self, now=None):
+        """"quiet" when incremental mode should free its second tool, else None. The clock
+        starts at the first armed code (an idle start does not settle)."""
+        be = self.discover
+        if (self.mode != "incremental" or self.settle <= 0 or be is None
+                or getattr(be, "settled_at", None) is not None
+                or getattr(be, "_tool2", None) is None):
+            return None
+        stamps = [t for t in (getattr(be, "last_armed_at", None),
+                              getattr(be, "last_new_at", None)) if t is not None]
+        if not stamps:
+            return None
+        now = time.monotonic() if now is None else now
+        return "quiet" if now - max(stamps) >= self.settle else None
+
     def _run(self):
         try:
+            if self.mode == "incremental":
+                tick = REFRESH_SECONDS
+                if self.settle > 0:
+                    tick = max(0.005, min(tick, self.settle / 4.0))
+                while not self._wake.wait(tick):
+                    reason = self.settled()
+                    if reason is not None:
+                        self.discover.settle(reason)
+                    self._note_metadata()
+                return
             interval = self._interval()
             while not self._wake.wait(interval):
                 reason = self.saturated()
@@ -363,7 +442,9 @@ class Controller(object):
         """Threads do not survive fork: restart the controller in the child if still discovering."""
         self._lock = threading.Lock()
         self._wake = threading.Event()
-        if self.mode == "auto" and not self._switched and not self._stopped:
+        if self._stopped:
+            return
+        if self.mode == "incremental" or (self.mode == "auto" and not self._switched):
             try:
                 self._start_thread()
             except Exception:
@@ -435,7 +516,7 @@ class Controller(object):
                 be.stop()
             except Exception:
                 pass
-        if not self._switched:
+        if not self._switched or self.mode == "incremental":
             self._note_metadata(discovered=self.discovered)
 
 
@@ -564,6 +645,8 @@ def activate():
         include_internal=include_internal, impact_targets=impact_targets,
         quiet=_float_env(ENV_QUIET, DEFAULT_QUIET), max_seconds=_float_env(ENV_MAX, DEFAULT_MAX),
         legacy_watch=legacy_watch,
+        incremental=os.environ.get(ENV_INCREMENTAL, "1").strip() not in ("0", "false", "False"),
+        settle=_float_env(ENV_SETTLE, DEFAULT_SETTLE),
     )
     backend.requested_mode = raw_mode or None
     try:
