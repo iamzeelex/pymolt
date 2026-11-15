@@ -119,6 +119,7 @@ def dep():
 def _controller(sink, family, **kw):
     kw.setdefault("quiet", 1000.0)
     kw.setdefault("max_seconds", 1000.0)
+    kw.setdefault("incremental", False)     # these exercise discover -> watch
     return Controller(MOD, sink, prefer=family, source=(__name__, USER), **kw)
 
 
@@ -345,7 +346,8 @@ def test_activate_records_mode_switch_and_discovered_count(tmp_path):
     env.update(PYMOLT_TRACE_TARGET="vfakeact", PYTHONPATH=os.pathsep.join([str(repo),
                                                                           str(tmp_path)]),
                PYMOLT_TRACE_OUT=str(tmp_path / "t-{pid}.jsonl"), PYMOLT_TRACE_MODE="auto",
-               PYMOLT_TRACE_DISCOVER_QUIET="0.05", PYMOLT_TRACE_SINK="jsonl")
+               PYMOLT_TRACE_DISCOVER_QUIET="0.05", PYMOLT_TRACE_SINK="jsonl",
+               PYMOLT_TRACE_INCREMENTAL="0")
     code = ("from pymolt.verify import boundary_tracer\n"
             "boundary_tracer.activate()\n"
             "import time, vfakeact\n"
@@ -478,3 +480,144 @@ def test_a_sink_without_key_keeps_todays_admit_call(dep, kind):
     finally:
         be.stop()
     assert calls == [False]
+
+
+# ── incremental (3.12+ auto) ─────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
+def test_auto_is_incremental_on_312_and_records_it(dep):
+    mod, _ = dep
+    sink = RecSink()
+    before = time.time()
+    ctl = Controller(MOD, sink, mode="auto", prefer="auto", source=(__name__, USER))
+    ctl.start()
+    try:
+        mod.plain(1)
+        mod.other(2)                    # no discover window: a symbol seen late is still seen
+        assert ctl.switch("manual") is False
+    finally:
+        ctl.stop()
+    assert {e["sym"] for e in sink.events} == {MOD + ".plain", MOD + ".other"}
+    meta = sink.metadata
+    assert meta["mode"] == "incremental" and meta["requested_mode"] == "auto"
+    assert before <= meta["switched_at"] <= time.time()
+    assert meta["discovered"] == 2 and meta["armed"] == 2
+
+
+@pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
+def test_incremental_falls_back_to_discover_then_watch_with_one_tool_id(dep):
+    from pymolt.verify import _monitoring
+    mon = sys.monitoring
+    taken = []
+    try:
+        for tool in _monitoring.TOOL_IDS[1:]:
+            if mon.get_tool(tool) is None:
+                mon.use_tool_id(tool, "squatter")
+                taken.append(tool)
+        mod, _ = dep
+        sink = RecSink()
+        ctl = Controller(MOD, sink, mode="auto", source=(__name__, USER), quiet=1000.0)
+        ctl.start()
+        try:
+            mod.plain(1)
+        finally:
+            ctl.stop()
+    finally:
+        for tool in taken:
+            mon.free_tool_id(tool)
+    assert ctl.mode == "auto" and ctl.discover.name == "monitoring"
+    assert any(n.startswith("incremental-unavailable") for n in sink.metadata["backend_notes"])
+    assert len(sink.events) == 1
+
+
+def test_incremental_below_312_is_discover_then_watch_with_a_note(dep, monkeypatch):
+    mod, _ = dep
+    monkeypatch.setattr(boundary_tracer, "HAS_MONITORING", False)
+    sink = RecSink()
+    ctl = Controller(MOD, sink, mode="incremental", source=(__name__, USER), quiet=1000.0)
+    ctl.start()
+    try:
+        mod.plain(1)
+    finally:
+        ctl.stop()
+    assert ctl.mode == "auto" and ctl.discover.name == "setprofile"
+    assert "incremental-unavailable: discover -> watch" in sink.metadata["backend_notes"]
+    assert (ctl.quiet, ctl.max_seconds) == (1000.0, boundary_tracer.DEFAULT_MAX)
+    assert (boundary_tracer.DEFAULT_QUIET, boundary_tracer.DEFAULT_MAX) == (5.0, 60.0)
+
+
+@pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
+def test_activate_auto_is_incremental_end_to_end(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    pkg = tmp_path / "vfakeinc"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("def f(x):\n    return x\n\ndef g(x):\n    return x\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYMOLT_TRACE")}
+    env.update(PYMOLT_TRACE_TARGET="vfakeinc", PYTHONPATH=os.pathsep.join([str(repo),
+                                                                          str(tmp_path)]),
+               PYMOLT_TRACE_OUT=str(tmp_path / "t-{pid}.jsonl"), PYMOLT_TRACE_MODE="auto",
+               PYMOLT_TRACE_SINK="jsonl", PYMOLT_TRACE_INCREMENTAL_SETTLE="0.05")
+    code = ("from pymolt.verify import boundary_tracer\n"
+            "boundary_tracer.activate()\n"
+            "import time, vfakeinc\n"
+            "vfakeinc.f(1)\n"
+            "vfakeinc.f(2)\n"
+            "be = boundary_tracer._active[0].discover\n"
+            "deadline = time.monotonic() + 10\n"
+            "while be.settled_at is None and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "vfakeinc.g(3)\n")
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=60,
+                   cwd=str(tmp_path))
+    (meta_path,) = tmp_path.glob("*.meta.json")
+    meta = json.loads(meta_path.read_text())
+    assert meta["mode"] == "incremental" and meta["discovered"] == 2
+    assert meta["started_at"] <= meta["switched_at"] <= meta["ended_at"]
+    assert meta["settle_reason"] == "quiet"
+    assert meta["switched_at"] < meta["settled_at"] <= meta["ended_at"]
+    (trace,) = list(tmp_path.glob("t-*.jsonl"))
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert [(e["sym"], e["result"]) for e in events] == [
+        ("vfakeinc.f", 1), ("vfakeinc.f", 2), ("vfakeinc.g", 3)]
+
+
+@pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
+def test_incremental_settles_after_a_quiet_window_and_records_it(dep):
+    mod, _ = dep
+    sink = RecSink()
+    ctl = Controller(MOD, sink, mode="auto", source=(__name__, USER), settle=0.05)
+    ctl.start()
+    try:
+        be = ctl.discover
+        tool2 = be._tool2
+        mod.plain(1)
+        assert _wait(lambda: be.settled_at is not None)
+        assert sys.monitoring.get_tool(tool2) is None
+        mod.plain(2)
+        mod.other(3)                     # a plain call first made after the settle: found
+    finally:
+        ctl.stop()
+    assert [e["sym"] for e in sink.events] == [MOD + ".plain"] * 2 + [MOD + ".other"]
+    meta = sink.metadata
+    assert meta["mode"] == "incremental" and meta["settle_reason"] == "quiet"
+    assert meta["settled_at"] == be.settled_at and meta["incremental_settle"] == 0.05
+    assert meta["discovered"] == 2
+
+
+@pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
+def test_incremental_never_settles_with_zero_or_when_idle(dep):
+    mod, _ = dep
+    for settle, call in ((0.0, True), (0.01, False)):
+        sink = RecSink()
+        ctl = Controller(MOD, sink, mode="auto", source=(__name__, USER), settle=settle)
+        ctl.start()
+        try:
+            if call:
+                mod.plain(1)
+            time.sleep(0.1)
+            assert ctl.discover.settled_at is None and ctl.discover._tool2 is not None
+            assert ctl.settled(time.monotonic() + 1000.0) is None
+        finally:
+            ctl.stop()
+        assert "settled_at" not in sink.metadata
