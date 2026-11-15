@@ -20,7 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from pymolt.core.graph import DependencyGraph
-from pymolt.ingestion.detect import detect_sources
+from pymolt.ingestion.detect import detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 from pymolt.risk.models import RiskReport
 
@@ -38,6 +38,10 @@ class AssessResult(BaseModel):
     target_python: str | None = None
     target_resolved: bool = False
     target_error: str | None = None
+    # The resolver's stderr tail (<= 40 lines, ANSI stripped) and the packages its
+    # failure lines name. Only culprits get a "conflict" row; the rest are "unresolved".
+    target_error_detail: str | None = None
+    target_culprits: list[str] = Field(default_factory=list)
     # The legacy baseline could not be resolved (no legacy interpreter). The
     # target side is still resolved, but there is nothing honest to compare it to.
     baseline_unresolved: bool = False
@@ -57,16 +61,150 @@ class AssessResult(BaseModel):
         return dict(Counter(r["status"] for r in self.rows))
 
 
-def resolve_chosen_source(sources, manifest_name: str | None):
-    """Pick the source manifest by name, or default to the first lock/manifest.
+# ── resolver failures ────────────────────────────────────────────────────────
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_DETAIL_LINES = 40
+_REQ_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# `name==1.0`, `name[extra]>=2`, `name @ url`: the name is what precedes the first operator.
+_REQ_WITH_OP = re.compile(
+    r"(?<![\w.-])([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*(?:===|==|~=|!=|<=|>=|<|>|\s@\s)"
+)
+_FAILED_BUILD = re.compile(
+    r"Failed to (?:download and build|build|download|fetch|clone)\s+`([^`]+)`")
+_NOT_FOUND = re.compile(r"`([^`]+)` was not found in the package registry")
+_NO_VERSIONS = re.compile(r"there are no versions of ([A-Za-z0-9][A-Za-z0-9._-]*)")
+_NO_DIST = re.compile(r"No matching distribution found for ([A-Za-z0-9][A-Za-z0-9._-]*)")
+_GIT_URL = re.compile(r"git\+(?:git|https?|ssh)://\S*?/([A-Za-z0-9._-]+?)(?:\.git)?(?:[@#\s`'\"]|$)")
+
+
+def canonical_name(name: str) -> str:
+    """PEP 503 normalisation, so ``Flask_Cors`` and ``flask-cors`` compare equal."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+class TargetResolveError(str):
+    """A one-line resolver failure summary that also carries the resolver's evidence.
+
+    A ``str`` so every existing ``target_error`` consumer keeps working;
+    ``detail`` is the stderr tail and ``culprits`` the packages its failure lines name.
+    """
+
+    detail: str | None
+    culprits: list[str]
+
+    def __new__(cls, summary: str, detail: str | None = None, culprits: list[str] | None = None):
+        obj = super().__new__(cls, summary)
+        obj.detail = detail
+        obj.culprits = list(culprits or [])
+        return obj
+
+
+def _spec_name(spec: str) -> str | None:
+    match = _REQ_NAME.match(spec.strip())
+    return canonical_name(match.group(0)) if match else None
+
+
+def parse_resolver_culprits(stderr: str) -> list[str]:
+    """The package names a resolver's failure output points at, in order of appearance.
+
+    Supported uv shapes: ``Failed to build `x==1```, ``Failed to download/fetch/clone
+    `x```, ``Because x==1 depends on y>=2`` (incl. ``And because`` / ``Because only x<=1
+    is available``, wrapped over lines), ```x` was not found in the package registry``,
+    ``there are no versions of x``, ``No matching distribution found for x``, and
+    ``git+git://host/org/x.git`` URLs. The bare ``No solution found`` header names none.
+    """
+    text = _ANSI.sub("", stderr or "")
+    found: list[str] = []
+
+    # Join wrapped continuation lines (and uv's tree glyphs) into one string.
+    flat = re.sub(r"\s*\n[\s│├└─▶╰×]*", " ", text)
+    positions: list[tuple[int, str | None]] = []
+    for m in _FAILED_BUILD.finditer(flat):
+        positions.append((m.start(), _spec_name(m.group(1))))
+    for m in _NOT_FOUND.finditer(flat):
+        positions.append((m.start(), _spec_name(m.group(1))))
+    for m in _NO_VERSIONS.finditer(flat):
+        positions.append((m.start(), canonical_name(m.group(1))))
+    for m in _NO_DIST.finditer(flat):
+        positions.append((m.start(), canonical_name(m.group(1))))
+    for m in re.finditer(r"(?:[Bb]ecause|you require|Your project requires)\b", flat):
+        end = flat.find(", we can conclude", m.end())
+        clause = flat[m.end(): end if end != -1 else m.end() + 300]
+        for req in _REQ_WITH_OP.finditer(clause):
+            positions.append((m.start(), canonical_name(req.group(1))))
+    for m in _GIT_URL.finditer(flat):
+        positions.append((m.start(), canonical_name(m.group(1))))
+    for _, name in sorted(positions, key=lambda item: item[0]):
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def resolver_summary(stderr: str, fallback: str) -> str:
+    """uv's first ``error:`` / ``×`` line, else its first non-blank line, else ``fallback``."""
+    lines = [ln.strip() for ln in _ANSI.sub("", stderr or "").splitlines() if ln.strip()]
+    for ln in lines:
+        m = re.match(r"^(?:error:|×|ERROR:)\s*(.+)$", ln)
+        if m:
+            return m.group(1).rstrip(":").strip()
+    return lines[0].rstrip(":") if lines else fallback
+
+
+def _process_error(exc: BaseException | None):
+    """The ``CalledProcessError`` at the root of ``exc``'s cause chain, if any."""
+    import subprocess
+
+    for _ in range(8):
+        if exc is None:
+            return None
+        if isinstance(exc, subprocess.CalledProcessError):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def describe_resolver_failure(exc: BaseException) -> TargetResolveError:
+    """A resolver exception as a one-line summary plus its stderr tail and culprits."""
+    proc = _process_error(exc)
+    stderr = ""
+    if proc is not None:
+        raw = proc.stderr
+        stderr = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else (raw or "")
+    if not stderr.strip():
+        return TargetResolveError(str(exc))
+    clean = _ANSI.sub("", stderr).rstrip()
+    tail = "\n".join(clean.splitlines()[-_DETAIL_LINES:])
+    return TargetResolveError(
+        resolver_summary(stderr, str(exc)), tail, parse_resolver_culprits(stderr),
+    )
+
+
+def manifest_fixation(source) -> str:
+    """How firmly the *manifest* pins its versions (``pinned`` / ``intent`` / ...).
+
+    Not the resolved graph's fixation: a resolve always yields pins, which says
+    nothing about the file the engineer wrote (ranges only is still ``intent``).
+    """
+    fixation = source.fixation
+    return getattr(fixation, "value", str(fixation))
+
+
+def failure_evidence(target_error) -> tuple[str | None, list[str]]:
+    """``(stderr tail, culprits)`` carried by a ``resolve_target_graph`` error, if any."""
+    return getattr(target_error, "detail", None), list(getattr(target_error, "culprits", []))
+
+
+def resolve_chosen_source(sources, manifest_name: str | None, project_dir=None):
+    """Pick the source manifest by name or relative path, or default to the first lock/manifest.
 
     Raises ``ValueError`` when a named manifest is not found (the caller decides
     how to surface it).
     """
     if manifest_name:
-        for src in sources:
-            if src.path.name.lower() == manifest_name.lower():
-                return src
+        found = find_source(sources, manifest_name, project_dir or ".")
+        if found is not None:
+            return found
         discovered = [s.path.name for s in sources]
         raise ValueError(f"Manifest '{manifest_name}' not found. Discovered: {discovered}")
     lock_sources = [s for s in sources if s.is_lock]
@@ -121,13 +259,22 @@ def extract_constraint(declared: str | None) -> str | None:
         return text or "any"
 
 
-def build_comparison_rows(baseline_graph, target_graph, target_python, target_error) -> list[dict]:
+def build_comparison_rows(
+    baseline_graph, target_graph, target_python, target_error, target_culprits=None,
+) -> list[dict]:
     """Compute the baseline/target comparison as plain dicts (no rich markup).
+
+    When the target did not resolve, only the packages the resolver named
+    (``target_culprits``, else the ones ``target_error`` carries) are ``conflict``;
+    every other row is ``unresolved``: the resolver never judged it.
 
     Shared by the CLI table renderer and ``--json``. One row per package
     in the union; visibility filtering is the renderer's concern.
     """
     rows = []
+    if target_culprits is None:
+        target_culprits = getattr(target_error, "culprits", None)
+    culprit_set = {canonical_name(c) for c in (target_culprits or [])}
     all_packages = sorted(
         set(baseline_graph.nodes.keys() if baseline_graph else [])
         | set(target_graph.nodes.keys() if target_graph else [])
@@ -147,7 +294,8 @@ def build_comparison_rows(baseline_graph, target_graph, target_python, target_er
 
         if target_python:
             if target_error:
-                target_version, status = None, "conflict"
+                target_version = None
+                status = "conflict" if canonical_name(name) in culprit_set else "unresolved"
             elif t:
                 target_version = t.version or "unpinned"
                 if not b:
@@ -196,7 +344,7 @@ def resolve_target_graph(
         )
         return graph, None
     except Exception as e:
-        return None, str(e)
+        return None, describe_resolver_failure(e)
     finally:
         if constraint_path and constraint_path.exists():
             try:
@@ -545,10 +693,11 @@ def run_assess(
     config = config or {}
     project_path = Path(project_dir)
 
-    sources = detect_sources(project_path)
+    sources = detect_sources(project_path, include_subroots=True)
     if not sources:
         raise ValueError(f"No python dependency sources detected in directory {project_dir}")
-    chosen = resolve_chosen_source(sources, source_manifest or config.get("selected_manifest"))
+    chosen = resolve_chosen_source(
+        sources, source_manifest or config.get("selected_manifest"), project_path)
 
     overrides = overrides if overrides is not None else config.get("target_overrides", {})
 
@@ -576,6 +725,7 @@ def run_assess(
     )
     _p("compare", 0.8)
     rows = build_comparison_rows(baseline_graph, target_graph, target_python, target_error)
+    error_detail, error_culprits = failure_evidence(target_error)
 
     risk = None
     if with_risk and baseline_graph is not None:
@@ -600,12 +750,14 @@ def run_assess(
     return AssessResult(
         project_dir=str(project_path),
         source_manifest=chosen.path.name,
-        source_fixation=report.source_fixation,
+        source_fixation=manifest_fixation(chosen),
         resolution_quality=report.resolution_quality,
         detected_python=report.detected_python,
         target_python=target_python,
         target_resolved=target_resolved,
-        target_error=target_error,
+        target_error=None if target_error is None else str(target_error),
+        target_error_detail=error_detail,
+        target_culprits=error_culprits,
         baseline_unresolved=baseline_graph is None,
         baseline_tier=classify_baseline_tier(
             baseline_resolved=baseline_graph is not None,

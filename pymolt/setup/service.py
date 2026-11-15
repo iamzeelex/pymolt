@@ -18,11 +18,12 @@ from pymolt.core.enums import Mode
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.ingestion.detect import (
     detect_local_environments,
+    detect_manifest,
     detect_project_python_version,
     detect_sources,
     detect_system_tools,
 )
-from pymolt.ingestion.fallback_compiler import list_running_containers
+from pymolt.ingestion.fallback_compiler import list_project_containers
 from pymolt.setup.pythons import (
     classify_eol,
     get_available_python_versions,
@@ -35,7 +36,7 @@ _TOOL_ORDER = ["uv", "conda", "poetry", "container", "system"]
 
 
 class ManifestOption(BaseModel):
-    name: str            # the manifest file name (source of truth)
+    name: str            # the manifest's path relative to the project (its identity)
     mode: str            # Mode value (pip / conda / ...)
     fixation: str        # SourceFixation value
     is_lock: bool
@@ -132,8 +133,8 @@ _VARIANT_MARKERS = ("dev", "test", "tests", "doc", "docs", "rtd", "ci", "lint",
 #: Names that state the project's dependencies outright.
 _CANONICAL_MANIFESTS = {"requirements.txt", "requirements.in", "pyproject.toml",
                         "pipfile", "environment.yml", "environment.yaml"}
-#: Packaging metadata pymolt cannot yet classify into edges (see the inventory's
-#: own note) — a last resort, never the assumed source of truth.
+#: Packaging metadata: its dependencies are only partly readable (computed
+#: values are not executed) — a last resort, never the assumed source of truth.
 _UNCLASSIFIED_MANIFESTS = {"setup.py", "setup.cfg"}
 
 
@@ -156,7 +157,10 @@ def _manifest_rank(source) -> tuple:
     # "310" / "39" / "py38" — a per-interpreter row, not the project.
     version_specific = any(w.replace("py", "").replace(".", "").isdigit() for w in words)
 
-    if source.is_lock:
+    if source.subroot:
+        # A part of the repo, not the project at its top: never assumed.
+        tier = 5
+    elif source.is_lock:
         tier = 0
     elif lowered in _UNCLASSIFIED_MANIFESTS:
         tier = 4
@@ -179,11 +183,11 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
     project_path = Path(project_dir)
     notes: list[str] = []
 
-    sources = detect_sources(project_path)
+    sources = detect_sources(project_path, include_subroots=True)
     default_source = _pick_default_manifest(sources)
     manifests = [
         ManifestOption(
-            name=src.path.name,
+            name=src.ref(project_path),
             mode=src.mode.value,
             fixation=src.fixation.value,
             is_lock=src.is_lock,
@@ -194,9 +198,9 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
     if not sources:
         notes.append(f"No Python dependency sources detected in {project_path}.")
     elif len(sources) > 1 and default_source is not None:
-        others = [s.path.name for s in sources if s is not default_source]
+        others = [s.ref(project_path) for s in sources if s is not default_source]
         notes.append(
-            f"{len(sources)} manifests here; assuming {default_source.path.name} is the "
+            f"{len(sources)} manifests here; assuming {default_source.ref(project_path)} is the "
             f"source of truth. Others: {', '.join(others)}."
         )
 
@@ -217,15 +221,18 @@ def gather_setup_options(project_dir: str | Path) -> SetupOptions:
 
     # Call the lister unconditionally — it self-guards on docker availability, so
     # we don't depend on the (sometimes flaky) daemon-liveness probe in system_tools.
+    # Only a container that mounts this project is offered.
     containers: list[ContainerOption] = []
     try:
-        for c in list_running_containers():
+        for c in list_project_containers(project_path):
             containers.append(
                 ContainerOption(id=c["id"], name=c.get("name", ""),
                                 python=c.get("python") or None)
             )
     except Exception as e:  # docker probing is best-effort
         notes.append(f"Container detection skipped: {e}")
+    if not containers:
+        notes.append("No running container mounts this project.")
 
     tools = _build_tool_options(sources, system_tools, containers)
     target_versions = build_target_options(base_python_default)
@@ -282,8 +289,8 @@ def _build_tool_options(sources, system_tools, containers) -> list[ToolOption]:
         if name == "container":
             available = bool(containers)
             detail = (
-                f"{len(containers)} running container(s)" if containers
-                else "no running containers"
+                f"{len(containers)} running container(s) mounting the project" if containers
+                else "no running container mounts the project"
             )
         elif name == "system":
             available = True
@@ -369,7 +376,20 @@ def check_setup_values(
     """
     manifests = [m.name for m in options.manifests]
     if manifest is not None and manifest not in manifests:
-        raise SetupError(f"unknown manifest {manifest!r}", f"Detected: {', '.join(manifests)}.")
+        # A path the scan did not list is still fine if it is a supported manifest
+        # inside the project (e.g. a lock under a directory scan does not treat as a root).
+        project = options.project_dir
+        if Path(manifest).is_absolute() or ".." in Path(manifest).parts:
+            example = manifests[0] if manifests else "requirements.txt"
+            raise SetupError(f"manifest {manifest!r} must be a path inside the project",
+                             f"Give it relative to {project}, e.g. {example}.")
+        if not (Path(project) / manifest).is_file():
+            raise SetupError(f"unknown manifest {manifest!r}: no such file in the project",
+                             f"Detected: {', '.join(manifests)}.")
+        if detect_manifest(project, manifest) is None:
+            raise SetupError(f"manifest {manifest!r} is not a supported format",
+                             "Supported: requirements*.txt/.in, pyproject.toml, Pipfile, "
+                             "setup.py/setup.cfg, environment.yml, and the lock files.")
     available = [t.name for t in options.tools if t.available]
     if tool is not None and tool not in available:
         raise SetupError(
@@ -385,17 +405,22 @@ def check_setup_values(
         raise SetupError("a container is required with the container tool", f"Running: {running}.")
 
 
-def apply_setup(project_dir: str | Path, choices: SetupChoices) -> EnvConfig:
+def apply_setup(
+    project_dir: str | Path, choices: SetupChoices, *, notes: list[str] | None = None,
+) -> EnvConfig:
     """Persist the chosen config to ``.pymolt/env_config.json`` and return it.
 
-    Also creates the ``.pymolt`` folder and adds the config to
-    ``.gitignore`` (best-effort), matching what the CLI setup used to do inline.
+    Also creates the ``.pymolt`` folder and adds the config to ``.gitignore``
+    (best-effort). Every side effect outside ``.pymolt/`` is appended to ``notes``
+    when given, so the caller can say what it changed in the user's project.
     """
     project_path = Path(project_dir)
     pymolt_dir = project_path / ".pymolt"
     pymolt_dir.mkdir(parents=True, exist_ok=True)
     (pymolt_dir / "cache").mkdir(exist_ok=True)
-    _ensure_gitignore(project_path)
+    added = _ensure_gitignore(project_path)
+    if added and notes is not None:
+        notes.append(f"Added {_GITIGNORE_ENTRY} to {project_path / '.gitignore'}.")
 
     config = EnvConfig(
         selected_manifest=choices.selected_manifest,
@@ -412,16 +437,21 @@ def apply_setup(project_dir: str | Path, choices: SetupChoices) -> EnvConfig:
     return config
 
 
-def _ensure_gitignore(project_path: Path) -> None:
+_GITIGNORE_ENTRY = ".pymolt/env_config.json"
+
+
+def _ensure_gitignore(project_path: Path) -> bool:
+    """Append the config to an existing ``.gitignore``. True only when it wrote."""
     gitignore_path = project_path / ".gitignore"
-    entry = ".pymolt/env_config.json"
     try:
-        if gitignore_path.exists():
-            content = gitignore_path.read_text(encoding="utf-8")
-            if entry in content:
-                return
-            separator = "\n" if content and not content.endswith("\n") else ""
-            with open(gitignore_path, "a", encoding="utf-8") as f:
-                f.write(f"{separator}{entry}\n")
+        if not gitignore_path.exists():
+            return False
+        content = gitignore_path.read_text(encoding="utf-8")
+        if _GITIGNORE_ENTRY in content:
+            return False
+        separator = "\n" if content and not content.endswith("\n") else ""
+        with open(gitignore_path, "a", encoding="utf-8") as f:
+            f.write(f"{separator}{_GITIGNORE_ENTRY}\n")
+        return True
     except OSError:
-        pass
+        return False

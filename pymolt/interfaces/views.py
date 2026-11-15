@@ -35,6 +35,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -341,8 +342,10 @@ def setup_payload(options, project_dir: str | Path, *, config=None) -> dict:
     }
 
 
-def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
-    """``SetupOptions`` (+ the saved ``EnvConfig``, if any) -> view."""
+def setup_view(options, project_dir: str | Path, *, config=None,
+               side_effects: Iterable[str] = ()) -> dict:
+    """``SetupOptions`` (+ the saved ``EnvConfig``, if any) -> view. ``side_effects``: what
+    saving changed besides the config (e.g. an edited ``.gitignore``), said, not hidden."""
     full = setup_payload(options, project_dir, config=config)
     full_path = write_full_report(project_dir, "setup", full)
     lists = _Lists()
@@ -359,6 +362,7 @@ def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
         if offered and config.target_python not in offered:
             warnings.append(f"Python {config.target_python} is not in the available list; "
                             "assess fails if it cannot be provisioned.")
+        warnings.extend(side_effects)
         tool = getattr(config.selected_tool, "value", config.selected_tool)
         summary = (f"Saved {full['config_path']}.\nManifest {config.selected_manifest}, tool "
                    f"{tool}, Python {config.base_python} -> {config.target_python}.")
@@ -391,7 +395,7 @@ def setup_view(options, project_dir: str | Path, *, config=None) -> dict:
 
 # ── assess ───────────────────────────────────────────────────────────────────
 
-_ROW_PRIORITY = {"conflict": 0, "removed": 1, "upgrade": 2, "added": 3}
+_ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3, "added": 4}
 _VERDICT_LEVEL = {"red": "blocked", "yellow": "unproven", "green": "resolves"}
 
 
@@ -406,6 +410,8 @@ def assess_payload(result, *, baseline_hint=None, target_hint=None) -> dict:
         "target_python": result.target_python,
         "target_resolved": result.target_resolved,
         "target_error": result.target_error,
+        "target_error_detail": result.target_error_detail,
+        "target_culprits": list(result.target_culprits),
         "baseline_unresolved": result.baseline_unresolved,
         "baseline_tier": result.baseline_tier,
         "target_manifest_path": result.target_manifest_path,
@@ -496,6 +502,8 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         "resolution_quality": result.resolution_quality,
         "target_resolved": result.target_resolved,
         "target_error": result.target_error,
+        "target_error_detail": result.target_error_detail,
+        "target_culprits": list(result.target_culprits),
         "changes_format": "name base>target status" + (" risk=tier" if risk_by_pkg else ""),
         "changes": changes,
         "changes_total": len(moved),
@@ -523,7 +531,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
     lines.append(
         f"Base tier: {result.baseline_tier}. Upgrades: {counts.get('upgrade', 0)}, "
         f"added: {counts.get('added', 0)}, removed: {counts.get('removed', 0)}, "
-        f"conflicts: {counts.get('conflict', 0)}, manual-zone: {len(manual_zone)}."
+        f"conflicts: {counts.get('conflict', 0)}, "
+        + (f"unresolved: {counts['unresolved']}, " if counts.get("unresolved") else "")
+        + f"manual-zone: {len(manual_zone)}."
     )
     lines.append(f"{len(moved)} package(s) differ, {counts.get('unchanged', 0)} unchanged. "
                  + _note(lists, "changes", len(changes), full_path))
@@ -537,7 +547,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
     lines.append("A resolve is not evidence the code still works: capture and verify decide.")
 
     if result.target_error:
-        hint = "Fix the conflict in data.target_error (or loosen constraints), then assess again."
+        culprits = ", ".join(result.target_culprits) or "none named by the resolver"
+        hint = (f"The target does not resolve: {result.target_error}. Culprit(s): {culprits}. "
+                "Fix or loosen them, then assess again.")
     elif result.baseline_unresolved:
         hint = "Build the base environment (data.baseline_env), then assess again inside it."
     else:
@@ -549,12 +561,35 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 # ── capture ──────────────────────────────────────────────────────────────────
 
 
-def capture_view(slot, *, when: str, state) -> dict:
+def capture_refusal_hint(slot, static_contacts: int | None) -> str:
+    """The hint for a capture that was not accepted, by what went wrong."""
+    from pymolt.verify.service import parse_failed_count
+
+    rc = slot.returncode
+    log = f" (see {slot.command_log})" if slot.command_log else ""
+    if rc not in (None, 0) and slot.events > 0:
+        failed, _ = parse_failed_count(slot.command_log)
+        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}). "
+                "Fix or deselect them, or keep a red baseline with --accept-failing.")
+    if rc not in (None, 0):
+        return (f"The command failed (exit {rc}) and recorded no dependency call"
+                f"{log}. Fix the command and capture again; the slot is unchanged.")
+    if slot.events == 0:
+        contacts = f" ({static_contacts} static contacts)" if static_contacts is not None else ""
+        return (f"The command ran (exit {rc if rc is not None else 0}) but called no recorded "
+                f"dependency{contacts}. Run a command that exercises them, or pass --target.")
+    return (f"The recording is not usable: {slot.validity_reason or 'invalid trace'}{log}. "
+            "Fix the command and capture again; the slot is unchanged.")
+
+
+def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
+                 project_dir: str | Path | None = None) -> dict:
     """A capture's ``ContractSlot`` (+ the contract state after it) -> view.
 
     ``when`` is the CLI word: ``baseline`` or ``post-migration``. A capture that is
-    not accepted as evidence is still an answer (``ok`` true, ``accepted`` false):
-    the command ran, and what it recorded cannot stand for that side.
+    not accepted as evidence is ``ok: false`` with ``accepted: false``: the command
+    ran, but what it recorded cannot stand for that side, so no one should read "ok"
+    as "evidence recorded". The hint follows the cause.
     """
     from pymolt.verify.models import CaptureValidity
 
@@ -596,23 +631,37 @@ def capture_view(slot, *, when: str, state) -> dict:
         "request_id": slot.request_id,
         "correlation_id": slot.correlation_id,
         "metadata_path": slot.metadata_path,
+        "red": getattr(slot, "red", None),
     }
     if accepted:
         lines = [f"Recorded {slot.events} call(s) in {slot.processes} process(es) as the "
                  f"'{when}' capture.", f"Filled: {', '.join(filled) or 'none'}."]
         if slot.env_note:
             lines.append(f"Env: {slot.env_note}")
+        red = getattr(slot, "red", None)
+        if red:
+            failed = red.get("failed")
+            lines.append(f"RED: the command exited {red.get('returncode')} "
+                         f"({failed if failed is not None else 'some'} test(s) failed); kept "
+                         "because --accept-failing was given. The calls from failing tests are "
+                         "compared as usual.")
         hint = ("Next: change the code (or apply a plan), then capture post-migration."
                 if "post_migration" not in filled else
                 "Next: verify (compares baseline and post-migration).")
     else:
         lines = [f"NOT accepted as '{when}' evidence: {slot.validity_reason or validity}.",
                  f"Diagnostic artifact: {slot.trace_path}"]
-        hint = "Fix the command (see command_log) and capture again; the slot is unchanged."
+        if static_contacts is None and project_dir is not None and slot.events == 0:
+            from pymolt.verify.service import static_contact_count
+
+            static_contacts = static_contact_count(project_dir)
+        hint = capture_refusal_hint(slot, static_contacts)
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
-    return ok("\n".join(lines), lists.finish(data, warnings),
+    view = ok("\n".join(lines), lists.finish(data, warnings),
               full_report_path=slot.trace_path, hint=hint)
+    view["ok"] = accepted
+    return view
 
 
 def capture_attach_view(instructions, *, when: str, collect_command: str) -> dict:
@@ -625,6 +674,16 @@ def capture_attach_view(instructions, *, when: str, collect_command: str) -> dic
 
 
 # ── plan ─────────────────────────────────────────────────────────────────────
+
+
+def inconclusive_deltas(risks) -> tuple[int, int]:
+    """``(K, T)``: the plan's API deltas that were inconclusive, and all of them."""
+    deltas = list(getattr(risks, "deltas", None) or ())
+    return sum(1 for d in deltas if getattr(d, "quality", None) == "inconclusive"), len(deltas)
+
+
+def unknown_api_phrase(inconclusive: int, total: int) -> str:
+    return f"API changes unknown for {inconclusive} of {total} package(s)"
 
 
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) -> dict:
@@ -653,6 +712,7 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         patterns = sum(1 for item in items if isinstance(item, CodemodPattern))
         per_package.append(f"{pkg} rules={len(items) - patterns} patterns={patterns}")
     sites = sum(change.sites for change in plan.changes)
+    inconclusive, delta_total = inconclusive_deltas(getattr(plan, "risks", None))
 
     data: dict[str, Any] = {
         "plan_id": plan.plan_id,
@@ -670,6 +730,8 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         "api_impacts": lists.fit("api_impacts", impacts),
         "api_impacts_total": len(impacts),
         "baseline_bound": plan.baseline_trace_path is not None,
+        "api_deltas_inconclusive": inconclusive,
+        "api_deltas_total": delta_total,
         **_risk_data(lists, getattr(plan, "risks", None)),
     }
     warnings: list[str] = []
@@ -689,11 +751,22 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
     if data["risks_status"] is not None:
         attention = data["risks_attention_total"]
         fixed = data["risks_fixed_total"]
-        lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the plan "
-                     f"(data.risks_attention, data.risks_fixed; evidence {data['risks_status']}).")
+        unknown = unknown_api_phrase(inconclusive, delta_total)
+        if inconclusive and inconclusive == delta_total:
+            lines.append(f"Predicted risks: none rated — {unknown} (inconclusive)")
+        elif inconclusive:
+            lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the "
+                         f"plan; {unknown} (inconclusive)")
+        else:
+            lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the "
+                         f"plan (data.risks_attention, data.risks_fixed; evidence "
+                         f"{data['risks_status']}).")
     if by_pkg and not plan.changes:
+        unknown_tail = (f", but API changes are unknown for {inconclusive} of "
+                        f"{delta_total} package(s)" if inconclusive else "")
         lines.append(f"No call sites matched: none of the returned recipes apply in the "
-                     f"{plan.files_scanned} file(s) scanned. The plan changes no file.")
+                     f"{plan.files_scanned} file(s) scanned. The plan changes no file"
+                     f"{unknown_tail}.")
     if "diffs" in lists.truncated:
         lines.append(f"{lists.truncated['diffs']} diff(s) omitted; the plan file has every change.")
     if warnings:
@@ -785,8 +858,15 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
                      "trusting this verdict.")
-    lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
-                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.")
+    narrowed = bool(getattr(rep, "impact_filter_active", False)) and (
+        getattr(rep, "all_static_targets", rep.static_targets) > rep.static_targets)
+    lines.append(f"Static {rep.static_targets}"
+                 + (f" of {rep.all_static_targets} (narrowed to the plan's packages)"
+                    if narrowed else "")
+                 + f", confirmed {rep.confirmed}, BLIND {rep.blind}, "
+                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%"
+                 + (" (over the narrowed set)." if narrowed else "."))
+    lines.extend(f"{note}" for note in rep.notes if note.startswith("RED:"))
     if verdict == "pass" and rep.blind:
         lines.append(f"PASS covers the exercised calls only: {rep.blind} BLIND symbol(s) "
                      "were never run.")

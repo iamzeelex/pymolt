@@ -141,6 +141,71 @@ class TestCaptureNamedTrace:
         assert state.diagnostic_captures == [slot]
         assert "diagnostics" in slot.trace_path
 
+    def test_accept_failing_keeps_a_red_run_that_recorded_events(self, tmp_path):
+        script = _write_script(
+            tmp_path,
+            "import json\njson.loads('{}')\nprint('=== 2 failed, 5 passed in 0.1s ===')\n"
+            "raise SystemExit(1)\n",
+        )
+        refused = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json",
+        )
+        assert refused.validity is CaptureValidity.COMMAND_FAILED and refused.red is None
+
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json", accept_failing=True,
+        )
+        assert slot.validity is CaptureValidity.VALID
+        assert slot.red == {"returncode": 1, "failed": 2, "summary": "2 failed, 5 passed in 0.1s"}
+        assert service.load_contract_state(tmp_path).baseline == slot
+
+    def test_accept_failing_still_refuses_a_run_with_no_events(self, tmp_path):
+        script = _write_script(tmp_path, "raise SystemExit(3)\n")
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+            command=[sys.executable, str(script)], target="json", accept_failing=True,
+        )
+        assert slot.validity is CaptureValidity.COMMAND_FAILED and slot.red is None
+        assert service.load_contract_state(tmp_path).baseline is None
+
+    def test_slot_paths_are_stored_relative_and_survive_a_changed_cwd(
+            self, tmp_path, monkeypatch):
+        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
+        monkeypatch.chdir(tmp_path.parent)
+        slot = service.capture_named_trace(
+            Path(tmp_path.name), "baseline", CaptureMode.TEST_SUITE,
+            command=[sys.executable, str(script)], target="json",
+        )
+        assert Path(slot.trace_path).is_absolute()
+        raw = json.loads((tmp_path / ".pymolt" / "contract_state.json").read_text())
+        assert raw["baseline"]["trace_path"] == ".pymolt/contract_traces/baseline.jsonl"
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        loaded = service.load_contract_state(tmp_path).baseline
+        assert Path(loaded.trace_path).is_file()
+
+    def test_legacy_cwd_relative_path_is_accepted_with_a_warning(
+            self, tmp_path, monkeypatch, caplog):
+        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
+        service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.TEST_SUITE,
+            command=[sys.executable, str(script)], target="json",
+        )
+        state_file = tmp_path / ".pymolt" / "contract_state.json"
+        raw = json.loads(state_file.read_text())
+        raw["baseline"]["trace_path"] = "proj/.pymolt/contract_traces/baseline.jsonl"
+        state_file.write_text(json.dumps(raw))
+        (tmp_path.parent / "proj").symlink_to(tmp_path)
+        monkeypatch.chdir(tmp_path.parent)
+        with caplog.at_level("WARNING"):
+            loaded = service.load_contract_state(tmp_path).baseline
+        assert Path(loaded.trace_path).is_file()
+        assert "relative to the current directory" in caplog.text
+
     def test_invalid_recapture_preserves_the_active_baseline(self, tmp_path):
         good = _write_script(tmp_path, "import json\njson.loads('{}')\n", "good.py")
         active = service.capture_named_trace(
@@ -700,3 +765,38 @@ class TestSampledVerdict:
     def test_without_complete_tallies_sampling_still_blocks(self, tmp_path):
         report = self._verdict(tmp_path, complete=False)
         assert any("sampled captures" in r for r in report.verdict_reasons)
+
+
+class TestMissingSideReason:
+    def _reasons(self, tmp_path, trace, used):
+        from pymolt.verify.models import ContractSlot
+        from pymolt.verify.report import ContractReport
+
+        report = ContractReport(root=".")
+        slots = [(name, ContractSlot(
+            trace_path="/x.jsonl", captured_at="2026-11-14T00:00:00+00:00",
+            mode=CaptureMode.TEST_SUITE, validity=CaptureValidity.VALID, dropped_events=0,
+            **({"red": {"returncode": 1, "failed": 3, "summary": "3 failed"}}
+               if name == "baseline" else {})))
+            for name in used]
+        service._stamp_verdict(report, trace, None, slots)
+        return report
+
+    def test_only_the_baseline_recorded(self, tmp_path):
+        trace = tmp_path / "t.jsonl"
+        trace.write_text('{"t": "return", "q": "m.f", "result": 1}\n')
+        report = self._reasons(tmp_path, str(trace), ["baseline"])
+        assert ("no post-migration capture yet (only the baseline is recorded)"
+                in report.verdict_reasons)
+        assert not any("no baseline" in r for r in report.verdict_reasons)
+        assert any(n.startswith("RED:") and "3 failing" in n for n in report.notes)
+
+    def test_only_the_post_migration_capture(self, tmp_path):
+        trace = tmp_path / "t.jsonl"
+        trace.write_text('{"t": "return", "q": "m.f", "result": 1}\n')
+        report = self._reasons(tmp_path, str(trace), ["post-migration"])
+        assert "no baseline capture" in report.verdict_reasons
+
+    def test_no_captures(self, tmp_path):
+        report = self._reasons(tmp_path, None, [])
+        assert "no captures" in report.verdict_reasons

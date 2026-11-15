@@ -536,6 +536,14 @@ def container_is_running(container_id: str) -> bool:
         return False
 
 
+def display_container(container_id: str | None) -> str:
+    """A container name in full; only a 64-character hex id is shortened (to 12)."""
+    value = container_id or ""
+    if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+        return value[:12]
+    return value
+
+
 def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
     """What environment a capture for this slot should default to, per the
     project's saved :class:`EnvConfig` — the fix for the root-cause bug where a
@@ -557,12 +565,12 @@ def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
             return {
                 "container": config.container_id, "workdir": None,
                 "command_prefix": None,
-                "note": f"baseline → container {config.container_id[:12]}",
+                "note": f"baseline → container {display_container(config.container_id)}",
             }
         return {
             "container": None, "workdir": None, "command_prefix": None,
             "note": (
-                f"configured container {config.container_id[:12]} not running — "
+                f"configured container {display_container(config.container_id)} not running — "
                 "baseline ran locally; re-run setup to refresh"
             ),
         }
@@ -574,11 +582,15 @@ def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
     # this is the fallback when the caller left it unset.
     if when == "post_migration" and config.target_env_path:
         venv = Path(config.target_env_path)
+        if not venv.is_absolute():
+            venv = Path(os.path.abspath(project_dir)) / venv
         for candidate in (venv / "bin" / "python", venv / "Scripts" / "python.exe"):
             if candidate.exists():
+                # Absolute, never resolved: a venv's bin/python is a symlink to the base
+                # interpreter, and running the link target loses the venv (and its pytest).
                 return {
                     "container": None, "workdir": None,
-                    "command_prefix": [str(candidate.resolve()), "-m"],
+                    "command_prefix": [os.path.abspath(candidate), "-m"],
                     "note": f"post-migration → target env {config.target_env_path}",
                 }
 
@@ -1006,9 +1018,42 @@ def _state_path(project_dir: str | Path) -> Path:
     return Path(project_dir) / CONTRACT_STATE_PATH
 
 
+def _anchor_slot_path(root: Path, value: str | None) -> str | None:
+    """A stored slot path as an absolute one, anchored to the project ``root``.
+
+    Slot paths are stored relative to the project root. A legacy relative path that only
+    resolves from the current directory (written by an older pymolt run with a relative
+    ``--project-dir``) is still accepted, with a warning.
+    """
+    if not value:
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    anchored = root / path
+    if anchored.exists():
+        return str(anchored)
+    if path.exists():
+        logger.warning(
+            "contract state path %r only resolves relative to the current directory; "
+            "using it, but capture again to store it relative to the project", value)
+        return os.path.abspath(path)
+    return str(anchored)
+
+
 def load_contract_state(project_dir: str | Path) -> ContractState:
-    """The current capture state, or a fresh empty one if none is persisted yet."""
-    return ContractState.load(_state_path(project_dir)) or ContractState()
+    """The current capture state, or a fresh empty one if none is persisted yet.
+
+    Every slot path comes back absolute (anchored to the project root), whatever the
+    current directory is; they are stored relative (see ``ContractState.save``).
+    """
+    state = ContractState.load(_state_path(project_dir)) or ContractState()
+    root = Path(os.path.abspath(project_dir))
+    for slot in (state.baseline, state.post_migration, *state.diagnostic_captures):
+        if slot is not None:
+            for field in ("trace_path", "metadata_path", "command_log"):
+                setattr(slot, field, _anchor_slot_path(root, getattr(slot, field)))
+    return state
 
 
 def witnessed_distributions(
@@ -1165,14 +1210,59 @@ def _inspect_snapshot(trace: Path, snap: Path) -> TraceArtifactQuality:
 
 
 def _capture_validity(
-    result: TraceCaptureResult, staged_path: Path,
+    result: TraceCaptureResult, staged_path: Path, *, accept_failing: bool = False,
 ) -> tuple[CaptureValidity, str | None]:
     if result.returncode not in (None, 0) and not result.cancelled:
-        return CaptureValidity.COMMAND_FAILED, f"command exited with code {result.returncode}"
+        # A red run is accepted only on request, and only when it recorded events: a run
+        # that called nothing has nothing to compare, red or not.
+        if not (accept_failing and result.events > 0):
+            return CaptureValidity.COMMAND_FAILED, f"command exited with code {result.returncode}"
     if result.events == 0:
         return CaptureValidity.EMPTY, "capture produced zero events"
     quality = inspect_trace_artifact(staged_path)
     return quality.validity, quality.reason
+
+
+_FAILED_COUNT = re.compile(r"(\d+) failed")
+
+
+def parse_failed_count(command_log: str | Path | None) -> tuple[int | None, str]:
+    """``(N, summary line)`` from a pytest-style ``N failed`` line in a command log;
+    ``(None, "")`` when the log is missing or has none."""
+    if not command_log:
+        return None, ""
+    try:
+        lines = Path(command_log).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None, ""
+    for line in reversed(lines):
+        match = _FAILED_COUNT.search(line)
+        if match:
+            return int(match.group(1)), line.strip(" =")
+    return None, ""
+
+
+def static_contact_count(project_dir: str | Path) -> int | None:
+    """How many static contacts the project has (None when they cannot be counted)."""
+    try:
+        from pymolt.verify.contact_map import build_contact_map
+
+        return len(build_contact_map(project_dir).contacts)
+    except Exception as exc:  # noqa: BLE001 - a hint detail, never a gate
+        logger.info("could not count static contacts: %s", exc)
+        return None
+
+
+def _red_stamp(result: TraceCaptureResult) -> dict | None:
+    """``{"returncode", "failed", "summary"}`` for a non-zero run, else None.
+
+    ``failed`` and ``summary`` are parsed from a pytest-style summary line in the command
+    log (``N failed``); ``failed`` is None when the log has none.
+    """
+    if result.returncode in (None, 0) or result.cancelled:
+        return None
+    failed, summary = parse_failed_count(result.command_log)
+    return {"returncode": result.returncode, "failed": failed, "summary": summary}
 
 
 def _diagnostic_path(project_dir: Path, when: str) -> Path:
@@ -1234,6 +1324,7 @@ def capture_named_trace(
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
+    accept_failing: bool = False,
 ) -> ContractSlot:
     """Capture a trace and persist it as the named slot (``"baseline"`` or
     ``"post_migration"``). For ``mode in (TEST_SUITE, LIVE_COMMAND)`` — pymolt
@@ -1252,6 +1343,9 @@ def capture_named_trace(
     ``covered_sites``/``blind_sites``. Best-effort: degrades to ``None``/``0``/``0`` (logged,
     never raised) when ``coverage`` isn't installed or the second pass fails.
 
+    A command that exits non-zero is refused as evidence unless ``accept_failing`` is set
+    and the run recorded events; the slot is then stamped ``red`` (still ``valid``).
+
     Never prompts; raises ``ValueError`` on bad input (unknown ``when``, no
     ``command``, or an unsupported ``mode`` for this function — see
     ``start_attached_capture`` for ``LIVE_ATTACH``).
@@ -1266,7 +1360,9 @@ def capture_named_trace(
     if not command:
         raise ValueError("command is required for TEST_SUITE/LIVE_COMMAND capture")
 
-    project_dir = Path(project_dir)
+    # Anchor everything to the project root: a relative project dir would otherwise put
+    # stored paths (and the target env lookup) relative to whichever directory pymolt ran in.
+    project_dir = Path(os.path.abspath(project_dir))
     if privacy is None:
         privacy = "values" if mode is CaptureMode.TEST_SUITE else "shape"
     sampling_source = "caller"
@@ -1370,7 +1466,8 @@ def capture_named_trace(
     if not staged_path.exists():
         staged_path.parent.mkdir(parents=True, exist_ok=True)
         staged_path.touch()
-    validity, validity_reason = _capture_validity(result, staged_path)
+    validity, validity_reason = _capture_validity(
+        result, staged_path, accept_failing=accept_failing)
     state = load_contract_state(project_dir)
     archived_previous = None
 
@@ -1457,6 +1554,7 @@ def capture_named_trace(
         sink_failures=result.sink_failures,
         instrumentation_skipped=result.instrumentation_skipped,
         activation_failures=getattr(result, "activation_failures", []),
+        red=_red_stamp(result) if validity is CaptureValidity.VALID else None,
     )
     if validity is CaptureValidity.VALID:
         setattr(state, when, slot)
@@ -1602,7 +1700,7 @@ def start_attached_capture(
     if when not in ("baseline", "post_migration"):
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
 
-    project_dir = Path(project_dir)
+    project_dir = Path(os.path.abspath(project_dir))
     if sample_rate is None:
         sample_rate = default_sample_rate(CaptureMode.LIVE_ATTACH)
     watcher_env = trace_env(
@@ -1707,7 +1805,7 @@ def finalize_attached_capture(
 
     The slot's sample rate is the one the watcher ran with (its sidecar), else
     ``sample_rate``, else the attach default."""
-    project_dir = Path(project_dir)
+    project_dir = Path(os.path.abspath(project_dir))
     out_path = Path(out_path)
     _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
@@ -1945,6 +2043,18 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
             "plan_id": bound[0].plan_id if bound else None, "notes": notes}
 
 
+def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]) -> str:
+    """Why there is nothing to diff against, naming the side that is actually missing."""
+    names = {name for name, _ in used_slots}
+    if names == {"baseline"}:
+        return "no post-migration capture yet (only the baseline is recorded)"
+    if names == {"post-migration"}:
+        return "no baseline capture"
+    if not names and trace is None:
+        return "no captures"
+    return "no baseline trace is available for a version diff"
+
+
 def _stamp_verdict(
     report: ContractReport,
     trace: str | None,
@@ -1967,7 +2077,7 @@ def _stamp_verdict(
                 quality.reason or f"current trace is {quality.validity.value}"
             )
     if against is None:
-        comparability.append("no baseline trace is available for a version diff")
+        comparability.append(_missing_side_reason(trace, used_slots))
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
@@ -1980,6 +2090,14 @@ def _stamp_verdict(
         validity = getattr(slot, "validity", CaptureValidity.UNKNOWN)
         if validity is not CaptureValidity.VALID:
             comparability.append(f"{name} capture validity is {validity.value}")
+        red = getattr(slot, "red", None)
+        if red:
+            failed = red.get("failed")
+            report.notes.append(
+                f"RED: the {name} capture was taken with "
+                f"{failed if failed is not None else 'some'} failing test(s) "
+                f"(exit {red.get('returncode')}); the calls from failing tests are compared "
+                "as usual")
         dropped = getattr(slot, "dropped_events", None)
         if dropped is None:
             comparability.append(f"{name} capture has no event-loss counters")
