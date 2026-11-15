@@ -193,8 +193,9 @@ def _fail(error: str, hint: str | None = None) -> dict:
 
 @mcp.tool()
 def status(project_dir: str = ".") -> dict:
-    """Report where the project stands in the migration funnel and what single
-    command to run next. Call this anytime to orient your agent workflow.
+    """Report where the project stands in the migration funnel, whether the
+    configured environments exist, and the single command to run next. Call this
+    anytime to orient your agent workflow.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -203,7 +204,7 @@ def status(project_dir: str = ".") -> dict:
         path = _resolve_dir(project_dir)
         from pymolt.status import build_status
 
-        funnel = build_status(str(path))
+        funnel = build_status(str(path), check_environments=True)
         full = funnel.model_dump(mode="json")
         full_path = _write_full_report(path, "status", full)
 
@@ -213,6 +214,7 @@ def status(project_dir: str = ".") -> dict:
         ]
         data = {
             "phases": phases_out,
+            "checks": [check.model_dump(mode="json") for check in funnel.checks],
             "next_command": funnel.next_command,
             "next_reason": funnel.next_reason,
             "notes": funnel.notes,
