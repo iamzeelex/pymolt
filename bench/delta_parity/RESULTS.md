@@ -5,6 +5,8 @@ Host: macOS 27.2.1 arm64. Repo at `0a629e3` plus this uncommitted harness, branc
 Raw data: `results/flask_parity.json`, `results/pandas_parity.json`, `results/last_run.txt`.
 Method and rule: [README.md](README.md).
 
+Engine: `run.py` now runs the shipped `pymolt.delta` engine, not the prototype's internal predictor. The numbers below were reproduced with it: pooled recall 0.95 and precision 1.00 (flask 0.89 / 1.00, pandas 1.00 / 1.00). The measured tables are unchanged.
+
 ## Outcome
 
 **The decision rule passes: retire Axiom Graph as a runtime service.**
