@@ -536,6 +536,14 @@ def container_is_running(container_id: str) -> bool:
         return False
 
 
+def display_container(container_id: str | None) -> str:
+    """A container name in full; only a 64-character hex id is shortened (to 12)."""
+    value = container_id or ""
+    if len(value) == 64 and all(c in "0123456789abcdefABCDEF" for c in value):
+        return value[:12]
+    return value
+
+
 def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
     """What environment a capture for this slot should default to, per the
     project's saved :class:`EnvConfig` — the fix for the root-cause bug where a
@@ -557,12 +565,12 @@ def resolve_capture_env(project_dir: str | Path, when: str) -> dict:
             return {
                 "container": config.container_id, "workdir": None,
                 "command_prefix": None,
-                "note": f"baseline → container {config.container_id[:12]}",
+                "note": f"baseline → container {display_container(config.container_id)}",
             }
         return {
             "container": None, "workdir": None, "command_prefix": None,
             "note": (
-                f"configured container {config.container_id[:12]} not running — "
+                f"configured container {display_container(config.container_id)} not running — "
                 "baseline ran locally; re-run setup to refresh"
             ),
         }

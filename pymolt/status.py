@@ -89,7 +89,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
     Writes nothing. A container baseline is checked with ``docker inspect``, which
     is why ``build_status`` runs this only when asked.
     """
-    from pymolt.verify.service import container_is_running
+    from pymolt.verify.service import container_is_running, display_container
 
     if config is None:
         return []
@@ -100,7 +100,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
             name="base environment",
             state="ok" if running else "error",
             detail=(
-                f"container {config.container_id[:12]} is running"
+                f"container {display_container(config.container_id)} is running"
                 if running else f"container {config.container_id or '?'} is not running"
             ),
             hint=None if running else "Start the container or re-run setup.",
