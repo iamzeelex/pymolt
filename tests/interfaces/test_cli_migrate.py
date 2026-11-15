@@ -188,4 +188,4 @@ def test_migrate_write_records_receipt_and_recommends_post_capture(tmp_path: Pat
     receipt = MigrationReceipt.load(tmp_path)
     assert receipt is not None
     assert receipt.baseline_trace_path == baseline.trace_path
-    assert "capture --when post-migration" in result.output
+    assert "capture post-migration" in result.output

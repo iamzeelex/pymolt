@@ -5,7 +5,7 @@ build and how to point pymolt at it afterwards. ``build_target_hint`` is pure/re
 read the project's existing ``Dockerfile``, but never writes or runs anything) and returns a
 :class:`TargetHint` — a derived Dockerfile suggestion (when one can be derived), the ``uv``
 commands that would create an equivalent venv, and the ready-to-copy
-``pymolt contract capture --when post-migration ...`` command to run once the engineer has
+``pymolt capture post-migration ...`` command to run once the engineer has
 built the environment themselves.
 
 ``derive_target_dockerfile`` (and its ``_rewrite_from_line`` helper) is a pure string transform
@@ -182,7 +182,7 @@ def build_target_hint(
 
     python_hint = f"{_SUGGESTED_VENV_DIR}/bin/python"
     capture_hint = (
-        f"pymolt contract capture --when post-migration --mode tests -- "
+        f"pymolt capture post-migration --mode tests -- "
         f"{python_hint} -m pytest tests/"
     )
 

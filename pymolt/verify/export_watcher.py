@@ -14,7 +14,7 @@ Docker image, the 3.6 devcontainer, …) and the watcher auto-activates from the
         _normalize.py _identity.py _backend.py _monitoring.py _sinks.py _wrap.py
         boundary_tracer.py                                       # verbatim, stdlib-only
 
-CLI: ``pymolt verify export-watcher <dir>``
+Written by ``pymolt capture … --mode attach`` (and injected by every capture).
 Standalone: ``python -m pymolt.verify.export_watcher <dir>``
 """
 import shutil

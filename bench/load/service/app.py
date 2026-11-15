@@ -3,7 +3,7 @@
 A small but realistic HTTP service: Flask + SQLAlchemy (sqlite, WAL) + pydantic v2 +
 requests (to a local stub upstream), served by waitress with 8 threads, plus a background
 sweeper thread. ``bench/load/run.py`` copies this file into a fresh per-run project dir
-and runs it either bare (``nocap``) or under ``pymolt contract capture`` (``capture``).
+and runs it either bare (``nocap``) or under ``pymolt capture`` (``capture``).
 
 Written the way a lean production Flask app usually is (request-scoped ``scoped_session``
 removed on teardown, prebuilt SQL statements, handlers returning dicts that Flask

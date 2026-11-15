@@ -165,8 +165,8 @@ def test_build_transplant_plan_orders_steps_and_ends_in_contract():
     last = plan.steps[-1]
     assert "contract" in last.title.lower()
     joined = "\n".join(last.commands)
-    assert "pymolt contract capture --when baseline" in joined
-    assert "--when post-migration" in joined
+    assert "pymolt capture baseline" in joined
+    assert "pymolt capture post-migration" in joined
     assert "pymolt contract report" in joined
 
 

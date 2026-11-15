@@ -63,7 +63,7 @@ def test_build_target_hint_writes_and_runs_nothing(tmp_path):
     assert "FROM python:3.13" in hint.suggested_dockerfile
     assert any("uv venv" in cmd for cmd in hint.suggested_uv_commands)
     assert any("requirements-target.txt" in cmd for cmd in hint.suggested_uv_commands)
-    assert "pymolt contract capture --when post-migration" in hint.capture_hint
+    assert "pymolt capture post-migration" in hint.capture_hint
 
 
 def test_build_target_hint_no_dockerfile_notes_the_gap(tmp_path):
