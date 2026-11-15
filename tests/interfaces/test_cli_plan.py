@@ -230,6 +230,22 @@ def test_plan_names_what_needs_manual_review(tmp_path, monkeypatch):
     assert "No call sites matched" in result.output
 
 
+def test_apply_of_a_plan_with_no_files_says_it_changed_nothing(tmp_path, monkeypatch):
+    _configured_project(tmp_path)
+    migration = DependencyMigration("flask", "2.0.3", "3.0.0")
+    monkeypatch.setattr(codemod_service, "resolve_codemod_migrations",
+                        lambda *a, **k: ([migration], "requirements-target.txt"))
+    monkeypatch.setattr(codemod_service, "preview_codemods", lambda *a, **k: ({}, []))
+    planned = runner.invoke(app, ["plan", str(tmp_path)])
+    assert planned.exit_code == 0, planned.output
+
+    applied = runner.invoke(app, ["apply", str(tmp_path)])
+
+    assert applied.exit_code == 0, applied.output
+    assert "it changed no file" in applied.output
+    assert "Migration applied" not in applied.output
+
+
 def test_plan_agent_prints_a_json_failure_when_the_resolver_fails(tmp_path, monkeypatch):
     _configured_project(tmp_path)
 
