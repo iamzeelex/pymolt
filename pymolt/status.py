@@ -107,6 +107,13 @@ def _capture_phase(
             phase=label, state=STALE,
             detail=f"{detail} — capture validity is {reason}",
         )
+    if current_fingerprint is not None and slot.env_fingerprint is None:
+        # Taken before setup: it records no environment, so it cannot be checked
+        # against this one, and `apply` rejects it as a baseline.
+        return PhaseState(
+            phase=label, state=STALE,
+            detail=f"{detail} — taken before setup, so it records no environment",
+        )
     if (current_fingerprint is not None and slot.env_fingerprint is not None
             and slot.env_fingerprint != current_fingerprint):
         than = f" than {world}" if world else ""

@@ -232,6 +232,17 @@ def test_contract_capture_blocked_without_exec_opt_in(tmp_path):
     assert "PYMOLT_MCP_ALLOW_EXEC" in result["hint"]
 
 
+def test_contract_capture_before_setup_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
+    project = _make_project(tmp_path)
+    result = mcp_server.contract_capture(
+        project_dir=str(project), when="baseline", mode="tests", command=["pytest"],
+    )
+    assert result["ok"] is False
+    assert "not configured" in result["error"]
+    assert not (project / ".pymolt" / "contract_state.json").exists()
+
+
 def test_env_hint_not_gated_returns_hint(tmp_path):
     """env_hint runs nothing (it only suggests a Dockerfile/uv commands), so it must work
     without PYMOLT_MCP_ALLOW_EXEC set at all — unlike contract_capture."""

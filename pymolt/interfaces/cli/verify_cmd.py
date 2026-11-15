@@ -301,6 +301,14 @@ def capture_cmd(
     effective_privacy = (
         "values" if capture_mode is CaptureMode.TEST_SUITE else "shape"
     ) if privacy == "auto" else privacy
+    if service.environment_fingerprint(project_dir) is None:
+        # Without a config the capture records no environment, so nothing can later
+        # tell whether it still describes the project, and `apply` rejects it.
+        fail(
+            "pymolt is not configured for this project",
+            hint="Run `pymolt setup .` first. A capture records the environment it was "
+                 "taken in.",
+        )
 
     if collect:
         out_path = service.pending_attach_path(project_dir, when_key)

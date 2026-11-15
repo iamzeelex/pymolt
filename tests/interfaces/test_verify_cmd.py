@@ -12,14 +12,42 @@ import json
 import re
 import sys
 
+import pytest
 from typer.testing import CliRunner
 
-from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE
+from pymolt.ingestion.config import EnvConfig, ToolChoice
+from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE, EXIT_USAGE
 from pymolt.interfaces.cli.verify_cmd import app
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _configured(tmp_path):
+    """Captures need a setup: it is the environment they record."""
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.11", target_python="3.12",
+    ).save(tmp_path / ".pymolt" / "env_config.json")
+
+
+def test_capture_before_setup_is_refused(tmp_path):
+    (tmp_path / ".pymolt" / "env_config.json").unlink()
+    app_py = _write_app(tmp_path, third_party=False)
+
+    result = runner.invoke(app, [
+        "capture", "--when", "baseline", "--mode", "tests",
+        "--project-dir", str(tmp_path), "--target", "json",
+        "--", sys.executable, str(app_py),
+    ])
+
+    assert result.exit_code == EXIT_USAGE
+    assert "not configured" in result.output
+    assert "pymolt setup" in result.output
+    assert not (tmp_path / ".pymolt" / "contract_state.json").exists()
 
 
 def _write_app(tmp_path, *, third_party: bool):
