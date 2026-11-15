@@ -348,8 +348,8 @@ def compatibility_verdict(
     *some* versions satisfying the constraints install on the target Python. What the
     verdict can honestly say is bounded by the baseline's medallion tier — Gold/Silver
     earn a green verdict, Bronze/None stay amber — and it always points at
-    ``pymolt contract`` for behavioural proof. Bronze→Silver is an explicit upgrade
-    path (run the baseline's tests), not a dead end.
+    ``pymolt capture`` + ``pymolt verify`` for behavioural proof. Bronze→Silver is an
+    explicit upgrade path (run the baseline's tests), not a dead end.
     """
     if not target_python:
         return None
@@ -367,7 +367,7 @@ def compatibility_verdict(
             f"The newest versions matching your constraints install on Python {tp}, but the "
             "legacy baseline could not be established (no interpreter) — there is nothing to "
             "compare against. Build the legacy environment (hint above), re-run with "
-            "--container, then run `pymolt contract`.",
+            "--container, then capture and verify (`pymolt capture`, `pymolt verify`).",
             "yellow",
         )
     if baseline_tier == BaselineTier.BRONZE:
@@ -375,7 +375,7 @@ def compatibility_verdict(
             f"⚠ BRONZE baseline — resolves, migration unproven (Python {tp})",
             f"The latest releases matching your UNPINNED bounds install on Python {tp} — not "
             "evidence the code migrates, and the baseline is an unvalidated reconstruction "
-            "(e.g. `tensorflow>=1.3` → 2.x). Run `pymolt contract`: if the baseline's tests "
+            "(e.g. `tensorflow>=1.3` → 2.x). Capture and verify: if the baseline's tests "
             "pass it becomes SILVER; pin the manifest to reach GOLD.",
             "yellow",
         )
@@ -383,14 +383,15 @@ def compatibility_verdict(
         return (
             f"✔ SILVER baseline — resolves on Python {tp}",
             "Not pinned, but its tests pass, so the baseline is behaviourally validated (not "
-            f"pin-exact GOLD). Dependencies resolve on Python {tp}; run `pymolt contract` "
+            f"pin-exact GOLD). Dependencies resolve on Python {tp}; capture and verify "
             "against the target to confirm the behaviour carries over.",
             "green",
         )
     return (
         f"✔ GOLD baseline — resolves on Python {tp}",
         f"Pinned, production-exact baseline; resolves cleanly on Python {tp} with no conflicts. "
-        "Run `pymolt contract` to verify runtime behaviour.",
+        "Capture and verify (`pymolt capture`, `pymolt verify`) to check runtime "
+        "behaviour.",
         "green",
     )
 

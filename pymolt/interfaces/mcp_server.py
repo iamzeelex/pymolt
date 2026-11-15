@@ -69,7 +69,7 @@ START HERE — the two tools nothing else can replace:
                    resolved through imports and scopes (LibCST). Grepping imports
                    finds modules, not the symbols actually called, and undercounts
                    the surface severalfold.
-  contract_capture / contract_report
+  contract_capture / verify
                    record what the code really calls at runtime before AND after
                    the migration, then report what changed: results, raises,
                    symbols that vanished. This cannot be derived by reading files
@@ -83,8 +83,8 @@ Supporting phases, in order:  setup_options/setup_apply -> assess
 Typical run:
   contract_capture(when='baseline')  BEFORE editing anything
   -> assess -> engineer/agent edits code and builds the target env
-  -> contract_capture(when='post-migration') -> contract_report
-  Repeat edits + post-migration capture until contract_report is clean.
+  -> contract_capture(when='post-migration') -> verify
+  Repeat edits + post-migration capture until verify says PASS.
 
 codemods_preview is a DRY RUN: it never applies changes.
 Applying codemods requires explicit human approval via the CLI,
@@ -524,7 +524,7 @@ def assess(
 
     A successful resolve is an INPUT to the migration, not evidence it worked.
     Never report "the migration is feasible" from this tool alone — cite the
-    baseline tier, and get behavioural proof from contract_report.
+    baseline tier, and get behavioural proof from verify.
 
     Args:
         project_dir: Project directory (default: current directory).
@@ -685,7 +685,7 @@ def contract_capture(
         request_id: Request identity for correlation.
         correlation_id: Cross-system correlation identity.
 
-    Use baseline before editing code, post-migration after — contract_report diffs them.
+    Use baseline before editing code, post-migration after — verify compares them.
     """
     gate = _require_exec_allowed()
     if gate is not None:
@@ -766,7 +766,7 @@ def contract_capture(
             data,
             full_report_path=slot.trace_path,
             hint=("Edit the project's code, then capture when='post-migration'."
-                  if need_post else "Run contract_report to diff baseline vs post-migration."),
+                  if need_post else "Run verify to compare baseline and post-migration."),
         )
     except Exception as e:  # noqa: BLE001
         return _fail(
@@ -776,118 +776,98 @@ def contract_capture(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. contract_report
+# 7. verify
 # ─────────────────────────────────────────────────────────────────────────────
+
+_CHANGE_CATEGORIES = ("changed", "disappeared", "appeared", "uncomparable", "rewritten")
 
 
 @mcp.tool()
-def contract_report(project_dir: str = ".") -> dict:
+def verify(project_dir: str = ".") -> dict:
     """The verdict on whether the migration changed your program's behaviour:
-    static contact map × recorded runtime traces → confirmed / BLIND coverage,
-    a trust %, and exactly which dependency calls now return something else,
-    raise something else, or stopped happening.
+    PASS, FAIL or INCONCLUSIVE, with the reasons, the coverage of the static
+    contact map (confirmed / BLIND, trust %), and exactly which dependency calls
+    now return something else, raise something else, or stopped happening.
 
     This is the one question no amount of file reading, type checking or
     dependency resolution can answer — it requires the baseline and
-    post-migration traces from contract_capture. A green test suite and a clean
-    resolve are not substitutes: they do not tell you a call started returning an
-    empty generator instead of None.
+    post-migration captures from contract_capture. A green test suite and a
+    clean resolve are not substitutes: they do not tell you a call started
+    returning an empty generator instead of None.
 
     Args:
         project_dir: Project directory (default: current directory).
 
-    Auto-sources baseline/post-migration from contract_capture. Repeat edits +
-    post-migration capture until no result_changed remains.
+    Same verdict as `pymolt verify`, saved to .pymolt/ so status counts it.
+    Repeat edits + post-migration capture until the verdict is PASS.
     """
     try:
         path = _resolve_dir(project_dir)
+        from pymolt.migration_state import MigrationReceipt
         from pymolt.verify import service
-        from pymolt.verify.diff import build_boundary_diff
+        from pymolt.verify.unified import build_unified_verification
 
         rep = service.build_contract_report_from_state(str(path))
-        full = rep.model_dump(mode="json")
-        full_path = _write_full_report(path, "contract_report", full)
+        receipt = MigrationReceipt.load(path)
+        unified = build_unified_verification(
+            rep, run_id=receipt.run_id if receipt is not None else None,
+        )
+        unified.save(path)
+        full_path = _write_full_report(path, "verify", rep.model_dump(mode="json"))
 
         trust_pct = round(rep.trust * 100)
         data: dict[str, Any] = {
+            "verdict": unified.verdict.value,
+            "reasons": rep.verdict_reasons,
             "static_targets": rep.static_targets,
             "confirmed": rep.confirmed,
             "blind": rep.blind,
             "dynamic_only": rep.dynamic_only,
             "trust_pct": trust_pct,
         }
-
-        # Behavioral verdicts + NEEDS_ACTION come from the baseline->post BoundaryDiff.
-        # rep.diff carries only counts; rebuild the diff for the symbol lists,
-        # mirroring how the CLI report auto-sources the two named slots.
-        state = service.load_contract_state(str(path))
-        post_captured = state.post_migration is not None
-        if rep.diff is not None and state.baseline is not None and state.post_migration is not None:
-            bdiff = build_boundary_diff(state.baseline.trace_path, state.post_migration.trace_path)
-
-            def _names(entries: list[dict]) -> tuple[list[str], int]:
-                names = [e.get("qualname", "?") for e in entries]
-                return _fit_answer(names)
-
-            rc, rc_t = _names(bdiff.result_changed)
-            rk, rk_t = _names(bdiff.raise_changed)
-            dp, dp_t = _names(bdiff.disappeared)
-            nh, nh_t = _names(bdiff.skipped_opaque)
-            # True totals, independent of what fit in the payload — the summary
-            # below must never report a truncated length as the finding count.
-            totals = {
-                "result_changed": len(bdiff.result_changed),
-                "raise_changed": len(bdiff.raise_changed),
-                "disappeared": len(bdiff.disappeared),
-                "needs_action": len(bdiff.skipped_opaque),
-            }
-            data["behavioral"] = {
-                "result_changed": rc,
-                "raise_changed": rk,
-                "disappeared": dp,
-                "needs_action": nh,
-                "counts": totals,
-                "clean": bdiff.is_clean(),
-            }
-            for key, trunc in (("result_changed", rc_t), ("raise_changed", rk_t),
-                               ("disappeared", dp_t), ("needs_action", nh_t)):
-                if trunc:
-                    data["behavioral"][f"{key}_truncated"] = trunc
-
         summary_lines = [
+            f"VERDICT: {unified.verdict.value.upper()}"
+            + (f" — {'; '.join(rep.verdict_reasons)}" if rep.verdict_reasons else ""),
             f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
-            f"dynamic-only {rep.dynamic_only}.",
-            f"Contract trust: {trust_pct}%.",
+            f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.",
         ]
-        behavioral = data.get("behavioral")
-        if behavioral is not None:
-            c = behavioral["counts"]
-            summary_lines.append(
-                f"Behavior: result_changed {c['result_changed']}, "
-                f"raise_changed {c['raise_changed']}, "
-                f"disappeared {c['disappeared']} "
-                f"({'clean' if behavioral['clean'] else 'CHANGED'})."
-            )
-            dropped = sum(t for t in (rc_t, rk_t, dp_t, nh_t))
+
+        fact_diff = rep.fact_diff or {}
+        entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
+        if fact_diff:
+            changes: dict[str, Any] = {}
+            dropped = 0
+            for category in _CHANGE_CATEGORIES:
+                names = [e.get("symbol", "?") for e in entries if e.get("category") == category]
+                if names:
+                    shown, cut = _fit_answer(names)
+                    changes[category] = shown
+                    dropped += cut
+            data["changes"] = changes
+            data["change_counts"] = {
+                k: v for k, v in (fact_diff.get("counts") or {}).items() if v
+            }
+            counted = ", ".join(f"{k} {v}" for k, v in data["change_counts"].items())
+            summary_lines.append(f"Calls: {counted or 'nothing moved'}.")
             if dropped:
                 summary_lines.append(
-                    f"{dropped} symbol name(s) omitted from the lists below — "
-                    f"full report: {full_path}"
+                    f"{dropped} symbol name(s) omitted from the lists — full report: {full_path}"
                 )
 
+        state = service.load_contract_state(str(path))
         hint = None
-        if not post_captured:
+        if state.post_migration is None:
             hint = ("No post-migration capture yet — edit the code, then "
                     "contract_capture when='post-migration'.")
-        elif behavioral is not None and not behavioral["clean"]:
-            hint = ("Behavior changed — fix the flagged symbols, re-capture "
-                    "post-migration, re-report.")
+        elif unified.verdict.value == "fail":
+            hint = ("Behaviour changed — fix the listed calls, re-capture "
+                    "post-migration, verify again.")
 
         return _ok("\n".join(summary_lines), data, full_report_path=full_path, hint=hint)
     except Exception as e:  # noqa: BLE001
         return _fail(
-            f"contract_report failed: {e}",
-            hint="Capture at least a baseline trace with contract_capture first.",
+            f"verify failed: {e}",
+            hint="Capture at least a baseline with contract_capture first.",
         )
 
 

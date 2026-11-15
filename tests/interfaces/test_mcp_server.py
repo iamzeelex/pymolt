@@ -24,7 +24,7 @@ _EXPECTED_TOOLS = {
     "setup_apply",
     "assess",
     "contract_capture",
-    "contract_report",
+    "verify",
     "codemods",
     "codemods_preview",
     "migrate",
@@ -75,7 +75,7 @@ def test_dir_taking_tools_use_project_dir_param():
     import inspect
 
     dir_tools = ["scan", "setup_options", "setup_apply", "assess",
-                 "contract_capture", "contract_report", "codemods_preview"]
+                 "contract_capture", "verify", "codemods_preview"]
     for name in dir_tools:
         params = inspect.signature(getattr(mcp_server, name)).parameters
         assert "project_dir" in params, f"{name} lost its project_dir param"
@@ -141,7 +141,7 @@ def test_every_tool_handles_nonexistent_dir(tmp_path):
         "contract_capture": lambda: mcp_server.contract_capture(
             project_dir=missing, when="baseline", mode="tests", command=["pytest"],
         ),
-        "contract_report": lambda: mcp_server.contract_report(project_dir=missing),
+        "verify": lambda: mcp_server.verify(project_dir=missing),
         "codemods_preview": lambda: mcp_server.codemods_preview(project_dir=missing),
     }
     for name, call in calls.items():

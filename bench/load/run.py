@@ -72,7 +72,7 @@ GATE = {
     "max_dropped": 0,           # dropped calls/events across every capture run
     "max_bytes_per_day": 1 * GB,
     "max_p99_ratio": 2.0,       # paced p99 (capture) <= 2x paced p99 (no capture)
-    "max_fold_rss": 500 * MIB,  # host `contract report` peak RSS
+    "max_fold_rss": 500 * MIB,  # host `verify` peak RSS
 }
 
 def _utcnow() -> datetime:
@@ -983,11 +983,11 @@ def _print_run_line(record: dict) -> None:
 
 
 def measure_fold(run_dir: Path) -> dict:
-    """`pymolt contract report <svc> --json` under /usr/bin/time: peak RSS and seconds."""
+    """`pymolt verify <svc> --json` under /usr/bin/time: peak RSS and seconds."""
     _require_pymolt()
     svc_dir = run_dir / "svc"
     flag = "-l" if sys.platform == "darwin" else "-v"
-    cmd = ["/usr/bin/time", flag, str(PYMOLT), "contract", "report", str(svc_dir), "--json"]
+    cmd = ["/usr/bin/time", flag, str(PYMOLT), "verify", str(svc_dir), "--json"]
     out_path, err_path = run_dir / "fold.json", run_dir / "fold.time"
     started = time.monotonic()
     try:
@@ -1090,7 +1090,7 @@ def summarize_run(run_dir: Path, nocap_dirs: list[Path] | None = None, fold: boo
     if run.get("kind") == "capture" and fold and not run.get("error") and (
         refold or "fold" not in run
     ):
-        print(f"[{run_dir.name}] host fold: pymolt contract report ...", flush=True)
+        print(f"[{run_dir.name}] host fold: pymolt verify ...", flush=True)
         run["fold"] = measure_fold(run_dir)
         (run_dir / "run.json").write_text(json.dumps(run, indent=2) + "\n")
     load = run.get("load") or {}
@@ -1362,7 +1362,7 @@ def evaluate_gate(runs: dict[str, dict], triplets: list[dict], paced: tuple[str,
         else max(vols) < GATE["max_bytes_per_day"])
     folds = [(c["name"], (c.get("fold") or {}).get("max_rss_bytes"),
               (c.get("fold") or {}).get("seconds")) for c in caps]
-    row("3b host fold (contract report max RSS)", f"< {_fmt_mib(GATE['max_fold_rss'])}",
+    row("3b host fold (verify max RSS)", f"< {_fmt_mib(GATE['max_fold_rss'])}",
         " / ".join(f"{n}: {_fmt_mib(r)}, {sec} s" for n, r, sec in folds) or "n/a",
         None if not folds or any(r is None for _, r, _ in folds)
         else max(r for _, r, _ in folds) < GATE["max_fold_rss"])
