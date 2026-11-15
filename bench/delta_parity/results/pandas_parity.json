@@ -16,22 +16,22 @@
  "units": 19,
  "timing": {
   "contact_map_s": 0.0,
-  "baseline_run_old_s": 0.53,
+  "baseline_run_old_s": 0.282,
   "engine": {
-   "env_resolve_s": 0.044,
+   "env_resolve_s": 0.041,
    "env_build_s": 0,
    "symbols": 14,
-   "probe_s": 1.329,
-   "probe_old_s": 1.328,
+   "probe_s": 1.099,
+   "probe_old_s": 1.099,
    "probe_old_cached": false,
-   "probe_new_s": 1.246,
+   "probe_new_s": 0.936,
    "probe_new_cached": false,
-   "diff_s": 0.001,
+   "diff_s": 0.002,
    "fetch_s": 0.0,
-   "total_s": 1.375
+   "total_s": 1.143
   },
-  "engine_wall_s": 1.375,
-  "local_total_excl_env_build_s": 1.37
+  "engine_wall_s": 1.143,
+  "local_total_excl_env_build_s": 1.14
  },
  "axiom_meta": {
   "pandas": {

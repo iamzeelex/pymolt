@@ -37,6 +37,7 @@ from typing import Any
 
 from packaging.utils import canonicalize_name
 
+from pymolt.adapters.python_runner import RunnerSpec, run_in, to_container
 from pymolt.delta import envs as envs_mod
 from pymolt.delta import fetch as fetch_mod
 from pymolt.delta.models import (
@@ -201,44 +202,49 @@ def _stamps(executable: str, site_dirs: list[str]) -> dict[str, int | None]:
     return stamps
 
 
-def _cache_file(root: Path, executable: str, request: dict) -> Path:
-    key = json.dumps({"v": PROBE_VERSION, "exe": os.path.abspath(executable),
+# Runs inside the runner (possibly Python 3.6): stdlib only, no f-strings.
+_REMOTE_STAMPS_SOURCE = r'''
+import json, os, shutil, sys
+req = json.loads(sys.stdin.read() or "{}")
+exe = req.get("exe") or ""
+real = os.path.realpath(shutil.which(exe) or exe)
+def mtime(p):
+    try:
+        return os.stat(p).st_mtime_ns
+    except OSError:
+        return None
+out = {"interpreter:" + real: mtime(real)}
+for d in req.get("dirs") or []:
+    out["site:" + d] = mtime(d)
+sys.stdout.write(json.dumps(out))
+'''
+
+
+def _remote_stamps(runner: RunnerSpec, executable: str,
+                   site_dirs: list[str]) -> dict[str, int | None] | None:
+    """The same validity stamps, read by a tiny stdlib script inside the runner."""
+    try:
+        proc = run_in(runner, [executable, "-B", "-c", _REMOTE_STAMPS_SOURCE],
+                      stdin=json.dumps({"exe": executable, "dirs": site_dirs}), timeout=30.0)
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _cache_file(root: Path, executable: str, request: dict,
+                runner: RunnerSpec | None = None) -> Path:
+    key = json.dumps({"v": PROBE_VERSION,
+                      "exe": executable if runner else os.path.abspath(executable),
+                      "container": runner.container_id if runner else None,
+                      "image": (runner.image_id or runner.image) if runner else None,
                       "src": hashlib.sha256(_PROBE_SOURCE_PATH.read_bytes()).hexdigest(),
                       "req": request}, sort_keys=True)
     return root / CACHE_DIR / f"probe-{hashlib.sha256(key.encode()).hexdigest()[:20]}.json"
 
 
-def run_probe(
-    executable: str, root: Path, request: dict, *, use_cache: bool = True,
-    timeout: float = PROBE_TIMEOUT,
-) -> ProbeRun:
-    """Run the probe in ``executable`` with the project as cwd. Never raises."""
-    cache = _cache_file(root, executable, request)
-    if use_cache:
-        try:
-            payload = json.loads(cache.read_text(encoding="utf-8"))
-            if payload.get("stamps") == _stamps(executable, payload["meta"].get("site_dirs") or []):
-                return ProbeRun(meta=payload["meta"], results=payload["results"], from_cache=True)
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            pass
-    t0 = time.perf_counter()
-    run = ProbeRun()
-    stdout = stderr = ""
-    try:
-        proc = subprocess.Popen(
-            [executable, "-B", "-c", _PROBE_SOURCE_PATH.read_text(encoding="utf-8")],
-            cwd=str(root), env=_child_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-        )
-    except OSError as exc:
-        run.failure = f"could not start {executable}: {exc}"
-        return run
-    try:
-        stdout, stderr = proc.communicate(json.dumps(request), timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        stdout, stderr = proc.communicate()
-        run.failure = f"probe timed out after {timeout:g}s"
+def _parse_probe_output(run: ProbeRun, stdout: str, stderr: str, returncode: int | None) -> None:
     done = False
     for line in (stdout or "").splitlines():
         if not line.startswith(MARK):
@@ -255,17 +261,81 @@ def run_probe(
             run.results[payload["path"]] = payload["result"]
     if run.failure is None and not done:
         tail = (stderr or "").strip().splitlines()[-1:] or [""]
-        run.failure = f"probe stopped before finishing (exit {proc.returncode}) {tail[0][:200]}"
+        run.failure = f"probe stopped before finishing (exit {returncode}) {tail[0][:200]}"
+
+
+def run_probe(
+    executable: str, root: Path, request: dict, *, use_cache: bool = True,
+    timeout: float = PROBE_TIMEOUT, runner: RunnerSpec | None = None,
+) -> ProbeRun:
+    """Run the probe in ``executable`` with the project as cwd. Never raises.
+
+    ``runner``: run it inside that container instead (``docker exec -i``; the request goes
+    on stdin, nothing is copied in; ``executable`` is a path inside the container and the
+    cwd is the project's mount point there). Timeouts grow ×4 when the container is emulated.
+    """
+    cache = _cache_file(root, executable, request, runner)
+
+    def stamps_now(site_dirs: list[str]) -> dict[str, int | None] | None:
+        if runner is None:
+            return _stamps(executable, site_dirs)
+        return _remote_stamps(runner, executable, site_dirs)
+
+    if use_cache:
+        try:
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+            now = stamps_now(payload["meta"].get("site_dirs") or [])
+            if now is not None and payload.get("stamps") == now:
+                return ProbeRun(meta=payload["meta"], results=payload["results"], from_cache=True)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+    t0 = time.perf_counter()
+    run = ProbeRun()
+    if runner is not None:
+        cwd = to_container(runner, str(root))
+        factor = 4 if runner.emulated else 1
+        try:
+            proc = run_in(runner, [executable, "-B", "-c",
+                                   _PROBE_SOURCE_PATH.read_text(encoding="utf-8")],
+                          stdin=json.dumps(request), cwd=cwd, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            run.failure = f"probe timed out after {timeout * factor:g}s in container {runner.name}"
+            run.seconds = round(time.perf_counter() - t0, 3)
+            return run
+        except (OSError, subprocess.SubprocessError) as exc:
+            run.failure = f"could not start {executable} in container {runner.name}: {exc}"
+            return run
+        _parse_probe_output(run, proc.stdout, proc.stderr, proc.returncode)
+    else:
+        stdout = stderr = ""
+        try:
+            proc = subprocess.Popen(
+                [executable, "-B", "-c", _PROBE_SOURCE_PATH.read_text(encoding="utf-8")],
+                cwd=str(root), env=_child_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+            )
+        except OSError as exc:
+            run.failure = f"could not start {executable}: {exc}"
+            return run
+        try:
+            stdout, stderr = proc.communicate(json.dumps(request), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            run.failure = f"probe timed out after {timeout:g}s"
+        _parse_probe_output(run, stdout, stderr, proc.returncode)
     run.seconds = round(time.perf_counter() - t0, 3)
     if run.ok and run.meta:
-        try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({
-                "stamps": _stamps(executable, run.meta.get("site_dirs") or []),
-                "meta": run.meta, "results": run.results,
-            }), encoding="utf-8")
-        except OSError as exc:
-            log.debug("delta probe cache not written: %s", exc)
+        site_dirs = run.meta.get("site_dirs") or []
+        stamps = stamps_now(site_dirs)
+        if stamps is not None:
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps({
+                    "stamps": stamps, "meta": run.meta, "results": run.results,
+                }), encoding="utf-8")
+            except OSError as exc:
+                log.debug("delta probe cache not written: %s", exc)
     return run
 
 
@@ -486,6 +556,8 @@ class DiffInput:
     resolve_new: Callable[[list[str]], Mapping[str, dict]] | None = None
     # (package, spellings) -> (successor, source) from curated knowledge
     knowledge_hint: Callable[[str, list[str]], tuple[str, str] | None] | None = None
+    # new-side paths whose import raised (not "no such module"): never counted as removed
+    import_failed: frozenset[str] = frozenset()
 
 
 def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
@@ -506,9 +578,15 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
         for s in ends or ([sp_old[path]] if path in sp_old else []):
             baseline.setdefault(s.spelling, []).extend(t.warnings)
 
+    def import_failed(name: str) -> bool:
+        return any(name == p or name.startswith(p + ".") or p.startswith(name + ".")
+                   for p in inp.import_failed)
+
     groups: dict[str, list[str]] = {}
     for s in sp_old.values():
         if not s.unit or not s.exists or s.step.get("kind") == "module":
+            continue
+        if import_failed(s.spelling):  # raised on import in the new interpreter: not "removed"
             continue
         groups.setdefault(s.canonical, []).append(s.spelling)
 
@@ -888,12 +966,19 @@ class _Run:
             "contexts": contexts,
             "per_path_timeout": PER_PATH_TIMEOUT,
         }
+
+        def request_for(env: Interpreter) -> dict:
+            if env.runner is not None and env.runner.emulated:
+                return {**request, "per_path_timeout": PER_PATH_TIMEOUT * 4}
+            return request
+
         t_probe = time.perf_counter()
         runs: dict[str, ProbeRun | None] = {"old": None, "new": None}
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = {
-                side: pool.submit(run_probe, env.executable, self.root, request,
-                                  use_cache=self.use_cache)
+                side: pool.submit(run_probe, env.executable, self.root, request_for(env),
+                                  use_cache=self.use_cache,
+                                  **({"runner": env.runner} if env.runner is not None else {}))
                 for side, env in (("old", old_env), ("new", new_env)) if env.available
             }
             for side, fut in futures.items():
@@ -925,13 +1010,15 @@ class _Run:
         if runs["old"] is not None and runs["old"].ok and runs["new"] is not None \
                 and runs["new"].ok and any(usable.values()):
             new_exe = new_env.executable
+            new_runner = new_env.runner
 
             def resolve_new(paths: list[str]) -> Mapping[str, dict]:
                 t2 = time.perf_counter()
                 run2 = run_probe(new_exe, self.root,  # type: ignore[arg-type]
                                  {"paths": paths, "dists": request["dists"], "any_root": True,
                                   "contexts": [], "per_path_timeout": PER_PATH_TIMEOUT},
-                                 use_cache=self.use_cache)
+                                 use_cache=self.use_cache,
+                                 **({"runner": new_runner} if new_runner is not None else {}))
                 self.stats["second_pass_s"] = round(time.perf_counter() - t2, 3)
                 self.stats["second_pass_paths"] = len(paths)
                 return run2.results if run2.ok else {}
@@ -941,6 +1028,9 @@ class _Run:
                 old=runs["old"].results, new=runs["new"].results, touched=touched,
                 root_to_package=root_to_package, resolve_new=resolve_new,
                 knowledge_hint=self._knowledge_hint,
+                import_failed=frozenset(
+                    path for path, res in runs["new"].results.items()
+                    if res.get("import_errors")),
             ))
             self.stats["diff_s"] = round(time.perf_counter() - t_diff
                                          - self.stats.get("second_pass_s", 0), 3)
@@ -953,6 +1043,7 @@ class _Run:
                 if usable.get(name) and not report.facts:
                     report.notes.append(f"the touched symbols include nothing from {name}")
 
+        self._record_import_errors(reports, runs, root_to_package)
         for report in reports.values():
             report.notes = _unique(report.notes + self.notes)
         self.stats["total_s"] = round(time.perf_counter() - t_start, 3)
@@ -962,6 +1053,21 @@ class _Run:
             r._stats = dict(self.stats)
             out.append(r)
         return out
+
+    def _record_import_errors(self, reports, runs, root_to_package) -> None:
+        """Modules that raised on import: reported as such, never as missing names."""
+        for side in ("old", "new"):
+            run = runs[side]
+            if run is None:
+                continue
+            for res in run.results.values():
+                for ie in res.get("import_errors") or []:
+                    pkg = root_to_package.get(str(ie.get("module", "")).split(".")[0])
+                    if pkg not in reports:
+                        continue
+                    entry = {**ie, "side": side}
+                    if entry not in reports[pkg].import_errors:
+                        reports[pkg].import_errors.append(entry)
 
     def _migration(self, dist: str) -> Migration:
         key = canonicalize_name(dist)
@@ -981,6 +1087,10 @@ class _Run:
                                 f"{run.failure if run else 'not run'}")
             return False
         py = run.meta.get("python")
+        if env.python and py and not envs_mod.same_minor(py, env.python):
+            report.notes.append(f"the {label} interpreter ({env.executable}) reported Python "
+                                f"{env.python} but the probe ran on {py}")
+            return False
         if side == "old":
             report.old_python = py
         else:
