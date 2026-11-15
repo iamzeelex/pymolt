@@ -654,6 +654,12 @@ def build_migration_plan(
     # The local provider's delta reports feed the plan's risk prediction as-is, so the
     # facts are computed once; a remote provider has none and prediction computes them.
     delta_reports = getattr(provider, "reports", None) or None
+    python_move = None
+    if config.base_python and config.target_python:
+        from pymolt.pyversion.plan import same_python_minor
+
+        if not same_python_minor(config.base_python, config.target_python):
+            python_move = (config.base_python, config.target_python)
     plan = create_migration_plan(
         root, previews, migrations,
         target_python=config.target_python or "unknown",
@@ -662,5 +668,6 @@ def build_migration_plan(
         files_scanned=len(scanned),
         impacts=impacts,
         delta_reports=delta_reports,
+        python_move=python_move,
     )
     return plan, previews, source_desc, by_pkg
