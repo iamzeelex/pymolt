@@ -38,7 +38,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_serializer
+
+from pymolt.adapters.python_runner import RunnerSpec
 
 SCHEMA = "pymolt.delta/1"
 
@@ -69,6 +71,9 @@ class TouchedSymbol(BaseModel):
     warnings: list[RecordedWarning] = Field(default_factory=list)
 
 
+_FACT_ADDITIONS = ("basis", "removed_in", "deprecated_in", "warns_since", "origin")
+
+
 class DeltaFact(BaseModel):
     symbol: str
     aliases: list[str] = Field(default_factory=list)
@@ -79,6 +84,26 @@ class DeltaFact(BaseModel):
     deprecated_in_old: bool = False
     successor: str | None = None
     evidence: list[str] = Field(default_factory=list)
+    # Where each side's answer came from: "probe" | "knowledge" | "import-statement"
+    # ({"old": ..., "new": ...}); None = both probed (the dependency default).
+    basis: dict[str, str] | None = None
+    # Python-version lifetimes (subject "python"): the release that removed / deprecated it,
+    # and the first release whose stdlib warns when it is used.
+    removed_in: str | None = None
+    deprecated_in: str | None = None
+    warns_since: str | None = None
+    # "stdlib" | "site-packages:<dist>" (a third-party shim, e.g. setuptools' distutils).
+    origin: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_additions(self, handler: Any) -> dict[str, Any]:
+        # The pymolt.delta/1 additions are optional: a dependency fact without them dumps
+        # exactly as before, so readers and golden files predating them are unaffected.
+        data = handler(self)
+        for key in _FACT_ADDITIONS:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
     # Engine-side detail the provider uses (not part of the schema, never dumped):
     # importable spellings, whether the successor has the same signature, origins.
@@ -106,6 +131,24 @@ class DeltaReport(BaseModel):
     quality: Quality
     facts: list[DeltaFact] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # "dependency" (a package's API) or "python" (the stdlib between interpreter versions).
+    subject: str = "dependency"
+    # How each side was observed: {"old": "probe:<interpreter or runner>" |
+    # "knowledge:<file>@<date>", "new": ...}.
+    sides: dict[str, str] = Field(default_factory=dict)
+    # Modules that raised on import on a side (never reported as REMOVED):
+    # [{"module", "side", "error", "origin", "cause"}].
+    import_errors: list[dict[str, Any]] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_default_additions(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)  # same rule as DeltaFact: absent additions dump as before
+        if data.get("subject") == "dependency":
+            data.pop("subject", None)
+        for key in ("sides", "import_errors"):
+            if not data.get(key):
+                data.pop(key, None)
+        return data
 
     # Timings and cache counters of the run (see ``engine.run_stats``); never dumped.
     _stats: dict[str, Any] = PrivateAttr(default_factory=dict)
@@ -133,6 +176,8 @@ class Interpreter(BaseModel):
     reason: str | None = None  # set when executable is None
     built_seconds: float | None = None
     versions: dict[str, str | None] = Field(default_factory=dict)
+    # Set when the interpreter lives in a container: ``executable`` is then a path inside it.
+    runner: RunnerSpec | None = None
 
     @property
     def available(self) -> bool:

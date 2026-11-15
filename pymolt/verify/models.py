@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, computed_field
 
+from pymolt.adapters.python_runner import RunnerSpec
 from pymolt.core.enums import EvidenceLevel, TestStatus, TraceScope, Verdict
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,9 @@ class ContractSlot(BaseModel):
     # "baseline → container abc123" or "running locally"). Defaults so OLD
     # .pymolt/contract_state.json files (written before this existed) still load.
     env_note: str | None = None
+    # The container this capture ran in (None = it ran locally): lets later phases reach the
+    # same interpreter and map its paths back to the project.
+    runner: RunnerSpec | None = None
     # Coverage-based gap summary (TEST_SUITE captures only) — what fraction of the
     # project's static dependency-usage sites the test suite actually exercised. None/0
     # when unavailable (coverage not installed, non-TEST_SUITE capture, or the second

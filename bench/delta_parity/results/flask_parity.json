@@ -17,25 +17,25 @@
  "symbols": 55,
  "units": 47,
  "timing": {
-  "contact_map_s": 1.9,
-  "baseline_run_old_s": 0.074,
+  "contact_map_s": 0.02,
+  "baseline_run_old_s": 0.081,
   "engine": {
-   "env_resolve_s": 0.036,
+   "env_resolve_s": 0.061,
    "env_build_s": 0,
    "symbols": 55,
-   "probe_s": 0.22,
-   "probe_old_s": 0.219,
+   "probe_s": 0.187,
+   "probe_old_s": 0.187,
    "probe_old_cached": false,
-   "probe_new_s": 0.165,
+   "probe_new_s": 0.129,
    "probe_new_cached": false,
-   "second_pass_s": 0.098,
+   "second_pass_s": 0.104,
    "second_pass_paths": 10,
    "diff_s": 0.002,
    "fetch_s": 0.0,
-   "total_s": 0.387
+   "total_s": 0.359
   },
-  "engine_wall_s": 0.388,
-  "local_total_excl_env_build_s": 0.39
+  "engine_wall_s": 0.36,
+  "local_total_excl_env_build_s": 0.36
  },
  "axiom_meta": {
   "flask": {

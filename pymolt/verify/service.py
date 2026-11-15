@@ -509,31 +509,22 @@ def _docker(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
     return res
 
 
+def _container_runner_spec(container: str | None):
+    """The RunnerSpec of the container a capture ran in (None = it ran locally)."""
+    from pymolt.adapters.python_runner import inspect_container
+
+    return inspect_container(container) if container else None
+
+
 def container_is_running(container_id: str) -> bool:
     """True if a container with this id/name is currently running (best-effort).
 
-    Shared by the SetupPanel STALE check and ``resolve_capture_env`` below —
-    one docker-liveness mechanism, not two.
+    Shared by the SetupPanel STALE check and ``resolve_capture_env`` below. The one docker
+    liveness check lives in ``pymolt.adapters.python_runner``; this delegates to it.
     """
-    import shutil
+    from pymolt.adapters.python_runner import is_running
 
-    if not shutil.which("docker"):
-        return False
-    try:
-        res = run_command(
-            ["docker", "ps", "-q", "--no-trunc", "--filter", f"id={container_id}"],
-            check=False, timeout=5,
-        )
-        if res.stdout.strip():
-            return True
-        # id filter misses name-based configs; fall back to a name filter.
-        res = run_command(
-            ["docker", "ps", "-q", "--filter", f"name={container_id}"],
-            check=False, timeout=5,
-        )
-        return bool(res.stdout.strip())
-    except Exception:
-        return False
+    return is_running(container_id)
 
 
 def display_container(container_id: str | None) -> str:
@@ -1407,6 +1398,7 @@ def capture_named_trace(
     # a relative command like `pytest tests/` collects the target's tests.
     if cwd is None and not container:
         cwd = project_dir
+    runner_spec = _container_runner_spec(container)
     out_path = project_dir / ".pymolt" / "contract_traces" / f"{when}.jsonl"
     # Capture into a sibling first.  A subprocess can fail to start or time out;
     # archiving the current slot before that succeeds leaves contract_state
@@ -1446,7 +1438,7 @@ def capture_named_trace(
                 capture_kwargs["sample_first"] = LONG_RUN_SAMPLE_FIRST
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
         _record_sampling(staged_path, sample_rate, sampling_source)
-        _record_site_text(staged_path, project_dir)
+        _record_site_text(staged_path, project_dir, runner_spec)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
@@ -1533,6 +1525,7 @@ def capture_named_trace(
         trace_path=result.out_path, captured_at=_now(), mode=mode,
         command=list(command), target=target, events=result.events, processes=result.processes,
         command_log=result.command_log, returncode=result.returncode, env_note=env_note,
+        runner=runner_spec,
         coverage_pct=coverage_pct, covered_sites=covered_sites, blind_sites=blind_sites,
         env_fingerprint=environment_fingerprint(project_dir),
         env_setup_fingerprint=environment_setup_fingerprint(project_dir),
@@ -1752,7 +1745,7 @@ def poll_attached_capture(out_path: str | Path) -> int:
 _PROJECTED = '"src": "facts"'  # how project_snapshot marks its lines
 
 
-def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
+def _record_site_text(trace_path: str | Path, project_dir: str | Path, runner=None) -> None:
     """Keep the source text of every call site with the trace.
 
     The project's code changes between the baseline and the post-migration capture, so
@@ -1761,7 +1754,7 @@ def _record_site_text(trace_path: str | Path, project_dir: str | Path) -> None:
     effort — without it the diff falls back to line numbers.
     """
     try:
-        record_site_text(trace_path, project_dir)
+        record_site_text(trace_path, project_dir, runner)
     except Exception as exc:  # noqa: BLE001 - never fail a capture over annotation
         logger.warning("could not record call-site text for %s: %s", trace_path, exc)
 

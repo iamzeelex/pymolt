@@ -530,7 +530,8 @@ def test_identity_resolution_can_be_disabled(tmp_path, monkeypatch):
     rep = build_contract_report(root, trace=trace, resolve_identities=False)
     assert rep.identity_interpreter is None
     assert rep.canonical_trust == rep.exact_trust == 0.0
-    assert not (root / ".pymolt" / "cache").exists()
+    # No identity cache; the contact-map cache (cache/contacts) is allowed.
+    assert not list((root / ".pymolt" / "cache").glob("identity-*.json"))
 
 
 def test_unobservable_static_paths_are_classified_not_blind():

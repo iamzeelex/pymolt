@@ -67,6 +67,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, computed_field
 
+from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_host
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -229,6 +230,13 @@ class FactSet(BaseModel):
     # The runtime's ``warnings_capture`` ("on" / "off"); None = a runtime that predates it,
     # so "no warnings on a fact" does not mean "none were issued".
     warnings_capture: str | None = None
+    # Container call sites (``/work/<project>/...``) are mapped to host paths through the
+    # capture's runner before they are made project-relative.
+    runner: RunnerSpec | None = Field(default=None, exclude=True)
+    path_map_source: str | None = None   # "slot" | "config" | "config-container" | "explicit"
+    paths_mapped: int = 0                # distinct call-site files mapped container -> host
+    paths_foreign: int = 0               # distinct absolute call-site files left outside the root
+    notes: list[str] = Field(default_factory=list)
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -993,13 +1001,15 @@ def load_site_text(trace_path: str | Path) -> dict[str, str]:
     return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
 
 
-def collect_site_text(trace_path: str | Path, root: str | Path) -> dict[str, str]:
+def collect_site_text(trace_path: str | Path, root: str | Path,
+                      runner: RunnerSpec | None = None) -> dict[str, str]:
     """Read the source line of every distinct ``where.file:line`` in a trace.
 
     Run at capture time, before the project's code changes. Returns
     ``{"<file as recorded>:<line>": "<stripped line, at most 240 chars>"}`` for files under
     ``root`` only (relative recorded paths resolve against ``root``). Unreadable files, lines
-    past EOF and undecodable bytes are skipped / replaced, never raised.
+    past EOF and undecodable bytes are skipped / replaced, never raised. With ``runner`` a
+    container path is read from its host counterpart (the key stays the recorded path).
     """
     root_real = os.path.realpath(str(root))
     wanted: dict[str, set[int]] = defaultdict(set)
@@ -1016,6 +1026,9 @@ def collect_site_text(trace_path: str | Path, root: str | Path) -> dict[str, str
     out: dict[str, str] = {}
     for file, lines in wanted.items():
         path = file if os.path.isabs(file) else os.path.join(root_real, file)
+        if runner is not None and os.path.isabs(file) and not _within(os.path.realpath(path),
+                                                                     root_real):
+            path = to_host(runner, file) or path
         real = os.path.realpath(path)
         if not _within(real, root_real):
             continue
@@ -1061,9 +1074,10 @@ def store_site_text(trace_path: str | Path, site_text: Mapping[str, str]) -> str
     return str(path)
 
 
-def record_site_text(trace_path: str | Path, root: str | Path) -> int:
+def record_site_text(trace_path: str | Path, root: str | Path,
+                     runner: RunnerSpec | None = None) -> int:
     """``collect_site_text`` + ``store_site_text``; returns the number of lines recorded."""
-    site_text = collect_site_text(trace_path, root)
+    site_text = collect_site_text(trace_path, root, runner)
     if site_text:
         store_site_text(trace_path, site_text)
     return len(site_text)
@@ -1096,6 +1110,8 @@ def fold_facts(
     root: str | Path | None = None,
     site_text: Mapping[str, str] | None = None,
     source: str | None = None,
+    runner: RunnerSpec | None = None,
+    runner_source: str | None = None,
 ) -> FactSet:
     """Fold v1/v2 JSONL events and/or aggregated MemorySink records into a FactSet.
 
@@ -1106,7 +1122,8 @@ def fold_facts(
     site_text = site_text or {}
     rel_cache: dict[str, str] = {}
     acc: dict[tuple, _Acc] = {}
-    fs = FactSet(source=source, root=root_s, site_text_entries=len(site_text))
+    fs = FactSet(source=source, root=root_s, site_text_entries=len(site_text),
+                 runner=runner, path_map_source=runner_source if runner else None)
     versions: set[int] = set()
     # Identical inputs / outcomes / call sites recur across facts (one result shared by many
     # inputs, one input at many sites): keep ONE object per canonical form. Decoded JSON is
@@ -1134,7 +1151,7 @@ def fold_facts(
         else:
             rel = rel_cache.get(abs_file)
             if rel is None:
-                rel = rel_cache[abs_file] = _relativize(abs_file, root_s)
+                rel = rel_cache[abs_file] = _site_path(fs, abs_file)
         symbol = ev["sym"] or ev["q"]
         ikey = _canon(ev["input"])
         ikey = pool.setdefault("i" + ikey, ikey)
@@ -1174,6 +1191,7 @@ def fold_facts(
     ordered = sorted(acc.values(), key=lambda a: a.first_seen)
     acc.clear()
     fs.facts = [_fact_from_acc(a) for a in ordered]
+    _note_foreign_paths(fs)
     return fs
 
 
@@ -1182,6 +1200,7 @@ def load_facts(
     *,
     root: str | Path | None = None,
     site_text: Mapping[str, str] | None = None,
+    runner: "RunnerSpec | None | Literal['auto']" = "auto",
 ) -> FactSet:
     """Load a trace (JSONL, aggregated JSON, or a facts snapshot) and its sidecar
     ``site_text``, then fold.
@@ -1190,7 +1209,11 @@ def load_facts(
     and ``<trace>.facts.json`` (``find_facts_snapshot``) exists; otherwise the JSONL is folded
     (a facts capture's JSONL holds the snapshot's projection). Whenever a snapshot belongs to
     the trace, its quality counters (evicted, widened, outcomes past the cap) and tallies
-    annotate the FactSet."""
+    annotate the FactSet.
+
+    ``runner``: the container the trace was captured in. ``"auto"`` (default) finds it from
+    the project's state (the capture slot's runner, else ``EnvConfig.runner``); ``None`` maps
+    nothing."""
     p = Path(trace_path)
     if is_facts_snapshot(p):
         snap: Path | None = p
@@ -1205,7 +1228,11 @@ def load_facts(
     stats = _ReadStats()
     records = iter_snapshot_records(snap) if jsonl is None and snap is not None else \
         iter_trace_records(trace_path, stats)
-    fs = fold_facts(records, root=root, site_text=site_text, source=str(trace_path))
+    runner_source = "explicit" if isinstance(runner, RunnerSpec) else None
+    if runner == "auto":
+        runner, runner_source = runner_for_trace(base, root)
+    fs = fold_facts(records, root=root, site_text=site_text, source=str(trace_path),
+                    runner=runner, runner_source=runner_source)
     fs.invalid_lines = stats.invalid_lines
     fs.aggregated = fs.aggregated or stats.aggregated
     meta = _read_json(metadata_path(base))
@@ -1245,7 +1272,7 @@ def _site_warnings(fs: FactSet, item: Mapping[str, Any],
     line = where.get("line") if _is_lineno(where.get("line")) else None
     return SiteWarnings(
         symbol=item.get("sym") or item.get("q") or "?",
-        file=_relativize(file, fs.root),
+        file=_site_path(fs, file),
         func=where.get("func") if isinstance(where.get("func"), str) else "?",
         line=line,
         text=(site_text or {}).get(f"{file}:{line}") if line is not None else None,
@@ -1331,7 +1358,7 @@ def _annotate_from_snapshot(fs: FactSet, snap: Path,
                 continue
             rel = rel_cache.get(file)
             if rel is None:
-                rel = rel_cache[file] = _relativize(file, fs.root)
+                rel = rel_cache[file] = _site_path(fs, file)
             if t.get("warnings"):
                 sw = _site_warnings(fs, t, site_text)
                 if sw is not None:
@@ -2507,6 +2534,90 @@ def _within(path: str, root: str) -> bool:
         return os.path.commonpath([path, root]) == root
     except ValueError:
         return False
+
+
+def _site_path(fs: FactSet, file: str) -> str:
+    """A call-site file as a project-relative path; a container path goes through the
+    runner's mounts first (``/work/p/a.py`` -> ``<host>/a.py``)."""
+    if fs.runner is not None and os.path.isabs(file) and not _under_root(file, fs.root):
+        host = to_host(fs.runner, file)
+        if host is not None:
+            fs.paths_mapped += 1
+            return _relativize(host, fs.root)
+    return _relativize(file, fs.root)
+
+
+def _under_root(file: str, root: str | None) -> bool:
+    if root is None:
+        return False
+    return any(_within(f, b) for b in dict.fromkeys((root, os.path.realpath(root)))
+               for f in dict.fromkeys((file, os.path.realpath(file))))
+
+
+def _note_foreign_paths(fs: FactSet) -> None:
+    """Say so when absolute call sites remain outside the project root."""
+    if fs.root is None:
+        return
+    foreign = {f.file for f in fs.facts if os.path.isabs(f.file) or f.file.startswith("/")}
+    fs.paths_foreign = len(foreign)
+    if not foreign:
+        return
+    if fs.runner is None:
+        fs.notes.append(
+            f"container paths not mapped: {len(foreign)} call-site file(s) lie outside the "
+            "project root and no runner is recorded for this capture (re-capture, or "
+            "set the container with `pymolt setup`)")
+    else:
+        fs.notes.append(
+            f"{len(foreign)} call-site file(s) are outside the project root and not under a "
+            f"mount of {fs.runner.name} (dependency code, not project code)")
+
+
+def runner_for_trace(trace_path: str | Path,
+                     root: str | Path | None = None) -> tuple[RunnerSpec | None, str | None]:
+    """The container a trace was captured in, and where that was recorded.
+
+    The capture slot whose trace this is (``ContractSlot.runner``) > ``EnvConfig.runner`` >
+    a legacy config that only names ``container_id`` (inspected with docker). ``(None, None)``
+    when the project records no container. Never raises."""
+    try:
+        project = Path(root) if root is not None else _project_of(Path(trace_path))
+        if project is None:
+            return None, None
+        state = _read_json(project / ".pymolt" / "contract_state.json")
+        want = _canon_path(trace_path, project)
+        if isinstance(state, dict):
+            for key in ("baseline", "post_migration"):
+                slot = state.get(key)
+                if (isinstance(slot, dict) and isinstance(slot.get("trace_path"), str)
+                        and _canon_path(slot["trace_path"], project) == want
+                        and isinstance(slot.get("runner"), dict)):
+                    return RunnerSpec.model_validate(slot["runner"]), "slot"
+        config = _read_json(project / ".pymolt" / "env_config.json")
+        if isinstance(config, dict):
+            if isinstance(config.get("runner"), dict):
+                return RunnerSpec.model_validate(config["runner"]), "config"
+            cid = config.get("container_id")
+            if isinstance(cid, str) and cid:
+                spec = inspect_container(cid)
+                if spec is not None:
+                    return spec, "config-container"
+    except Exception as exc:  # noqa: BLE001 - a missing mapping degrades to a note
+        logger.warning("could not determine the capture's runner: %s", exc)
+    return None, None
+
+
+def _project_of(trace: Path) -> Path | None:
+    for parent in trace.resolve().parents:
+        if parent.name == ".pymolt":
+            return parent.parent
+    return None
+
+
+def _canon_path(path: str | Path, project: Path) -> str:
+    p = Path(path)
+    p = p if p.is_absolute() else project / p
+    return os.path.realpath(str(p))
 
 
 def _relativize(file: str, root: str | None) -> str:

@@ -30,6 +30,7 @@ The walk stops at the first step owned by something that is not one of ``roots``
 
 import ast
 import importlib
+import importlib.util
 import inspect
 import json
 import os
@@ -42,7 +43,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 1
+PROBE_VERSION = 2
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -497,20 +498,69 @@ def _describe(step, nxt, in_class):
     return real_next
 
 
+def _import_origin(name):
+    """Where the module that failed to import lives: stdlib, a site-packages root, or other."""
+    top = name.split(".")[0]
+    try:
+        spec = importlib.util.find_spec(top)
+        where = (getattr(spec, "origin", None) or "") if spec is not None else ""
+    except BaseException:
+        where = ""
+    if "site-packages" in where or "dist-packages" in where:
+        return "site-packages:" + top
+    if top in _DEP_ROOTS:
+        return "site-packages:" + top
+    return "stdlib" if where else "other"
+
+
+def _import_failure(prefix, exc):
+    """``{module, error, origin, cause}`` when importing ``prefix`` raised something other than
+    "no module named <prefix or one of its parents>"; None when the name is simply absent."""
+    if isinstance(exc, ImportError) and getattr(exc, "name", None) is not None \
+            and type(exc).__name__ == "ModuleNotFoundError" \
+            and (prefix == exc.name or prefix.startswith(exc.name + ".")):
+        return None
+    try:
+        detail = _norm(str(exc))[:200]
+    except Exception:
+        detail = "<unprintable>"
+    return {"module": prefix, "error": type(exc).__name__ + ": " + detail,
+            "origin": _import_origin(prefix),
+            "cause": getattr(exc, "name", None) if isinstance(exc, ImportError) else None}
+
+
 def resolve(path):
     parts = path.split(".")
     module, i = None, 0
+    import_errors = []
     for i in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:i])
         try:
-            module = importlib.import_module(".".join(parts[:i]))
+            module = importlib.import_module(prefix)
             break
         except _Timeout:
             raise
-        except BaseException:
+        except BaseException as exc:
+            failure = _import_failure(prefix, exc)
+            if failure is not None:
+                import_errors.append(failure)
             continue
+    # Importing "a.b.c" runs a.b first: one raising module fails every longer prefix with the
+    # same error. Keep the shortest prefix per error (the module that actually raised).
+    by_error = {}
+    for failure in import_errors:
+        by_error[failure["error"]] = failure
+    import_errors = list(by_error.values())
     if module is None:
-        return {"exists": False, "error": "no importable prefix", "steps": [], "module": None}
+        out = {"exists": False, "error": "no importable prefix", "steps": [], "module": None}
+        if import_errors:
+            # The module exists but raised: that is not a missing name.
+            out["error"] = "import raised: " + import_errors[0]["error"]
+            out["import_errors"] = import_errors
+        return out
     out = {"module": module.__name__, "steps": []}
+    if import_errors:
+        out["import_errors"] = import_errors
     rel = _rel_file(module.__name__)
     if rel:
         out["module_file"] = rel

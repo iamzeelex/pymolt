@@ -10,7 +10,9 @@ the shape and answers narrow questions:
 - :func:`successor_hint` — the curated successor of a removed symbol;
 - :func:`succession_edges` — framework-succession edges (formerly served by Axiom);
 - :func:`warning_switches` — env switches that make an old version warn about the new one;
-- :func:`probe_contexts` — setup snippets the API probe runs so proxies resolve.
+- :func:`probe_contexts` — setup snippets the API probe runs so proxies resolve;
+- :func:`stdlib_changes` / :func:`stdlib_lifetimes` — curated stdlib successors and the
+  generated module/name lifetimes (read through :mod:`pymolt.core.stdlib`).
 
 Nothing here touches the network or the project.
 """
@@ -21,7 +23,7 @@ import hashlib
 import json
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
@@ -30,7 +32,14 @@ from pydantic import BaseModel, Field
 
 KNOWLEDGE_DIR = Path(__file__).resolve().parent
 SCHEMA = "pymolt.knowledge/1"
-_FILES = ("codemod_rules", "succession", "warning_switches", "probe_contexts")
+_FILES = (
+    "codemod_rules",
+    "succession",
+    "warning_switches",
+    "probe_contexts",
+    "stdlib_changes",
+    "stdlib_lifetimes",
+)
 
 
 class KnowledgeError(ValueError):
@@ -96,7 +105,7 @@ class ProbeContext(_Entry):
 
 
 @cache
-def _load(name: str) -> dict[str, Any]:
+def _load_raw(name: str) -> dict[str, Any]:
     path = KNOWLEDGE_DIR / f"{name}.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -104,8 +113,14 @@ def _load(name: str) -> dict[str, Any]:
         raise KnowledgeError(f"cannot read knowledge file {path.name}: {exc}") from exc
     if not isinstance(data, dict) or data.get("schema") != SCHEMA:
         raise KnowledgeError(f"{path.name}: expected schema {SCHEMA!r}")
+    return data
+
+
+@cache
+def _load(name: str) -> dict[str, Any]:
+    data = _load_raw(name)
     if not isinstance(data.get("entries"), list):
-        raise KnowledgeError(f"{path.name}: 'entries' must be a list")
+        raise KnowledgeError(f"{name}.json: 'entries' must be a list")
     return data
 
 
@@ -199,6 +214,54 @@ def warning_switches(package: str, from_version: str, to_version: str) -> list[W
     ]
 
 
+class StdlibChangeEntry(_Entry):
+    """One curated stdlib change; mirrors :class:`pymolt.core.stdlib.StdlibChange`."""
+
+    symbols: list[str]
+    kind: Literal["module-removed", "module-moved", "name-removed", "name-moved", "deprecated"]
+    deprecated_in: str | None = None
+    warns_since: str | None = None
+    removed_in: str | None = None
+    successor: str | None = None
+    same_object: bool = False
+    successor_since: str | None = None
+    fix: Literal["rewrite-import", "rewrite-attr", "replace-attr-path", "advisory"] = "advisory"
+    hint: str = ""
+    shimmed_by: str | None = None
+
+
+@cache
+def stdlib_changes() -> tuple[StdlibChangeEntry, ...]:
+    """The curated stdlib changes, validated."""
+    return tuple(StdlibChangeEntry.model_validate(e) for e in _load("stdlib_changes")["entries"])
+
+
+class _Span(BaseModel):
+    present: tuple[str, str | None]  # (first, last); last None = still in the newest swept
+    since_unknown: bool = False  # sweep-derived: "first" is only the oldest interpreter swept
+
+
+class _Lifetimes(BaseModel):
+    source: str
+    date: str
+    pythons: list[str]
+    modules: dict[str, _Span]
+    names: dict[str, _Span]
+    submodules: list[str] = Field(default_factory=list)
+    stable: dict[str, list[str]] = Field(default_factory=dict)
+
+
+@cache
+def stdlib_lifetimes() -> dict[str, Any]:
+    """The generated stdlib lifetimes (``bench/stdlib_sweep``), validated, as a dict."""
+    data = _load_raw("stdlib_lifetimes")
+    try:
+        _Lifetimes.model_validate(data)
+    except ValueError as exc:
+        raise KnowledgeError(f"stdlib_lifetimes.json: {exc}") from exc
+    return data
+
+
 @cache
 def _contexts() -> tuple[ProbeContext, ...]:
     return tuple(ProbeContext.model_validate(e) for e in _load("probe_contexts")["entries"])
@@ -214,11 +277,14 @@ __all__ = [
     "CuratedRule",
     "KnowledgeError",
     "ProbeContext",
+    "StdlibChangeEntry",
     "WarningSwitch",
     "codemod_rules",
     "curated_rules",
     "knowledge_version",
     "probe_contexts",
+    "stdlib_changes",
+    "stdlib_lifetimes",
     "succession_edges",
     "successor_hint",
     "warning_switches",

@@ -204,6 +204,26 @@ def status_view(report) -> dict:
 # ── scan ─────────────────────────────────────────────────────────────────────
 
 
+def exposure_summary(exposure: dict) -> str | None:
+    """One line for ``python_exposure``: what the data says is gone, and how far up it runs."""
+    total = exposure["sites_total"]
+    guarded = exposure["guarded_total"]
+    if not total and not guarded:
+        return None
+    parts: list[str] = []
+    if total:
+        by = max(exposure["by_version"], key=lambda v: tuple(int(p) for p in v.split(".")))
+        parts.append(
+            f"{total} site(s) use stdlib names removed by {by} (data only; `pymolt plan` confirms)"
+            f" - runs unchanged up to {exposure['ceiling']}"
+        )
+    else:
+        parts.append("No unguarded use of stdlib names the data says were removed")
+    if guarded:
+        parts.append(f"{guarded} more guarded by a fallback or version check")
+    return "; ".join(parts) + "."
+
+
 def scan_view(report, project_dir: str | Path) -> dict:
     """``ScanReport`` -> view. The full report is the ``scan --json`` payload."""
     full_path = write_full_report(project_dir, "scan", report.model_dump(mode="json"))
@@ -243,6 +263,7 @@ def scan_view(report, project_dir: str | Path) -> dict:
         "edge_totals": {"total": total_edges, "by_group": by_group, "by_kind": by_kind},
         "divergences": lists.cap("divergences", divergences),
         "contacts": None,
+        "python_exposure": None,
     }
     lines = [f"{len(roots)} project root(s), {total_edges} dependency edge(s)."]
     if "roots" in lists.truncated:
@@ -272,6 +293,20 @@ def scan_view(report, project_dir: str | Path) -> dict:
             f"{distinct} distinct symbol(s), {cmap.files_scanned} file(s) scanned. "
             + _note(lists, "per_dependency", len(shown), full_path)
         )
+    exposure = report.python_exposure
+    if exposure is not None:
+        rows = lists.fit("python_exposure_sites", list(exposure["unguarded_sites"]))
+        data["python_exposure"] = {**exposure, "unguarded_sites": rows}
+        summary = exposure_summary(exposure)
+        if summary:
+            lines.append(summary)
+            if lists.truncated.get("python_exposure_sites"):
+                lines.append("Exposed sites: "
+                             + _note(lists, "python_exposure_sites", len(rows), full_path))
+    if cmap is not None and cmap.unparsed_cython:
+        data["unparsed_cython"] = lists.cap("unparsed_cython", list(cmap.unparsed_cython))
+        lines.append(f"{len(cmap.unparsed_cython)} .pyx/.pxd/.pxi file(s) are not parsed; "
+                     "names used only inside them are not counted.")
     lines.append(f"{len(divergences)} root(s) with Python-version divergence."
                  if divergences else "No Python-version divergence detected.")
     if by_kind:
@@ -678,7 +713,8 @@ def capture_attach_view(instructions, *, when: str, collect_command: str) -> dic
 
 def inconclusive_deltas(risks) -> tuple[int, int]:
     """``(K, T)``: the plan's API deltas that were inconclusive, and all of them."""
-    deltas = list(getattr(risks, "deltas", None) or ())
+    deltas = [d for d in (getattr(risks, "deltas", None) or ())
+              if getattr(d, "subject", "dependency") == "dependency"]
     return sum(1 for d in deltas if getattr(d, "quality", None) == "inconclusive"), len(deltas)
 
 
@@ -713,6 +749,12 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         per_package.append(f"{pkg} rules={len(items) - patterns} patterns={patterns}")
     sites = sum(change.sites for change in plan.changes)
     inconclusive, delta_total = inconclusive_deltas(getattr(plan, "risks", None))
+    risks_report = getattr(plan, "risks", None)
+    # With no baseline the report may hold python risks only: the dependency line is then
+    # not printed (it would read "0 need attention" for risks nobody predicted).
+    dependency_predicted = risks_report is not None and (
+        plan.baseline_trace_path is not None or delta_total > 0
+        or any(getattr(r, "scope", "dependency") == "dependency" for r in risks_report.risks))
 
     data: dict[str, Any] = {
         "plan_id": plan.plan_id,
@@ -732,7 +774,11 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         "baseline_bound": plan.baseline_trace_path is not None,
         "api_deltas_inconclusive": inconclusive,
         "api_deltas_total": delta_total,
-        **_risk_data(lists, getattr(plan, "risks", None)),
+        **_risk_data(lists, risks_report if dependency_predicted else None),
+        "python": _python_data(lists, plan),
+        "compile_findings": lists.cap("compile_findings",
+                                      list(getattr(plan, "compile_findings", None) or [])),
+        "compile_findings_total": len(getattr(plan, "compile_findings", None) or []),
     }
     warnings: list[str] = []
     if plan.baseline_trace_path is None:
@@ -748,17 +794,23 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         lines.append(f"{len(advisories)} site(s) need manual review (data.advisories).")
     if impacts:
         lines.append(f"{len(impacts)} API impact(s) (data.api_impacts).")
+    python_line = python_summary_line(plan)
+    if python_line:
+        lines.append(python_line)
     if data["risks_status"] is not None:
         attention = data["risks_attention_total"]
         fixed = data["risks_fixed_total"]
         unknown = unknown_api_phrase(inconclusive, delta_total)
+        # Next to a python line these counts are the dependencies' only: say so, or
+        # "0 need attention" reads as contradicting "8 certain" python risks.
+        label = "Dependency risks" if python_line else "Predicted risks"
         if inconclusive and inconclusive == delta_total:
-            lines.append(f"Predicted risks: none rated — {unknown} (inconclusive)")
+            lines.append(f"{label}: none rated — {unknown} (inconclusive)")
         elif inconclusive:
-            lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the "
+            lines.append(f"{label}: {attention} need attention, {fixed} fixed by the "
                          f"plan; {unknown} (inconclusive)")
         else:
-            lines.append(f"Predicted risks: {attention} need attention, {fixed} fixed by the "
+            lines.append(f"{label}: {attention} need attention, {fixed} fixed by the "
                          f"plan (data.risks_attention, data.risks_fixed; evidence "
                          f"{data['risks_status']}).")
     if by_pkg and not plan.changes:
@@ -781,8 +833,89 @@ def _risk_label(risk) -> str:
     return f"{risk.tier.value} {risk.site.label()} {risk.symbol}: {risk.reason}{fixed}"
 
 
+def _python_risks(plan) -> list:
+    report = getattr(plan, "risks", None)
+    return [r for r in (report.risks if report is not None else ())
+            if getattr(r, "scope", "dependency") == "python"]
+
+
+def python_summary_line(plan) -> str | None:
+    """"Python 3.6→3.12: N risk(s) (k certain); 0 fixed by the plan; needs attention: ..."."""
+    python = getattr(plan, "python", None)
+    if not python:
+        return None
+    risks = _python_risks(plan)
+    head = f"Python {python.get('from')}→{python.get('to')}"
+    quality = python.get("quality")
+    certain = sum(1 for r in risks if r.tier.value == "certain")
+    fixed = [r for r in risks if r.fixed_by_plan]
+    attention = [r for r in risks if not r.fixed_by_plan]
+    line = f"{head}: {len(risks)} risk(s) ({certain} certain); {len(fixed)} fixed by the plan"
+    if attention:
+        names: list[str] = []
+        for r in attention:
+            label = r.symbol + (" (manual)" if r.fix == "advisory" else "")
+            if label not in names:
+                names.append(label)
+        shown = ", ".join(names[:5]) + (f", +{len(names) - 5} more" if len(names) > 5 else "")
+        line += f"; needs attention: {shown}"
+    elif quality != "complete":
+        line += "; none rated, the evidence is incomplete"
+    report = getattr(plan, "risks", None)
+    guarded = len(getattr(report, "guarded", None) or ()) if report is not None else 0
+    pre = len(getattr(report, "pre_existing", None) or ()) if report is not None else 0
+    if guarded or pre:
+        line += f"; listed, not rated: {guarded} guarded, {pre} pre-existing"
+    if quality != "complete":
+        line += f" (evidence {quality}: see data.python.notes)"
+    return line
+
+
+def _python_data(lists: _Lists, plan) -> dict[str, Any] | None:
+    python = getattr(plan, "python", None)
+    if not python:
+        return None
+    risks = _python_risks(plan)
+    report = getattr(plan, "risks", None)
+    ordered = sorted(risks, key=lambda r: (r.fixed_by_plan, _tier_rank(r), r.site.label()))
+    return {
+        "from": python.get("from"), "to": python.get("to"), "quality": python.get("quality"),
+        "sides": python.get("sides") or {}, "notes": lists.cap("python.notes",
+                                                               list(python.get("notes") or [])),
+        "risks_total": len(risks),
+        "certain": sum(1 for r in risks if r.tier.value == "certain"),
+        "fixed_by_plan": sum(1 for r in risks if r.fixed_by_plan),
+        "risks": lists.fit("python.risks", [_risk_label(r) + (f" [{r.fix}]" if r.fix else "")
+                                            for r in ordered]),
+        "guarded": lists.fit("python.guarded", [
+            f"{g.kind} {g.site.label()} {g.symbol}: {g.reason}"
+            for g in (getattr(report, "guarded", None) or ())]),
+        "guarded_total": len(getattr(report, "guarded", None) or ()),
+        "pre_existing_total": len(getattr(report, "pre_existing", None) or ()),
+    }
+
+
+def _tier_rank(risk) -> int:
+    from pymolt.verify.predict import TIER_ORDER
+
+    return TIER_ORDER[risk.tier]
+
+
+def dependency_risks(report):
+    """The plan's risk report without its python-scope risks (None stays None)."""
+    if report is None:
+        return None
+    from pymolt.verify.predict import PredictionReport
+
+    return PredictionReport(status=report.status, deltas=report.deltas, notes=report.notes,
+                            risks=[r for r in report.risks
+                                   if getattr(r, "scope", "dependency") == "dependency"])
+
+
 def _risk_data(lists: _Lists, report) -> dict[str, Any]:
-    """A plan's predicted risks, most severe first, split by whether the plan fixes them."""
+    """A plan's predicted dependency risks, most severe first, split by whether the plan
+    fixes them (python risks are reported under ``python``)."""
+    report = dependency_risks(report)
     if report is None:
         return {"risks_status": None, "risks_attention": [], "risks_attention_total": 0,
                 "risks_fixed": [], "risks_fixed_total": 0}

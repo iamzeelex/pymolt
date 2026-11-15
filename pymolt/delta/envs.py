@@ -30,6 +30,7 @@ from pathlib import Path
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+from pymolt.adapters.python_runner import RunnerSpec, run_in, runner_available
 from pymolt.delta.models import Interpreter
 
 log = logging.getLogger(__name__)
@@ -106,33 +107,48 @@ def python_in(env_dir: Path) -> Path | None:
     return None
 
 
+def same_minor(a: str | None, b: str | None) -> bool:
+    """Python versions agree by major.minor ("3.6" == "3.6.15")."""
+    def minor(value: str | None) -> tuple[str, ...] | None:
+        parts = (value or "").strip().split(".")
+        return tuple(parts[:2]) if len(parts) >= 2 and parts[0].isdigit() else None
+
+    ma, mb = minor(a), minor(b)
+    return ma is not None and ma == mb
+
+
 def installed_versions(
-    executable: str, names: Sequence[str], timeout: float = 60.0
+    executable: str, names: Sequence[str], timeout: float = 60.0,
+    runner: RunnerSpec | None = None,
 ) -> tuple[str | None, dict[str, str | None], str | None]:
-    """``(python, {name: version|None}, error)`` as the interpreter itself reports them."""
+    """``(python, {name: version|None}, error)`` as the interpreter itself reports them.
+
+    ``runner``: the interpreter lives in that container (``executable`` is a path inside it).
+    """
+    where = f"{executable} in container {runner.name}" if runner else executable
     try:
-        proc = subprocess.run(
-            [executable, "-B", "-c", _VERSIONS_SOURCE],
-            input=json.dumps(list(names)), capture_output=True, text=True,
-            timeout=timeout, env=_child_env(),
-        )
+        proc = run_in(runner, [executable, "-B", "-c", _VERSIONS_SOURCE],
+                      stdin=json.dumps(list(names)), timeout=timeout,
+                      env=None if runner else _child_env())
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, {}, f"could not run {executable}: {exc}"
+        return None, {}, f"could not run {where}: {exc}"
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
-        return None, {}, f"{executable} exited {proc.returncode}: {tail[0][:200]}"
+        return None, {}, f"{where} exited {proc.returncode}: {tail[0][:200]}"
     try:
         payload = json.loads(proc.stdout or "{}")
     except ValueError:
-        return None, {}, f"{executable} answered something that is not JSON"
+        return None, {}, f"{where} answered something that is not JSON"
     return payload.get("python"), dict(payload.get("versions") or {}), None
 
 
-def _check(executable: str, wants: Sequence[Want], source: str, note: str | None) -> Interpreter:
+def _check(executable: str, wants: Sequence[Want], source: str, note: str | None,
+           runner: RunnerSpec | None = None) -> Interpreter:
     """An Interpreter for ``executable`` with versions filled; ``reason`` set if unusable."""
-    python, versions, error = installed_versions(executable, [w.name for w in wants])
+    python, versions, error = installed_versions(executable, [w.name for w in wants],
+                                                 runner=runner)
     interp = Interpreter(executable=executable, source=source, python=python, note=note,
-                         versions=versions)
+                         versions=versions, runner=runner)
     if error:
         interp.executable, interp.reason = None, error
         return interp
@@ -141,7 +157,8 @@ def _check(executable: str, wants: Sequence[Want], source: str, note: str | None
         for w in wants if not same_version(versions.get(w.name), w.version)
     ]
     if wrong:
-        interp.reason = f"{executable} has " + ", ".join(wrong)
+        where = f"container {runner.name}" if runner else executable
+        interp.reason = f"{where} has " + ", ".join(wrong)
     return interp
 
 
@@ -246,14 +263,48 @@ def throwaway_env(
     return exe, None, round(time.perf_counter() - t0, 2)
 
 
-def _baseline_trace(root: Path) -> Path | None:
+def _baseline_slot(root: Path):
     from pymolt.verify.models import ContractState
 
     state = ContractState.load(root / ".pymolt" / "contract_state.json")
-    slot = state.baseline if state is not None else None
+    return state.baseline if state is not None else None
+
+
+def _baseline_trace(root: Path) -> Path | None:
+    slot = _baseline_slot(root)
     if slot is None or not slot.trace_path:
         return None
     return _rel(root, slot.trace_path)
+
+
+def _runners(root: Path, config) -> list[RunnerSpec]:
+    """The containers that hold the baseline: the baseline slot's, then setup's (deduplicated).
+
+    A config written before ``EnvConfig.runner`` existed names its container only; the spec
+    is rebuilt from docker then.
+    """
+    out: list[RunnerSpec] = []
+    slot = _baseline_slot(root)
+    if slot is not None and slot.runner is not None:
+        out.append(slot.runner)
+    spec = config.runner if config is not None else None
+    if spec is None and config is not None and config.container_id \
+            and config.selected_tool.value == "container":
+        from pymolt.adapters.python_runner import inspect_container
+
+        spec = inspect_container(config.container_id)
+    if spec is not None and all(spec.container_id != r.container_id for r in out):
+        out.append(spec)
+    return out
+
+
+def baseline_runner(root: Path) -> RunnerSpec | None:
+    """The first running container that holds the baseline (slot, then setup), or None."""
+    root = Path(root)
+    for spec in _runners(root, _config(root)):
+        if runner_available(spec)[0]:
+            return spec
+    return None
 
 
 def _config(root: Path):
@@ -267,6 +318,19 @@ def resolve_old(root: Path, wants: Sequence[Want], online: bool = False) -> Inte
     root = Path(root)
     tried: list[str] = []
     candidates: list[Interpreter] = []
+    config = _config(root)
+    for spec in _runners(root, config):
+        ok, why = runner_available(spec)
+        if not ok:
+            tried.append(why or f"container {spec.name} is unavailable")
+            continue
+        interp = _check(spec.executable, wants, "container",
+                        f"baseline container {spec.name}"
+                        + (f" ({spec.image})" if spec.image else ""), runner=spec)
+        if _satisfied(interp):
+            return interp
+        candidates.append(interp)
+        tried.append(interp.reason or "")
     trace = _baseline_trace(root)
     if trace is not None:
         from pymolt.verify.identity_resolver import select_interpreter
@@ -281,7 +345,6 @@ def resolve_old(root: Path, wants: Sequence[Want], online: bool = False) -> Inte
             tried.append(interp.reason or "")
         elif choice.note:
             tried.append(choice.note)
-    config = _config(root)
     base_python = config.base_python if config is not None else None
     base_exe: str | None = None
     if config is not None and config.system_python and os.sep in config.system_python:

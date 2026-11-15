@@ -32,7 +32,6 @@ here, not a separate tool.
 import json
 import logging
 import os
-import sys
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -41,6 +40,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from pymolt.core.stdlib import is_stdlib
 from pymolt.verify import identity_resolver
 from pymolt.verify.comparators import ComparatorProfile, TraceComparator, compare_traces
 from pymolt.verify.contact_map import _IGNORE_DEPS, Contact, build_contact_map, contact_class
@@ -423,6 +423,20 @@ def _executed_files(
     )
 
 
+def _container_path_note(scope_note: str, trace: str | Path | None, root: Path) -> str:
+    """Keep the path-suffix note only when container paths stayed foreign after mapping."""
+    if trace is None:
+        return scope_note
+    try:
+        facts = load_facts(trace, root=root)
+    except Exception:  # noqa: BLE001 — the note is advisory; never fail the report over it
+        return scope_note
+    foreign = facts.paths_foreign > 0 or any("container paths not mapped" in n for n in facts.notes)
+    if facts.paths_mapped and not foreign:
+        return f"container paths mapped via {facts.path_map_source}"
+    return scope_note
+
+
 def _ratio(confirmed: int, static: int) -> float:
     return confirmed / static if static else 0.0
 
@@ -561,7 +575,7 @@ def build_contract_report(
     if view.events:
         executed_files, scope_note = _executed_files(view.files, root, contact_files)
         if scope_note:
-            report.notes.append(scope_note)
+            report.notes.append(_container_path_note(scope_note, trace, root))
         executed_scope = bool(view.files - {f for f in view.files if f.startswith("<")})
         if not executed_scope:
             report.notes.append(
@@ -579,7 +593,6 @@ def build_contract_report(
             names.add(identity.sym)
         impact_names[path] = names
 
-    stdlib = sys.stdlib_module_names
     observed_tops = {name.split(".", 1)[0] for name in (*view.observations, *view.q_names)}
     symbols: list[SymbolStatus] = []
     for target, s in static.items():
@@ -591,7 +604,7 @@ def build_contract_report(
             else "existence"
         )
         if klass == "behavioural" and identity is not None and identity.resolved:
-            if identity.sym.split(".")[0] in stdlib:
+            if is_stdlib(identity.sym.split(".")[0]):
                 klass = "interpreter"
         elif klass == "behavioural" and identity is not None and identity.error:
             unobservable = _unresolvable_class(identity.error, s["dep"])
@@ -637,7 +650,7 @@ def build_contract_report(
         )
     for obs in sorted(unmatched, key=lambda o: o.name):
         dep = obs.name.split(".")[0]
-        if dep in stdlib or dep in _IGNORE_DEPS:
+        if is_stdlib(dep) or dep in _IGNORE_DEPS:
             continue  # the trace boundary may include odd entries; keep deps only
         matched_paths = _names_match_impact([obs.name, *sorted(obs.legacy)], impact_names)
         symbols.append(
