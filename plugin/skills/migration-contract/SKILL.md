@@ -12,8 +12,9 @@ contract tools exist for, and it is the part you cannot do by reading files.
 
 ## Two rules that decide whether the migration is verifiable at all
 
-**1. Capture the baseline BEFORE touching anything.** A baseline recorded after
-the first edit is not a baseline. If the user has already started editing, say so
+**1. Capture the baseline BEFORE touching any code.** A baseline recorded after
+the first edit is not a baseline. It needs `setup` first: a capture records the
+environment it ran in. If the user has already started editing, say so
 plainly and offer the fallback: capture from a clean checkout of the pre-migration
 commit, or proceed with static-only evidence and label it as such.
 
@@ -26,16 +27,17 @@ and point at the behavioural evidence.
 ## The sequence
 
 ```
-contract_map            # see the surface first: call sites, not imports
-contract_capture(when='baseline')      # BEFORE any edit
-scan → setup_options/setup_apply → assess    # prepare the migration
-… edit code, build the target environment, apply codemods …
-contract_capture(when='post-migration')
-contract_report         # the verdict
+scan                             # roots, dependencies, call sites (not imports)
+setup → assess                   # pin the migration, resolve the target
+capture(when='baseline')         # BEFORE any code edit
+plan                             # the codemods as a plan + diffs; a person runs `pymolt apply`
+… or edit code yourself; build the target environment (assess says how) …
+capture(when='post-migration')
+verify                           # the verdict
 ```
 
-Repeat the edit → re-capture → report loop until `contract_report` comes back
-clean. Each report gives three numbers; read all three to the user:
+`status` says which of these is next. Repeat the edit → re-capture → verify loop
+until verify says PASS. Each report gives three numbers; read all three to the user:
 
 - **confirmed** — calls the run actually exercised on both sides.
 - **BLIND** — calls in the static map the run never touched. High BLIND means the
@@ -44,17 +46,17 @@ clean. Each report gives three numbers; read all three to the user:
 
 ## Reading the tools honestly
 
-- `contract_map` counts **call sites**, not imports. If you are tempted to grep
+- `scan` counts **call sites**, not imports. If you are tempted to grep
   imports instead, don't — measured against this tool, import-grepping undercounts
   the real contact surface severalfold.
 - `assess` output is an input, not a conclusion. Report which versions move and
-  what enters the manual zone; leave the verdict to `contract_report`.
+  what enters the manual zone; leave the verdict to `verify`.
 - Every tool returns a `summary` that states its own completeness ("All 31
   listed" / "Showing 20 of 31 … full list: <path>"). If it says a list was
   truncated, **read the `full_report_path` file** before answering — answering
   from a partial list is the classic way to get this wrong.
-- `codemods_preview` is a dry run. Applying codemods needs explicit human
-  approval, in the CLI, outside the agent loop.
+- `plan` writes no source. Applying it needs explicit human approval:
+  `pymolt apply`, in the CLI, outside the agent loop.
 
 ## Dead frameworks
 
@@ -62,5 +64,5 @@ For a project built on a dead framework (TF1 + standalone Keras, say), present
 both strategies and let the user choose: an in-place shim (living corpse — cheap,
 low ceiling, e.g. `compat.v1`) or a transplant (durable, effortful, e.g. Keras →
 torchvision with an `.h5` → `.pth` weight port). If the baseline tier is `none`,
-surface the baseline-env hint from `env_hint` and stop — either build that legacy
+surface the baseline-env hint `assess` returns and stop — either build that legacy
 environment in a container, or hand it back. Never fabricate a baseline.

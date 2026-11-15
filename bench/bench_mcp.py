@@ -38,8 +38,8 @@ PYMOLT_TOOLS = BASE_TOOLS + ",mcp__pymolt"
 # the MCP server's own `_INSTRUCTIONS`, not a hint invented for the benchmark.
 PLUGIN_SYSTEM = (
     "The pymolt MCP server is available. Prefer its tools over reading Dockerfiles, "
-    "lockfiles, manifests or running analysis by hand: scan -> setup_options/setup_apply "
-    "-> assess -> contract_map/contract_capture/contract_report. They mirror the pymolt "
+    "lockfiles, manifests or running analysis by hand: status -> scan -> setup -> assess "
+    "-> capture -> plan -> verify. They mirror the pymolt "
     "CLI funnel and return authoritative results."
 )
 
