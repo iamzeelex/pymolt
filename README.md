@@ -26,7 +26,7 @@ Install via `uv` or `pipx`:
 
 ```bash
 uv tool install pymolt
-# or with MCP server support:
+# or with the optional MCP server (for clients without a shell):
 uv tool install "pymolt[mcp]"
 ```
 
@@ -37,7 +37,7 @@ cd your-legacy-project
 pymolt setup .                                         # manifest, tool, base and target Python
 pymolt assess .                                        # resolve the target, write requirements-target.txt
 pymolt capture baseline --mode tests -- pytest tests/  # before any code change; cannot be redone later
-pymolt plan .                                          # the codemods as a plan; shows the diff, writes no source
+pymolt plan .                                          # API changes, codemods and predicted risks; shows the diff, writes no source
 pymolt apply .                                         # writes exactly that plan
 pymolt capture post-migration --mode tests -- pytest tests/   # in the target environment
 pymolt verify .                                        # PASS / FAIL / INCONCLUSIVE
@@ -45,7 +45,7 @@ pymolt verify .                                        # PASS / FAIL / INCONCLUS
 
 `pymolt rollback .` undoes the last `apply`. Instead of `plan` + `apply` you can change the code by hand or hand the project to an AI agent; `verify` compares the two captures the same way (`status` tracks only migrations made with `apply`).
 
-`verify` gives you three numbers that no resolver can: how much of the Axiom-impacted dependency surface your tests actually exercised, how much stayed **BLIND**, and which calls changed behaviour. Its verdict is deliberately tri-state: `PASS`, `FAIL`, or `INCONCLUSIVE`. Missing, stale, opaque, sampled, or non-comparable evidence can never become a green result.
+`verify` gives you three numbers that no resolver can: how much of the dependency surface touched by the plan's API changes your tests actually exercised, how much stayed **BLIND**, and which calls changed behaviour. Its verdict is deliberately tri-state: `PASS`, `FAIL`, or `INCONCLUSIVE`. Missing, stale, opaque, sampled, or non-comparable evidence can never become a green result.
 
 ---
 
@@ -66,24 +66,35 @@ The two captures bracket the code change. Everything before them prepares it:
 | setup | `pymolt setup .` | Manifest, resolution tool, base and target Python. Options or prompts. |
 | assess | `pymolt assess . --risk` | Lock-first resolution of base vs target, CVE deltas, the pinned target manifest, and how to build the target environment. |
 | capture | `pymolt capture baseline -- pytest tests/` | Records the calls your code makes into its dependencies. Needs setup. The one step you cannot do later. |
-| plan | `pymolt plan .` | The verified codemods as a plan, with the diff. Writes no source. |
+| plan | `pymolt plan .` | The API changes between base and target, the codemods for them and the predicted risks per call site, as a plan with the diff. Writes no source. |
 | apply | `pymolt apply .` | Writes exactly the plan; refuses it if a planned file changed since. Keeps rollback data. |
 | capture | `pymolt capture post-migration -- pytest tests/` | The same recording in the target environment. |
 | verify | `pymolt verify .` | Compares the captures: confirmed · BLIND · trust % · what changed. |
 
-**Where is the contact map in this?** `pymolt scan .` lists it: calls, attribute reads, decorators, bases, context managers, constants and protocol operations that cross into a dependency. It is the static denominator of every coverage number. Axiom delta paths focus it automatically after `apply`; full-surface totals remain visible.
+**Where is the contact map in this?** `pymolt scan .` lists it: calls, attribute reads, decorators, bases, context managers, constants and protocol operations that cross into a dependency. It is the static denominator of every coverage number. The plan's API changes focus it automatically after `apply`; full-surface totals remain visible.
 
 ---
 
-## Built for AI Agents (MCP Server)
+## Built for AI Agents
 
-PyMolt isn't just a CLI — it's a first-class Model Context Protocol (MCP) server. If you use Cursor, Claude Desktop, Windsurf, or Google Antigravity, your agent gets the migration funnel as tools.
+Agents drive the CLI. The seven report commands (`status`, `scan`, `setup`, `assess`, `capture`, `plan`, `verify`) take `--agent`, which prints the compact view: the summary, true counts, capped lists with the path of the full report, and flags that say whether a list is complete. `--json` prints the full payload.
 
-Give your agent the contract tools in particular. It can already resolve dependencies and read manifests on its own; what it cannot do is tell you whether the migration changed behaviour — or even count its own dependency contact surface correctly.
+```bash
+pymolt assess . --agent
+pymolt verify . --json
+```
 
-### Configure in your MCP Client
+The Claude Code plugin (`plugin/`) ships a skill and an agent that use these commands. It starts no MCP server.
 
-Add PyMolt to your agent config (e.g. `~/.cursor/mcp.json` or `claude_desktop_config.json`):
+Give your agent the contract commands in particular. It can already resolve dependencies and read manifests on its own; what it cannot do is tell you whether the migration changed behaviour, or even count its own dependency contact surface correctly.
+
+### MCP server (optional)
+
+For clients without a shell (Claude Desktop, ChatGPT and similar), PyMolt also runs as a Model Context Protocol server. It is a thin adapter over the same view layer: each tool returns exactly what `pymolt <command> --agent` prints for the same project, and has no logic of its own. Install the extra (it pins `mcp<2`) and add the server to your client's config (e.g. `claude_desktop_config.json`):
+
+```bash
+uv tool install "pymolt[mcp]"
+```
 
 ```json
 {
@@ -96,19 +107,17 @@ Add PyMolt to your agent config (e.g. `~/.cursor/mcp.json` or `claude_desktop_co
 }
 ```
 
-### Available MCP Tools
-
-The tools have the names of the CLI commands. None of them writes source: `plan` saves the plan, and a person applies it with `pymolt apply`.
+The 7 tools have the names of the CLI commands. None of them writes source: `plan` saves the plan, and a person applies it with `pymolt apply`. Lists that do not fit are cut, with the true total stated; the full report goes to `.pymolt/agent/<command>.json`.
 
 | Tool | What the agent gets |
 |---|---|
 | `status` | Where the project stands, whether its environments exist, and the single next tool. |
 | `scan` | Project roots, dependency edges, Python-version divergence, and every call site into a dependency, resolved through imports and scopes. Import greps undercount this severalfold. |
 | `setup` | With no choices, the valid manifests, tools and Python versions; with them, the saved configuration. |
-| `assess` | Base vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment — plus optional risk scoring. An input to the contract, never the conclusion. |
-| `capture` | Runs *your* test or app command with a boundary tracer injected — zero edits to the project — and keeps it as the `baseline` or `post-migration` capture. |
-| `plan` | The codemods for the target manifest as a saved plan and unified diffs. |
-| `verify` | The verdict: PASS / FAIL / INCONCLUSIVE, confirmed / BLIND coverage, trust %, and exactly which dependency calls changed result, changed raise, or disappeared. |
+| `assess` | Base vs target resolution: which versions move, which conflict, what enters the manual zone, how to build the target environment, plus optional risk scoring. An input to the contract, never the conclusion. |
+| `capture` | Runs *your* test or app command with a boundary tracer injected (zero edits to the project) and keeps it as the `baseline` or `post-migration` capture. Runs a process on your machine, so it requires `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment. |
+| `plan` | The API changes, the codemods for the target manifest and the predicted risks, as a saved plan and unified diffs. |
+| `verify` | The verdict: PASS / FAIL / INCONCLUSIVE, confirmed / BLIND coverage, trust %, which predicted risks were hit, and exactly which dependency calls changed result, changed raise, or disappeared. |
 
 ---
 
@@ -141,15 +150,20 @@ CI exit codes are stable: `0` = passed policy, `1` = incompatibility or failed c
 
 ---
 
-## Codemods and Axiom
+## Codemods and API changes
 
-`pymolt plan` rewrites code with **LibCST** codemods that it gets from **Axiom**, a service that knows which APIs changed between two versions of a package.
+`pymolt plan` finds which APIs your code uses changed between the base and the target versions of each dependency, and rewrites what it can with **LibCST** codemods.
 
+- **Computed locally**: the API changes come from the two environments, only for the symbols your project touches: removed, moved, signature, default and deprecated. Successor hints come from the warnings the baseline run recorded, the old version's docstrings and the knowledge shipped with pymolt. With `plan --online`, intermediate releases are read from PyPI as well; only package names and versions leave the machine.
+- **Environments**: the old side is the baseline capture's interpreter, the new side your target environment. The from-versions are the ones the baseline capture actually ran (it records them), not what an unpinned manifest resolves to today; the plan states each correction. If there is none, pymolt builds a throwaway one under `.pymolt/cache/envs/` from uv's cache. Without `--online` it downloads nothing, and a package it cannot build is reported as inconclusive, never as "no changes".
+- **Predicted risks**: the plan lists the risks per call site, as "fixed by the plan" or "needs attention", for example a default that changed on a parameter your call leaves unset. A default that moves to or from `None` or a sentinel is decided at call time, so it is medium unless the site's own baseline warning names it. `verify` then reports each prediction as hit, prevented by the plan (the rewrite kept the behaviour), miss or not exercised.
 - **Formatting kept**: indentation and comments stay as written.
 - **Templates**: a codemod is a match/rewrite template, e.g. `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`.
 - **Checked locally**: pymolt re-checks every rule before it goes into a plan; rules it cannot check are listed for manual review.
 - **All or nothing**: `apply` prepares and parses every changed file before the first write; a failed apply restores them all.
-- **Endpoint**: the public Axiom is the default. Point pymolt at another one with `pymolt axiom endpoint <url>`, `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT`. Only package names and versions are sent, never code.
+- **Remote Axiom (optional)**: a remote Axiom service is used only if you configure one, with `--endpoint <url>` or `PYMOLT_AXIOM_ENDPOINT` (token in `PYMOLT_API_TOKEN`). Only package names and versions are sent, never code.
+
+Evidence: on 22 API changes in flask, werkzeug and pandas, the local computation reaches recall 0.95 and precision 1.00, against 0.55 and 0.63 for Axiom's cached data. See [bench/delta_parity/RESULTS.md](bench/delta_parity/RESULTS.md).
 
 ---
 
@@ -164,7 +178,7 @@ CI exit codes are stable: `0` = passed policy, `1` = incompatibility or failed c
 | `pymolt setup [dir]` | Manifest, tool, base and target Python: `--manifest`, `--tool`, `--base-python`, `--target-python`, `--container`, `--target-env`, or prompts. |
 | `pymolt assess [dir]` | Base vs target resolution, CVE deltas, pinned target manifest, target-environment commands. |
 | `pymolt capture baseline\|post-migration -- <cmd>` | Runs your command and keeps only a valid recording; failed/empty captures remain diagnostic artifacts. |
-| `pymolt plan [dir]` | The codemods as a plan with the diff; `--patch FILE` exports it. Writes no source. |
+| `pymolt plan [dir]` | API changes, codemods and predicted risks as a plan with the diff; `--online` reads intermediate releases from PyPI, `--endpoint URL` uses a remote Axiom, `--patch FILE` exports the diff. Writes no source. |
 | `pymolt apply [dir]` | Writes only the saved plan; validates hashes and retains rollback data. |
 | `pymolt verify [dir]` | `PASS` / `FAIL` / `INCONCLUSIVE`, confirmed / BLIND / trust %, and behavioural changes; also golden snapshots, canary policy, shadow classification, opt-in rollback. `--baseline`/`--post-migration` compare other recordings (not saved). |
 | `pymolt rollback [dir]` | Restores the sources of the last apply; protects later edits unless `--force`. |
@@ -173,11 +187,10 @@ CI exit codes are stable: `0` = passed policy, `1` = incompatibility or failed c
 
 | Command | Description |
 |---|---|
-| `pymolt axiom login\|logout\|status\|endpoint\|clear-cache` | Axiom access: token, endpoint, local cache. |
-| `pymolt mcp` | Starts the stdio Model Context Protocol server for AI coding agents. |
+| `pymolt mcp` | Starts the optional stdio Model Context Protocol server (needs `pymolt[mcp]`). |
 | `pymolt succession [dir]`, `pymolt forks REPO` | Experimental: framework succession (`--plan` for `apply`) and fork triage. |
 
-Commands removed in this version print their replacement: `doctor` → `status`; `contract capture/trace/boundary/export-watcher` → `capture`; `contract report/diff` → `verify`; `contract map` → `scan`; `migrate`, `codemods` → `plan` + `apply`; `env hint` → `assess`; `auth`, `config`, `login`, `logout` → `axiom`.
+Commands removed in this version print their replacement: `doctor` → `status`; `contract capture/trace/boundary/export-watcher` → `capture`; `contract report/diff` → `verify`; `contract map` → `scan`; `migrate`, `codemods` → `plan` + `apply`; `env hint` → `assess`; `axiom` (API changes are computed locally by `plan`; for a remote provider use `plan --endpoint URL` or `PYMOLT_AXIOM_ENDPOINT`); `auth`, `config`, `login`, `logout` → `PYMOLT_API_TOKEN` (sent only to an explicitly configured endpoint) or `plan`.
 
 ---
 
@@ -194,15 +207,15 @@ One word per thing, in the CLI, the MCP tools and these docs.
 | **post-migration** | The capture taken after the migration, in the target environment. |
 | **call site** | A place in your code that calls into a dependency. `scan` lists them (the contact map). |
 | **BLIND** | A call site that no capture exercised. |
-| **codemod** | A rewrite rule for one dependency version change, from Axiom. |
-| **plan** | The codemods applied to your files as a diff, saved for `apply`. |
+| **codemod** | A rewrite for one dependency version change, from the local API-change facts or the knowledge shipped with pymolt. |
+| **API change** | A symbol your code uses that is removed, moved, or changed in signature, default or deprecation status between base and target. `plan` computes them locally. |
+| **plan** | The API changes, the codemods applied to your files as a diff, and the predicted risks, saved for `apply`. |
 | **verdict** | `PASS`, `FAIL` or `INCONCLUSIVE`, from `verify`. |
 | **base tier** | How far the base dependencies can be trusted: gold (pinned), silver (tests pass), bronze (unvalidated), none. JSON key: `baseline_tier`. |
-| **Axiom** | The service pymolt gets codemods from. |
+| **Axiom** | Optional remote provider of API changes and codemods; used only if configured with `--endpoint`. |
 
 ---
 
 ## License
 
 PyMolt is open-source software licensed under the [Apache License, Version 2.0](LICENSE).
-Axiom codemods are provided under the Business Source License 1.1 with free public access.

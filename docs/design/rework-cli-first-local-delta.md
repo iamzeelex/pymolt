@@ -105,3 +105,26 @@ Each risk carries the site, the symbol, the fact, the evidence and whether a pla
    - `mcp<2` is pinned and the fresh-install smoke test passes.
 4. **No network by default.** Only `--online` fetches intermediate releases, and only package names and versions leave the machine.
 5. **Full suite passes;** the injected runtime parses at `feature_version=(3, 6)`.
+
+## Acceptance results (2026-11-15)
+
+All five criteria pass:
+- `bench/e2e_pandas` now runs the plan → apply pipeline for every scenario. In each one the offline plan:
+  - takes pandas 1.5.3 from the baseline capture;
+  - proposes the one `toyapp/core.py` rewrite;
+  - rates `Series.append` certain and fixed by the plan, and `DataFrame.mean`@24 high.
+- The verdicts are PASS, FAIL, PASS, FAIL as before. Calibration has `mean` as a hit, `append` as prevented, and the four call-time-default risks as misses.
+- Delta parity: P 1.00, R 0.95, the same as before.
+- Full suite: 1149 passed.
+
+The first run through plan → apply surfaced four defects. The previous bench edited the code by hand, so it never ran this path. All four are fixed:
+1. **From-versions were reconstructed.** An unpinned manifest re-resolved to the newest release: the plan diffed pandas 3.1.1 → 2.2.3, found no rewrite and mis-rated every risk.
+   - The runtime now records `distributions` (dist → version of every loaded installed distribution, read from `*.dist-info`/`*.egg-info` metadata, ~4 ms) in each process's capture metadata.
+   - `plan` takes the from-side from the baseline's record (`witness_rows`) and states each correction.
+2. **The post-migration capture after `apply` was narrowed to the plan's symbols.** v0.1.0 auto-filled impact targets, which with no explicit mode meant watch-only, so every other baseline call showed as DISAPPEARED. Plan-derived targets now widen the default mode (`widen_targets`); an explicit `--impact-targets` still means a targeted capture.
+3. **`__init__`'s receiver was rendered per backend:** opaque before the body runs, the finished object after it. The same constructor call keyed differently, so it came out as DISAPPEARED + APPEARED. The receiver is now canonicalized to `{"__opaque__": type}` when facts load.
+4. **Calibration was line-wide and penalized fixes:**
+   - a drift of `groupby` scored the `GroupBy.sum` risk on the same line;
+   - a removed call the plan rewrote, with its behaviour kept, counted as a miss.
+   
+   Both are fixed: scoring is per symbol, and the second case now counts as **prevented**.
