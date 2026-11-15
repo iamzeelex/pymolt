@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Delta parity: a local, scoped API delta versus Axiom Graph's cached checkpoints.
+"""Delta parity: pymolt's local delta engine versus Axiom Graph's cached checkpoints.
 
 Question: can PyMolt generate the API-change facts a migration needs on the spot, from
 the two environments it already builds and scoped to the symbols the project touches,
@@ -8,41 +8,43 @@ at least as well as the Axiom Graph service? See README.md for the decision rule
 Per pair:
   1. build (or reuse) the old and new environments with uv;
   2. take the touched symbols. For flask, use the static contact map of the flasgger
-     fixture (`pymolt contract map --json`) plus the instance methods flasgger calls.
+     fixture (pymolt's static contact map) plus the instance methods flasgger calls.
      For pandas, use the e2e toy app's baseline facts;
-  3. LOCAL: run probe.py in both interpreters (existence, owner, signature, bases,
-     warnings, forwarding) and diff the results. Add the warnings the baseline run
-     emits (what tier 1's baseline capture sees);
-  4. GROUND TRUTH: run calls_<pair>.py in both interpreters, which exercises each symbol
-     the way the project uses it, plus the introspected API diff;
+  3. GROUND TRUTH: run this directory's probe.py in both interpreters (the units and the
+     introspected API diff) and calls_<pair>.py, which exercises each symbol the way the
+     project uses it;
+  4. LOCAL: `pymolt.delta.compute_deltas` on a scratch project whose baseline capture
+     points at the old interpreter and whose target environment is the new one, with the
+     warnings the baseline run emits (calls_<pair>.py in the OLD env only: what the
+     baseline capture records). Without --offline it may fetch intermediate releases
+     (versions only). The engine's facts are mapped back onto the units;
   5. AXIOM: match the cached checkpoint changes (~/Library/Caches/axiom_graph/checkpoints)
      to the same symbols through every path spelling (public, defining, receiver);
-  6. INTERMEDIATE: for each symbol removed without a local successor hint, bisect the PyPI
-     releases between old and new. It range-requests only the one module file out of each
-     wheel, sending versions only, and mines its deprecation prose;
-  7. score precision and recall per category and write results/<pair>_parity.json.
+  6. score precision and recall per category and write results/<pair>_parity.json.
 
-Run:  .venv/bin/python bench/delta_parity/run.py [--pair flask|pandas|all] [--offline]
+Run:  .venv/bin/python bench/delta_parity/run.py [--pair flask|pandas|all] [--offline] [--warm]
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import os
 import re
-import struct
 import subprocess
 import sys
 import time
-import zlib
 from pathlib import Path
 
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+sys.path.insert(0, str(REPO))
+
+from pymolt.delta import RecordedWarning, TouchedSymbol, compute_deltas, run_stats  # noqa: E402
+from pymolt.delta.fetch import successor_from  # noqa: E402
+
 CACHE = HERE / ".cache"
 RESULTS = HERE / "results"
 PYMOLT = REPO / ".venv" / "bin" / "pymolt"
@@ -127,7 +129,6 @@ PAIRS = {
     },
 }
 
-MAX_INTERMEDIATE_PROBES = 8
 CATEGORIES = ("REMOVED", "SIGNATURE", "BASES", "DEPRECATED", "BEHAVIOR")
 USE_IMPACT = ("REMOVED", "DEPRECATED", "BEHAVIOR")
 
@@ -161,9 +162,13 @@ def run_json(cmd: list[str], cwd: Path | None = None) -> tuple[dict, float]:
 def touched_symbols(name: str, pair: dict) -> tuple[list[str], float]:
     if pair.get("symbols"):
         return list(pair["symbols"]), 0.0
-    data, secs = run_json([str(PYMOLT), "contract", "map", str(pair["fixture"]), "--json"])
+    from pymolt.verify.contact_map import build_contact_map  # the map `pymolt scan` builds
+
+    t0 = time.perf_counter()
+    cmap = build_contact_map(pair["fixture"])
+    secs = time.perf_counter() - t0
     roots = set(pair["deps"])
-    syms = sorted({c["target"] for c in data["contacts"] if c["target"].split(".")[0] in roots})
+    syms = sorted({c.target for c in cmap.contacts if c.target.split(".")[0] in roots})
     return sorted(set(syms) | set(pair["extra_symbols"])), secs
 
 
@@ -327,71 +332,93 @@ def ground_truth(units: dict, calls_o: dict, calls_n: dict) -> dict[str, dict]:
     return gt
 
 
-# ── local prediction (probes + baseline-run warnings; never sees new-env use) ──────────
-
-_SUCCESSOR_RES = [
-    re.compile(r"[Ii]mport\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?\s+instead"),
-    re.compile(r"[Uu]se\s+['\"`]?([A-Za-z_][\w\.\(\)]*)['\"`]?\s+(?:instead|to )"),
-    re.compile(r"[Ii]mport (?:them|it) directly from\s+['\"`]?([\w\.]+)"),
-    re.compile(r"[Ss]ubclass(?:ing)?\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?"),
-]
+# ── local: pymolt.delta (never sees new-env use) ───────────────────────────────────────
 
 
-def successor_from(messages: list[str]) -> str | None:
-    for msg in messages:
-        for rx in _SUCCESSOR_RES:
-            m = rx.search(msg)
-            if m:
-                return m.group(1).rstrip(".")
-    return None
-
-
-def local_predict(units: dict, calls_o: dict, rule: str = "strict") -> dict[str, dict]:
-    """``strict`` (the shipped rule): DEPRECATED only from unconditional evidence, i.e. a
-    PEP 562 ``__getattr__`` branch for the name or a warning raised on access. ``any``
-    also counts every ``warnings.warn`` in the new body/class that names the symbol,
-    which are mostly argument-conditional; reported for transparency."""
+def _pins(pair: dict, side: str) -> dict[str, str]:
     out = {}
-    for unit, u in units.items():
-        leaf = unit.rsplit(".", 1)[-1]
-        cats = {}
-        o, n = u["old"], u["new"]
-        old_msgs = (
-            o.get("warns", [])
-            if o.get("kind") != "class"
-            else _mentions_d(o.get("warns", []), leaf)
-        )
-        old_msgs = [m["message"] for m in old_msgs] + _mentions(o.get("getattr_warns", []), leaf)
-        base_warn = [w for k, v in _calls_for(unit, calls_o) for w in v["warnings"]]
-        if u["exists_o"] and not u["exists_n"]:
-            cats["REMOVED"] = ["absent in new"]
-        if u["exists_o"] and u["exists_n"]:
-            sig = signature_changes(o.get("shape"), n.get("shape"))
-            if sig:
-                cats["SIGNATURE"] = sig
-            bases = bases_changed(o, n)
-            if bases:
-                cats["BASES"] = bases
-            new_static = _mentions(n.get("getattr_warns", []), leaf)
-            if rule == "any":
-                new_static += [m["message"] for m in _mentions_d(n.get("warns", []), leaf)]
-            new_rt = [w["message"] for w in u["runtime_warnings_n"]]
-            if new_static or new_rt:
-                cats["DEPRECATED"] = sorted(set(new_static + new_rt))
-            if base_warn:  # the baseline run warned at this call: predicts a behaviour change
-                cats["BEHAVIOR"] = sorted(set(base_warn))
-        hint_msgs = old_msgs + base_warn
-        out[unit] = {
-            "categories": cats,
-            "hint": successor_from(hint_msgs),
-            "hint_source": "old env (static/baseline run)" if successor_from(hint_msgs) else None,
-            "forwards_to_old": o.get("forwards_to"),
-        }
+    for spec in pair[side]["packages"]:
+        if "==" in spec:
+            name, version = spec.split("==", 1)
+            out[name.strip().lower()] = version.strip()
     return out
 
 
-def _mentions_d(warns: list[dict], leaf: str) -> list[dict]:
-    return [w for w in warns if leaf.strip("_") in w.get("message", "")]
+def _scratch_project(name: str, pair: dict) -> Path:
+    """A project whose baseline capture ran in the old env and whose target env is the
+    new one: compute_deltas resolves both interpreters the way it does for a real project."""
+    from pymolt.ingestion.config import EnvConfig
+    from pymolt.verify.models import CaptureMode, ContractSlot, ContractState
+
+    root = CACHE / "projects" / name
+    (root / ".pymolt").mkdir(parents=True, exist_ok=True)
+    EnvConfig(target_env_path=str(pair["new"]["env"])).save(root / ".pymolt" / "env_config.json")
+    trace = root / ".pymolt" / "baseline.jsonl"
+    trace.write_text("", encoding="utf-8")
+    Path(str(trace) + ".meta.json").write_text(json.dumps({"processes": [{
+        "executable": str(pair["old"]["env"] / "bin" / "python"),
+        "counters": {"events_written": 1}}]}), encoding="utf-8")
+    ContractState(baseline=ContractSlot(
+        trace_path=str(trace), captured_at="2026-11-15T00:00:00+00:00",
+        mode=CaptureMode.TEST_SUITE,
+    )).save(root / ".pymolt" / "contract_state.json")
+    return root
+
+
+def _baseline_warnings(symbols: list[str], calls_o: dict) -> list[TouchedSymbol]:
+    """The touched symbols, each with the warnings the old env's baseline run emitted."""
+    out = []
+    for sym in symbols:
+        warns = []
+        for key, call in calls_o.items():
+            if re.sub(r"\[.*\]$", "", key) != sym:
+                continue
+            for text in call.get("warnings", []):
+                category, _, message = text.partition(": ")
+                warns.append(RecordedWarning(category=category, message=message or text))
+        out.append(TouchedSymbol(path=sym, origin="given", warnings=warns))
+    return out
+
+
+def engine_predict(units: dict, reports: list) -> dict[str, dict]:
+    """The engine's facts mapped onto the bench units (every spelling a fact names).
+
+    REMOVED/MOVED → REMOVED (the spelling no longer works); SIGNATURE/DEFAULT → SIGNATURE,
+    or BASES for a bases change; DEPRECATED with new-side evidence → DEPRECATED; a baseline
+    runtime warning on a symbol that still exists → BEHAVIOR (it predicts the break).
+    """
+    by_spelling: dict[str, list] = {}
+    for report in reports:
+        for fact in report.facts:
+            for spelling in fact.spellings():
+                by_spelling.setdefault(spelling, []).append(fact)
+    out = {}
+    for unit in units:
+        cats: dict[str, list[str]] = {}
+        hint = source = None
+        facts = by_spelling.get(unit, [])
+        for f in facts:
+            label = f"{f.kind} {f.symbol}" + (f" {f.param}: {f.old} -> {f.new}" if f.param else "")
+            if f.kind in ("REMOVED", "MOVED"):
+                cats.setdefault("REMOVED", []).append(label)
+                if f.successor:
+                    hint = f.successor
+                    source = ("same object (MOVED)" if f.kind == "MOVED" else
+                              next((e[len("successor:"):] for e in f.evidence
+                                    if e.startswith("successor:")), None))
+            elif f.kind in ("SIGNATURE", "DEFAULT"):
+                cats.setdefault("BASES" if "bases" in f.evidence else "SIGNATURE", []).append(label)
+            elif f.kind == "DEPRECATED" and any(e.startswith("deprecated-in-new:")
+                                                for e in f.evidence):
+                cats.setdefault("DEPRECATED", []).append(label)
+            if f.kind not in ("REMOVED", "MOVED") and any(e.startswith("warning:")
+                                                          for e in f.evidence):
+                cats.setdefault("BEHAVIOR", []).append(
+                    next(e for e in f.evidence if e.startswith("warning:")))
+        out[unit] = {"categories": {k: sorted(set(v)) for k, v in cats.items()},
+                     "hint": hint, "hint_source": source,
+                     "facts": [f.model_dump() for f in facts if f.kind != "UNCHANGED"]}
+    return out
 
 
 # ── Axiom checkpoints ─────────────────────────────────────────────────────────────────
@@ -499,218 +526,6 @@ def axiom_predict(units: dict, rows: list[dict]) -> dict[str, dict]:
     return out
 
 
-# ── intermediate release fetch (versions only; one module file per wheel) ─────────────
-
-
-class Fetcher:
-    def __init__(self, offline: bool):
-        import httpx
-
-        self.offline = offline
-        self.client = httpx.Client(
-            timeout=30, follow_redirects=True, headers={"User-Agent": "delta-parity-bench/0.1"}
-        )
-        self.bytes = 0
-        self.requests = 0
-        self.dir = CACHE / "pypi"
-        self.dir.mkdir(parents=True, exist_ok=True)
-
-    def releases(self, dist: str) -> dict:
-        f = self.dir / f"{dist}.json"
-        if not f.exists():
-            r = self.client.get(f"https://pypi.org/pypi/{dist}/json")
-            r.raise_for_status()
-            self.bytes += len(r.content)
-            self.requests += 1
-            f.write_bytes(r.content)
-        return json.loads(f.read_text())["releases"]
-
-    def member(self, dist: str, version: str, files: list[dict], member: str) -> str | None:
-        cached = self.dir / f"{dist}-{version}-{member.replace('/', '__')}"
-        if cached.exists():
-            return cached.read_text()
-        wheels = [x for x in files if x["filename"].endswith(".whl") and not x.get("yanked")]
-        wheels.sort(
-            key=lambda x: 0 if "py3-none-any" in x["filename"] or "py2.py3" in x["filename"] else 1
-        )
-        if not wheels:
-            return None
-        text = self._range_member(wheels[0]["url"], member)
-        if text is not None:
-            cached.write_text(text)
-        return text
-
-    def _get(self, url: str, start: int, end: int) -> bytes:
-        r = self.client.get(url, headers={"Range": f"bytes={start}-{end}"})
-        if r.status_code != 206:
-            raise RuntimeError(f"range request not honoured ({r.status_code})")
-        self.bytes += len(r.content)
-        self.requests += 1
-        return r.content
-
-    def _range_member(self, url: str, member: str) -> str | None:
-        head = self.client.head(url)
-        self.requests += 1
-        size = int(head.headers["content-length"])
-        tail_start = max(0, size - 65536)
-        tail = self._get(url, tail_start, size - 1)
-        eocd = tail.rfind(b"PK\x05\x06")
-        _, _, _, _, _, cd_size, cd_off, _ = struct.unpack("<IHHHHIIH", tail[eocd : eocd + 22])
-        if cd_off >= tail_start:
-            cd = tail[cd_off - tail_start : cd_off - tail_start + cd_size]
-        else:
-            cd = self._get(url, cd_off, cd_off + cd_size - 1)
-        pos = 0
-        while pos + 46 <= len(cd) and cd[pos : pos + 4] == b"PK\x01\x02":
-            (_, _, _, _, method, _, _, _, csize, _, nlen, elen, clen, _, _, _, lho) = struct.unpack(
-                "<IHHHHHHIIIHHHHHII", cd[pos : pos + 46]
-            )
-            name = cd[pos + 46 : pos + 46 + nlen].decode("utf-8", "replace")
-            if name == member:
-                hdr = self._get(url, lho, lho + 30 + nlen + 512 + csize)
-                lnlen, lelen = struct.unpack("<HH", hdr[26:30])
-                start = 30 + lnlen + lelen
-                data = hdr[start : start + csize]
-                if len(data) < csize:
-                    data = self._get(url, lho + start, lho + start + csize - 1)
-                raw = zlib.decompress(data, -15) if method == 8 else data
-                return raw.decode("utf-8", "replace")
-            pos += 46 + nlen + elen + clen
-        return None
-
-
-def _present(src: str, leaf: str) -> bool:
-    try:
-        tree = ast.parse(src)
-    except SyntaxError:
-        return False
-    for node in tree.body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == leaf:
-            return True
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            if any((a.asname or a.name.split(".")[-1]) == leaf for a in node.names):
-                return True
-        if isinstance(node, ast.Assign) and any(
-            getattr(t, "id", None) == leaf for t in node.targets
-        ):
-            return True
-        if isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
-            if any(isinstance(c, ast.Constant) and c.value == leaf for c in ast.walk(node)):
-                return True
-    return False
-
-
-def _module_warnings(src: str, leaf: str) -> list[str]:
-    """warnings.warn messages that belong to ``leaf``: its own def/class body, the
-    ``__getattr__`` branch serving it, or any module warning that names it."""
-    tree = ast.parse(src)
-    msgs = []
-
-    def text(node):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.JoinedStr):
-            return "".join(text(v) or "{...}" for v in node.values)
-        if isinstance(node, ast.BinOp):
-            return (text(node.left) or "") + (text(node.right) or "")
-        return None
-
-    def warns(scope):
-        for n in ast.walk(scope):
-            if (
-                isinstance(n, ast.Call)
-                and getattr(n.func, "attr", getattr(n.func, "id", "")) == "warn"
-            ):
-                t = text(n.args[0]) if n.args else None
-                if t:
-                    msgs.append(t)
-
-    for node in tree.body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name == leaf:
-            warns(node)
-        if isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
-            for n in ast.walk(node):
-                if isinstance(n, ast.If) and any(
-                    isinstance(c, ast.Constant) and c.value == leaf for c in ast.walk(n.test)
-                ):
-                    warns(ast.Module(body=n.body, type_ignores=[]))
-    if not msgs:
-        before = len(msgs)
-        warns(tree)
-        msgs[before:] = [m for m in msgs[before:] if leaf in m]
-    return msgs
-
-
-def intermediate_hint(
-    fetcher: Fetcher, pair: dict, unit: str, module_file: str, old_v: str, new_v: str
-) -> dict:
-    root = unit.split(".")[0]
-    dist = pair["dist"][root]
-    parts = unit.split(".")
-    module_parts = module_file[:-3].replace("/__init__", "").split("/")
-    leaf = parts[len(module_parts)] if len(parts) > len(module_parts) else parts[-1]
-    t0 = time.perf_counter()
-    b0, r0 = fetcher.bytes, fetcher.requests
-    releases = fetcher.releases(dist)
-    cands = []
-    for v, files in releases.items():
-        try:
-            pv = Version(v)
-        except InvalidVersion:
-            continue
-        if pv.is_prerelease or not (Version(old_v) < pv < Version(new_v)):
-            continue
-        if files and not all(f.get("yanked") for f in files):
-            cands.append((pv, v, files))
-    cands.sort()
-    # Newest first: the last release that still has the symbol carries its final
-    # deprecation prose. Bisection is wrong here: histories are not monotonic (flask 2.3.0
-    # dropped `flask.Markup` by accident and 2.3.1 restored it as a deprecated alias).
-    # Try the newest patch of each minor series first, then every release, newest first.
-    newest_per_minor, seen = [], set()
-    for pv, v, files in reversed(cands):
-        if (pv.major, pv.minor) not in seen:
-            seen.add((pv.major, pv.minor))
-            newest_per_minor.append((pv, v, files))
-    order = newest_per_minor + [c for c in reversed(cands) if c not in newest_per_minor]
-    probes, found = [], None
-    for _, v, files in order[:MAX_INTERMEDIATE_PROBES]:
-        src = fetcher.member(dist, v, files, module_file)
-        ok = bool(src) and _present(src, leaf)
-        probes.append([v, ok])
-        if ok:
-            found = (v, src)
-            break
-    result = {"unit": unit, "module_file": module_file, "candidates": len(cands), "probes": probes}
-    if found:
-        msgs = _module_warnings(found[1], leaf)
-        result.update(
-            {"last_version_with_symbol": found[0], "messages": msgs, "hint": successor_from(msgs)}
-        )
-    else:
-        result.update({"last_version_with_symbol": None, "messages": [], "hint": None})
-    result.update(
-        {
-            "seconds": round(time.perf_counter() - t0, 2),
-            "bytes": fetcher.bytes - b0,
-            "requests": fetcher.requests - r0,
-        }
-    )
-    return result
-
-
-def module_file_for(unit: str, env: Path, py: str) -> str | None:
-    sp = next(env.glob("lib/python*/site-packages"))
-    parts = unit.split(".")
-    for i in range(len(parts) - 1, 0, -1):
-        rel = Path(*parts[:i])
-        if (sp / rel / "__init__.py").exists():
-            return str(rel / "__init__.py")
-        if (sp / rel.with_suffix(".py")).exists():
-            return str(rel.with_suffix(".py"))
-    return None
-
-
 # ── scoring ───────────────────────────────────────────────────────────────────────────
 
 
@@ -741,7 +556,7 @@ def hint_ok(hint: str | None, expected: list[str]) -> bool:
 # ── driver ────────────────────────────────────────────────────────────────────────────
 
 
-def run_pair(name: str, offline: bool) -> dict:
+def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
     pair = PAIRS[name]
     timing = {}
     for side in ("old", "new"):
@@ -752,66 +567,40 @@ def run_pair(name: str, offline: bool) -> dict:
     timing["contact_map_s"] = round(map_s, 2)
     sym_file = RESULTS / f"{name}_symbols.json"
     sym_file.write_text(json.dumps(symbols, indent=1))
+
+    # ground truth: introspection + use, independent of pymolt.delta
     probes, calls = {}, {}
     for side in ("old", "new"):
         py = str(pair[side]["env"] / "bin" / "python")
-        probes[side], secs = run_json(
-            [
-                py,
-                "-I",
-                str(HERE / "probe.py"),
-                str(sym_file),
-                f"--deps={','.join(pair['deps'])}",
-                *pair["probe_args"],
-            ]
+        probes[side], _ = run_json(
+            [py, "-I", str(HERE / "probe.py"), str(sym_file),
+             f"--deps={','.join(pair['deps'])}", *pair["probe_args"]]
         )
-        timing[f"probe_{side}_wall_s"] = round(secs, 3)
-        timing[f"probe_{side}_in_process_s"] = probes[side]["probe_s"]
         calls[side], secs = run_json([py, "-I", str(HERE / pair["calls"])])
-        timing[f"use_calls_{side}_wall_s"] = round(secs, 3)
-    t0 = time.perf_counter()
+        if side == "old":
+            timing["baseline_run_old_s"] = round(secs, 3)
     units = build_units(symbols, probes["old"], probes["new"])
     gt = ground_truth(units, calls["old"]["calls"], calls["new"]["calls"])
-    local = local_predict(units, calls["old"]["calls"])
-    local_any = local_predict(units, calls["old"]["calls"], rule="any")
-    timing["diff_s"] = round(time.perf_counter() - t0, 3)
+
+    # local: the shipped engine
+    old_pins, new_pins = _pins(pair, "old"), _pins(pair, "new")
+    migrations = [(dep, old_pins[dep], new_pins[dep]) for dep in pair["deps"]]
+    project = _scratch_project(name, pair)
+    t0 = time.perf_counter()
+    reports = compute_deltas(project, migrations,
+                             symbols=_baseline_warnings(symbols, calls["old"]["calls"]),
+                             online=not offline, use_cache=warm)
+    wall = time.perf_counter() - t0
+    stats = run_stats(reports[0]) if reports else {}
+    timing["engine"] = stats
+    timing["engine_wall_s"] = round(wall, 3)
+    timing["local_total_excl_env_build_s"] = round(wall - stats.get("env_build_s", 0), 2)
+    local = engine_predict(units, reports)
+
     rows, axiom_meta = load_axiom(pair)
     axiom = axiom_predict(units, rows)
-
-    old_v = probes["old"]["versions"]
-    new_v = probes["new"]["versions"]
-    intermediates = []
-    if not offline:
-        fetcher = Fetcher(offline)
-        for unit, g in gt.items():
-            if "REMOVED" not in g["categories"]:
-                continue
-            expected = pair["successors"].get(unit, [])
-            if hint_ok(local[unit]["hint"], expected):
-                continue
-            root = unit.split(".")[0]
-            mf = module_file_for(unit, pair["old"]["env"], pair["old"]["python"])
-            if not mf:
-                continue
-            try:
-                res = intermediate_hint(fetcher, pair, unit, mf, old_v[root], new_v[root])
-            except Exception as exc:  # noqa: BLE001 — record, never crash the bench
-                res = {"unit": unit, "error": f"{type(exc).__name__}: {exc}"}
-            intermediates.append(res)
-            if res.get("hint"):
-                local[unit]["hint"] = res["hint"]
-                local[unit]["hint_source"] = (
-                    f"intermediate {res['last_version_with_symbol']} (range-fetched)"
-                )
-        timing["intermediate_total_s"] = round(sum(r.get("seconds", 0) for r in intermediates), 2)
-        timing["intermediate_bytes"] = sum(r.get("bytes", 0) for r in intermediates)
-
     scored = {
         "local": {"api": score(gt, local), "use": score(gt, local, USE_IMPACT)},
-        "local_any_static_warn": {
-            "api": score(gt, local_any),
-            "use": score(gt, local_any, USE_IMPACT),
-        },
         "axiom": {"api": score(gt, axiom), "use": score(gt, axiom, USE_IMPACT)},
     }
     hints = {}
@@ -820,46 +609,25 @@ def run_pair(name: str, offline: bool) -> dict:
             exp = pair["successors"].get(unit, [])
             hints[unit] = {
                 "expected": exp,
-                "local": [
-                    local[unit]["hint"],
-                    local[unit]["hint_source"],
-                    hint_ok(local[unit]["hint"], exp),
-                ],
-                "axiom": [
-                    axiom[unit]["hint"],
-                    axiom[unit]["hint_text"][:1],
-                    hint_ok(axiom[unit]["hint"], exp),
-                ],
+                "local": [local[unit]["hint"], local[unit]["hint_source"],
+                          hint_ok(local[unit]["hint"], exp)],
+                "axiom": [axiom[unit]["hint"], axiom[unit]["hint_text"][:1],
+                          hint_ok(axiom[unit]["hint"], exp)],
             }
-    local_total = sum(
-        v
-        for k, v in timing.items()
-        if k.startswith(("probe_", "use_calls_old")) and k.endswith("wall_s")
-    ) + timing.get("diff_s", 0)
-    timing["local_total_excl_env_build_s"] = round(
-        local_total + timing.get("intermediate_total_s", 0), 2
-    )
     report = {
         "pair": name,
-        "versions": {
-            "old": old_v,
-            "new": new_v,
-            "python": [probes["old"]["python"], probes["new"]["python"]],
-        },
+        "versions": {"old": probes["old"]["versions"], "new": probes["new"]["versions"],
+                     "python": [probes["old"]["python"], probes["new"]["python"]]},
         "symbols": len(symbols),
         "units": len(units),
         "timing": timing,
         "axiom_meta": axiom_meta,
         "score": scored,
         "hints": hints,
-        "intermediates": intermediates,
+        "delta_reports": [r.model_dump() for r in reports],
         "per_unit": {
-            u: {
-                "ground_truth": gt[u],
-                "local": local[u],
-                "axiom": axiom[u],
-                "contacts": units[u]["contacts"],
-            }
+            u: {"ground_truth": gt[u], "local": local[u], "axiom": axiom[u],
+                "contacts": units[u]["contacts"]}
             for u in sorted(units)
         },
     }
@@ -870,7 +638,10 @@ def run_pair(name: str, offline: bool) -> dict:
 def print_report(rep: dict) -> None:
     print(f"\n=== {rep['pair']}  {rep['versions']}  symbols={rep['symbols']} units={rep['units']}")
     print("axiom checkpoints:", rep["axiom_meta"])
-    for who in ("local", "local_any_static_warn", "axiom"):
+    for r in rep["delta_reports"]:
+        print(f"  pymolt.delta {r['package']} {r['from']} -> {r['to']}: {r['quality']}, "
+              f"{sum(1 for f in r['facts'] if f['kind'] != 'UNCHANGED')} change fact(s)")
+    for who in ("local", "axiom"):
         for view in ("api", "use"):
             s = rep["score"][who][view]
             p = "n/a" if s["precision"] is None else f"{s['precision']:.2f}"
@@ -878,7 +649,9 @@ def print_report(rep: dict) -> None:
             counts = f"TP={s['tp']:>2} FP={s['fp']:>2} FN={s['fn']:>2}"
             print(f"  {who:<22} {view:<4} {counts}  P={p} R={r}")
     print("  hints:", json.dumps(rep["hints"]))
-    print("  timing:", rep["timing"])
+    t = rep["timing"]
+    print(f"  engine: {t['local_total_excl_env_build_s']} s excl. env builds "
+          f"(wall {t['engine_wall_s']} s)  {t['engine']}")
     print(f"  {'unit':<52}{'ground truth':<34}{'local':<34}axiom")
     for u, d in rep["per_unit"].items():
         g = ",".join(sorted(d["ground_truth"]["categories"])) or "-"
@@ -888,15 +661,35 @@ def print_report(rep: dict) -> None:
             print(f"  {u:<52}{g:<34}{lo:<34}{ax}")
 
 
+def print_pooled(reps: list[dict]) -> None:
+    print("\n=== pooled")
+    for who in ("local", "axiom"):
+        for view in ("api", "use"):
+            tp = sum(r["score"][who][view]["tp"] for r in reps)
+            fp = sum(r["score"][who][view]["fp"] for r in reps)
+            fn = sum(r["score"][who][view]["fn"] for r in reps)
+            p = f"{tp / (tp + fp):.2f}" if tp + fp else "n/a"
+            rc = f"{tp / (tp + fn):.2f}" if tp + fn else "n/a"
+            print(f"  {who:<6} {view:<4} TP={tp:>2} FP={fp:>2} FN={fn:>2}  P={p} R={rc}")
+    for r in reps:
+        print(f"  {r['pair']}: engine {r['timing']['local_total_excl_env_build_s']} s "
+              "excl. env builds")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pair", default="all", choices=["all", *PAIRS])
     ap.add_argument("--offline", action="store_true", help="skip the intermediate-release fetch")
+    ap.add_argument("--warm", action="store_true",
+                    help="let the engine reuse its probe/hint caches (default: cold)")
     args = ap.parse_args()
     RESULTS.mkdir(parents=True, exist_ok=True)
     names = list(PAIRS) if args.pair == "all" else [args.pair]
-    for n in names:
-        print_report(run_pair(n, args.offline))
+    reps = [run_pair(n, args.offline, args.warm) for n in names]
+    for rep in reps:
+        print_report(rep)
+    if len(reps) > 1:
+        print_pooled(reps)
     return 0
 
 

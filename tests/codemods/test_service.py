@@ -67,7 +67,9 @@ def test_resolve_codemod_migrations_prefers_cached_assess(monkeypatch):
         called = True
         return []
 
-    monkeypatch.setattr("pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file)
+    monkeypatch.setattr(
+        "pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file
+    )
 
     migrations, source_desc = resolve_codemod_migrations("/tmp/project", assess_result=result)
     assert not called
@@ -76,12 +78,16 @@ def test_resolve_codemod_migrations_prefers_cached_assess(monkeypatch):
 
 
 def test_resolve_codemod_migrations_uses_target_file_fallback(monkeypatch):
-    def fake_dependency_file(project_dir, target_dependency_file, *, config=None, use_cache=True, warnings=None):
+    def fake_dependency_file(
+        project_dir, target_dependency_file, *, config=None, use_cache=True, warnings=None
+    ):
         assert project_dir == "/tmp/project"
         assert target_dependency_file == "requirements-target.txt"
         return [DependencyMigration("flask", "2.0.3", "3.0.0")]
 
-    monkeypatch.setattr("pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file)
+    monkeypatch.setattr(
+        "pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file
+    )
 
     migrations, source_desc = resolve_codemod_migrations(
         "/tmp/project",
@@ -97,7 +103,8 @@ def _node(name, version) -> Node:
 
 def _graph(nodes: dict[str, Node]) -> DependencyGraph:
     return DependencyGraph(
-        nodes=nodes, resolution_quality=ResolutionQuality.RESOLVED, source_fixation=SourceFixation.PINNED,
+        nodes=nodes, resolution_quality=ResolutionQuality.RESOLVED,
+        source_fixation=SourceFixation.PINNED,
     )
 
 
@@ -131,7 +138,8 @@ class TestContainerDegrade:
                               constraint_file=None, force_recompile=False):
             if container_id:
                 raise ValueError(
-                    f"Specified Docker container '{container_id}' was not found running or is not matching."
+                    f"Specified Docker container '{container_id}' was not found running "
+                    "or is not matching."
                 )
             if chosen_source is not None and chosen_source.path.name == "requirements-target.txt":
                 return target_graph, report
@@ -168,7 +176,8 @@ class TestContainerDegrade:
                               constraint_file=None, force_recompile=False):
             if container_id:
                 raise ValueError(
-                    f"Specified Docker container '{container_id}' was not found running or is not matching."
+                    f"Specified Docker container '{container_id}' was not found running "
+                    "or is not matching."
                 )
             if chosen_source is not None and chosen_source.path.name == "requirements-target.txt":
                 return target_graph, report
@@ -263,3 +272,37 @@ def test_run_codemods_dry_run_default(tmp_path):
     )
     assert result.dry_run is True
     assert "flask.helpers" in (tmp_path / "app.py").read_text()  # untouched
+
+
+# ── provider choice: local by default, Axiom only when configured ────────────
+
+def test_codemod_provider_is_local_without_an_endpoint(tmp_path):
+    from pymolt.codemods.client import AxiomGraphClient
+    from pymolt.codemods.service import codemod_provider
+    from pymolt.delta.provider import LocalDeltaProvider
+
+    local = codemod_provider(tmp_path, None, online=True)
+    assert isinstance(local, LocalDeltaProvider) and local.online is True
+    assert isinstance(codemod_provider(tmp_path, "http://axiom.test"), AxiomGraphClient)
+
+
+def test_preview_codemods_defaults_to_the_local_provider(tmp_path, monkeypatch):
+    from pymolt.codemods import service
+    from pymolt.delta import provider as provider_mod
+
+    seen = {}
+
+    class _Local:
+        def __init__(self, project_dir, *, online=False, symbols=None):
+            seen["project_dir"], seen["online"] = project_dir, online
+
+        def fetch_bundle(self, migrations, *, progress=None, use_cache=None):
+            return {"flask": CodemodBundle()}
+
+    monkeypatch.setattr(provider_mod, "LocalDeltaProvider", _Local)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    by_pkg, previews = service.preview_codemods(
+        tmp_path, [DependencyMigration("flask", "2.0.3", "3.0.0")], online=True,
+    )
+    assert seen == {"project_dir": tmp_path, "online": True}
+    assert by_pkg == {"flask": []} and previews == []

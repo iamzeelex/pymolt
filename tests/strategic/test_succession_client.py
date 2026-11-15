@@ -43,8 +43,12 @@ def _transplant() -> SuccessionEdge:
     return SuccessionEdge(
         from_framework="keras", to_framework="torch+torchvision", strategy="transplant",
         summary="Re-init from torchvision", scaffold_hint="maskrcnn_resnet50_fpn(...)",
-        abstraction_mappings=[AbstractionMapping(from_symbol="keras.Model", to_symbol="torch.nn.Module")],
-        weight_conversion=WeightConversion(from_format=".h5", to_format=".pth", approach="h5py→state_dict"),
+        abstraction_mappings=[
+            AbstractionMapping(from_symbol="keras.Model", to_symbol="torch.nn.Module")
+        ],
+        weight_conversion=WeightConversion(
+            from_format=".h5", to_format=".pth", approach="h5py→state_dict"
+        ),
     )
 
 
@@ -175,7 +179,9 @@ def test_run_succession_never_applies_transplant(tmp_path):
 
 
 def test_run_succession_no_frameworks_returns_empty(tmp_path):
-    edges, result = run_succession(tmp_path, base_url="http://x", client=_FakeClient([_keras_shim()]))
+    edges, result = run_succession(
+        tmp_path, base_url="http://x", client=_FakeClient([_keras_shim()])
+    )
     assert edges == [] and result is None
 
 
@@ -223,3 +229,57 @@ def test_cli_succession_renders_transplant_plan(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "transplant" in result.output
     assert "Scaffold" in result.output and "pymolt capture" in result.output
+
+
+# ── local knowledge (the default: no endpoint configured) ─────────────────────
+
+def test_client_without_endpoint_reads_curated_knowledge(monkeypatch):
+    monkeypatch.delenv("PYMOLT_AXIOM_ENDPOINT", raising=False)
+    monkeypatch.setattr(
+        client_mod.httpx, "post",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network without an endpoint")),
+    )
+    client = client_mod.SuccessionClient()
+    assert client.remote is False
+
+    edges = client.fetch(["tensorflow==1.15", "keras>=2.0.8", "numpy"])
+
+    by_target = {e.to_framework: e for e in edges}
+    assert set(by_target) == {"tensorflow.keras", "torch+torchvision", "tensorflow>=2"}
+    assert by_target["tensorflow.keras"].is_in_place
+    assert by_target["tensorflow.keras"].patterns[0].kind == "rewrite-module"
+    assert by_target["torch+torchvision"].is_transplant
+    assert by_target["torch+torchvision"].weight_conversion.from_format == ".h5"
+    assert all(any("pymolt knowledge" in ev for ev in e.evidence) for e in edges)
+
+
+def test_knowledge_edges_dedupe_across_aliases():
+    from pymolt.knowledge import succession_edges
+
+    edges = succession_edges(["tensorflow", "tensorflow<2"])
+    assert [e.to_framework for e in edges] == ["tensorflow>=2"]
+
+
+def test_run_succession_local_applies_the_curated_shim(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYMOLT_AXIOM_ENDPOINT", raising=False)
+    (tmp_path / "requirements.txt").write_text("keras>=2.0.8\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("from keras.layers import Conv2D\n", encoding="utf-8")
+
+    edges, result = run_succession(tmp_path, base_url=None)
+
+    assert {e.to_framework for e in edges} == {"tensorflow.keras", "torch+torchvision"}
+    assert result is not None and result.files_changed == 1
+    assert (tmp_path / "app.py").read_text() == "from keras.layers import Conv2D\n"
+
+
+def test_endpoint_in_environment_switches_to_remote(monkeypatch):
+    monkeypatch.setenv("PYMOLT_AXIOM_ENDPOINT", "http://svc:8000")
+    captured = {}
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        return _FakeResp({"edges": []})
+
+    monkeypatch.setattr(client_mod.httpx, "post", fake_post)
+    assert client_mod.SuccessionClient().fetch(["keras"]) == []
+    assert captured["url"] == "http://svc:8000/succession"
