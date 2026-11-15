@@ -178,6 +178,16 @@ def test_setup_view_has_one_key_set_listing_or_saved(tmp_path):
     assert saved["config"]["target_python"] == "3.13"
 
 
+def test_setup_view_says_what_saving_changed_besides_the_config(tmp_path):
+    from pymolt.ingestion.config import EnvConfig
+
+    config = EnvConfig(selected_manifest="requirements.txt", base_python="3.8",
+                       target_python="3.13")
+    note = "Added .pymolt/env_config.json to .gitignore."
+    view = views.setup_view(_options(), tmp_path, config=config, side_effects=[note])
+    assert note in view["data"]["warnings"]
+
+
 # ── assess ───────────────────────────────────────────────────────────────────
 
 _ASSESS_KEYS = {
