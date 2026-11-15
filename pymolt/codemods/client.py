@@ -166,7 +166,7 @@ class AxiomGraphClient:
             if progress:
                 names = ", ".join(m.name for m in chunk)
                 progress(
-                    f"Fetching batch {index}/{len(chunks)} from Axiom Cloud Hub ({self.base_url}) — {names}…"
+                    f"Fetching batch {index}/{len(chunks)} from Axiom ({self.base_url}) — {names}…"
                 )
             fetched = self._fetch_chunk(chunk, progress=progress)
             for m in chunk:
