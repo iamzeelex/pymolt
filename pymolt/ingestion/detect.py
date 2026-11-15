@@ -379,52 +379,21 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
         except Exception:
             pass
 
-    # 3. setup.py
-    elif name == "setup.py":
-        try:
-            content = manifest_path.read_text(encoding="utf-8")
-            blocks = re.findall(r"(?:install_requires|install_reqs|requirements|requires|deps)\s*=\s*\[(.*?)\]", content, re.DOTALL)
-            for block in blocks:
-                items = re.findall(r"['\"]([^'\"]+)['\"]", block)
-                for item in items:
-                    item = item.strip()
-                    if not item:
-                        continue
-                    try:
-                        req = Requirement(item)
-                        key = normalize_pkg_name(req.name)
-                        requirements[key] = item
-                    except Exception:
-                        pkg_match = re.match(r"^([\w\-\.]+)", item)
-                        if pkg_match:
-                            key = normalize_pkg_name(pkg_match.group(1))
-                            requirements[key] = item
-        except Exception:
-            pass
+    # 3. setup.py / 4. setup.cfg — the one shared extractor (parsed, never executed).
+    elif name in ("setup.py", "setup.cfg"):
+        from pymolt.ingestion.setup_reqs import MAIN_GROUP, parse_setup_file
 
-    # 4. setup.cfg
-    elif name == "setup.cfg":
-        try:
-            import configparser
-            config = configparser.ConfigParser()
-            config.read(manifest_path)
-            if config.has_option("options", "install_requires"):
-                block = config.get("options", "install_requires")
-                for line in block.splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    try:
-                        req = Requirement(line)
-                        key = normalize_pkg_name(req.name)
-                        requirements[key] = line
-                    except Exception:
-                        pkg_match = re.match(r"^([\w\-\.]+)", line)
-                        if pkg_match:
-                            key = normalize_pkg_name(pkg_match.group(1))
-                            requirements[key] = line
-        except Exception:
-            pass
+        for req in parse_setup_file(manifest_path).requirements:
+            if req.group != MAIN_GROUP:
+                continue  # extras are not part of the base dependency set
+            try:
+                key = normalize_pkg_name(Requirement(req.raw).name)
+            except Exception:
+                pkg_match = re.match(r"^([\w\-\.]+)", req.raw)
+                if not pkg_match:
+                    continue
+                key = normalize_pkg_name(pkg_match.group(1))
+            requirements[key] = req.raw
 
     if not requirements and name == "setup.cfg" and (manifest_path.parent / "setup.py").is_file():
         return extract_declared_requirements(manifest_path.parent / "setup.py")

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from pymolt.core.enums import EdgeKind
 from pymolt.ingestion.detect import detect_sources, normalize_pkg_name
+from pymolt.ingestion.setup_reqs import parse_setup_file
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,24 @@ def _parse_pipfile(path: Path, inv: DependencyInventory) -> None:
             inv.edges.append(_poetry_edge(name, spec, group, path.name))
 
 
+def _parse_setup_file(path: Path, inv: DependencyInventory) -> None:
+    """``install_requires`` / ``extras_require`` -> edges (provenance: the file's name).
+
+    Parsed, never executed; computed values come back as a note.
+    """
+    deps = parse_setup_file(path)
+    inv.manifests.append(path.name)
+    seen = {(e.raw, e.group) for e in inv.edges if e.source_file in ("setup.py", "setup.cfg")}
+    for req in deps.requirements:
+        if (req.raw, req.group) in seen:
+            continue
+        edge = _make_edge(req.raw, req.group, path.name)
+        if req.marker:
+            edge.marker = f"({edge.marker}) and ({req.marker})" if edge.marker else req.marker
+        inv.edges.append(edge)
+    inv.notes.extend(f"{path.name}: {note}" for note in deps.notes)
+
+
 def build_inventory(project_dir: str | Path) -> DependencyInventory:
     """Scan a project's PyPI manifests and classify every dependency edge."""
     project_path = Path(project_dir)
@@ -291,7 +310,7 @@ def build_inventory(project_dir: str | Path) -> DependencyInventory:
 
     req_queue: list = []
     visited: set = set()
-    saw_setup = False
+    setup_files: list[Path] = []
 
     for src in sources:
         name = src.path.name.lower()
@@ -305,15 +324,15 @@ def build_inventory(project_dir: str | Path) -> DependencyInventory:
         elif name == "pipfile":
             _parse_pipfile(src.path, inv)
         elif name in ("setup.py", "setup.cfg"):
-            saw_setup = True
+            setup_files.append(src.path)
 
     # Process requirements files, following -r includes transitively.
     while req_queue:
         path, group = req_queue.pop(0)
         _parse_requirements_file(path, group, inv, visited, req_queue)
 
-    if saw_setup:
-        inv.notes.append("setup.py/setup.cfg present — its install_requires/extras_require "
-                         "are not yet edge-classified (follow-up).")
+    # setup.py before setup.cfg, so the .py declaration wins a duplicate.
+    for path in sorted(setup_files, key=lambda p: p.name.lower() != "setup.py"):
+        _parse_setup_file(path, inv)
 
     return inv
