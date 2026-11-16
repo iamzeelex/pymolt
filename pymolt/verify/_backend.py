@@ -46,6 +46,7 @@ only a ``warn()`` walks it. ``warnings.warn`` is wrapped, not replaced: the orig
 runs, with ``stacklevel`` shifted by the one frame the wrapper adds, so the filters, the
 "once"/"default" registries and the reported file/line are exactly what they were.
 """
+import builtins
 import functools
 import inspect
 import os
@@ -653,6 +654,10 @@ def privacy_normalizer():
 # The categories that announce an API change; the message is capped (a hint, not a dump).
 WARN_CATEGORIES = (DeprecationWarning, PendingDeprecationWarning, FutureWarning)
 WARN_MESSAGE_MAX = 300
+# Never recorded, whatever points where: nondeterministic (garbage collection decides when a
+# ResourceWarning fires) or about the import machinery, not about how a call was made.
+WARN_UNRELATED = tuple(c for c in (ResourceWarning, ImportWarning, BytesWarning,
+                                   getattr(builtins, "EncodingWarning", None)) if c)
 ENV_WARNINGS = "PYMOLT_TRACE_WARNINGS"   # "0" / "off": do not wrap ``warnings.warn``
 _WARN_DEPTH = 256           # frames walked from the warn() caller to the call in flight
 _WARNED_MAX = 10000         # per backend: accumulators awaiting their call's completion
@@ -660,6 +665,7 @@ _WARNED_MAX = 10000         # per backend: accumulators awaiting their call's co
 _warn_lock = threading.Lock()
 _warn_owners = [()]         # [tuple of backends capturing], read lock-free by the hook
 _warn_saved = [None, None]  # [the original warnings.warn, our wrapper] while installed
+_warn_refronted = {}       # name -> (original, wrapper) of simplefilter & co. while installed
 _category_labels = {}
 
 
@@ -674,12 +680,15 @@ def _category_label(category):
     return label
 
 
-def warning_key(message, category=None):
+def warning_key(message, category=None, broad=False):
     """``(category label, message)`` of a deprecation-family warning, else None.
 
     Mirrors ``warnings.warn``'s own reading (a ``Warning`` instance gives its class; no
     category means ``UserWarning``) without running user code: a Warning instance's text is
-    its single string argument, a non-string message is named by its type."""
+    its single string argument, a non-string message is named by its type.
+
+    ``broad=True`` also keys a warning of any other category (bar ``WARN_UNRELATED``); the
+    caller then decides whether it is a notice to the project (see ``_capture_warning``)."""
     if isinstance(message, Warning):
         category = type(message)
         args = getattr(message, "args", ())
@@ -689,17 +698,63 @@ def warning_key(message, category=None):
     else:
         return None
     if not issubclass(category, WARN_CATEGORIES):
-        return None
+        if not broad or not issubclass(category, Warning) or issubclass(category, WARN_UNRELATED):
+            return None
+    return _warning_key_of(category, text)
+
+
+def _warning_key_of(category, text):
     if len(text) > WARN_MESSAGE_MAX:
         text = text[:WARN_MESSAGE_MAX]
     return (_category_label(category), text)
 
 
-def _capture_warning(owners, message, category, frame):
-    """Attribute one warning to the innermost recorded call in flight (across backends)."""
-    key = warning_key(message, category)
-    if key is None:
-        return
+def _points_into_project(owners, frame):
+    """Whether ``frame`` (where a warning says it was issued) is the project's own code: the
+    dependency addressed its caller. Judged by each owner's near-side matcher; an owner with no
+    near side (``include_internal``) accepts any."""
+    if frame is None:
+        return False
+    try:
+        name = frame.f_globals.get("__name__")
+    except Exception:
+        return False
+    for owner in owners:
+        near = getattr(owner, "near", None)
+        if near is None or near.matches(name, frame):
+            return True
+    return False
+
+
+def _capture_warning(owners, message, category, frame, attributed=None, text=None):
+    """Attribute one warning to the innermost recorded call in flight (across backends).
+
+    What is recorded (the family rule): every deprecation-family warning
+    (``DeprecationWarning``, ``PendingDeprecationWarning``, ``FutureWarning`` and subclasses),
+    and a warning of ANY other category (bar ``WARN_UNRELATED``) whose own location, the frame
+    ``stacklevel`` makes it point at (``attributed``), is the project's code. The second half is
+    "the dependency is telling its caller something": PyYAML 5.4's ``YAMLLoadWarning`` is a
+    ``RuntimeWarning``, issued by ``load_warning()`` with ``stacklevel=3`` to name the project's
+    ``yaml.load(s)`` line, and a family-only rule missed it. A warning that points at the
+    dependency itself (a ``UserWarning`` about its own internals) stays out, as does one issued
+    by the project's code (the walk to the call in flight stops there).
+
+    ``text`` is the message already read by the caller (the C-level observer has only that)."""
+    if text is not None:
+        if not (isinstance(category, type) and issubclass(category, Warning)):
+            return
+        if issubclass(category, WARN_CATEGORIES):
+            key = _warning_key_of(category, text)
+        elif issubclass(category, WARN_UNRELATED) or not _points_into_project(owners, attributed):
+            return
+        else:
+            key = _warning_key_of(category, text)
+    else:
+        key = warning_key(message, category)
+        if key is None:
+            key = warning_key(message, category, broad=True)
+            if key is None or not _points_into_project(owners, attributed):
+                return
     best = None
     for owner in owners:
         hit = owner._warning_frame(frame)
@@ -707,6 +762,19 @@ def _capture_warning(owners, message, category, frame):
             best = (hit[0], hit[1], owner)
     if best is not None:
         best[2]._add_warning(best[1], key)
+
+
+def _attributed_frame(caller, stacklevel):
+    """The frame ``warnings.warn(..., stacklevel)`` issued from ``caller`` points at."""
+    try:
+        level = stacklevel if stacklevel > 1 else 1
+    except Exception:
+        return caller
+    frame = caller
+    while level > 1 and frame is not None and frame.f_back is not None:
+        frame = frame.f_back
+        level -= 1
+    return frame
 
 
 def _forward_stacklevel(stacklevel, kwargs, caller, c_impl=True):
@@ -741,14 +809,23 @@ def _make_warn_hook(original):
         owners = _warn_owners[0]
         if owners:
             try:
-                _capture_warning(owners, message, category, caller)
+                _capture_warning(owners, message, category, caller,
+                                 _attributed_frame(caller, stacklevel))
+                _front_observer()
             except Exception:
                 pass  # capture must never change what warn() does
         try:
             level = _forward_stacklevel(stacklevel, kwargs, caller, c_impl)
         except Exception:
             level = stacklevel  # a bad stacklevel: let the original raise its own error
-        return original(message, category, level, source, **kwargs)
+        # The observer filter sees this warning again when the original reaches the filters:
+        # it is already recorded, so it stays out of the way until the original returns.
+        previous = getattr(_obs_state, "skip", False)
+        _obs_state.skip = True
+        try:
+            return original(message, category, level, source, **kwargs)
+        finally:
+            _obs_state.skip = previous
 
     try:
         functools.update_wrapper(warn, original)
@@ -758,6 +835,101 @@ def _make_warn_hook(original):
     return warn
 
 
+# ── the observer filter: warnings raised from C ──────────────────────────────
+# ``warnings.warn`` is wrapped above, but C code warns through ``PyErr_WarnEx`` straight into
+# the interpreter's filter loop (``datetime.utcnow()`` on 3.12). The loop calls, for every
+# filter in ``warnings.filters`` until one matches, ``msg.match(text)``, ``issubclass(category,
+# cat)`` and ``mod.match(module)``. The observer is a filter at the FRONT of the list whose three
+# parts are probes: ``match(text)`` keeps the text, the category's ``__subclasscheck__`` receives
+# the category (and records the warning with the text), and the filter NEVER matches (the
+# category check answers False). It therefore changes nothing the program can see: no action
+# is taken on its behalf, every filter after it decides exactly as before, ``once`` /
+# ``default`` / ``module`` registries are the interpreter's own, ``error`` still raises, and
+# ``catch_warnings(record=True)`` logs what it always logged. Nothing is re-applied because
+# nothing was intercepted. (The alternative, an ``always`` filter plus a ``showwarning`` hook,
+# would take the decision over and have to re-implement it, and ``catch_warnings(record=True)``
+# swaps ``showwarning`` out from under it.)
+_obs_state = threading.local()   # .text: the message the loop is testing; .skip: warn() is recorded
+
+
+class _ObserverText(object):
+    def match(self, text):
+        try:
+            _obs_state.text = text
+        except Exception:
+            pass
+        return True
+
+
+def _observe(category):
+    owners = _warn_owners[0]
+    text = getattr(_obs_state, "text", None)
+    _obs_state.text = None
+    if not owners or text is None or getattr(_obs_state, "skip", False):
+        return
+    if not isinstance(category, type):
+        return
+    frame = sys._getframe(2)         # 0 _observe, 1 __subclasscheck__, 2 what the C code ran in
+    own = getattr(sys.modules.get("warnings"), "__file__", None)
+    while frame is not None and own and frame.f_code.co_filename == own:
+        frame = frame.f_back         # the pure-Python warnings module, when C is not in use
+    if frame is None:
+        return
+    _capture_warning(owners, None, category, frame, frame, text=str(text))
+
+
+class _ObserverMeta(type):
+    def __subclasscheck__(cls, sub):
+        try:
+            _observe(sub)
+        except Exception:
+            pass      # recording must never change (or raise from) the program's own warning
+        return False
+
+
+_ObserverCategory = _ObserverMeta("PymoltWarningObserver", (Warning,), {})
+_OBSERVER_FILTER = ("ignore", _ObserverText(), _ObserverCategory, None, 0)
+
+
+def _front_observer():
+    """Keep the observer first in ``warnings.filters`` (cheap when it is: one identity test)."""
+    import warnings
+    flt = warnings.filters
+    if flt and flt[0] is _OBSERVER_FILTER:
+        return
+    flt[:] = [_OBSERVER_FILTER] + [f for f in flt if f is not _OBSERVER_FILTER]
+
+
+def _remove_observer():
+    import warnings
+    flt = warnings.filters
+    if any(f is _OBSERVER_FILTER for f in flt):
+        flt[:] = [f for f in flt if f is not _OBSERVER_FILTER]
+
+
+def _make_refront(original):
+    """``simplefilter`` & co. insert at the front: put the observer back there afterwards, so a
+    program's ``warnings.simplefilter("ignore")`` does not hide C-level warnings from it."""
+    def refront(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        finally:
+            if _warn_owners[0]:
+                try:
+                    _front_observer()
+                except Exception:
+                    pass
+    try:
+        functools.update_wrapper(refront, original)
+    except Exception:
+        pass
+    refront.__pymolt_warn_hook__ = True
+    return refront
+
+
+_REFRONT_FUNCTIONS = ("simplefilter", "filterwarnings", "resetwarnings")
+
+
 def _warnings_disabled():
     raw = os.environ.get(ENV_WARNINGS, "1").strip().lower()
     return raw in ("0", "false", "no", "off")
@@ -765,8 +937,9 @@ def _warnings_disabled():
 
 def install_warning_capture(owner):
     """Start attributing warnings to ``owner``'s calls in flight (idempotent). The first
-    owner wraps ``warnings.warn``. ``owner`` provides ``_warning_frame(frame)`` ->
-    ``(depth, frame) | None`` and ``_add_warning(frame, key)``."""
+    owner wraps ``warnings.warn`` and puts the observer filter first in ``warnings.filters``.
+    ``owner`` provides ``_warning_frame(frame)`` -> ``(depth, frame) | None`` and
+    ``_add_warning(frame, key)``."""
     if _warnings_disabled():
         return False
     try:
@@ -782,12 +955,23 @@ def install_warning_capture(owner):
             hook = _make_warn_hook(original)
             warnings.warn = hook
             _warn_saved[0], _warn_saved[1] = original, hook
+            for name in _REFRONT_FUNCTIONS:
+                fn = getattr(warnings, name, None)
+                if fn is not None:
+                    wrapped = _make_refront(fn)
+                    setattr(warnings, name, wrapped)
+                    _warn_refronted[name] = (fn, wrapped)
+        try:
+            _front_observer()
+        except Exception:
+            pass
     return True
 
 
 def remove_warning_capture(owner):
-    """Stop attributing warnings to ``owner``. The last owner restores ``warnings.warn``,
-    unless something wrapped our wrapper since (it then stays, as a pass-through)."""
+    """Stop attributing warnings to ``owner``. The last owner restores ``warnings.warn`` (and
+    ``simplefilter`` & co.) and takes the observer filter out, unless something wrapped our
+    wrapper since (it then stays, as a pass-through)."""
     with _warn_lock:
         _warn_owners[0] = tuple(o for o in _warn_owners[0] if o is not owner)
         if _warn_owners[0] or _warn_saved[1] is None:
@@ -797,6 +981,11 @@ def remove_warning_capture(owner):
             if warnings.warn is _warn_saved[1]:
                 warnings.warn = _warn_saved[0]
                 _warn_saved[0] = _warn_saved[1] = None
+            for name, (fn, wrapped) in list(_warn_refronted.items()):
+                if getattr(warnings, name, None) is wrapped:
+                    setattr(warnings, name, fn)
+                del _warn_refronted[name]
+            _remove_observer()
         except Exception:
             pass
 
