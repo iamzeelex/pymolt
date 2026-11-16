@@ -61,7 +61,7 @@ from ._identity import (
     sink_identity_fields,
     unwrap,
 )
-from ._normalize import typename
+from ._normalize import OutcomeMarker, typename
 
 _WRAP_MARK = "__pymolt_wrapped__"
 _FUNCTION = types.FunctionType
@@ -361,7 +361,8 @@ class WrapBackend(object):
                                      backend._take_warnings() if backend._warned else None)
                 raise
             # construction "result" is the instance -> shape becomes opaque:<Class>
-            backend._safe_record(qualname, real_init, bound_args, kw, self_obj, None, ident,
+            backend._safe_record(qualname, real_init, bound_args, kw,
+                                 OutcomeMarker(typename(self_obj)), None, ident,
                                  _now() - t0,
                                  backend._take_warnings() if backend._warned else None)
 
