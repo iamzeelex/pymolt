@@ -59,6 +59,46 @@ def test_resolve_old_prefers_the_running_container(monkeypatch, tmp_path):
     assert calls[0][0] == SPEC
 
 
+def test_baseline_missing_a_want_is_absent_not_a_reason_to_build(monkeypatch, tmp_path):
+    """G10: asgiref is a Django 4 dependency the Django 2.2 baseline never had."""
+    _config(monkeypatch)
+    monkeypatch.setattr(envs_mod, "runner_available", lambda spec: (True, None))
+    monkeypatch.setattr(envs_mod, "run_in", lambda spec, argv, **kw: _cp(json.dumps(
+        {"python": "3.9.1", "versions": {"django": "2.2.28", "asgiref": None, "pytz": "1"}})))
+    monkeypatch.setattr(envs_mod, "throwaway_env",
+                        lambda *a, **k: pytest.fail("built a throwaway env"))
+    wants = [envs_mod.Want("django", "2.2.28"), envs_mod.Want("asgiref", "3.11.1")]
+    old = envs_mod.resolve_old(tmp_path, wants)
+    assert old.available and old.source == "container" and old.reason is None
+    assert old.absent == ["asgiref"]
+
+
+def test_baseline_with_another_version_is_still_wrong(monkeypatch, tmp_path):
+    _config(monkeypatch)
+    monkeypatch.setattr(envs_mod, "runner_available", lambda spec: (True, None))
+    monkeypatch.setattr(envs_mod, "run_in", lambda spec, argv, **kw: _cp(json.dumps(
+        {"python": "3.9.1", "versions": {"django": "2.2.28", "asgiref": "3.0"}})))
+    monkeypatch.setattr(envs_mod, "throwaway_env", lambda *a, **k: (None, "no uv", None))
+    monkeypatch.setattr("pymolt.ingestion.fallback_compiler.find_python_interpreter",
+                        lambda *a, **k: None)
+    wants = [envs_mod.Want("django", "2.2.28"), envs_mod.Want("asgiref", "3.11.1")]
+    old = envs_mod.resolve_old(tmp_path, wants)
+    assert old.reason and "asgiref 3.0" in old.reason
+
+
+def test_a_baseline_with_none_of_the_wants_is_not_accepted(monkeypatch, tmp_path):
+    _config(monkeypatch)
+    monkeypatch.setattr(envs_mod, "runner_available", lambda spec: (True, None))
+    monkeypatch.setattr(envs_mod, "run_in", lambda spec, argv, **kw: _cp(json.dumps(
+        {"python": "3.9.1", "versions": {"django": None, "asgiref": None}})))
+    monkeypatch.setattr(envs_mod, "throwaway_env", lambda *a, **k: (None, "no uv", None))
+    monkeypatch.setattr("pymolt.ingestion.fallback_compiler.find_python_interpreter",
+                        lambda *a, **k: None)
+    old = envs_mod.resolve_old(tmp_path, [envs_mod.Want("django", "2.2.28"),
+                                          envs_mod.Want("asgiref", "3.11.1")])
+    assert not old.available
+
+
 def test_resolve_old_uses_the_baseline_slots_runner_first(monkeypatch, tmp_path):
     from types import SimpleNamespace
 

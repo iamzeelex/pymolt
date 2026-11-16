@@ -1206,6 +1206,11 @@ class _Run:
             report.new_python = py
         info = (run.meta.get("dists") or {}).get(report.package) or {}
         version = info.get("version")
+        if version is None and side == "old" and any(
+                canonicalize_name(a) == canonicalize_name(report.package) for a in env.absent):
+            report.notes.append(f"{report.package} is not in the baseline interpreter: absent "
+                                f"in the old version, its symbols are new")
+            return True
         if version is None:
             report.notes.append(f"{report.package} is not installed in the {label} interpreter "
                                 f"({env.executable})")
