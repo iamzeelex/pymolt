@@ -170,7 +170,10 @@ def run_scenario(name: str, base: Path) -> dict:
     change, upgrade, expected = SCENARIOS[name]
     root = base / name
     make_project(root, change)
-    pymolt(root, "setup", ".", log="setup.log")
+    # Explicit versions: without them setup assumes the Python pymolt itself runs on, so the
+    # scenario would silently become a migration to whatever interpreter the dev venv has.
+    pymolt(root, "setup", ".", "--base-python", OLD["python"], "--target-python", NEW["python"],
+           "--target-env", str(ENVS / NEW["python"]), log="setup.log")
     rc_base = capture(root, "baseline", OLD)
     (root / "requirements-target.txt").write_text("pandas==2.2.3\nrequests\n")
     rc_plan = pymolt(root, "plan", ".", "--target-manifest", "requirements-target.txt",
