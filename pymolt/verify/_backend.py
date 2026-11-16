@@ -254,6 +254,49 @@ def _stdlib_roots():
     return tuple(os.path.normpath(r) + os.sep for r in roots if r)
 
 
+ENV_STDLIB = "PYMOLT_TRACE_STDLIB"   # comma list of stdlib top-level modules to treat as targets
+
+# Test-runner packages are never a boundary target: a project's tests call them (monkeypatch,
+# fixtures, hooks) and their inputs (tmp paths, node ids) change every run. They come back only
+# when ``PYMOLT_TRACE_TARGET`` names one of them (naming any lifts the exclusion for the whole
+# family; the target prefixes themselves still decide which modules match).
+TEST_RUNNER_PACKAGES = frozenset((
+    "_pytest", "pytest", "pluggy", "py", "iniconfig", "_hypothesis_pytestplugin", "xdist"))
+
+# Where a stdlib module's callables report their ``__module__`` from, when it is not the
+# module's own name (``os.path.join`` is ``posixpath.join``). A leading underscore is tried too
+# (``datetime`` -> ``_datetime``, ``asyncio`` -> ``_asyncio``).
+_STDLIB_ALIASES = {
+    "os": ("posix", "nt", "posixpath", "ntpath", "genericpath"),
+}
+
+
+def stdlib_targets(raw=None):
+    """The stdlib top-level modules ``PYMOLT_TRACE_STDLIB`` (or ``raw``) asks to be recorded
+    like dependencies: a frozenset of top-level names, empty when unset (nothing changes)."""
+    if raw is None:
+        raw = os.environ.get(ENV_STDLIB, "")
+    if not isinstance(raw, str):
+        raw = ",".join(str(r) for r in raw)
+    return frozenset(p.strip().split(".", 1)[0] for p in raw.split(",") if p.strip())
+
+
+def _stdlib_hit_names(targets):
+    """Every top-level module name that counts as one of the stdlib ``targets``."""
+    names = set(targets)
+    for name in targets:
+        names.add("_" + name)
+        names.update(_STDLIB_ALIASES.get(name, ()))
+    return frozenset(names)
+
+
+def _runner_exclusions(explicit_tops):
+    """The test-runner packages to exclude, none of them when the target names one."""
+    if any(t in TEST_RUNNER_PACKAGES for t in explicit_tops):
+        return ()
+    return tuple(sorted(TEST_RUNNER_PACKAGES))
+
+
 class AnyMatcher(object):
     """Matches when any of its matchers does (the discover target widened by impact targets)."""
 
@@ -268,17 +311,24 @@ class AnyMatcher(object):
 
 
 class PrefixMatcher(object):
-    """Match modules under one or more explicit top-level prefixes (minus excludes)."""
+    """Match modules under one or more explicit top-level prefixes (minus excludes), plus the
+    stdlib modules ``PYMOLT_TRACE_STDLIB`` names (``stdlib`` overrides the environment)."""
 
-    def __init__(self, prefixes, exclude=()):
+    def __init__(self, prefixes, exclude=(), stdlib=None):
         self.prefixes = tuple(p for p in prefixes if p)
-        self.exclude = tuple(exclude)
+        tops = [p.split(".", 1)[0] for p in self.prefixes]
+        self.exclude = tuple(exclude) + _runner_exclusions(tops)
+        self.stdlib = stdlib_targets() if stdlib is None else stdlib_targets(stdlib)
+        self._stdlib_names = _stdlib_hit_names(self.stdlib)
 
     def matches(self, module, frame=None):
         if not module:
             return False
-        if module.split(".", 1)[0] in self.exclude:
+        top = module.split(".", 1)[0]
+        if top in self.exclude:
             return False
+        if top in self._stdlib_names:
+            return True
         for p in self.prefixes:
             if module == p or module.startswith(p + "."):
                 return True
@@ -303,16 +353,22 @@ class SitePackagesMatcher(object):
     Decisions are cached per module name to keep the hot path to a dict lookup.
     """
 
-    def __init__(self, exclude=()):
-        self.exclude = tuple(exclude)
+    def __init__(self, exclude=(), stdlib=None):
+        self.exclude = tuple(exclude) + _runner_exclusions(())
+        self.stdlib = stdlib_targets() if stdlib is None else stdlib_targets(stdlib)
+        self._stdlib_names = _stdlib_hit_names(self.stdlib)
         self._roots = _site_roots()
         self._cache = {}
 
     def matches(self, module, frame=None):
-        if not module or not self._roots:
+        if not module:
             return False
         top = module.split(".", 1)[0]
-        if top in self.exclude or top in _BUILTIN_MODULES:
+        if top in self.exclude:
+            return False
+        if top in self._stdlib_names:
+            return True   # a stdlib module this capture asked to record (PYMOLT_TRACE_STDLIB)
+        if not self._roots or top in _BUILTIN_MODULES:
             return False  # C builtins (builtins, posix, ...) are never a dependency
         cached = self._cache.get(module)
         if cached is not None:
@@ -373,6 +429,8 @@ class AppMatcher(object):
     def matches(self, module, frame=None):
         if not module:
             return False
+        if module in _SELF_MODULES:
+            return False   # the injected runtime is not the project
         if self.source:
             return any(module == p or module.startswith(p + ".") for p in self.source)
         top = module.split(".", 1)[0]
@@ -488,6 +546,17 @@ def sink_tally(sink):
     def positional(qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         return fn(qualname, sym, site, kind)
     return positional
+
+
+# The import machinery is never a boundary (``PYMOLT_TRACE_STDLIB=importlib`` included): its
+# frames are what runs while a dependency is being imported, not a contact with it.
+_IMPORT_MACHINERY = ("importlib._bootstrap", "_frozen_importlib")
+
+
+def never_target(module):
+    """True for a module that is never a dependency boundary (this runtime, the import
+    machinery)."""
+    return module in _SELF_MODULES or module.startswith(_IMPORT_MACHINERY)
 
 
 class TraceBackend(object):
@@ -873,7 +942,7 @@ class FrameBackend(TraceBackend):
 
     def _target_module(self, module, frame):
         """Far-side decision for a module (cached per code by the callers)."""
-        if module in _SELF_MODULES:
+        if never_target(module):
             return False
         return bool(self._in_target(module, frame))
 
@@ -1143,8 +1212,8 @@ class SetProfileBackend(FrameBackend):
             if len(self._callee) >= _CODE_CACHE_MAX:
                 self._callee.clear()
             module = frame.f_globals.get("__name__", "") or ""
-            ent = [code, self._target_module(module, frame), module,
-                   code.co_name == "<module>", None, generator_marker(code)]
+            ent = [code, self._target_module(module, frame) and code.co_name != "__del__",
+                   module, code.co_name == "<module>", None, generator_marker(code)]
             self._callee[id(code)] = ent
         return ent
 

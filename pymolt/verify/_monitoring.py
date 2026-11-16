@@ -80,7 +80,6 @@ import types
 
 from ._backend import (
     _CODE_CACHE_MAX,
-    _SELF_MODULES,
     OUTCOME_RAISE,
     OUTCOME_RETURN,
     FrameBackend,
@@ -88,6 +87,7 @@ from ._backend import (
     _monotonic,
     generator_marker,
     install_warning_capture,
+    never_target,
     remove_warning_capture,
 )
 from ._identity import _wrapped_of
@@ -592,7 +592,7 @@ class MonitoringBackend(FrameBackend):
         body = code.co_name == "<module>"
         prefix = self._watch_prefix
         watched = id(code) in self._watch_codes or (
-            prefix is not None and module not in _SELF_MODULES
+            prefix is not None and not never_target(module)
             and bool(prefix.matches(module, frame)))
         disable = None
         if self.mode == INCREMENTAL:
@@ -603,7 +603,8 @@ class MonitoringBackend(FrameBackend):
             if not hit and prefix is not None:
                 disable = self._mon.DISABLE   # only a global PY_START reaches unwatched code
         else:
-            hit = not body and (watched or self._target_module(module, frame))
+            hit = not body and (watched or (self._target_module(module, frame)
+                                            and code.co_name != "__del__"))
             if not hit:
                 disable = self._mon.DISABLE
         # [code, in_target, module, is_module_body, identity, generator marker, DISABLE|None]
@@ -826,7 +827,7 @@ class MonitoringBackend(FrameBackend):
         ent = self._deps.get(id(code))
         if ent is None or ent[0] is not code:
             module = func.__globals__.get("__name__", "") or ""
-            dep = module not in _SELF_MODULES and (
+            dep = not never_target(module) and code.co_name != "__del__" and (
                 id(code) in self._impact_codes or self._target_module(module, None))
             if len(self._deps) >= _CODE_CACHE_MAX:
                 self._deps.clear()
@@ -871,7 +872,8 @@ class MonitoringBackend(FrameBackend):
         module = g.get("__name__", "") or ""
         body = code.co_name == "<module>"
         hit = False
-        if not body and module not in _SELF_MODULES and self._b_owns(code, g, module):
+        if (not body and not never_target(module) and code.co_name != "__del__"
+                and self._b_owns(code, g, module)):
             prefix = self._watch_prefix
             hit = (id(code) in self._impact_codes
                    or (prefix is not None and bool(prefix.matches(module, frame)))
