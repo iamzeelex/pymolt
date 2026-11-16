@@ -2055,7 +2055,16 @@ def _stamp_verdict(
     used_slots: list[tuple[str, object]],
 ) -> None:
     """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty."""
-    for warning in (report.fact_diff or {}).get("warnings") or ():
+    # The verdict's FAIL evidence is the WHOLE surface (``all_*``): an impact filter is a focus
+    # for the report, not a limit on what can fail it, or a change nobody predicted could
+    # never be found. Coverage (BLIND, dynamic-only, trust, static targets) stays scoped to the
+    # impacted surface below: "what the migration touches was exercised" is the meaningful
+    # claim there, and the whole-surface BLIND count would drown it.
+    whole_diff = report.all_fact_diff or report.fact_diff
+    whole_clean = report.all_diff_clean if report.all_diff_clean is not None \
+        else report.diff_clean
+    whole_counts = report.all_diff if report.all_diff is not None else report.diff
+    for warning in (whole_diff or {}).get("warnings") or ():
         # Snapshot caps that lower the comparison level without blocking PASS.
         if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:")):
             if warning not in report.notes:
@@ -2129,7 +2138,7 @@ def _stamp_verdict(
         if baseline.sample_rate != post.sample_rate:
             comparability.append("baseline and post-migration used different sample rates")
         if (baseline.sample_rate < 1 or post.sample_rate < 1) and not _tallies_complete(
-                report.fact_diff):
+                whole_diff):
             comparability.append(
                 "sampled captures cannot prove that unmatched interactions disappeared"
             )
@@ -2146,20 +2155,26 @@ def _stamp_verdict(
         report.verdict = VerificationVerdict.INCONCLUSIVE
         report.verdict_reasons = list(dict.fromkeys(comparability))
         return
-    if report.diff_clean is False or report.probe_changed:
+    if whole_clean is False or report.probe_changed:
         report.verdict = VerificationVerdict.FAIL
-        if report.diff_clean is False:
+        if whole_clean is False:
             report.verdict_reasons.append("behavioral boundary changes were detected")
+            if report.unpredicted_changes:
+                n = len(report.unpredicted_changes)
+                names = ", ".join(sorted({str(e.get("symbol")) for e in
+                                          report.unpredicted_changes})[:5])
+                report.verdict_reasons.append(
+                    f"{n} behaviour change(s) outside the plan's predicted impacts: {names}")
         if report.probe_changed:
             report.verdict_reasons.append("sandbox replay changed behavior")
         return
 
     reasons: list[str] = []
-    if report.diff is None:
+    if whole_counts is None:
         reasons.append("no before/after diff was produced")
-    elif report.diff.get("skipped_opaque", 0):
+    elif whole_counts.get("skipped_opaque", 0):
         reasons.append("some boundary interactions were opaque or nondeterministic")
-    reasons.extend(_fact_diff_reasons(report.fact_diff))
+    reasons.extend(_fact_diff_reasons(whole_diff))
     if report.blind:
         reasons.append(f"{report.blind} static dependency symbol(s) were not exercised")
     if report.dynamic_only:
@@ -2228,6 +2243,14 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
             )
     if not any(counts.values()):
         reasons.append("no comparable call facts were recorded on both sides")
+    # An unverified edited site is counted in the summary but never blocks PASS; a review
+    # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
+    entries = [e for e in entries if not e.get("unverified")]
+    reviews = [e for e in entries if e.get("review")]
+    if reviews:
+        names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
+        reasons.append(f"{len(reviews)} edited call(s) need review: {names}")
+    entries = [e for e in entries if not e.get("review")]
     unpaired = sum(
         1 for e in entries
         if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
@@ -2252,6 +2275,7 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
             f"{uncomparable} call fact(s) lost their outcome distribution and cannot be compared"
         )
     return reasons or ["the fact diff could not establish equivalence"]
+
 
 
 def baseline_setup_unchanged(slot, current_setup: str | None) -> bool:

@@ -951,6 +951,12 @@ def _risk_data(lists: _Lists, report) -> dict[str, Any]:
     }
 
 
+def _site_text(site: dict | None) -> str:
+    if not site:
+        return "?"
+    return f"{site.get('file', '?')}:{site.get('line', '?')}"
+
+
 def _calibration_data(lists: _Lists, calibration) -> dict[str, Any] | None:
     """Predicted vs observed, as counts plus the hits and the unpredicted changes."""
     if calibration is None:
@@ -1036,6 +1042,20 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         if dropped:
             lines.append(f"{dropped} symbol name(s) omitted from data.changes; full report: "
                          f"{full_path}")
+    edited = (rep.all_fact_diff or rep.fact_diff or {})
+    if (edited.get("edited_sites") or {}).get("sites") and edited.get("edited_summary"):
+        lines.append(f"{edited['edited_summary']}.")
+        data["edited_sites"] = edited["edited_sites"]
+    outside = list(getattr(rep, "unpredicted_changes", None) or ())
+    if outside:
+        data["changes_outside_plan"] = [
+            {"symbol": e.get("symbol"), "category": e.get("category"),
+             "site": _site_text(e.get("old_site") or e.get("new_site"))} for e in outside]
+        lines.append(f"{len(outside)} behaviour change(s) outside the plan's predicted impacts: "
+                     + "; ".join(f"{e['symbol']} at {e['site']}"
+                                 for e in data["changes_outside_plan"][:5])
+                     + (" ..." if len(outside) > 5 else "")
+                     + " (data.changes_outside_plan).")
     cal = data["calibration"]
     if cal is not None and cal["predicted"]:
         prevented = f"{cal['prevented']} prevented by the plan, " if cal["prevented"] else ""
