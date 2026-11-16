@@ -29,9 +29,17 @@ class CodemodPattern(BaseModel):
     old_qualname: str
     new_qualname: str
     kind: str
-    """'rewrite-import' (module moved) | 'rename-call' (symbol renamed)."""
+    """'rewrite-import' (module moved) | 'rename-call' (symbol renamed) | 'rewrite-attr' (a
+    module segment inserted into an attribute chain) | 'replace-attr-path' (a cross-module
+    rename such as ``imp.reload`` → ``importlib.reload``) | 'rewrite-module'."""
     confidence: str = "medium"
     evidence: list[str] = Field(default_factory=list)
+    requires_import: str | None = None
+    """A module the rewritten code needs imported, e.g. ``collections.abc``."""
+    scope: str = "dependency"
+    """``"dependency"`` (a package's API) or ``"python"`` (a stdlib fix for the Python move)."""
+    runs_on_base: bool | None = None
+    """Whether the rewritten code also runs on the base Python (None: not known/applicable)."""
 
     def summary(self) -> str:
         return f"[{self.kind}] {self.old_qualname} → {self.new_qualname}  ({self.confidence})"
