@@ -32,6 +32,7 @@ Nothing here prompts or prints — that's the callers' job. Bad input raises
 from __future__ import annotations
 
 import glob
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -46,11 +47,13 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
@@ -58,6 +61,7 @@ from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     find_facts_snapshot,
     iter_snapshot,
+    iter_trace_records,
     merge_fact_snapshots,
     project_snapshot,
     read_snapshot_header,
@@ -1439,6 +1443,7 @@ def capture_named_trace(
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
         _record_sampling(staged_path, sample_rate, sampling_source)
         _record_site_text(staged_path, project_dir, runner_spec)
+        _record_sources_for(staged_path, project_dir, when, runner_spec)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
@@ -1473,6 +1478,7 @@ def capture_named_trace(
         try:
             result.metadata_path = _move_trace_metadata(staged_path, diagnostic)
             result.facts_path = _move_facts_snapshot(staged_path, diagnostic)
+            _move_sources(staged_path, diagnostic)
         except OSError as exc:
             logger.warning("could not move diagnostic trace metadata: %s", exc)
         if result.command_log:
@@ -1504,6 +1510,7 @@ def capture_named_trace(
         try:
             result.metadata_path = _move_trace_metadata(staged_path, out_path)
             result.facts_path = _move_facts_snapshot(staged_path, out_path)
+            _move_sources(staged_path, out_path)
         except OSError as exc:
             logger.warning("could not promote trace metadata: %s", exc)
         if result.command_log:
@@ -1539,6 +1546,7 @@ def capture_named_trace(
         backend=result.backend,
         impact_targets=result.impact_targets,
         metadata_path=result.metadata_path,
+        sources_path=_existing(sources_path(result.out_path)),
         events_seen=result.events_seen,
         dropped_events=result.dropped_events,
         sampling_dropped=result.sampling_dropped,
@@ -1602,6 +1610,7 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
             shutil.move(str(current_snapshot), str(snapshot_path(destination)))
         except OSError as exc:
             logger.warning("could not archive previous %s facts snapshot: %s", when, exc)
+    _move_sources(current, destination)
     return str(destination)
 
 
@@ -1745,6 +1754,192 @@ def poll_attached_capture(out_path: str | Path) -> int:
 _PROJECTED = '"src": "facts"'  # how project_snapshot marks its lines
 
 
+SOURCES_SCHEMA = "pymolt.sources/1"
+SOURCES_MAX_BYTES = 1_000_000
+SOURCES_TOTAL_BUDGET = 32_000_000  # raw bytes of text in one snapshot's whole-tree part
+_NOT_PROJECT_DIRS = frozenset({"site-packages", ".pymolt", ".venv", "venv", ".tox", ".git",
+                               "node_modules", "__pycache__"})
+
+
+def _existing(path: Path) -> str | None:
+    return str(path) if path.is_file() else None
+
+
+def sources_path(trace_path: str | Path) -> Path:
+    """Where a capture keeps its source snapshot: ``<trace>.sources.json.gz``."""
+    return Path(str(trace_path) + ".sources.json.gz")
+
+
+def _move_sources(source: str | Path, destination: str | Path) -> None:
+    src, dst = sources_path(source), sources_path(destination)
+    if not src.is_file():
+        return
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+    except OSError as exc:
+        logger.warning("could not move the source snapshot %s: %s", src, exc)
+
+
+def _read_snapshot(path: str | Path | None) -> dict | None:
+    if not path:
+        return None
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) and isinstance(data.get("files"), dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def record_sources(
+    trace_path: str | Path, project_dir: str | Path, runner=None, *,
+    extra_files: Iterable[str] = (), whole_tree: bool = False,
+) -> str | None:
+    """Snapshot the text and sha256 of project files, gzipped next to the trace.
+
+    The files are those with a fact in the trace (``fact_files``), plus ``extra_files``
+    (a post-migration capture passes the baseline's, so a file whose calls all vanished, or
+    that only gained calls, has text on both sides), plus, with ``whole_tree`` (a baseline),
+    every other project ``.py`` file under the root up to ``SOURCES_TOTAL_BUDGET`` bytes
+    (facts first, then the rest smallest first; what was left out is recorded). Files are read
+    on the host after the run (a container path maps through ``to_host``) and keyed by the
+    project-relative path. Over ``SOURCES_MAX_BYTES``, unreadable, outside the project, or
+    inside a virtualenv / site-packages: skipped (the last two silently). A file in neither
+    snapshot stays unknown. Format::
+
+        {"schema": "pymolt.sources/1", "root": ..., "fact_files": [...],
+         "files": {"app/x.py": {"sha256": ..., "text": ...}},
+         "skipped": [{"file": ..., "reason": ...}], "left_out": [...], "left_out_total": N}
+
+    Returns the sidecar path, or None when it could not be written (never raises)."""
+    root = os.path.realpath(str(project_dir))
+    seen: set[str] = set()
+    try:
+        for rec in iter_trace_records(trace_path):
+            where = rec.get("where")
+            file = where.get("file") if isinstance(where, dict) else None
+            if isinstance(file, str) and file:
+                seen.add(file)
+    except OSError:
+        return None
+
+    def relative(file: str) -> tuple[str, str] | None:
+        path = file if os.path.isabs(file) else os.path.join(root, file)
+        if runner is not None and os.path.isabs(file):
+            real = os.path.realpath(path)
+            if real != root and not real.startswith(root + os.sep):
+                path = to_host(runner, file) or path
+        real = os.path.realpath(path)
+        if real != root and not real.startswith(root + os.sep):
+            return None                     # not a project file: the runtime's or a dependency's
+        rel = Path(os.path.relpath(real, root)).as_posix()
+        if _NOT_PROJECT_DIRS & set(rel.split("/")[:-1]):
+            return None
+        return rel, real
+
+    fact_files: dict[str, str] = {}
+    for file in sorted(seen):
+        found = relative(file)
+        if found:
+            fact_files[found[0]] = found[1]
+    wanted = dict(fact_files)
+    for file in sorted(extra_files):
+        found = relative(file)
+        if found:
+            wanted.setdefault(found[0], found[1])
+    rest: list[tuple[int, str, str]] = []
+    if whole_tree:
+        from pymolt.verify.contact_map import _source_files
+
+        for path in _source_files(Path(root))[0]:
+            found = relative(str(path))
+            if found and found[0] not in wanted:
+                try:
+                    rest.append((os.path.getsize(found[1]), found[0], found[1]))
+                except OSError:
+                    continue
+        rest.sort()
+
+    files: dict[str, dict[str, str]] = {}
+    skipped: list[dict[str, str]] = []
+    left_out: list[str] = []
+    total = 0
+
+    def take(rel: str, real: str, budgeted: bool) -> None:
+        nonlocal total
+        try:
+            raw = Path(real).read_bytes()
+        except OSError as exc:
+            skipped.append({"file": rel, "reason": f"unreadable: {exc.__class__.__name__}"})
+            return
+        if len(raw) > SOURCES_MAX_BYTES:
+            skipped.append({"file": rel, "reason": f"over {SOURCES_MAX_BYTES} bytes ({len(raw)})"})
+            return
+        if budgeted and total + len(raw) > SOURCES_TOTAL_BUDGET:
+            left_out.append(rel)
+            return
+        total += len(raw)
+        files[rel] = {"sha256": hashlib.sha256(raw).hexdigest(),
+                      "text": raw.decode("utf-8", errors="replace")}
+
+    for rel, real in wanted.items():
+        take(rel, real, False)
+    for _size, rel, real in rest:
+        take(rel, real, True)
+    out = sources_path(trace_path)
+    pending = out.with_name(f".{out.name}.{uuid.uuid4().hex}.pending")
+    try:
+        with gzip.open(pending, "wt", encoding="utf-8", compresslevel=6) as fh:
+            json.dump({"schema": SOURCES_SCHEMA, "root": root,
+                       "fact_files": sorted(fact_files), "files": files, "skipped": skipped,
+                       "left_out": left_out[:500], "left_out_total": len(left_out)}, fh)
+        os.replace(pending, out)
+    except OSError as exc:
+        logger.warning("could not write the source snapshot for %s: %s", trace_path, exc)
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+        return None
+    return str(out)
+
+
+def load_sources(path: str | Path | None) -> dict[str, str] | None:
+    """``{relative path: text}`` from a source snapshot; None when absent or unreadable
+    (an older capture: callers fall back to line-text rules). A file not in the result is
+    unknown, not empty."""
+    data = _read_snapshot(path)
+    if data is None:
+        return None
+    try:
+        return {k: v["text"] for k, v in data["files"].items()}
+    except (KeyError, TypeError):
+        return None
+
+
+def _record_sources_for(trace_path: str | Path, project_dir: str | Path, when: str,
+                        runner=None) -> None:
+    """The snapshot of one slot: a baseline stores the whole tree (within budget); a
+    post-migration capture stores its own fact files plus the baseline's, so every file that
+    had facts on either side has text on both."""
+    try:
+        if when == "baseline":
+            record_sources(trace_path, project_dir, runner, whole_tree=True)
+        else:
+            record_sources(trace_path, project_dir, runner,
+                           extra_files=_baseline_fact_files(project_dir))
+    except Exception as exc:  # noqa: BLE001 - never fail a capture over provenance
+        logger.warning("could not record the source snapshot for %s: %s", trace_path, exc)
+
+
+def _baseline_fact_files(project_dir: str | Path) -> list[str]:
+    """The files that had facts in the baseline capture (from its snapshot; [] if none)."""
+    baseline = load_contract_state(project_dir).baseline
+    data = _read_snapshot(baseline.sources_path) if baseline is not None else None
+    return list(data.get("fact_files") or ()) if data else []
+
+
 def _record_site_text(trace_path: str | Path, project_dir: str | Path, runner=None) -> None:
     """Keep the source text of every call site with the trace.
 
@@ -1803,6 +1998,7 @@ def finalize_attached_capture(
     _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
     _record_site_text(out_path, project_dir)
+    _record_sources_for(out_path, project_dir, when)
     metadata = _read_trace_metadata(out_path)
     ran_with = metadata.get("sample_rate")
     if isinstance(ran_with, int | float) and not isinstance(ran_with, bool) and 0 < ran_with <= 1:
@@ -1861,6 +2057,7 @@ def finalize_attached_capture(
         try:
             metadata_path = _move_trace_metadata(out_path, final_path)
             _move_facts_snapshot(out_path, final_path)
+            _move_sources(out_path, final_path)
         except OSError as exc:
             logger.warning("could not promote attached trace metadata: %s", exc)
             metadata_path = None
@@ -1872,6 +2069,7 @@ def finalize_attached_capture(
         try:
             metadata_path = _move_trace_metadata(out_path, diagnostic)
             _move_facts_snapshot(out_path, diagnostic)
+            _move_sources(out_path, diagnostic)
         except OSError as exc:
             logger.warning("could not move attached diagnostic metadata: %s", exc)
             metadata_path = None
@@ -1891,6 +2089,7 @@ def finalize_attached_capture(
         backend=metadata.get("backend"),
         impact_targets=normalized_targets,
         metadata_path=metadata_path,
+        sources_path=_existing(sources_path(committed_path)),
         events_seen=events_seen,
         dropped_events=dropped_events,
         sampling_dropped=(
@@ -1989,10 +2188,80 @@ def build_contract_report_from_state(
         comparator_profile=comparator_profile,
         custom_comparator=custom_comparator,
         predictions=predictions,
+        diff_context=build_diff_context(project_dir, trace, against) if trace and against
+        else None,
     )
     _stamp_staleness(project_dir, report, used_slots)
     _stamp_verdict(report, trace, against, used_slots)
     return report
+
+
+def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path):
+    """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
+
+    Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
+    diff then falls back to line-text rules); the apply ledger from ``.pymolt/apply_ledger.json``;
+    the static contact maps are built from the snapshots; ``successors`` (old -> new symbol)
+    from the applied plan's impacts, its risks' delta facts and the ledger; and
+    ``type_relocations`` from the plan when it carries them. Never raises: a part that
+    cannot be built is left None."""
+    from pymolt.apply_ledger import ledger_path, load_ledger
+    from pymolt.verify.contact_map import contacts_by_line
+    from pymolt.verify.facts import DiffContext
+
+    root = Path(os.path.abspath(project_dir))
+    ctx = DiffContext()
+    ctx.old_sources = load_sources(sources_path(against))
+    ctx.new_sources = load_sources(sources_path(trace))
+    if ledger_path(root).is_file():
+        ctx.edits = load_ledger(root)
+    for side, sources in (("old", ctx.old_sources), ("new", ctx.new_sources)):
+        if sources:
+            try:
+                setattr(ctx, f"{side}_contacts", contacts_by_line(sources, root))
+            except Exception as exc:  # noqa: BLE001 - the diff degrades without contacts
+                logger.warning("could not build the %s contact map: %s", side, exc)
+    successors: dict[str, str] = {}
+    for entry in ctx.edits or ():
+        if entry.get("old_symbol") and entry.get("new_symbol"):
+            successors.setdefault(entry["old_symbol"], entry["new_symbol"])
+    try:
+        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import MigrationReceipt
+
+        receipt = MigrationReceipt.load(root)
+        plan = (MigrationPlan.load(root, receipt.plan_path)
+                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                else None)
+        if plan is not None:
+            for impact in plan.impacts:
+                if impact.replacement_path:
+                    successors.setdefault(impact.path, impact.replacement_path)
+            for risk in plan.risks.risks if plan.risks is not None else ():
+                for fact in [risk.fact, *risk.facts]:
+                    if fact and fact.get("symbol") and fact.get("successor"):
+                        successors.setdefault(fact["symbol"], fact["successor"])
+            relocations = getattr(plan, "type_relocations", None)
+            if relocations:
+                ctx.type_relocations = _relocation_map(relocations)
+    except Exception as exc:  # noqa: BLE001 - provenance is best effort
+        logger.warning("could not read the applied plan for the diff context: %s", exc)
+    ctx.successors = successors or None
+    return ctx
+
+
+def _relocation_map(relocations: object) -> dict[str, str] | None:
+    """The plan's ``type_relocations`` ([{"old", "new", "via"}, ...], as dicts or models) as an
+    old type -> new type map. An entry without both names is skipped."""
+    if isinstance(relocations, Mapping):
+        return {str(k): str(v) for k, v in relocations.items()} or None
+    out: dict[str, str] = {}
+    for item in relocations if isinstance(relocations, Iterable) else ():
+        old = item.get("old") if isinstance(item, Mapping) else getattr(item, "old", None)
+        new = item.get("new") if isinstance(item, Mapping) else getattr(item, "new", None)
+        if old and new:
+            out[str(old)] = str(new)
+    return out or None
 
 
 def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> dict:

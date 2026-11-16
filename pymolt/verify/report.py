@@ -463,8 +463,12 @@ def build_contract_report(
     custom_comparator: TraceComparator | str | None = None,
     resolve_identities: bool = True,
     predictions: Mapping[str, Any] | None = None,
+    diff_context: Any = None,
 ) -> ContractReport:
     """Build the unified report.
+
+    ``diff_context`` (a ``facts.DiffContext``): the snapshots, apply ledger, contact maps and
+    successors that let the fact diff judge an edited site by who edited it.
 
     ``predictions`` (``{"risks", "source", "plan_id", "notes"}``) are the predicted risks to
     calibrate against the fact diff (``calibration``); only a fact diff can score them.
@@ -830,6 +834,7 @@ def build_contract_report(
                     old_facts, load_facts(trace, root=root),
                     profile=DiffProfile.SHAPE if profile is ComparatorProfile.SHAPE
                     else DiffProfile.EXACT,
+                    context=diff_context,
                 )
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:

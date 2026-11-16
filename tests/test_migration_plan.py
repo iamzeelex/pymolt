@@ -330,3 +330,23 @@ def test_rollback_restores_applied_sources_when_metadata_fails(tmp_path, monkeyp
     assert path.read_text(encoding="utf-8") == (
         "from werkzeug.utils import safe_join\n"
     )
+
+
+def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
+    import json
+
+    plan = _plan(tmp_path, files=2)
+    apply_migration_plan(tmp_path, plan)
+
+    ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
+    assert ledger["run_id"] == plan.plan_id
+    entries = ledger["entries"]
+    assert {e["file"] for e in entries} == {"app0.py", "app1.py"}
+    entry = next(e for e in entries if e["file"] == "app0.py")
+    written = (tmp_path / "app0.py").read_text().splitlines()
+    a, b = entry["new_lines"]
+    assert "werkzeug.utils" in "\n".join(written[a - 1:b])
+    assert (entry["kind"], entry["rule"], entry["old_symbol"], entry["new_symbol"]) == (
+        "rewrite-import", "rewrite-import:flask.helpers.safe_join→werkzeug.utils.safe_join",
+        "flask.helpers.safe_join", "werkzeug.utils.safe_join")
+    assert entry["claim"] is None          # a bare pattern makes no claim

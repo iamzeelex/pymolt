@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import uuid
@@ -22,8 +23,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, computed_field, field_validator
 from pydantic_core import ValidationError
 
+from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
 from pymolt.verify.predict import PredictionReport
+
+logger = logging.getLogger(__name__)
 
 PLAN_SCHEMA_VERSION = 1
 DEFAULT_PLAN_PATH = Path(".pymolt/migration_plan.json")
@@ -166,6 +170,8 @@ class PlannedFileChange(BaseModel):
     new_source: str
     sites: int = 0
     recipes: list[str] = Field(default_factory=list)
+    # recipe key -> the claim it makes about its edit (see ``apply_ledger.claim_for``).
+    claims: dict[str, str] = Field(default_factory=dict)
     # Python fixes only: does the rewritten file also run on the base Python? None when the
     # change has no python fix (or the successor's age on the base is unknown).
     runs_on_base: bool | None = None
@@ -327,6 +333,8 @@ def create_migration_plan(
                     recipe_key(item)
                     for item in [*preview.rules, *preview.patterns]
                 ],
+                claims={recipe_key(item): claim for item in [*preview.rules, *preview.patterns]
+                        if (claim := claim_for(item))},
                 runs_on_base=_runs_on_base(preview),
             ))
         for advisory in preview.advisories:
@@ -656,6 +664,7 @@ def _apply_migration_plan_unlocked(
         raise
 
     applied_at = _now()
+    _write_apply_ledger(root, plan, applied_at)
     receipt = MigrationReceipt(
         run_id=plan.plan_id,
         applied_at=applied_at,
@@ -708,6 +717,21 @@ def _apply_migration_plan_unlocked(
             pass
         raise
     return receipt
+
+
+def _write_apply_ledger(root: Path, plan: MigrationPlan, applied_at: str) -> None:
+    """Record what apply wrote, from the files as they are now. Never fails the apply."""
+    from pymolt.apply_ledger import write_ledger
+
+    try:
+        files = []
+        for change in plan.changes:
+            written = _project_file(root, change.path).read_text(encoding="utf-8")
+            files.append((change.path, change.old_source, written, change.recipes,
+                          change.claims))
+        write_ledger(root, plan.plan_id, applied_at, files)
+    except Exception:  # noqa: BLE001 - provenance is best effort; the migration stands
+        logger.warning("could not write the apply ledger", exc_info=True)
 
 
 def rollback_migration(

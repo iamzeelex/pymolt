@@ -835,3 +835,44 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
             "— not dependencies; this code has not been ported to Python 3 yet."
         )
     return cmap
+
+
+def contacts_by_line(sources: dict[str, str], cache_root: str | Path | None = None
+                     ) -> dict[str, dict[int, set[str]]]:
+    """The static dependency contacts of a source snapshot: ``{file: {line: {symbol}}}``.
+
+    ``sources`` maps project-relative paths to text (a capture's snapshot), so the map
+    describes the code as the capture saw it, not as it is now. Same classification as
+    ``build_contact_map`` (own modules, the stdlib and pymolt's tooling are not contacts),
+    every line a contact is on is kept, and per-file records come from the content-keyed
+    cache under ``cache_root`` (keyed by the file's text, so an unchanged file is not
+    re-parsed). A file that does not parse is left out."""
+    root = Path(cache_root) if cache_root is not None else None
+    modules = {rel: ".".join(Path(rel).with_suffix("").parts).removesuffix(".__init__")
+               for rel in sources}
+    ours = {m.split(".")[0] for m in modules.values() if m}
+    out: dict[str, dict[int, set[str]]] = {}
+    todo = sorted((rel, text) for rel, text in sources.items() if rel.endswith(".py"))
+    caches = [_cache_path(root, modules[rel], text) if root is not None else None
+              for rel, text in todo]
+    records: list[list[dict[str, Any]] | None] = [
+        _cached_records(c) if c is not None else None for c in caches]
+    misses = [i for i, r in enumerate(records) if r is None]
+    for i, (parsed, _error) in zip(
+            misses, _parse_units([(modules[todo[i][0]], todo[i][1]) for i in misses])):
+        records[i] = parsed
+        if parsed is not None and caches[i] is not None:
+            _store_records(caches[i], parsed)
+    for (rel, _text), recs in zip(todo, records):
+        if recs is None:
+            continue                        # did not parse: left out
+        lines: dict[int, set[str]] = {}
+        for rec in recs:
+            top = rec["top"]
+            if (rec["ckind"] is None or top in ours or top in _IGNORE_DEPS
+                    or stdlib_data.is_stdlib(top) or is_py2_stdlib(top)):
+                continue
+            lines.setdefault(rec["line"], set()).add(rec["target"])
+        if lines:
+            out[rel] = lines
+    return out
