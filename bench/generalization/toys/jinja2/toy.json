@@ -1,0 +1,214 @@
+{
+  "name": "jinja2",
+  "ecosystem": "templating",
+  "old": {
+    "python": "3.9",
+    "requirements": [
+      "Jinja2==2.11.3",
+      "MarkupSafe==1.1.1",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "Jinja2==3.1.6",
+      "MarkupSafe==3.0.2",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "Jinja2",
+    "MarkupSafe"
+  ],
+  "target_manifest": [
+    "Jinja2==3.1.6",
+    "MarkupSafe==3.0.2"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/render.py": "\"\"\"Small HTML rendering layer: a Jinja2 environment with a few helpers.\"\"\"\nimport jinja2\nfrom jinja2 import contextfunction, evalcontextfilter\n\nTEMPLATES = {\n    \"page.html\": (\n        \"<h1>{{ title }}</h1>\"\n        \"{{ badge(user) }}\"\n        \"<ul>{% for item in items %}<li>{{ item|shout }}</li>{% endfor %}</ul>\"\n        \"<p>{{ note|nl2br }}</p>\"\n        \"{% with total = items|length %}<small>{{ total }} items</small>{% endwith %}\"\n    ),\n    \"row.html\": \"<td>{{ cell }}</td>\",\n}\n\n\n@contextfunction\ndef badge(ctx, name):\n    prefix = ctx.get(\"badge_prefix\", \"@\")\n    return jinja2.Markup('<span class=\"badge\">%s%s</span>') % (prefix, name)\n\n\n@evalcontextfilter\ndef shout(eval_ctx, value):\n    text = str(value).upper() + \"!\"\n    if eval_ctx.autoescape:\n        return jinja2.Markup(jinja2.escape(text))\n    return text\n\n\ndef nl2br(value):\n    lines = str(value).splitlines()\n    return jinja2.Markup(\"<br>\").join(jinja2.escape(line) for line in lines)\n\n\ndef make_env(autoescape=True):\n    env = jinja2.Environment(\n        loader=jinja2.DictLoader(TEMPLATES),\n        autoescape=autoescape,\n        extensions=[\"jinja2.ext.with_\"],\n        undefined=jinja2.StrictUndefined,\n    )\n    env.globals[\"badge\"] = badge\n    env.filters[\"shout\"] = shout\n    env.filters[\"nl2br\"] = nl2br\n    return env\n\n\ndef render_page(title, items, user, note=\"\", autoescape=True):\n    env = make_env(autoescape)\n    return env.get_template(\"page.html\").render(\n        title=title, items=items, user=user, note=note\n    )\n\n\ndef render_string(source, **context):\n    return make_env().from_string(source).render(**context)\n\n\ndef render_row(cell):\n    try:\n        return make_env().get_template(\"row.html\").render(cell=cell)\n    except jinja2.TemplateNotFound:\n        return \"\"\n\n\ndef safe_label(text):\n    \"\"\"Escape user text for use inside markup built by hand.\"\"\"\n    return jinja2.Markup(\"<b>\") + jinja2.escape(text) + jinja2.Markup(\"</b>\")\n",
+    "tests/__init__.py": "",
+    "tests/test_render.py": "import jinja2\nfrom app import render\n\n\ndef test_page_escapes_user_data():\n    out = render.render_page(\"A & B\", [\"x<y\"], \"bob\", note=\"l1\\nl<2\")\n    assert \"<h1>A &amp; B</h1>\" in out\n    assert '<span class=\"badge\">@bob</span>' in out\n    assert \"<li>X&lt;Y!</li>\" in out\n    assert \"l1<br>l&lt;2\" in out\n    assert \"<small>1 items</small>\" in out\n\n\ndef test_page_without_autoescape():\n    out = render.render_page(\"A & B\", [\"x<y\"], \"bob\", autoescape=False)\n    assert \"<h1>A & B</h1>\" in out\n    assert \"<li>X<Y!</li>\" in out\n\n\ndef test_render_string_and_row():\n    assert render.render_string(\"{{ a }}-{{ b }}\", a=\"<\", b=2) == \"&lt;-2\"\n    assert render.render_row(\"<i>\") == \"<td>&lt;i&gt;</td>\"\n\n\ndef test_safe_label():\n    label = render.safe_label(\"<script>\")\n    assert label == \"<b>&lt;script&gt;</b>\"\n    assert hasattr(label, \"__html__\")\n\n\ndef test_strict_undefined():\n    try:\n        render.render_string(\"{{ missing }}\")\n    except jinja2.UndefinedError:\n        pass\n    else:\n        raise AssertionError(\"expected UndefinedError\")\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/render.py",
+      "old": "import jinja2\n",
+      "new": "import jinja2\nimport markupsafe\n"
+    },
+    {
+      "file": "app/render.py",
+      "old": "from jinja2 import contextfunction, evalcontextfilter",
+      "new": "from jinja2 import pass_context, pass_eval_context"
+    },
+    {
+      "file": "app/render.py",
+      "old": "@contextfunction",
+      "new": "@pass_context"
+    },
+    {
+      "file": "app/render.py",
+      "old": "@evalcontextfilter",
+      "new": "@pass_eval_context"
+    },
+    {
+      "file": "app/render.py",
+      "old": "return jinja2.Markup('<span class=\"badge\">%s%s</span>') % (prefix, name)",
+      "new": "return markupsafe.Markup('<span class=\"badge\">%s%s</span>') % (prefix, name)"
+    },
+    {
+      "file": "app/render.py",
+      "old": "return jinja2.Markup(jinja2.escape(text))",
+      "new": "return markupsafe.Markup(markupsafe.escape(text))"
+    },
+    {
+      "file": "app/render.py",
+      "old": "return jinja2.Markup(\"<br>\").join(jinja2.escape(line) for line in lines)",
+      "new": "return markupsafe.Markup(\"<br>\").join(markupsafe.escape(line) for line in lines)"
+    },
+    {
+      "file": "app/render.py",
+      "old": "        extensions=[\"jinja2.ext.with_\"],\n",
+      "new": ""
+    },
+    {
+      "file": "app/render.py",
+      "old": "return jinja2.Markup(\"<b>\") + jinja2.escape(text) + jinja2.Markup(\"</b>\")",
+      "new": "return markupsafe.Markup(\"<b>\") + markupsafe.escape(text) + markupsafe.Markup(\"</b>\")"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/render.py",
+          "append": "\n\ndef linkify(text):\n    return render_string(\"{{ t|urlize }}\", t=text)\n"
+        },
+        {
+          "file": "tests/test_render.py",
+          "append": "\n\ndef test_linkify_makes_links():\n    out = render.linkify(\"docs at www.example.org\")\n    assert \"<a href=\" in out\n    assert \"www.example.org\" in out\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "Template.render"
+      ]
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "jinja2.Markup",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/render.py:20",
+      "sites": [
+        "app/render.py:20",
+        "app/render.py:27",
+        "app/render.py:33",
+        "app/render.py:69"
+      ],
+      "breaks": "AttributeError: module 'jinja2' has no attribute 'Markup' (3.1 removed the re-export)",
+      "successor": "markupsafe.Markup",
+      "fixable": "auto",
+      "source": "Jinja2 3.1.0 changelog: removed previously deprecated code (jinja2.Markup, jinja2.escape)",
+      "verified": {
+        "old": "jinja2 2.11.3 + MarkupSafe 1.1.1 (py3.9): `jinja2.Markup is markupsafe.Markup` -> True; no warning under -W error",
+        "new": "jinja2 3.1.6 + MarkupSafe 3.0.2 (py3.12): AttributeError: module 'jinja2' has no attribute 'Markup'; `from jinja2 import Markup` -> ImportError"
+      }
+    },
+    {
+      "symbol": "jinja2.escape",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/render.py:27",
+      "sites": [
+        "app/render.py:27",
+        "app/render.py:33",
+        "app/render.py:69"
+      ],
+      "breaks": "AttributeError: module 'jinja2' has no attribute 'escape'",
+      "successor": "markupsafe.escape",
+      "fixable": "auto",
+      "source": "Jinja2 3.1.0 changelog: removed previously deprecated code",
+      "verified": {
+        "old": "`jinja2.escape is markupsafe.escape` -> True (both the MarkupSafe C-speedups builtin); no warning",
+        "new": "AttributeError: module 'jinja2' has no attribute 'escape'; markupsafe.escape works and renders identically"
+      }
+    },
+    {
+      "symbol": "jinja2.contextfunction",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/render.py:3",
+      "sites": [
+        "app/render.py:3",
+        "app/render.py:17"
+      ],
+      "breaks": "ImportError: cannot import name 'contextfunction' from 'jinja2'",
+      "successor": "jinja2.pass_context",
+      "fixable": "auto",
+      "source": "Jinja2 3.0.0 deprecated (contextfunction/contextfilter -> pass_context), 3.1.0 removed",
+      "verified": {
+        "old": "jinja2 2.11.3: importable, works as a global taking ctx first; no pass_context attribute; no warning",
+        "new": "3.1.6: ImportError; pass_context exists and the migrated app renders byte-identical output",
+        "round4_audit": "identity check: in old Jinja2 2.11.3 `jinja2.pass_context` does not exist (so contextfunction is not the same object as anything); new 3.1.x: contextfunction gone, pass_context present. A rename to a different object is REMOVED with a successor (was MOVED)."
+      }
+    },
+    {
+      "symbol": "jinja2.evalcontextfilter",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/render.py:3",
+      "sites": [
+        "app/render.py:3",
+        "app/render.py:23"
+      ],
+      "breaks": "ImportError: cannot import name 'evalcontextfilter' from 'jinja2'",
+      "successor": "jinja2.pass_eval_context",
+      "fixable": "auto",
+      "source": "Jinja2 3.0.0 deprecated, 3.1.0 removed",
+      "verified": {
+        "old": "2.11.3: importable; filter receives EvalContext (autoescape False for from_string default is overridden by Environment(autoescape=True))",
+        "new": "3.1.6: ImportError; pass_eval_context equivalent",
+        "round4_audit": "identity check: old 2.11.3 has no `jinja2.pass_eval_context`; new 3.1.x: evalcontextfilter gone. A rename to a different object: REMOVED with a successor (was MOVED)."
+      }
+    },
+    {
+      "symbol": "jinja2.ext.with_",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/render.py:40",
+      "breaks": "AttributeError: module 'jinja2.ext' has no attribute 'with_' (raised by Environment(extensions=[...]) when it imports the dotted name)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "Jinja2 3.0.0 (with/autoescape extensions built in, deprecated), 3.1.0 removed",
+      "note": "String-literal reference, not an attribute access: a static delta over resolved symbols is expected to MISS it; found only by the runtime failure.",
+      "verified": {
+        "old": "Environment(extensions=['jinja2.ext.with_']) ok in 2.11.3",
+        "new": "AttributeError in 3.1.6; `{% with %}` is always available so the extension entry is simply deleted"
+      }
+    },
+    {
+      "symbol": "jinja2.filters.do_urlize",
+      "kind": "BEHAVIOR",
+      "param": "urlize filter",
+      "scenario": "change",
+      "site": "app/render.py:73",
+      "breaks": "`{{ 'www.example.org' | urlize }}` links to http://www.example.org on 2.11 and https://www.example.org on 3.1; same call, no error, no warning",
+      "successor": null,
+      "fixable": "none",
+      "source": "Jinja2 3.1.0 changelog: urlize adds https:// to bare www links by default",
+      "verified": {
+        "old": "docs at <a href=\"http://www.example.org\" rel=\"noopener\">www.example.org</a>",
+        "new": "docs at <a href=\"https://www.example.org\" rel=\"noopener\">www.example.org</a>"
+      }
+    }
+  ],
+  "expected_warnings": [],
+  "notes": "Cross-package same-object successor test: in the old env `jinja2.Markup is markupsafe.Markup` and `jinja2.escape is markupsafe.escape` are both True (checked with `is`), so a delta engine that follows an object to the module it now lives in should offer markupsafe.Markup / markupsafe.escape, and the migrated app (which must add `import markupsafe`) renders byte-identical output on 3.1. MarkupSafe moves 1.1.1 -> 3.0.2 in the same migration (Jinja2 3.1 needs MarkupSafe>=2.0). Old Jinja2 2.11.3 emits NO warnings for any of these (verified with -W error on py3.9), so the baseline offers no runtime warning to predict from (S4). Environment(autoescape=...) defaults did not change (False in both; the app sets autoescape explicitly), so there is no DEFAULT entry. `jinja2.ext.with_` is a string-literal reference (see its entry). The change scenario's `urlize` happens inside the template, so the observable boundary symbol is Template.render (the recorded call), not the filter. Manual migration adds `import markupsafe` right after `import jinja2`; if pymolt's rewrites already added it, the duplicate import is harmless. Equivalence checked: original app on py3.9/2.11.3 and migrated app on py3.12/3.1.6 print identical repr() for render_page (escaped and unescaped), render_string, render_row, safe_label; pytest 5/5 on both, 6/6 in the change scenario on both."
+}

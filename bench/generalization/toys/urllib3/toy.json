@@ -1,0 +1,179 @@
+{
+  "name": "urllib3",
+  "ecosystem": "http-client (offline)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "urllib3==1.26.20",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "urllib3==2.2.3",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "urllib3"
+  ],
+  "target_manifest": [
+    "urllib3==2.2.3"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/client.py": "\"\"\"Offline HTTP helpers built on urllib3: retry policy, pool manager, response parsing.\"\"\"\nimport io\nimport json\n\nimport urllib3\nfrom urllib3.response import HTTPResponse\nfrom urllib3.util.retry import Retry\n\nIDEMPOTENT = [\"GET\", \"HEAD\", \"PUT\"]\n\n\ndef build_retry(total=3, backoff=0.5):\n    return Retry(\n        total=total,\n        backoff_factor=backoff,\n        status_forcelist=[502, 503, 504],\n        method_whitelist=IDEMPOTENT,\n    )\n\n\ndef default_methods():\n    return sorted(Retry.DEFAULT_METHOD_WHITELIST)\n\n\ndef build_manager(retry=None):\n    retry = retry or build_retry()\n    timeout = urllib3.Timeout(connect=2.0, read=5.0)\n    return urllib3.PoolManager(num_pools=4, maxsize=2, retries=retry, timeout=timeout)\n\n\ndef fake_response(body, status=200, headers=None):\n    \"\"\"Build a response the way a mock transport would, from an in-memory body.\"\"\"\n    return HTTPResponse(body=io.BytesIO(body), headers=headers or {}, status=status)\n\n\ndef json_response(payload, status=200):\n    body = json.dumps(payload).encode(\"utf-8\")\n    return fake_response(body, status, {\"Content-Type\": \"application/json\", \"X-Request-Id\": \"r-1\"})\n\n\ndef content_type(resp):\n    return resp.getheader(\"Content-Type\", \"text/plain\")\n\n\ndef header_map(resp):\n    return {k.lower(): v for k, v in resp.getheaders().items()}\n\n\ndef parse_json(resp):\n    if content_type(resp).startswith(\"application/json\"):\n        return json.loads(resp.data.decode(\"utf-8\"))\n    return None\n\n\ndef split_url(url):\n    scheme, host, port = urllib3.get_host(url)\n    return {\"scheme\": scheme, \"host\": host, \"port\": port}\n\n\ndef should_retry(retry, method, status):\n    return retry.is_retry(method, status)\n",
+    "tests/test_client.py": "import urllib3\nfrom urllib3.response import HTTPResponse\nfrom urllib3.util.retry import Retry\n\nfrom app import client\n\n\ndef test_retry_policy():\n    retry = client.build_retry()\n    assert isinstance(retry, Retry)\n    assert retry.total == 3\n    assert retry.status_forcelist == [502, 503, 504]\n    assert \"GET\" in retry.allowed_methods\n    assert \"POST\" not in retry.allowed_methods\n\n\ndef test_default_methods_include_get():\n    methods = client.default_methods()\n    assert \"GET\" in methods and \"POST\" not in methods\n\n\ndef test_manager_configuration():\n    manager = client.build_manager()\n    assert isinstance(manager, urllib3.PoolManager)\n    assert manager.connection_pool_kw[\"maxsize\"] == 2\n    assert manager.connection_pool_kw[\"timeout\"].connect_timeout == 2.0\n    assert manager.connection_pool_kw[\"retries\"].total == 3\n\n\ndef test_json_response_roundtrip():\n    resp = client.json_response({\"ok\": True, \"n\": 3})\n    assert isinstance(resp, HTTPResponse)\n    assert resp.status == 200\n    assert client.parse_json(resp) == {\"ok\": True, \"n\": 3}\n\n\ndef test_headers():\n    resp = client.json_response({\"a\": 1})\n    assert client.content_type(resp) == \"application/json\"\n    assert client.header_map(resp)[\"x-request-id\"] == \"r-1\"\n    plain = client.fake_response(b\"hi\")\n    assert client.content_type(plain) == \"text/plain\"\n    assert client.parse_json(plain) is None\n\n\ndef test_split_url():\n    assert client.split_url(\"http://example.com:8080/x\") == {\n        \"scheme\": \"http\", \"host\": \"example.com\", \"port\": 8080}\n\n\ndef test_should_retry():\n    retry = client.build_retry()\n    assert client.should_retry(retry, \"GET\", 503) is True\n    assert client.should_retry(retry, \"POST\", 503) is False\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/client.py",
+      "old": "method_whitelist=IDEMPOTENT",
+      "new": "allowed_methods=IDEMPOTENT"
+    },
+    {
+      "file": "app/client.py",
+      "old": "Retry.DEFAULT_METHOD_WHITELIST",
+      "new": "Retry.DEFAULT_ALLOWED_METHODS"
+    },
+    {
+      "file": "app/client.py",
+      "old": "resp.getheader(\"Content-Type\", \"text/plain\")",
+      "new": "resp.headers.get(\"Content-Type\", \"text/plain\")"
+    },
+    {
+      "file": "app/client.py",
+      "old": "resp.getheaders().items()",
+      "new": "resp.headers.items()"
+    },
+    {
+      "file": "app/client.py",
+      "old": "scheme, host, port = urllib3.get_host(url)",
+      "new": "parsed = urllib3.util.parse_url(url)\n    scheme, host, port = parsed.scheme, parsed.host, parsed.port"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/client.py",
+          "append": "\n\ndef gzip_response(payload):\n    import gzip\n\n    body = gzip.compress(payload)\n    headers = {\"Content-Encoding\": \"gzip\", \"Content-Length\": str(len(body))}\n    return HTTPResponse(body=io.BytesIO(body), headers=headers, preload_content=False)\n\n\ndef chunk_sizes(resp, amt=7):\n    \"\"\"Sizes of the pieces a consumer sees when it streams a (possibly gzipped) body.\"\"\"\n    return [len(chunk) for chunk in resp.stream(amt)]\n"
+        },
+        {
+          "file": "tests/test_client.py",
+          "append": "\n\ndef test_chunk_sizes_cover_body():\n    payload = b\"hello world \" * 10\n    assert sum(client.chunk_sizes(client.gzip_response(payload))) == len(payload)\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "urllib3.response.HTTPResponse.stream"
+      ],
+      "behaviour": "stream(7) over a gzip body: 1.26.20 returns chunk sizes [3, 7, 110] (amt applied to the raw compressed bytes, so the first chunks are tiny or empty), 2.2.3 returns [7]*17+[1]; the test only asserts that the sizes sum to the payload length"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "urllib3.util.retry.Retry",
+      "kind": "SIGNATURE",
+      "param": "method_whitelist",
+      "site": "app/client.py:17",
+      "breaks": "TypeError: Retry.__init__() got an unexpected keyword argument 'method_whitelist'",
+      "successor": "allowed_methods",
+      "fixable": "auto",
+      "source": "urllib3 2.0 changelog (removed deprecated Retry(method_whitelist=); deprecated since 1.26.0)",
+      "verified": {
+        "old": "urllib3 1.26.20: Retry(..., method_whitelist=[...]) works, DeprecationWarning \"Using 'method_whitelist' with Retry is deprecated and will be removed in v2.0. Use 'allowed_methods' instead\"; result .allowed_methods == the list",
+        "new": "urllib3 2.2.3: TypeError: Retry.__init__() got an unexpected keyword argument 'method_whitelist'; allowed_methods=[...] works on both versions"
+      }
+    },
+    {
+      "symbol": "urllib3.util.retry.Retry.DEFAULT_METHOD_WHITELIST",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/client.py:22",
+      "breaks": "AttributeError: type object 'Retry' has no attribute 'DEFAULT_METHOD_WHITELIST'",
+      "successor": "urllib3.util.retry.Retry.DEFAULT_ALLOWED_METHODS",
+      "fixable": "auto",
+      "source": "urllib3 2.0 changelog (removed deprecated class attributes)",
+      "verified": {
+        "old": "1.26.20: frozenset of 6 methods, DeprecationWarning \"Using 'Retry.DEFAULT_METHOD_WHITELIST' is deprecated and will be removed in v2.0. Use 'Retry.DEFAULT_ALLOWED_METHODS' instead\"",
+        "new": "2.2.3: AttributeError; DEFAULT_ALLOWED_METHODS exists on both and holds the same frozenset",
+        "round4_audit": "identity check (old urllib3 1.26): `Retry.DEFAULT_METHOD_WHITELIST is Retry.DEFAULT_ALLOWED_METHODS` -> True (a deprecated metaclass property handing out the same frozenset); new 2.x: DEFAULT_METHOD_WHITELIST gone, DEFAULT_ALLOWED_METHODS present. MOVED (was REMOVED)."
+      }
+    },
+    {
+      "symbol": "urllib3.response.HTTPResponse.getheader",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/client.py:42",
+      "breaks": "no break on 2.2.3; DeprecationWarning only (removal announced for v2.1.0 but postponed; from 2.6 the method is no longer deprecated, so this entry is only valid for urllib3 2.0 to 2.5)",
+      "successor": "urllib3.response.HTTPResponse.headers.get",
+      "fixable": "manual",
+      "source": "urllib3 2.0 changelog (deprecated HTTPResponse.getheader/getheaders)",
+      "verified": {
+        "old": "1.26.20: works, DeprecationWarning 'HTTPResponse.getheader() is deprecated and will be removed in urllib3 v2.1.0. Instead use HTTPResponse.headers.get(name, default).'",
+        "new": "2.0.7 and 2.2.3: works, same DeprecationWarning; 2.6.3 and 2.8.0: works, no warning at all"
+      }
+    },
+    {
+      "symbol": "urllib3.response.HTTPResponse.getheaders",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/client.py:46",
+      "breaks": "no break on 2.2.3; DeprecationWarning only (see getheader: not deprecated from 2.6)",
+      "successor": "urllib3.response.HTTPResponse.headers",
+      "fixable": "manual",
+      "source": "urllib3 2.0 changelog",
+      "verified": {
+        "old": "1.26.20: returns HTTPHeaderDict, DeprecationWarning 'HTTPResponse.getheaders() is deprecated ... Instead access HTTPResponse.headers directly.'",
+        "new": "2.2.3: same return value, same warning; 2.6.3/2.8.0: no warning"
+      }
+    },
+    {
+      "symbol": "urllib3.get_host",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/client.py:56",
+      "breaks": "AttributeError: module 'urllib3' has no attribute 'get_host'",
+      "successor": "urllib3.util.parse_url",
+      "fixable": "manual",
+      "source": "urllib3 2.0 changelog (removed urllib3.get_host and util.url.get_host)",
+      "verified": {
+        "old": "1.26.20: urllib3.get_host('http://a.com/x') == ('http', 'a.com', None), no warning",
+        "new": "2.2.3: AttributeError (also for urllib3.util.url.get_host); parse_url(url).scheme/.host/.port gives the same values"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "urllib3.util.retry.Retry",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "urllib3.util.retry.Retry.DEFAULT_METHOD_WHITELIST",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "urllib3.response.HTTPResponse.getheader",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old+new(2.0-2.5)"
+    },
+    {
+      "symbol": "urllib3.response.HTTPResponse.getheaders",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old+new(2.0-2.5)"
+    }
+  ],
+  "notes": "New side pinned to urllib3 2.2.3, not the newest 2.x: in 2.6+ getheader/getheaders were un-deprecated (no warning), so the DEPRECATED entries would be unobservable. The documented 2.0 'removal' of getheaders did not happen (2.0.7 and 2.2.3 still warn only). Everything is constructed locally: HTTPResponse(body=BytesIO(...)), PoolManager(...) is built but never connects. Unchanged between 1.26 and 2.2.3 (verified, deliberately not ground truth): HTTPResponse(body=BytesIO).data/.status/.headers, PoolManager construction and connection_pool_kw, Timeout, Retry.is_retry, parse_url. S1: app functions return Retry, PoolManager and HTTPResponse objects (attribute-bearing, not value types) and tests read their attributes (retry.total, manager.connection_pool_kw, resp.status). Manual migration is applied to the ORIGINAL text; if pymolt already rewrote a line the corresponding edit's 'old' will no longer match and should be skipped."
+}
