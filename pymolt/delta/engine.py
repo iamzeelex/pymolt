@@ -601,6 +601,8 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
         if canon not in sp_old and (vanished or renamed):
             need.add(canon)
         if vanished:
+            for m in members:  # the same object under another spelling, probed on the old side
+                need.update(sp_old[m].step.get("same_object_as") or [])
             hints[canon] = _local_hint(canon, members, sp_old, baseline, inp)
             succ = hints[canon][0]
             if succ:
@@ -715,6 +717,12 @@ def _group_facts(
                  and _leaf(new_of(t).canonical) == leaf]  # type: ignore[union-attr]
         if m != canon and c_new is not None and _compatible(any_old, c_new.step, leaf):
             cands.append(canon)
+        if not cands:
+            same = _same_object_successor(old_steps[m].step, any_old, leaf, new_of)
+            if same is not None:
+                moved.setdefault(same.spelling, []).append(m)
+                moved_new_canon[same.spelling] = same.canonical
+                continue
         if cands:
             best = min(cands, key=_public_first)
             new_canon = new_of(best).canonical  # type: ignore[union-attr]
@@ -860,6 +868,22 @@ def _group_facts(
         out.append(DeltaFact(symbol=symbol, aliases=[s for s in members if s != symbol],
                              kind="UNCHANGED", evidence=["existence", "signature"]))
     return out
+
+
+def _same_object_successor(step: dict, any_old: dict, leaf: str,
+                           new_of: Callable[[str], Spell | None]) -> Spell | None:
+    """A spelling the old interpreter proved to be the same object (``is``) that is live and
+    not itself deprecated on the new side; the shortest public one."""
+    live = []
+    for cand in step.get("same_object_as") or []:
+        target = new_of(cand)
+        if target is None or not _compatible(any_old, target.step, leaf):
+            continue
+        runtime = target.runtime_warnings if target.final_for else []
+        if _side_deprecation(target.step, _leaf(cand), runtime, ""):
+            continue
+        live.append(target)
+    return min(live, key=lambda t: _public_first(t.spelling)) if live else None
 
 
 def _public_first(name: str) -> tuple:
