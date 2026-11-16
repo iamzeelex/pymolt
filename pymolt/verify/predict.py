@@ -42,6 +42,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
@@ -694,6 +695,41 @@ def _fix_kind(fact: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _recipe_old(recipe: str) -> str | None:
+    """``old`` of a recipe key ``kind:old→new`` (see ``recipe_key``)."""
+    head, sep, _ = recipe.partition("→")
+    return head.split(":", 1)[1] if sep and ":" in head else None
+
+
+def _python_fix_for(site: RiskSite, symbol: str,
+                    rewrites: Mapping[str, list[_Block]]) -> _Block | None:
+    """The planned change that rewrites this python site: a changed block covers its line and
+    one of the block's recipes rewrites exactly this spelling. (``_fix_for`` asks whether the
+    symbol's leaf left the text; ``collections.Iterable`` → ``collections.abc.Iterable`` keeps
+    it, so a python site is matched by recipe instead.)"""
+    if site.line is None:
+        return None
+    for block in rewrites.get(site.file) or ():
+        if block.start <= site.line <= block.end and any(
+                _recipe_old(r) == symbol for r in block.recipes):
+            return block
+    return None
+
+
+def _import_removed(site: RiskSite, symbol: str,
+                    rewrites: Mapping[str, list[_Block]]) -> _Block | None:
+    """The planned change that deletes this module-import site's import entirely."""
+    if site.line is None or not symbol or "." in symbol:
+        return None
+    pattern = re.compile(rf"^\s*(?:import\s+{re.escape(symbol)}\b|from\s+"
+                         rf"{re.escape(symbol)}\s+import\b)", re.M)
+    for block in rewrites.get(site.file) or ():
+        if (block.start <= site.line <= block.end and pattern.search(block.old_text)
+                and not pattern.search(block.new_text)):
+            return block
+    return None
+
+
 def predict_python_risks(
     report: Any,
     sites: Iterable[Any],
@@ -701,6 +737,7 @@ def predict_python_risks(
     base: str | None,
     target: str | None,
     compile_findings: Iterable[Mapping[str, Any]] | None = None,
+    changes: Iterable[Any] | None = None,
 ) -> PredictionReport:
     """Rate the project's stdlib sites against the python delta (``subject="python"``).
 
@@ -717,7 +754,8 @@ def predict_python_risks(
     =========  ==============================================================================
 
     Evidence caps the tier, it never rounds up: a data-only absence is never ``certain``.
-    ``fixed_by_plan`` stays False here: fixers are a later wave."""
+    ``changes``: the plan's frozen file changes; a site one of them rewrites is
+    ``fixed_by_plan`` (advisory-only removals have no rewrite and stay manual)."""
     from pymolt.pyversion.guards import evaluate_guard, parse_version
 
     out = PredictionReport()
@@ -867,7 +905,24 @@ def predict_python_risks(
             reached_at="import",
             evidence=[f"compile check on Python {finding.get('python') or target}"]))
 
-    out.risks.sort(key=lambda r: (TIER_ORDER[r.tier], r.site.file, r.site.line or 0, r.symbol))
+    rewrites = planned_rewrites(changes or ())
+    for risk in out.risks:
+        if risk.scope != "python":
+            continue
+        # A whole-module import the plan drops (it became unused after the module's calls
+        # were rewritten: ``import imp`` once ``imp.reload`` -> ``importlib.reload``) is
+        # fixed, advisory or not: listing it as manual would be a false "needs attention".
+        block = _import_removed(risk.site, risk.symbol, rewrites)
+        if block is None and risk.fix != "advisory":
+            block = _python_fix_for(risk.site, risk.symbol, rewrites)
+        if block is not None:
+            risk.fixed_by_plan = True
+            risk.fixed_by = list(block.recipes)
+            risk.evidence.append(
+                f"plan: rewrites {risk.site.file}:{block.start}"
+                + (f"-{block.end}" if block.end != block.start else ""))
+    out.risks.sort(key=lambda r: (r.fixed_by_plan, TIER_ORDER[r.tier], r.site.file,
+                                  r.site.line or 0, r.symbol))
     return out
 
 

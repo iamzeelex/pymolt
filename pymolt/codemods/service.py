@@ -660,6 +660,17 @@ def build_migration_plan(
 
         if not same_python_minor(config.base_python, config.target_python):
             python_move = (config.base_python, config.target_python)
+    python_stage = None
+    if python_move is not None:
+        # The python fixes join the dependency rewrites in one preview, so the plan's file
+        # changes (and the diffs the interfaces render) hold both.
+        from pymolt.pyversion.plan import plan_python_stage
+
+        try:
+            python_stage = plan_python_stage(root, *python_move, previews=previews)
+            previews = python_stage.previews
+        except Exception:  # noqa: BLE001 - create_migration_plan reports a failed python part
+            python_stage = None
     plan = create_migration_plan(
         root, previews, migrations,
         target_python=config.target_python or "unknown",
@@ -669,5 +680,6 @@ def build_migration_plan(
         impacts=impacts,
         delta_reports=delta_reports,
         python_move=python_move,
+        python_stage=python_stage,
     )
     return plan, previews, source_desc, by_pkg

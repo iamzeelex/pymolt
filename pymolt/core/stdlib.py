@@ -206,6 +206,11 @@ def is_stdlib(top: str) -> bool:
     return top in _tops()
 
 
+def is_module(dotted: str) -> bool:
+    """True when ``dotted`` is itself a module (``collections.abc``), not a name in one."""
+    return dotted in _modules() or dotted in _submodules()
+
+
 def module_lifetime(module: str) -> tuple[str, str | None] | None:
     """``(first, last)`` of a module; ``last`` None while it still exists.
 
@@ -325,6 +330,7 @@ __all__ = [
     "changes_for",
     "data_stamp",
     "describe",
+    "is_module",
     "is_py2_stdlib",
     "is_stdlib",
     "module_lifetime",

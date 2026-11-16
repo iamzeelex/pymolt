@@ -617,30 +617,114 @@ def _cache_path(root: Path, module_name: str, text: str) -> Path:
     return root / ".pymolt" / "cache" / "contacts" / f"{key}.json"
 
 
-def _file_records(root: Path, file: Path, module_name: str) -> list[dict[str, Any]]:
-    """Raw per-file records, from the content-keyed cache when this exact file was scanned."""
-    text = file.read_text(encoding="utf-8")
-    cache = _cache_path(root, module_name, text)
+def _cached_records(cache: Path) -> list[dict[str, Any]] | None:
     try:
         cached = json.loads(cache.read_text(encoding="utf-8"))
         if cached.get("version") == CONTACT_MAP_VERSION:
             return cached["records"]
     except (OSError, ValueError, KeyError, AttributeError):
         pass
+    return None
+
+
+def _parse_records(module_name: str, text: str) -> list[dict[str, Any]]:
+    """Parse one file into its raw records. Pure: also the process-pool work unit."""
     wrapper = MetadataWrapper(cst.parse_module(text))
     visitor = _ContactVisitor(module_name)
     wrapper.visit(visitor)
+    return visitor.records
+
+
+_Parsed = tuple[list[dict[str, Any]] | None, str | None]
+
+
+def _parse_unit(unit: tuple[str, str]) -> _Parsed:
+    """Pool worker: ``(module_name, text)`` -> ``(records, None)`` or ``(None, error)``."""
+    try:
+        return _parse_records(*unit), None
+    except Exception as e:  # noqa: BLE001 — reported per file by the caller
+        return None, str(e)
+
+
+def _store_records(cache: Path, records: list[dict[str, Any]]) -> None:
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(
-            json.dumps({"version": CONTACT_MAP_VERSION, "records": visitor.records}),
+            json.dumps({"version": CONTACT_MAP_VERSION, "records": records}),
             encoding="utf-8",
         )
         os.replace(tmp, cache)
     except OSError:  # a read-only project still scans; it just re-parses next time
         pass
-    return visitor.records
+
+
+def _file_records(root: Path, file: Path, module_name: str) -> list[dict[str, Any]]:
+    """Raw per-file records, from the content-keyed cache when this exact file was scanned."""
+    text = file.read_text(encoding="utf-8")
+    cache = _cache_path(root, module_name, text)
+    records = _cached_records(cache)
+    if records is not None:
+        return records
+    records = _parse_records(module_name, text)
+    _store_records(cache, records)
+    return records
+
+
+_PARALLEL_MIN_MISSES = 20
+_MAX_WORKERS = 8
+
+
+def _worker_count() -> int:
+    """Pool size: ``PYMOLT_SCAN_WORKERS`` when set to an integer, else CPU count capped at 8."""
+    raw = os.environ.get("PYMOLT_SCAN_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return max(1, min(os.cpu_count() or 1, _MAX_WORKERS))
+
+
+def _parse_units(units: list[tuple[str, str]]) -> list[_Parsed]:
+    """Parse every unit, in order; in a process pool when there are enough, else serially."""
+    workers = min(_worker_count(), len(units))
+    if workers > 1 and len(units) >= _PARALLEL_MIN_MISSES:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                chunk = max(1, len(units) // (workers * 4))
+                return list(pool.map(_parse_unit, units, chunksize=chunk))
+        except Exception as e:  # noqa: BLE001 — a pool that cannot start or dies falls back to serial
+            logger.warning("Parallel contact scan unavailable (%s); scanning serially", e)
+    return [_parse_unit(u) for u in units]
+
+
+def _scan_files(root: Path, files: list[Path]) -> list[_Parsed]:
+    """Per-file ``(records, error)`` in ``files`` order; cache hits first, misses together."""
+    results: list[_Parsed | None] = [None] * len(files)
+    misses: list[tuple[int, Path]] = []
+    units: list[tuple[str, str]] = []
+    for i, file in enumerate(files):
+        try:
+            module_name = _module_name(file, root)
+            text = file.read_text(encoding="utf-8")
+            cache = _cache_path(root, module_name, text)
+            records = _cached_records(cache)
+        except Exception as e:  # noqa: BLE001 — one unreadable file never aborts
+            results[i] = (None, str(e))
+            continue
+        if records is not None:
+            results[i] = (records, None)
+        else:
+            misses.append((i, cache))
+            units.append((module_name, text))
+    for (i, cache), (records, error) in zip(misses, _parse_units(units)):
+        if records is not None:
+            _store_records(cache, records)
+        results[i] = (records, error)
+    return results  # type: ignore[return-value]
 
 
 def _is_interesting_site(spelling: str) -> bool:
@@ -688,14 +772,11 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
     sites: dict[tuple[str, int, str, str], StdlibSite] = {}
     interesting: dict[str, bool] = {}
 
-    for file in files:
-        module_name = _module_name(file, root)
+    for file, (records, error) in zip(files, _scan_files(root, files)):
         rel = str(file.relative_to(root))
-        try:
-            records = _file_records(root, file, module_name)
-        except Exception as e:  # noqa: BLE001 — best-effort; one bad file never aborts
-            logger.warning("Contact scan failed for %s: %s", file, e)
-            cmap.notes.append(f"scan failed for {rel}: {e}")
+        if records is None:
+            logger.warning("Contact scan failed for %s: %s", file, error)
+            cmap.notes.append(f"scan failed for {rel}: {error}")
             continue
 
         for rec in records:
