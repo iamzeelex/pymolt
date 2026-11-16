@@ -30,26 +30,90 @@ from packaging.version import InvalidVersion, Version
 MAX_RELEASES = 8
 _TAIL = 65536
 
+_ID = r"([A-Za-z_][\w\.]*)"
+_Q = r"['\"`]?"
+_ROLE = r"(?::\w+:)?`?~?"
+
+# Successor prose, most specific first. Each pattern captures the successor name once.
 SUCCESSOR_RES = [
     re.compile(r"[Ii]mport\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?\s+instead"),
     re.compile(r"[Uu]se\s+:\w+:`~?([A-Za-z_][\w\.]*)`"),
     re.compile(r"[Uu]se\s+['\"`]?([A-Za-z_][\w\.\(\)]*)['\"`]?\s+(?:instead|to )"),
     re.compile(r"[Ii]mport (?:them|it) directly from\s+['\"`]?([\w\.]+)"),
     re.compile(r"[Ss]ubclass(?:ing)?\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?"),
+    # "use `X`" / "Please use 'X'" with the name quoted: any continuation
+    re.compile(r"\b[Uu]se\s+(?:the\s+)?[`'\"]~?@?" + _ID + r"(?:\(\))?[`'\"]"),
+    # "is renamed to 'X'", "has been renamed to X", "was renamed to `X`"
+    re.compile(r"\brenamed\s+to\s+" + _ROLE + _Q + _ID),
+    re.compile(r"\bmoved\s+to\s+" + _ROLE + _Q + _ID),
+    # "deprecated in favor of X", "in favour of `X`"
+    re.compile(r"\bin\s+favou?r\s+of\s+" + _ROLE + _Q + _ID),
+    re.compile(r"\b(?:replaced|superseded)\s+(?:by|with)\s+" + _ROLE + _Q + _ID),
+    re.compile(r"\b[Mm]igrate\s+to\s+(?:[\w ]+?style\s+)?`@?" + _ID + r"`"),
+    # bare "use X instead" / "Please use X." with a name that looks like code
+    re.compile(r"\b[Uu]se\s+" + _Q + r"([A-Za-z_][\w]*(?:[_\.][\w\.]*|\(\)))" + _Q),
 ]
+
+# Words the patterns can capture that are English, not a successor.
+_STOPWORDS = frozenset("""
+a an the this that these those it its them they their your you we our one ones any some each
+either neither both other another same new old more less most least only also just now then
+instead rather please note see here there which what when where while who whom whose why how
+and or but nor not no yes if else of to in on at by for from with without as is are was were
+be been being will would can could should may might must do does did has have had
+version versions release releases python python2 python3 module function method class object
+type value values name names argument arguments parameter parameters option options feature
+api code docs documentation following above below example later earlier future
+""".split())
+
+# Generic verbs a "use X to <do something>" sentence puts in X's slot. Never a successor
+# unless the prose quotes them as code (`apply`).
+_DENYLIST = frozenset("""
+operate apply dispatch call calls invoke execute run runs process handle perform evaluate
+resolve fire emit trigger supply provide produce create build make get set pass wrap
+convert transform generate compute construct implement override extend inherit define
+declare register configure specify describe indicate represent return returns yield
+""".split())
+
+
+def _acceptable(found: str, quoted: bool) -> bool:
+    name = found.strip("`'\"~").rstrip(".")
+    while name.endswith("()"):
+        name = name[:-2]
+    if not name or not re.match(r"^[A-Za-z_][\w\.]*$", name):
+        return False
+    low = name.lower()
+    if low in _STOPWORDS:
+        return False
+    codey = "_" in name or "." in name or any(c.isupper() for c in name[1:])
+    if not quoted and not codey and low in _DENYLIST:
+        return False
+    if not quoted and not codey and name.islower() and len(name) < 3:
+        return False
+    return True
 
 
 def successor_from(messages: list[str]) -> str | None:
-    """The first successor named by a deprecation message ("Use X instead", ...)."""
+    """The successor named by a deprecation message ("Use X instead", "renamed to X", "in favor
+    of X", "replaced by X", "moved to X", "superseded by X", ...): the earliest acceptable
+    mention in the first message that names one; stopwords and generic verbs never count."""
     for msg in messages:
-        for rx in SUCCESSOR_RES:
-            m = rx.search(msg or "")
-            if m:
-                found = m.group(1).rstrip(".")
-                while found.endswith("()"):
-                    found = found[:-2]
-                if found:
-                    return found
+        text = msg or ""
+        hits: list[tuple[int, int, str]] = []
+        for order, rx in enumerate(SUCCESSOR_RES):
+            for m in rx.finditer(text):
+                raw = m.group(1)
+                quoted = text[max(0, m.start(1) - 1): m.start(1)] in "`'\""
+                if _acceptable(raw, quoted):
+                    hits.append((m.start(1), order, raw))
+                    break
+        if hits:
+            _, _, raw = min(hits)
+            found = raw.strip("`'\"~").rstrip(".")
+            while found.endswith("()"):
+                found = found[:-2]
+            if found:
+                return found
     return None
 
 
@@ -240,6 +304,47 @@ def module_warnings(src: str, chain: list[str]) -> list[str]:
     return msgs
 
 
+def _import_member_candidates(member: str, node: ast.ImportFrom) -> list[str]:
+    """Wheel members a ``from X import name`` in ``member`` may refer to."""
+    parts = member.split("/")[:-1]
+    if node.level:
+        base = parts[: len(parts) - (node.level - 1)] if node.level > 1 else parts
+    else:
+        base = []
+    mod = (node.module or "").split(".") if node.module else []
+    path = "/".join([*base, *mod])
+    if not path:
+        return []
+    return [path + ".py", path + "/__init__.py"]
+
+
+def _followed_warnings(fetcher: Fetcher, dist: str, version: str, files: list[dict],
+                       member: str, src: str, chain: list[str], depth: int = 3) -> list[str]:
+    """The name is only re-exported here (``from .utils import contextfunction``): read the
+    module that defines it and mine that definition's prose instead."""
+    if depth <= 0 or len(chain) != 1:
+        return []
+    try:
+        node = _scope(ast.parse(src), chain)
+    except SyntaxError:
+        return []
+    if not isinstance(node, ast.ImportFrom):
+        return []
+    original = next((a.name for a in node.names if (a.asname or a.name) == chain[0]), None)
+    if original is None or original == "*":
+        return []
+    for cand in _import_member_candidates(member, node):
+        text = fetcher.member(dist, version, files, cand)
+        if not text:
+            continue
+        msgs = module_warnings(text, [original])
+        if msgs:
+            return msgs
+        return _followed_warnings(fetcher, dist, version, files, cand, text, [original],
+                                  depth - 1)
+    return []
+
+
 def intermediate_hint(
     fetcher: Fetcher, dist: str, member: str, chain: list[str], old_v: str, new_v: str
 ) -> dict[str, Any]:
@@ -280,6 +385,8 @@ def intermediate_hint(
                               "probes": probes}
     if found:
         msgs = module_warnings(found[1], chain)
+        if not msgs:
+            msgs = _followed_warnings(fetcher, dist, v, files, member, found[1], chain)
         result.update(last_version_with_symbol=found[0], messages=msgs[:5],
                       hint=successor_from(msgs))
     else:
