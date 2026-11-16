@@ -658,6 +658,14 @@ class MonitoringBackend(FrameBackend):
                 near = self._near_codes.get(id(back.f_code))
                 if not (near[1] if near is not None else self._code_is_near(back)):
                     return None
+            if self._inh_codes and id(code) in self._inh_codes:
+                # stdlib code armed for a dependency class's inherited method: only a call on
+                # a receiver of such a class is a contact, named after that class
+                sym = self._inherited_sym(code, frame.f_locals.get(code.co_varnames[0]))
+                if sym is None:
+                    return None
+                self._record(frame, ent, sym)
+                return None
             if self._renames:
                 cn = self._callname.pop(_get_ident(), None)
                 if cn is not None and cn[0] is code:
@@ -919,7 +927,10 @@ class MonitoringBackend(FrameBackend):
         kind = ent[1]
         key = (id(code), offset)
         tid = _get_ident()
-        if kind != _K_C:
+        csym = None
+        if kind == _K_NONE:
+            csym = self._inherited_call(callable_, arg0)
+        if kind != _K_C and csym is None:
             # Nothing compiled to record. A traced Python callable is only watched for a
             # binding failure, so a site that reached the same callee twice settles (DISABLE,
             # like incremental mode's arming): a bind failing on a later call is not seen.
@@ -947,7 +958,7 @@ class MonitoringBackend(FrameBackend):
             frame = _frame_of(code)
             if frame is None:
                 return True
-        info = self._c_start(frame, ent[2],
+        info = self._c_start(frame, csym or ent[2],
                              NO_ARG if arg0 is self._mon.MISSING else arg0)
         stack = self._cstack.get(tid)
         if stack is None:
@@ -1033,6 +1044,48 @@ class MonitoringBackend(FrameBackend):
         except Exception:
             pass
         return None
+
+    def _inherited_call(self, callable_, arg0):
+        """FU6: a call from our code to stdlib (or other non-target) code whose receiver is an
+        instance of a target class. A Python method is armed (its start is recorded, named
+        after the receiver's class) and None returned; a builtin method descriptor on a
+        dependency subclass of a builtin returns its symbol, to be recorded like a C call."""
+        t = type(callable_)
+        recv = arg0
+        if t is _METHOD:
+            func = callable_.__func__
+            recv = callable_.__self__
+            t = type(func)
+        else:
+            func = callable_
+        if t is _FUNCTION:
+            code = func.__code__
+            if (recv is self._mon.MISSING or code.co_argcount < 1
+                    or code.co_varnames[0] not in ("self", "cls")
+                    or id(code) in self._inh_codes):
+                return None
+            if self._dep_function(func) or self._inherited_sym(code, recv) is None:
+                return None
+            self._arm_inherited(code)
+            return None
+        if recv is self._mon.MISSING or not hasattr(func, "__objclass__"):
+            return None
+        return self._inherited_descriptor_sym(func, recv)
+
+    def _arm_inherited(self, code):
+        with self._arm_lock:
+            if id(code) in self._inh_codes:
+                return
+            self._inh_codes[id(code)] = code
+            self._impact_codes[id(code)] = code     # tool B (incremental) records it too
+            ent = self._callee.get(id(code))
+            restart = ent is not None and ent[0] is code and len(ent) > 6 and ent[6] is not None
+            self._watch_code(code)
+            if restart:
+                try:
+                    self._mon.restart_events()      # a DISABLEd location ignores local events
+                except Exception:
+                    pass
 
     def _record_binding(self, frame, func):
         ci = self._identity.code_identity(func.__code__, func.__globals__.get("__name__", ""),

@@ -590,6 +590,15 @@ def is_compiled_callable(obj):
     return t in _C_CALL_TYPES or t.__name__ in _C_TYPE_NAMES
 
 
+def mro_lookup(cls, name):
+    """The raw class-dict value ``name`` resolves to on ``cls`` (None if absent)."""
+    for owner in cls.__mro__:
+        value = owner.__dict__.get(name, NO_ARG)
+        if value is not NO_ARG:
+            return value
+    return None
+
+
 def same_c_callable(a, b):
     """True if two events name the same compiled callable. The profile hook is handed a
     freshly made bound builtin method at ``c_call`` and again at ``c_return``: same
@@ -1032,6 +1041,8 @@ class FrameBackend(TraceBackend):
         self._ccache = {}           # id(callable) -> (callable, sym | None): compiled decisions
         self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
         self._bind_kw = sink_binding(sink)
+        self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
+        self._inh_codes = {}        # id(code) -> code: stdlib code armed for inherited-method calls
 
     def _target_module(self, module, frame):
         """Far-side decision for a module (cached per code by the callers)."""
@@ -1258,6 +1269,59 @@ class FrameBackend(TraceBackend):
         result = value if outcome == OUTCOME_RETURN else AMBIGUOUS_OUTCOME
         self.sink.on_return(info[1], info[2], result, info[3], **kw)
 
+    # ── inherited methods ──────────────────────────────────────────────────────
+    # A dependency class inherits methods from the stdlib (``HTTPHeaderDict.get`` is
+    # ``Mapping.get``); the callee's code lives outside every target, yet the CALL from our
+    # code is a boundary contact. It is recorded when the receiver's class is a target class
+    # and resolves the method to that very code, named after the receiver's class.
+    def _inherited_sym(self, code, recv):
+        """``<receiver class module>.<qualname>.<method>`` for non-target ``code`` called on
+        ``recv``, or None. Decided once per (code, receiver class)."""
+        t = recv if isinstance(recv, type) else type(recv)
+        key = (id(code), id(t))
+        ent = self._inh.get(key)
+        if ent is not None and ent[0] is code and ent[1] is t:
+            return ent[2]
+        sym = None
+        try:
+            module = t.__module__
+            if (isinstance(module, str) and module and module != "builtins"
+                    and not never_target(module) and self._in_target(module)
+                    and code.co_name != "__del__"):
+                value = mro_lookup(t, code.co_name)
+                if isinstance(value, (staticmethod, classmethod)):
+                    value = value.__func__
+                if getattr(value, "__code__", None) is code:
+                    sym = module + "." + t.__qualname__ + "." + code.co_name
+        except Exception:
+            sym = None
+        if len(self._inh) >= _CODE_CACHE_MAX:
+            self._inh.clear()
+        self._inh[key] = (code, t, sym)
+        return sym
+
+    def _inherited_descriptor_sym(self, desc, recv):
+        """The same for a builtin method descriptor (``dict.get``) called on ``recv``, an
+        instance of a dependency subclass of its class."""
+        t = type(recv)
+        key = (id(desc), id(t))
+        ent = self._inh.get(key)
+        if ent is not None and ent[0] is desc and ent[1] is t:
+            return ent[2]
+        sym = None
+        try:
+            module = t.__module__
+            if (isinstance(module, str) and module and module != "builtins"
+                    and not never_target(module) and self._in_target(module)
+                    and desc.__name__ != "__del__" and mro_lookup(t, desc.__name__) is desc):
+                sym = module + "." + t.__qualname__ + "." + desc.__name__
+        except Exception:
+            sym = None
+        if len(self._inh) >= _CODE_CACHE_MAX:
+            self._inh.clear()
+        self._inh[key] = (desc, t, sym)
+        return sym
+
     # ── compiled calls ─────────────────────────────────────────────────────────
     def _c_sym(self, obj):
         """The ``module.qualname`` a compiled callable is recorded under, or None when it is
@@ -1369,8 +1433,13 @@ class SetProfileBackend(FrameBackend):
             if len(self._callee) >= _CODE_CACHE_MAX:
                 self._callee.clear()
             module = frame.f_globals.get("__name__", "") or ""
+            body = code.co_name == "<module>"
+            # [.., generator marker, may be an inherited method]: a non-target method (first
+            # parameter self/cls) can still be a dependency class's inherited method.
             ent = [code, self._target_module(module, frame) and code.co_name != "__del__",
-                   module, code.co_name == "<module>", None, generator_marker(code)]
+                   module, body, None, generator_marker(code),
+                   (not body and code.co_argcount > 0 and not never_target(module)
+                    and code.co_varnames[0] in ("self", "cls"))]
             self._callee[id(code)] = ent
         return ent
 
@@ -1403,8 +1472,19 @@ class SetProfileBackend(FrameBackend):
                         return self._hook
                 else:
                     ent = self._callee_entry(frame)
-                if not ent[1] or ent[3]:
-                    return self._hook  # not a dependency, or a module body (import, not a contact)
+                override = None
+                if not ent[1]:
+                    if not ent[6] or self._retired:
+                        return self._hook  # not a dependency
+                    back = frame.f_back
+                    if not self._caller_is_near(back):
+                        return self._hook
+                    override = self._inherited_sym(frame.f_code, frame.f_locals.get(
+                        frame.f_code.co_varnames[0]))
+                    if override is None:
+                        return self._hook  # not a dependency class's inherited method
+                elif ent[3]:
+                    return self._hook  # a module body (import, not a contact)
                 if ent[5] is not None and not first_start(frame):
                     return self._hook  # a generator resuming: not a call
                 back = frame.f_back
@@ -1412,7 +1492,7 @@ class SetProfileBackend(FrameBackend):
                     return self._hook  # hybrid: a WrapBackend wrapper already recorded this call
                 if not self._caller_is_near(back):  # caller = our code?
                     return self._hook  # internal dep<->dep traffic, not our boundary
-                if self._record(frame, ent):
+                if self._record(frame, ent, override):
                     tid = _get_ident()
                     self._inflight[tid] = self._inflight.get(tid, 0) + 1
             elif event == "return":
