@@ -218,6 +218,9 @@ class MigrationPlan(BaseModel):
     # Predicted risks per call site (baseline facts x the migrations' delta facts), each
     # marked fixed by this plan or not; None when there was no baseline to predict from.
     risks: PredictionReport | None = None
+    # Baseline types whose public spelling now names another class, with same-object evidence
+    # from both interpreters: [{"old", "new", "via"}]. verify reads it when comparing type names.
+    type_relocations: list[dict[str, str]] = Field(default_factory=list)
     # The python pseudo-migration: {from, to, quality, sides, ...}; None when the plan does
     # not move Python. Its risks are in ``risks`` (scope "python"); the target interpreter's
     # SyntaxError / SyntaxWarning findings are here.
@@ -349,6 +352,7 @@ def create_migration_plan(
     risks = None
     if predict and baseline_path is not None:
         risks = _predict_risks(root, baseline_path, list(migrations), changes, delta_reports)
+    type_relocations = list(getattr(risks, "_type_relocations", None) or [])
     python, compile_findings = None, []
     if predict and python_move is not None:
         risks, python, compile_findings = _python_part(root, python_move, risks, stage)
@@ -379,6 +383,7 @@ def create_migration_plan(
         changes=changes,
         advisories=advisories,
         risks=risks,
+        type_relocations=type_relocations,
         python=python,
         compile_findings=compile_findings,
     )
