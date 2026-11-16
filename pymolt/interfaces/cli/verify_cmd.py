@@ -108,6 +108,11 @@ def capture_cmd(
         None, "--impact-targets",
         help="Dependency symbols to focus on (post-migration default: the applied plan's)",
     ),
+    stdlib: str | None = typer.Option(
+        None, "--stdlib",
+        help="Stdlib modules to trace (comma list), or 'none' to disable. Default: during a "
+             "Python move, every stdlib module your project imports; not applied when "
+             "--target names dependencies unless --stdlib is given too"),
     deployment_id: str | None = typer.Option(
         None, "--deployment-id", help="Deployment id to store with the capture (stage/canary)"),
     request_id: str | None = typer.Option(
@@ -235,6 +240,7 @@ def capture_cmd(
         container=container, workdir=workdir, exclude=exclude, source=source,
         privacy=effective_privacy, sample_rate=sample_rate,
         accept_failing=accept_failing,
+        stdlib=stdlib,
         impact_targets=(
             [item.strip() for item in impact_targets.split(",") if item.strip()]
             if impact_targets else None
