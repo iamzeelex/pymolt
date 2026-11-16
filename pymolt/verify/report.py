@@ -60,6 +60,10 @@ from pymolt.verify.predict import Calibration, calibrate, predict_risks
 logger = logging.getLogger(__name__)
 
 TRUST_BASIS = "behavioural contacts in executed files"
+# Packages the injected runtime never treats as a boundary unless a target names them (it
+# keeps its own copy in ``_backend.TEST_RUNNER_PACKAGES``; a test keeps the two equal).
+TEST_RUNNER_PACKAGES = frozenset((
+    "_pytest", "pytest", "pluggy", "py", "iniconfig", "_hypothesis_pytestplugin", "xdist"))
 
 
 class SymbolStatus(BaseModel):
@@ -617,6 +621,12 @@ def build_contract_report(
             ):
                 unobservable = None
             klass = unobservable or klass
+        if (klass == "behavioural" and s["dep"].split(".")[0] in TEST_RUNNER_PACKAGES
+                and not hits and not observed_tops & TEST_RUNNER_PACKAGES):
+            # the capture does not trace the test runner (unless a target names one of the
+            # family, which lifts the exclusion for all of it), so its contacts can never be
+            # confirmed; counting them would lower trust for nothing
+            klass = "test-runner"
         names = [target]
         if identity is not None and identity.resolved:
             names.append(identity.sym)
@@ -733,6 +743,7 @@ def build_contract_report(
                            "statically unnameable, so neither BLIND nor confirmable"),
         ("absent-dependency", "target a package that is not installed in the capture's "
                               "interpreter, so no trace there can exercise them"),
+        ("test-runner", "belong to the test runner, which captures do not trace"),
     ):
         excluded = [s.target for s in scope if s.contact_class == klass]
         if excluded:

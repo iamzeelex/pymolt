@@ -588,3 +588,38 @@ def test_absent_dependency_leaves_trust_only_with_capture_interpreter_evidence(
     rep = build_contract_report(root, trace=trace)
     classes = {s.target: s.contact_class for s in rep.symbols if s.target.startswith("flask")}
     assert set(classes.values()) == {"behavioural"}
+
+
+def test_test_runner_contacts_are_left_out_of_trust_unless_traced(tmp_path):
+    """Captures never trace the test runner, so its contacts can't be confirmed: they are
+    left out of trust rather than counted BLIND. Traced (a target named it) they count."""
+    root = _project(tmp_path)
+    (root / "tests").mkdir()
+    (root / "tests" / "test_views.py").write_text(
+        "import pytest\nfrom myapp import views\n\n"
+        "def test_handler():\n"
+        "    with pytest.raises(ZeroDivisionError):\n"
+        "        1 / 0\n"
+        "    assert views.handler()\n",
+        encoding="utf-8",
+    )
+    trace = _trace(tmp_path, [
+        {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 4}}])
+    rep = build_contract_report(root, trace=trace)
+    runner = [s for s in rep.symbols if s.dep == "pytest"]
+    assert runner and {s.contact_class for s in runner} == {"test-runner"}
+    assert any("test runner" in note for note in rep.notes)
+    # flask.Flask confirmed, with_appcontext blind; pytest.raises is not in the denominator
+    assert rep.trust == 0.5
+
+    traced = _trace(tmp_path, [
+        {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 4}},
+        {"q": "_pytest.python_api.raises", "where": {"file": "tests/test_views.py", "line": 5}}])
+    rep = build_contract_report(root, trace=traced)
+    assert {s.contact_class for s in rep.symbols if s.dep == "pytest"} == {"behavioural"}
+
+
+def test_the_report_and_the_runtime_agree_on_the_test_runner_packages():
+    from pymolt.verify import _backend, report
+
+    assert report.TEST_RUNNER_PACKAGES == _backend.TEST_RUNNER_PACKAGES
