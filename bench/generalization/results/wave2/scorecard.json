@@ -1,0 +1,2846 @@
+{
+  "meta": {
+    "when": "2026-11-15 20:14:05",
+    "pymolt": "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+    "wall_seconds": 63.7,
+    "env_seconds": 1.3,
+    "parallel": 3
+  },
+  "rows": [
+    {
+      "toy": "click",
+      "ecosystem": "cli",
+      "old_python": "3.11",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 3,
+        "detected": 2,
+        "detected_any_kind": 2,
+        "recall": 0.6666666666666666,
+        "recall_any_kind": 0.6666666666666666,
+        "behavior_excluded": {
+          "total": 1,
+          "seen_by_plan": 1,
+          "symbols": [
+            "click.testing.CliRunner.invoke"
+          ]
+        },
+        "successors_expected": 3,
+        "successors_correct": 1,
+        "fp_candidates": [
+          "click.testing.CliRunner SIGNATURE",
+          "click.testing.CliRunner.__init__ SIGNATURE",
+          "click.types.Choice SIGNATURE",
+          "click.testing.CliRunner DEFAULT",
+          "click.testing.CliRunner.__init__ DEFAULT",
+          "click.testing.CliRunner.invoke DEFAULT",
+          "click.core.MultiCommand.__init__ DEPRECATED"
+        ],
+        "per_entry": [
+          {
+            "symbol": "click.get_terminal_size",
+            "kind": "REMOVED",
+            "sites": [
+              "app/cli.py:13"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "shutil.get_terminal_size",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "click.argument",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/cli.py:47"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "shell_complete",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "click.MultiCommand",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/cli.py:22"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "DEPRECATED",
+            "src": "impact",
+            "successor": "click.Group",
+            "plan_successor": "Group",
+            "successor_ok": true
+          },
+          {
+            "symbol": "click.testing.CliRunner.invoke",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/cli.py:83"
+            ],
+            "scenario": "change",
+            "fixable": "none",
+            "status": "other_kind",
+            "plan_kind": "DEFAULT",
+            "src": "impact",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "CliRunner.invoke",
+            "tier": "medium",
+            "result": "miss",
+            "fixed_by_plan": false
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 10,
+          "hit": 2,
+          "prevented": 0,
+          "miss": 8,
+          "not_exercised": 0
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "6 passed in 0.04s",
+        "expected": 2,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "disappeared": 1,
+              "drift": 2,
+              "equal": 11
+            }
+          },
+          "change": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [
+              "CliRunner.invoke"
+            ],
+            "counts": {
+              "disappeared": 1,
+              "drift": 2,
+              "equal": 12
+            }
+          }
+        },
+        "levels": {
+          "exact": 4,
+          "type": 0
+        },
+        "exact_share": 1.0,
+        "opaque_share": 0.2947368421052632
+      },
+      "E": {
+        "total": 0,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 0
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": []
+      },
+      "F": {
+        "delta_sides": [
+          "click new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/click/change/.pymolt/cache/envs/cd7102e826d6591c)",
+          "click new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/click/equiv/.pymolt/cache/envs/cd7102e826d6591c)",
+          "click old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/click/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 6.6,
+        "change": 6.7
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.3,
+          "capture_baseline": 1.1,
+          "plan": 1.3,
+          "apply": 0.8,
+          "tests_new": 0.3,
+          "capture_post": 1.0,
+          "verify": 0.8
+        },
+        "change": {
+          "setup": 1.3,
+          "capture_baseline": 1.1,
+          "plan": 1.4,
+          "apply": 0.8,
+          "tests_new": 0.3,
+          "capture_post": 1.0,
+          "verify": 0.8
+        }
+      }
+    },
+    {
+      "toy": "django",
+      "ecosystem": "web framework (settings at import time)",
+      "old_python": "3.9",
+      "status": "step failures: equiv:capture_post, change:capture_post",
+      "warnings": [
+        "manual_migration: app/core.py: old text not found: 'from django.utils import six\\nfrom django.utils.encoding impo'",
+        "manual_migration: app/core.py: old text not found: 'from django.utils import six\\nfrom django.utils.encoding impo'"
+      ],
+      "A": {
+        "total": 7,
+        "detected": 4,
+        "detected_any_kind": 6,
+        "recall": 0.5714285714285714,
+        "recall_any_kind": 0.8571428571428571,
+        "behavior_excluded": {
+          "total": 1,
+          "seen_by_plan": 0,
+          "symbols": [
+            "django.utils.html.escape"
+          ]
+        },
+        "successors_expected": 7,
+        "successors_correct": 1,
+        "fp_candidates": [
+          "django.utils.six.string_types REMOVED"
+        ],
+        "per_entry": [
+          {
+            "symbol": "django.conf.urls.url",
+            "kind": "REMOVED",
+            "sites": [
+              "app/urls.py:6"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "django.urls.re_path (same regex semantics; path() for non-regex)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "django.utils.six",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:24"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "builtin str",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "django.utils.encoding.force_text",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:16"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "django.utils.encoding.force_str",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "django.utils.http.urlquote",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:28"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "urllib.parse.quote (a different module: not the same object)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "django.utils.translation.ugettext",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:12"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "other_kind",
+            "plan_kind": "MOVED",
+            "src": "impact",
+            "successor": "django.utils.translation.gettext",
+            "plan_successor": "django.utils.translation.gettext",
+            "successor_ok": true
+          },
+          {
+            "symbol": "django.utils.translation.ugettext_lazy",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:8"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "other_kind",
+            "plan_kind": "MOVED",
+            "src": "risk",
+            "successor": "django.utils.translation.gettext_lazy",
+            "plan_successor": "django.utils.translation.gettext",
+            "successor_ok": false
+          },
+          {
+            "symbol": "django.http.HttpRequest.is_ajax",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:32"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "request.headers.get('x-requested-with') == 'XMLHttpRequest' (no library replacement)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "django.utils.html.escape",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/core.py:43"
+            ],
+            "scenario": "change",
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "django.utils.html.escape",
+            "tier": null,
+            "result": null,
+            "fixed_by_plan": null
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 0,
+          "hit": 0,
+          "prevented": 0,
+          "miss": 0,
+          "not_exercised": 0
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 2,
+        "correct": 0,
+        "wrong": 2,
+        "tests_after_apply": "1 error in 0.10s",
+        "expected": 4,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "inconclusive",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {}
+          },
+          "change": {
+            "expected_changed_by": {},
+            "verdict": "inconclusive",
+            "expected": "fail",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [
+              "django.utils.html.escape"
+            ],
+            "counts": {}
+          }
+        },
+        "levels": {
+          "exact": 0,
+          "type": 0
+        },
+        "exact_share": null,
+        "opaque_share": 0.2426470588235294
+      },
+      "E": {
+        "total": 0,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 0
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": []
+      },
+      "F": {
+        "delta_sides": [
+          "asgiref new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
+          "asgiref new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
+          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
+          "django new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
+          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
+          "sqlparse new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
+          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)"
+        ],
+        "delta_old_side_built": [
+          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)"
+        ],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 8.2,
+        "change": 8.4
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.0,
+          "capture_baseline": 1.5,
+          "plan": 2.1,
+          "apply": 0.8,
+          "tests_new": 0.6,
+          "capture_post": 1.3,
+          "verify": 0.9
+        },
+        "change": {
+          "setup": 1.1,
+          "capture_baseline": 1.5,
+          "plan": 2.2,
+          "apply": 0.8,
+          "tests_new": 0.6,
+          "capture_post": 1.3,
+          "verify": 0.9
+        }
+      }
+    },
+    {
+      "toy": "jinja2",
+      "ecosystem": "templating",
+      "old_python": "3.9",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 5,
+        "detected": 2,
+        "detected_any_kind": 4,
+        "recall": 0.4,
+        "recall_any_kind": 0.8,
+        "behavior_excluded": {
+          "total": 1,
+          "seen_by_plan": 0,
+          "symbols": [
+            "jinja2.filters.do_urlize"
+          ]
+        },
+        "successors_expected": 4,
+        "successors_correct": 2,
+        "fp_candidates": [
+          "jinja2.Markup.__add__ MOVED",
+          "jinja2.Markup.__mod__ MOVED",
+          "jinja2.Markup.__radd__ MOVED",
+          "jinja2.Markup.join MOVED",
+          "markupsafe.Markup.__add__ SIGNATURE",
+          "markupsafe.Markup.__mod__ SIGNATURE",
+          "markupsafe.Markup.__new__ SIGNATURE",
+          "markupsafe.Markup.join SIGNATURE"
+        ],
+        "per_entry": [
+          {
+            "symbol": "jinja2.Markup",
+            "kind": "MOVED",
+            "sites": [
+              "app/render.py:20",
+              "app/render.py:27",
+              "app/render.py:33",
+              "app/render.py:69"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "MOVED",
+            "src": "impact",
+            "successor": "markupsafe.Markup",
+            "plan_successor": "markupsafe.Markup",
+            "successor_ok": true
+          },
+          {
+            "symbol": "jinja2.escape",
+            "kind": "MOVED",
+            "sites": [
+              "app/render.py:27",
+              "app/render.py:33",
+              "app/render.py:69"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "MOVED",
+            "src": "impact",
+            "successor": "markupsafe.escape",
+            "plan_successor": "jinja2.compiler.escape",
+            "successor_ok": true
+          },
+          {
+            "symbol": "jinja2.contextfunction",
+            "kind": "MOVED",
+            "sites": [
+              "app/render.py:3",
+              "app/render.py:17"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "other_kind",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "jinja2.pass_context",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "jinja2.evalcontextfilter",
+            "kind": "MOVED",
+            "sites": [
+              "app/render.py:3",
+              "app/render.py:23"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "other_kind",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "jinja2.pass_eval_context",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "jinja2.ext.with_",
+            "kind": "REMOVED",
+            "sites": [
+              "app/render.py:40"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "jinja2.filters.do_urlize",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/render.py:73"
+            ],
+            "scenario": "change",
+            "fixable": "none",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "Template.render",
+            "tier": null,
+            "result": null,
+            "fixed_by_plan": null
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 42,
+          "hit": 0,
+          "prevented": 0,
+          "miss": 38,
+          "not_exercised": 4
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "5 passed in 0.10s",
+        "expected": 11,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "inconclusive",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "rewritten": 15
+            }
+          },
+          "change": {
+            "expected_changed_by": {},
+            "verdict": "inconclusive",
+            "expected": "fail",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [
+              "Template.render"
+            ],
+            "counts": {
+              "rewritten": 15
+            }
+          }
+        },
+        "levels": {
+          "exact": 28,
+          "type": 0
+        },
+        "exact_share": 1.0,
+        "opaque_share": 0.17708333333333331
+      },
+      "E": {
+        "total": 0,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 0
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": []
+      },
+      "F": {
+        "delta_sides": [
+          "jinja2 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/change/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "jinja2 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/equiv/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "jinja2 old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/jinja2/old/bin/python)",
+          "markupsafe new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/change/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "markupsafe new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/equiv/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "markupsafe old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/jinja2/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 7.3,
+        "change": 7.5
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.3,
+          "capture_baseline": 1.3,
+          "plan": 1.7,
+          "apply": 0.8,
+          "tests_new": 0.4,
+          "capture_post": 1.0,
+          "verify": 0.8
+        },
+        "change": {
+          "setup": 1.1,
+          "capture_baseline": 1.4,
+          "plan": 1.7,
+          "apply": 1.0,
+          "tests_new": 0.5,
+          "capture_post": 1.0,
+          "verify": 0.8
+        }
+      }
+    },
+    {
+      "toy": "networkx",
+      "ecosystem": "graphs",
+      "old_python": "3.8",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 8,
+        "detected": 6,
+        "detected_any_kind": 6,
+        "recall": 0.75,
+        "recall_any_kind": 0.75,
+        "behavior_excluded": {
+          "total": 1,
+          "seen_by_plan": 0,
+          "symbols": [
+            "numpy.matrix.__mul__"
+          ]
+        },
+        "successors_expected": 8,
+        "successors_correct": 1,
+        "fp_candidates": [
+          "networkx.classes.reportviews.OutEdgeView.__call__ SIGNATURE",
+          "networkx.readwrite.json_graph.node_link.node_link_data SIGNATURE"
+        ],
+        "per_entry": [
+          {
+            "symbol": "networkx.Graph.node",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:19"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "networkx.Graph.nodes",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "networkx.info",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:27"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "str(G)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "networkx.to_numpy_matrix",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:31"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "networkx.to_numpy_array",
+            "plan_successor": "is",
+            "successor_ok": false
+          },
+          {
+            "symbol": "numpy.matrix.__mul__",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/network.py:36"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "A @ A",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "numpy.matrix.A1",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:40"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": ".ravel()",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "networkx.Graph.selfloop_edges",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:44"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "networkx.selfloop_edges",
+            "plan_successor": "nx.selfloop_edges",
+            "successor_ok": true
+          },
+          {
+            "symbol": "networkx.connected_component_subgraphs",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:48"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "(G.subgraph(c).copy() for c in networkx.connected_components(G))",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "networkx.write_gpickle",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:57"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "pickle.dump",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "networkx.read_gpickle",
+            "kind": "REMOVED",
+            "sites": [
+              "app/network.py:61"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "pickle.load",
+            "plan_successor": null,
+            "successor_ok": false
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "networkx.node_link_data",
+            "tier": null,
+            "result": null,
+            "fixed_by_plan": null
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 14,
+          "hit": 6,
+          "prevented": 0,
+          "miss": 2,
+          "not_exercised": 6
+        },
+        "unpredicted_changes": [
+          "change: networkx.readwrite.json_graph.node_link.node_link_data"
+        ]
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "9 passed in 0.57s",
+        "expected": 1,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "rewritten": 7,
+              "disappeared": 3,
+              "appeared": 3,
+              "equal": 9
+            }
+          },
+          "change": {
+            "expected_changed_by": {
+              "networkx.node_link_data": "changed"
+            },
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [
+              "networkx.readwrite.json_graph.node_link.node_link_data"
+            ],
+            "expected_changed_found": [
+              "networkx.node_link_data"
+            ],
+            "expected_changed_missing": [],
+            "counts": {
+              "changed": 1,
+              "rewritten": 7,
+              "disappeared": 3,
+              "appeared": 3,
+              "equal": 9
+            }
+          }
+        },
+        "levels": {
+          "exact": 7,
+          "type": 2
+        },
+        "exact_share": 0.7777777777777778,
+        "opaque_share": 0.5754504504504505
+      },
+      "E": {
+        "total": 5,
+        "found": 1,
+        "python_level": {
+          "found": 1,
+          "total": 4
+        },
+        "c_level": {
+          "found": 0,
+          "total": 1
+        },
+        "post_migration": [],
+        "missed": [
+          "numpy.matrix PendingDeprecationWarning",
+          "networkx.connected_component_subgraphs DeprecationWarning",
+          "numpy.int (alias, networkx.readwrite import time) DeprecationWarning",
+          "networkx.convert_matrix / drawing.nx_pydot (\"is\" with a literal) SyntaxWarning"
+        ],
+        "per_entry": [
+          {
+            "symbol": "numpy.matrix",
+            "category": "PendingDeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "networkx.Graph.selfloop_edges",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          },
+          {
+            "symbol": "networkx.connected_component_subgraphs",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "numpy.int (alias, networkx.readwrite import time)",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "networkx.convert_matrix / drawing.nx_pydot (\"is\" with a literal)",
+            "category": "SyntaxWarning",
+            "from_c": true,
+            "found_in_baseline": false,
+            "found_in_post": false
+          }
+        ]
+      },
+      "F": {
+        "delta_sides": [
+          "networkx new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/networkx/change/.pymolt/cache/envs/6e204b673b907f68)",
+          "networkx new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/networkx/equiv/.pymolt/cache/envs/6e204b673b907f68)",
+          "networkx old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/networkx/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 14.1,
+        "change": 13.8
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.1,
+          "capture_baseline": 6.4,
+          "plan": 2.5,
+          "apply": 0.8,
+          "tests_new": 0.8,
+          "capture_post": 1.5,
+          "verify": 1.0
+        },
+        "change": {
+          "setup": 1.2,
+          "capture_baseline": 5.1,
+          "plan": 2.2,
+          "apply": 1.1,
+          "tests_new": 1.7,
+          "capture_post": 1.5,
+          "verify": 1.0
+        }
+      }
+    },
+    {
+      "toy": "pandas",
+      "ecosystem": "dataframes (reference)",
+      "old_python": "3.11",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 2,
+        "detected": 2,
+        "detected_any_kind": 2,
+        "recall": 1.0,
+        "recall_any_kind": 1.0,
+        "behavior_excluded": {
+          "total": 0,
+          "seen_by_plan": 0,
+          "symbols": []
+        },
+        "successors_expected": 1,
+        "successors_correct": 1,
+        "fp_candidates": [
+          "pandas.core.frame.DataFrame.groupby SIGNATURE",
+          "pandas.core.series.Series.to_dict SIGNATURE",
+          "pandas.core.frame.DataFrame.groupby DEFAULT",
+          "pandas.core.groupby.groupby.GroupBy.sum DEFAULT",
+          "pandas.core.series.Series DEFAULT",
+          "pandas.core.series.Series.__init__ DEFAULT"
+        ],
+        "per_entry": [
+          {
+            "symbol": "pandas.core.series.Series.append",
+            "kind": "REMOVED",
+            "sites": [
+              "toyapp/core.py:13"
+            ],
+            "scenario": null,
+            "fixable": "plan",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "pandas.concat",
+            "plan_successor": "pandas.concat",
+            "successor_ok": true
+          },
+          {
+            "symbol": "pandas.core.frame.DataFrame.mean",
+            "kind": "DEFAULT",
+            "sites": [
+              "toyapp/core.py:24"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "DEFAULT",
+            "src": "impact",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "pandas.core.frame.DataFrame.mean",
+            "tier": "high",
+            "result": "hit",
+            "fixed_by_plan": false
+          }
+        ],
+        "hit_rate": 1.0,
+        "calibration": {
+          "predicted": 11,
+          "hit": 1,
+          "prevented": 2,
+          "miss": 8,
+          "not_exercised": 0
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 1,
+        "correct": 1,
+        "wrong": 0,
+        "tests_after_apply": "3 passed in 0.87s",
+        "expected": 1,
+        "attribution": "per-rewrite",
+        "attributed": 1,
+        "unknown": 0,
+        "per_rewrite": [
+          {
+            "symbol": "pandas.core.series.Series.append",
+            "new_symbol": "pandas.core.reshape.concat.concat",
+            "site": "toyapp/core.py:13",
+            "result": "correct"
+          }
+        ]
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "pass",
+            "expected": "pass",
+            "ok": true,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "rewritten": 1,
+              "drift": 1,
+              "equal": 6
+            }
+          },
+          "change": {
+            "expected_changed_by": {
+              "pandas.core.frame.DataFrame.mean": "changed"
+            },
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [
+              "pandas.core.frame.DataFrame.mean"
+            ],
+            "expected_changed_found": [
+              "pandas.core.frame.DataFrame.mean"
+            ],
+            "expected_changed_missing": [],
+            "counts": {
+              "changed": 1,
+              "rewritten": 1,
+              "disappeared": 1,
+              "drift": 1,
+              "equal": 7
+            }
+          }
+        },
+        "levels": {
+          "exact": 3,
+          "type": 2
+        },
+        "exact_share": 0.6,
+        "opaque_share": 0.45
+      },
+      "E": {
+        "total": 2,
+        "found": 2,
+        "python_level": {
+          "found": 2,
+          "total": 2
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": [
+          {
+            "symbol": "pandas.core.series.Series.append",
+            "category": "FutureWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          },
+          {
+            "symbol": "pandas.core.frame.DataFrame.mean",
+            "category": "FutureWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          }
+        ]
+      },
+      "F": {
+        "delta_sides": [
+          "numpy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/change/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "numpy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/equiv/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "numpy old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/pandas/old/bin/python)",
+          "pandas new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/change/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "pandas new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/equiv/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "pandas old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/pandas/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 14.4,
+        "change": 14.5
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.1,
+          "capture_baseline": 2.2,
+          "plan": 5.9,
+          "apply": 0.8,
+          "tests_new": 1.2,
+          "capture_post": 1.7,
+          "verify": 1.5
+        },
+        "change": {
+          "setup": 1.2,
+          "capture_baseline": 2.2,
+          "plan": 6.1,
+          "apply": 0.8,
+          "tests_new": 1.0,
+          "capture_post": 1.7,
+          "verify": 1.5
+        }
+      }
+    },
+    {
+      "toy": "pydantic",
+      "ecosystem": "validation / web",
+      "old_python": "3.11",
+      "status": "step failures: equiv:capture_baseline, equiv:apply, change:capture_baseline, change:apply",
+      "warnings": [],
+      "A": {
+        "total": 9,
+        "detected": 0,
+        "detected_any_kind": 0,
+        "recall": 0.0,
+        "recall_any_kind": 0.0,
+        "behavior_excluded": {
+          "total": 4,
+          "seen_by_plan": 0,
+          "symbols": [
+            "pydantic.BaseModel.json",
+            "pydantic.BaseModel.Config",
+            "pydantic.BaseModel",
+            "pydantic.BaseModel.parse_obj"
+          ]
+        },
+        "successors_expected": 9,
+        "successors_correct": 0,
+        "fp_candidates": [],
+        "per_entry": [
+          {
+            "symbol": "pydantic.Field",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/core.py:8"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pattern= (same kwarg, renamed)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.validator",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:19"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.field_validator",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.dict",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:42"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_dump",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.json",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:46"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_dump_json",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.json",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/core.py:46"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "json.dumps(user.model_dump(mode='json')) to keep the v1 bytes",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.parse_obj",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:34"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_validate",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.parse_raw",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:38"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_validate_json",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.copy",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:50"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_copy",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.schema",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:54"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_json_schema",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.__fields__",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:58"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "pydantic.BaseModel.model_fields",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.Config",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/core.py:29"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "model_config = ConfigDict(str_strip_whitespace=True)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/core.py:15"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "nickname: Optional[str] = None",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "pydantic.BaseModel.parse_obj",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/core.py:75"
+            ],
+            "scenario": "change",
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "pydantic.main.BaseModel.parse_obj",
+            "tier": null,
+            "result": null,
+            "fixed_by_plan": null
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 0,
+          "hit": 0,
+          "prevented": 0,
+          "miss": 0,
+          "not_exercised": 0
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "7 passed, 13 warnings in 0.23s",
+        "expected": 8,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "inconclusive",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {}
+          },
+          "change": {
+            "expected_changed_by": {},
+            "verdict": "inconclusive",
+            "expected": "fail",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [
+              "pydantic.main.BaseModel.parse_obj"
+            ],
+            "counts": {}
+          }
+        },
+        "levels": {
+          "exact": 0,
+          "type": 0
+        },
+        "exact_share": null,
+        "opaque_share": null
+      },
+      "E": {
+        "total": 0,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 0
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": []
+      },
+      "F": {
+        "delta_sides": [],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 10.1,
+        "change": 6.4
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.2,
+          "capture_baseline": 4.3,
+          "plan": 0.9,
+          "apply": 1.1,
+          "tests_new": 0.6,
+          "capture_post": 1.2,
+          "verify": 0.8
+        },
+        "change": {
+          "setup": 1.1,
+          "capture_baseline": 1.1,
+          "plan": 0.9,
+          "apply": 0.8,
+          "tests_new": 0.4,
+          "capture_post": 1.1,
+          "verify": 1.0
+        }
+      }
+    },
+    {
+      "toy": "pyyaml",
+      "ecosystem": "serialization",
+      "old_python": "3.11",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 4,
+        "detected": 1,
+        "detected_any_kind": 4,
+        "recall": 0.25,
+        "recall_any_kind": 1.0,
+        "behavior_excluded": {
+          "total": 0,
+          "seen_by_plan": 0,
+          "symbols": []
+        },
+        "successors_expected": 0,
+        "successors_correct": 0,
+        "fp_candidates": [],
+        "per_entry": [
+          {
+            "symbol": "yaml.load",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/settings.py:13"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "other_kind",
+            "plan_kind": "DEFAULT",
+            "src": "impact",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "yaml.load_all",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/settings.py:24"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "other_kind",
+            "plan_kind": "DEFAULT",
+            "src": "impact",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "yaml.YAMLLoadWarning",
+            "kind": "REMOVED",
+            "sites": [
+              "app/settings.py:19"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "yaml.load",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/settings.py:56"
+            ],
+            "scenario": "change",
+            "fixable": "manual",
+            "status": "other_kind",
+            "plan_kind": "DEFAULT",
+            "src": "impact",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "yaml.load",
+            "tier": "medium",
+            "result": "hit",
+            "fixed_by_plan": false
+          }
+        ],
+        "hit_rate": 1.0,
+        "calibration": {
+          "predicted": 7,
+          "hit": 1,
+          "prevented": 0,
+          "miss": 4,
+          "not_exercised": 2
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "6 passed in 0.08s",
+        "expected": 0,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "pass",
+            "expected": "pass",
+            "ok": true,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "rewritten": 2,
+              "equal": 3
+            }
+          },
+          "change": {
+            "expected_changed_by": {
+              "yaml.load": "disappeared"
+            },
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [],
+            "expected_changed_found": [
+              "yaml.load"
+            ],
+            "expected_changed_missing": [],
+            "counts": {
+              "rewritten": 2,
+              "disappeared": 1,
+              "equal": 3
+            }
+          }
+        },
+        "levels": {
+          "exact": 6,
+          "type": 2
+        },
+        "exact_share": 0.75,
+        "opaque_share": 0.10555555555555556
+      },
+      "E": {
+        "total": 2,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 2
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [
+          "yaml.load YAMLLoadWarning",
+          "yaml.load_all YAMLLoadWarning"
+        ],
+        "per_entry": [
+          {
+            "symbol": "yaml.load",
+            "category": "YAMLLoadWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "yaml.load_all",
+            "category": "YAMLLoadWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          }
+        ]
+      },
+      "F": {
+        "delta_sides": [
+          "pyyaml new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pyyaml/change/.pymolt/cache/envs/1edcb82c6d2656b1)",
+          "pyyaml new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pyyaml/equiv/.pymolt/cache/envs/1edcb82c6d2656b1)",
+          "pyyaml old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/pyyaml/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 6.8,
+        "change": 6.5
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.1,
+          "capture_baseline": 1.2,
+          "plan": 1.4,
+          "apply": 0.9,
+          "tests_new": 0.4,
+          "capture_post": 1.0,
+          "verify": 0.8
+        },
+        "change": {
+          "setup": 1.1,
+          "capture_baseline": 1.1,
+          "plan": 1.4,
+          "apply": 0.8,
+          "tests_new": 0.3,
+          "capture_post": 1.0,
+          "verify": 0.8
+        }
+      }
+    },
+    {
+      "toy": "sqlalchemy",
+      "ecosystem": "ORM / DB (sqlite in-memory)",
+      "old_python": "3.9",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 9,
+        "detected": 7,
+        "detected_any_kind": 8,
+        "recall": 0.7777777777777778,
+        "recall_any_kind": 0.8888888888888888,
+        "behavior_excluded": {
+          "total": 1,
+          "seen_by_plan": 0,
+          "symbols": [
+            "sqlalchemy.engine.RowProxy"
+          ]
+        },
+        "successors_expected": 9,
+        "successors_correct": 0,
+        "fp_candidates": [
+          "sqlalchemy.engine.result.ResultProxy.fetchall REMOVED",
+          "sqlalchemy.engine.result.ResultProxy.first REMOVED",
+          "sqlalchemy.engine.result.ResultProxy.scalar REMOVED",
+          "sqlalchemy.engine.result.RowProxy.__eq__ REMOVED",
+          "sqlalchemy.engine.result.RowProxy.keys REMOVED",
+          "sqlalchemy.ext.declarative.api.DeclarativeMeta.__init__ REMOVED",
+          "sqlalchemy.engine.base.Engine.connect SIGNATURE",
+          "sqlalchemy.engine.create_engine SIGNATURE",
+          "sqlalchemy.orm.session.sessionmaker SIGNATURE",
+          "sqlalchemy.orm.session.sessionmaker.__init__ SIGNATURE",
+          "sqlalchemy.sql.schema.Table SIGNATURE",
+          "sqlalchemy.sql.schema.Table.__init__ SIGNATURE",
+          "sqlalchemy.sql.sqltypes.Integer SIGNATURE",
+          "sqlalchemy.sql.sqltypes.String SIGNATURE",
+          "sqlalchemy.sql.schema.MetaData.create_all DEFAULT",
+          "sqlalchemy.sql.schema.MetaData.reflect DEFAULT",
+          "sqlalchemy.engine.create_engine DEPRECATED"
+        ],
+        "per_entry": [
+          {
+            "symbol": "sqlalchemy.engine.Engine.execute",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:34"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "Connection.execute via `with engine.begin() as conn:` / `engine.connect()`",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.select",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/core.py:39"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "other_kind",
+            "plan_kind": "DEPRECATED",
+            "src": "impact",
+            "successor": "select(*cols), i.e. positional columns",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.engine.RowProxy.__getitem__",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:50"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "Row._mapping[...] / row.name",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.engine.RowProxy",
+            "kind": "BEHAVIOR",
+            "sites": [
+              "app/core.py:54"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "dict(row._mapping)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.engine.Connection.execute",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/core.py:77"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "detected",
+            "plan_kind": "SIGNATURE",
+            "src": "impact",
+            "successor": "sqlalchemy.text(...)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.engine.Engine.table_names",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:90"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "sqlalchemy.inspect(engine).get_table_names()",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.MetaData",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/core.py:94"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "SIGNATURE",
+            "src": "impact",
+            "successor": "MetaData(); meta.reflect(bind=engine)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.ext.declarative.declarative_base",
+            "kind": "MOVED",
+            "sites": [
+              "app/core.py:4"
+            ],
+            "scenario": null,
+            "fixable": "codemod",
+            "status": "detected",
+            "plan_kind": "MOVED",
+            "src": "impact",
+            "successor": "sqlalchemy.orm.declarative_base (the same function, relocated)",
+            "plan_successor": "sqlalchemy.ext.declarative.declarative_base",
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.orm.Query.get",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/core.py:69"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "DEPRECATED",
+            "src": "impact",
+            "successor": "sqlalchemy.orm.Session.get(Book, id)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "sqlalchemy.engine.RowProxy.keys",
+            "kind": "REMOVED",
+            "sites": [
+              "app/core.py:102"
+            ],
+            "scenario": "change",
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "row._fields / row._mapping.keys()",
+            "plan_successor": null,
+            "successor_ok": false
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "sqlalchemy.engine.result.RowProxy.keys",
+            "tier": "certain",
+            "result": "hit",
+            "fixed_by_plan": false
+          }
+        ],
+        "hit_rate": 1.0,
+        "calibration": {
+          "predicted": 59,
+          "hit": 41,
+          "prevented": 0,
+          "miss": 8,
+          "not_exercised": 10
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "6 passed in 0.64s",
+        "expected": 3,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "pass",
+            "ok": false,
+            "changed": [
+              "sqlalchemy.ext.declarative.api.declarative_base"
+            ],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "changed": 1,
+              "rewritten": 24,
+              "disappeared": 6,
+              "appeared": 7,
+              "drift": 2,
+              "equal": 3
+            }
+          },
+          "change": {
+            "expected_changed_by": {
+              "sqlalchemy.engine.result.RowProxy.keys": "disappeared"
+            },
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [
+              "sqlalchemy.ext.declarative.api.declarative_base"
+            ],
+            "expected_changed_found": [
+              "sqlalchemy.engine.result.RowProxy.keys"
+            ],
+            "expected_changed_missing": [],
+            "counts": {
+              "changed": 1,
+              "rewritten": 24,
+              "disappeared": 7,
+              "appeared": 7,
+              "drift": 2,
+              "equal": 3
+            }
+          }
+        },
+        "levels": {
+          "exact": 8,
+          "type": 30
+        },
+        "exact_share": 0.21052631578947367,
+        "opaque_share": 0.7471781864299303
+      },
+      "E": {
+        "total": 0,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 0
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": []
+      },
+      "F": {
+        "delta_sides": [
+          "sqlalchemy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/sqlalchemy/change/.pymolt/cache/envs/8e304b5439d46c2d)",
+          "sqlalchemy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/sqlalchemy/equiv/.pymolt/cache/envs/8e304b5439d46c2d)",
+          "sqlalchemy old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/sqlalchemy/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 10.3,
+        "change": 9.6
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.1,
+          "capture_baseline": 1.8,
+          "plan": 3.0,
+          "apply": 0.8,
+          "tests_new": 0.9,
+          "capture_post": 1.5,
+          "verify": 1.2
+        },
+        "change": {
+          "setup": 1.2,
+          "capture_baseline": 1.5,
+          "plan": 2.9,
+          "apply": 0.8,
+          "tests_new": 0.7,
+          "capture_post": 1.4,
+          "verify": 1.1
+        }
+      }
+    },
+    {
+      "toy": "stdlib",
+      "ecosystem": "python-stdlib",
+      "old_python": "3.8",
+      "status": "ok",
+      "warnings": [
+        "manual_migration: app/reloader.py: old text not found: 'import imp\\nimport sys'",
+        "manual_migration: app/reloader.py: old text not found: 'import imp\\nimport sys'"
+      ],
+      "A": {
+        "total": 11,
+        "detected": 5,
+        "detected_any_kind": 6,
+        "recall": 0.45454545454545453,
+        "recall_any_kind": 0.5454545454545454,
+        "behavior_excluded": {
+          "total": 0,
+          "seen_by_plan": 0,
+          "symbols": []
+        },
+        "successors_expected": 8,
+        "successors_correct": 1,
+        "fp_candidates": [],
+        "per_entry": [
+          {
+            "symbol": "asyncio.sleep",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/aio.py:8"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "asyncio.Queue",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/aio.py:18"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "imp.reload",
+            "kind": "MOVED",
+            "sites": [
+              "app/reloader.py:7"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "other_kind",
+            "plan_kind": "REMOVED",
+            "src": "risk",
+            "successor": "importlib.reload",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "distutils.version.LooseVersion",
+            "kind": "REMOVED",
+            "sites": [
+              "app/versions.py:2"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "risk",
+            "successor": null,
+            "plan_successor": null,
+            "successor_ok": null
+          },
+          {
+            "symbol": "collections.Mapping",
+            "kind": "MOVED",
+            "sites": [
+              "app/settings.py:5"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "MOVED",
+            "src": "risk",
+            "successor": "collections.abc.Mapping",
+            "plan_successor": "collections.abc.Mapping",
+            "successor_ok": true
+          },
+          {
+            "symbol": "unittest.TestCase.assertEquals",
+            "kind": "REMOVED",
+            "sites": [
+              "tests/test_app.py:75"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "unittest.TestCase.assertEqual",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "inspect.getargspec",
+            "kind": "REMOVED",
+            "sites": [
+              "app/specs.py:6"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "risk",
+            "successor": "inspect.getfullargspec",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "inspect.ArgSpec.keywords",
+            "kind": "REMOVED",
+            "sites": [
+              "app/specs.py:11"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "inspect.FullArgSpec.varkw",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "xml.etree.ElementTree.Element.getchildren",
+            "kind": "REMOVED",
+            "sites": [
+              "app/xmlio.py:12"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "missed",
+            "plan_kind": null,
+            "src": null,
+            "successor": "list(element)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "datetime.datetime.utcnow",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/stamps.py:6"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "DEPRECATED",
+            "src": "risk",
+            "successor": "datetime.datetime.now(datetime.timezone.utc)",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "datetime.datetime.utcfromtimestamp",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/stamps.py:10"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "DEPRECATED",
+            "src": "risk",
+            "successor": "datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)",
+            "plan_successor": null,
+            "successor_ok": false
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "datetime.datetime.fromisoformat",
+            "tier": null,
+            "result": null,
+            "fixed_by_plan": null
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 24,
+          "hit": 0,
+          "prevented": 0,
+          "miss": 0,
+          "not_exercised": 24
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 4,
+        "correct": 4,
+        "wrong": 0,
+        "tests_after_apply": "10 passed, 1 warning in 0.03s",
+        "expected": 5,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "disappeared": 1,
+              "appeared": 1
+            }
+          },
+          "change": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [
+              "datetime.datetime.fromisoformat"
+            ],
+            "counts": {
+              "disappeared": 1,
+              "appeared": 1
+            }
+          }
+        },
+        "levels": {
+          "exact": 0,
+          "type": 0
+        },
+        "exact_share": null,
+        "opaque_share": null
+      },
+      "E": {
+        "total": 9,
+        "found": 0,
+        "python_level": {
+          "found": 0,
+          "total": 6
+        },
+        "c_level": {
+          "found": 0,
+          "total": 3
+        },
+        "post_migration": [
+          {
+            "symbol": "datetime.datetime.utcnow",
+            "category": "DeprecationWarning",
+            "from_c": true,
+            "observed_post": false
+          },
+          {
+            "symbol": "datetime.datetime.utcfromtimestamp",
+            "category": "DeprecationWarning",
+            "from_c": true,
+            "observed_post": false
+          },
+          {
+            "symbol": "re.findall (non-raw '\\d+' literal)",
+            "category": "SyntaxWarning",
+            "from_c": true,
+            "observed_post": false
+          },
+          {
+            "symbol": "builtins.open (unclosed file)",
+            "category": "ResourceWarning",
+            "from_c": true,
+            "observed_post": false
+          }
+        ],
+        "missed": [
+          "asyncio.sleep DeprecationWarning",
+          "asyncio.Queue DeprecationWarning",
+          "imp DeprecationWarning",
+          "collections.Mapping DeprecationWarning",
+          "unittest.TestCase.assertEquals DeprecationWarning",
+          "inspect.getargspec DeprecationWarning",
+          "xml.etree.ElementTree.Element.getchildren DeprecationWarning",
+          "re.findall (non-raw '\\d+' literal in app/xmlio.py) DeprecationWarning",
+          "builtins.open (unclosed file in xmlio.read_all) ResourceWarning"
+        ],
+        "per_entry": [
+          {
+            "symbol": "asyncio.sleep",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "asyncio.Queue",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "imp",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "collections.Mapping",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "unittest.TestCase.assertEquals",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "inspect.getargspec",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "xml.etree.ElementTree.Element.getchildren",
+            "category": "DeprecationWarning",
+            "from_c": true,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "re.findall (non-raw '\\d+' literal in app/xmlio.py)",
+            "category": "DeprecationWarning",
+            "from_c": true,
+            "found_in_baseline": false,
+            "found_in_post": false
+          },
+          {
+            "symbol": "builtins.open (unclosed file in xmlio.read_all)",
+            "category": "ResourceWarning",
+            "from_c": true,
+            "found_in_baseline": false,
+            "found_in_post": false
+          }
+        ]
+      },
+      "F": {
+        "delta_sides": [
+          "iniconfig new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "iniconfig new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "iniconfig old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)",
+          "packaging new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "packaging new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "packaging old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)",
+          "pluggy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pluggy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pluggy old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)",
+          "pytest new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pytest new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pytest old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [
+          "python"
+        ],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 7.8,
+        "change": 6.9
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.2,
+          "capture_baseline": 2.1,
+          "plan": 1.6,
+          "apply": 0.8,
+          "tests_new": 0.3,
+          "capture_post": 1.0,
+          "verify": 0.8
+        },
+        "change": {
+          "setup": 1.2,
+          "capture_baseline": 1.1,
+          "plan": 1.7,
+          "apply": 0.8,
+          "tests_new": 0.3,
+          "capture_post": 1.0,
+          "verify": 0.8
+        }
+      }
+    },
+    {
+      "toy": "urllib3",
+      "ecosystem": "http-client (offline)",
+      "old_python": "3.11",
+      "status": "ok",
+      "warnings": [],
+      "A": {
+        "total": 5,
+        "detected": 5,
+        "detected_any_kind": 5,
+        "recall": 1.0,
+        "recall_any_kind": 1.0,
+        "behavior_excluded": {
+          "total": 0,
+          "seen_by_plan": 0,
+          "symbols": []
+        },
+        "successors_expected": 5,
+        "successors_correct": 1,
+        "fp_candidates": [
+          "urllib3.response.HTTPResponse SIGNATURE",
+          "urllib3.response.HTTPResponse.__init__ SIGNATURE",
+          "urllib3.util.retry.Retry.__init__ SIGNATURE",
+          "urllib3.response.HTTPResponse DEFAULT",
+          "urllib3.response.HTTPResponse.__init__ DEFAULT",
+          "urllib3.util.retry.Retry.__init__ DEFAULT",
+          "urllib3.util.timeout.Timeout DEFAULT",
+          "urllib3.util.timeout.Timeout.__init__ DEFAULT"
+        ],
+        "per_entry": [
+          {
+            "symbol": "urllib3.util.retry.Retry",
+            "kind": "SIGNATURE",
+            "sites": [
+              "app/client.py:17"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "SIGNATURE",
+            "src": "impact",
+            "successor": "allowed_methods",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "urllib3.util.retry.Retry.DEFAULT_METHOD_WHITELIST",
+            "kind": "REMOVED",
+            "sites": [
+              "app/client.py:22"
+            ],
+            "scenario": null,
+            "fixable": "auto",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "urllib3.util.retry.Retry.DEFAULT_ALLOWED_METHODS",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "urllib3.response.HTTPResponse.getheader",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/client.py:42"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "DEPRECATED",
+            "src": "impact",
+            "successor": "urllib3.response.HTTPResponse.headers.get",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "urllib3.response.HTTPResponse.getheaders",
+            "kind": "DEPRECATED",
+            "sites": [
+              "app/client.py:46"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "DEPRECATED",
+            "src": "impact",
+            "successor": "urllib3.response.HTTPResponse.headers",
+            "plan_successor": null,
+            "successor_ok": false
+          },
+          {
+            "symbol": "urllib3.get_host",
+            "kind": "REMOVED",
+            "sites": [
+              "app/client.py:56"
+            ],
+            "scenario": null,
+            "fixable": "manual",
+            "status": "detected",
+            "plan_kind": "REMOVED",
+            "src": "impact",
+            "successor": "urllib3.util.parse_url",
+            "plan_successor": "parse_url",
+            "successor_ok": true
+          }
+        ]
+      },
+      "B": {
+        "expected_changed": [
+          {
+            "symbol": "urllib3.response.HTTPResponse.stream",
+            "tier": null,
+            "result": null,
+            "fixed_by_plan": null
+          }
+        ],
+        "hit_rate": 0.0,
+        "calibration": {
+          "predicted": 15,
+          "hit": 12,
+          "prevented": 0,
+          "miss": 3,
+          "not_exercised": 0
+        },
+        "unpredicted_changes": []
+      },
+      "C": {
+        "proposed": 0,
+        "correct": 0,
+        "wrong": 0,
+        "tests_after_apply": "7 passed in 0.05s",
+        "expected": 2,
+        "attribution": "suite"
+      },
+      "D": {
+        "scenarios": {
+          "equiv": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "pass",
+            "ok": false,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [],
+            "counts": {
+              "rewritten": 2,
+              "disappeared": 3,
+              "appeared": 1,
+              "drift": 2,
+              "equal": 5
+            }
+          },
+          "change": {
+            "expected_changed_by": {},
+            "verdict": "fail",
+            "expected": "fail",
+            "ok": true,
+            "changed": [],
+            "expected_changed_found": [],
+            "expected_changed_missing": [
+              "urllib3.response.HTTPResponse.stream"
+            ],
+            "counts": {
+              "rewritten": 2,
+              "disappeared": 3,
+              "appeared": 1,
+              "drift": 3,
+              "equal": 7
+            }
+          }
+        },
+        "levels": {
+          "exact": 7,
+          "type": 3
+        },
+        "exact_share": 0.7,
+        "opaque_share": 0.11309523809523808
+      },
+      "E": {
+        "total": 4,
+        "found": 4,
+        "python_level": {
+          "found": 4,
+          "total": 4
+        },
+        "c_level": {
+          "found": 0,
+          "total": 0
+        },
+        "post_migration": [],
+        "missed": [],
+        "per_entry": [
+          {
+            "symbol": "urllib3.util.retry.Retry",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          },
+          {
+            "symbol": "urllib3.util.retry.Retry.DEFAULT_METHOD_WHITELIST",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          },
+          {
+            "symbol": "urllib3.response.HTTPResponse.getheader",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          },
+          {
+            "symbol": "urllib3.response.HTTPResponse.getheaders",
+            "category": "DeprecationWarning",
+            "from_c": false,
+            "found_in_baseline": true,
+            "found_in_post": false
+          }
+        ]
+      },
+      "F": {
+        "delta_sides": [
+          "urllib3 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/urllib3/change/.pymolt/cache/envs/090e85a53af8b8c4)",
+          "urllib3 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/urllib3/equiv/.pymolt/cache/envs/090e85a53af8b8c4)",
+          "urllib3 old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/urllib3/old/bin/python)"
+        ],
+        "delta_old_side_built": [],
+        "inconclusive": [],
+        "partial": [],
+        "import_errors": 0,
+        "import_error_samples": []
+      },
+      "seconds": {
+        "equiv": 6.6,
+        "change": 6.1
+      },
+      "phase_seconds": {
+        "equiv": {
+          "setup": 1.2,
+          "capture_baseline": 1.1,
+          "plan": 1.4,
+          "apply": 0.8,
+          "tests_new": 0.3,
+          "capture_post": 1.0,
+          "verify": 0.8
+        },
+        "change": {
+          "setup": 1.2,
+          "capture_baseline": 1.1,
+          "plan": 1.2,
+          "apply": 0.7,
+          "tests_new": 0.3,
+          "capture_post": 0.9,
+          "verify": 0.7
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,370 @@
+{
+  "name": "stdlib",
+  "ecosystem": "python-stdlib",
+  "old": {
+    "python": "3.8",
+    "requirements": [
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "pytest"
+  ],
+  "target_manifest": [
+    "pytest"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/aio.py": "\"\"\"Producer/consumer pipeline on a private event loop.\"\"\"\nimport asyncio\n\n\nasync def _produce(queue, items, delay, loop):\n    for item in items:\n        await queue.put(item)\n        await asyncio.sleep(delay, loop=loop)\n\n\nasync def _consume(queue, count):\n    return [await queue.get() for _ in range(count)]\n\n\ndef pipeline(items, delay=0.001):\n    loop = asyncio.new_event_loop()\n    try:\n        queue = asyncio.Queue(maxsize=2, loop=loop)\n        producer = asyncio.ensure_future(_produce(queue, items, delay, loop), loop=loop)\n        consumer = asyncio.ensure_future(_consume(queue, len(items)), loop=loop)\n        loop.run_until_complete(asyncio.wait([producer, consumer]))\n        return consumer.result()\n    finally:\n        loop.close()\n",
+    "app/reloader.py": "\"\"\"Hot-reload helper for plugin modules.\"\"\"\nimport imp\nimport sys\n\n\ndef reload_module(module):\n    return imp.reload(module)\n\n\ndef reload_by_name(name):\n    return imp.reload(sys.modules[name])\n",
+    "app/settings.py": "\"\"\"Read-only settings container.\"\"\"\nimport collections\n\n\nclass Settings(collections.Mapping):\n    def __init__(self, data):\n        self._data = dict(data)\n\n    def __getitem__(self, key):\n        return self._data[key]\n\n    def __iter__(self):\n        return iter(self._data)\n\n    def __len__(self):\n        return len(self._data)\n\n\ndef is_mapping(value):\n    return isinstance(value, collections.Mapping)\n",
+    "app/specs.py": "\"\"\"Describe how a callable can be called.\"\"\"\nimport inspect\n\n\ndef describe(func):\n    spec = inspect.getargspec(func)\n    return {\n        \"args\": spec.args,\n        \"defaults\": spec.defaults,\n        \"varargs\": spec.varargs,\n        \"accepts_kwargs\": spec.keywords is not None,\n    }\n",
+    "app/stamps.py": "\"\"\"UTC timestamps for the audit log.\"\"\"\nimport datetime\n\n\ndef now_stamp():\n    return datetime.datetime.utcnow().strftime(\"%Y-%m-%dT%H:%M:%SZ\")\n\n\ndef epoch_to_utc(seconds):\n    return datetime.datetime.utcfromtimestamp(seconds).isoformat()\n",
+    "app/versions.py": "\"\"\"Version comparison for release tags like 1.10 or 2.0rc1.\"\"\"\nfrom distutils.version import LooseVersion\n\n\ndef parse(text):\n    return LooseVersion(text)\n\n\ndef newest(versions):\n    return max(versions, key=LooseVersion)\n\n\ndef at_least(version, minimum):\n    return LooseVersion(version) >= LooseVersion(minimum)\n",
+    "app/xmlio.py": "\"\"\"Tiny XML item list reader.\"\"\"\nimport re\nimport xml.etree.ElementTree as ET\n\n\ndef load(text):\n    return ET.fromstring(text)\n\n\ndef items(text):\n    root = load(text)\n    return [(child.get(\"id\"), child.text) for child in root.getchildren()]\n\n\ndef numbers(text):\n    return [int(n) for n in re.findall(\"\\d+\", text)]\n\n\ndef read_all(path):\n    return open(path).read()\n",
+    "tests/test_app.py": "import sys\nimport unittest\n\nimport pytest\n\nfrom app import aio, reloader, settings, specs, stamps, versions, xmlio\n\n\ndef test_pipeline_preserves_order():\n    assert aio.pipeline([3, 1, 2, 5, 4]) == [3, 1, 2, 5, 4]\n\n\ndef test_reload_picks_up_changes(tmp_path, monkeypatch):\n    monkeypatch.syspath_prepend(str(tmp_path))\n    mod_file = tmp_path / \"plug_mod.py\"\n    mod_file.write_text(\"VALUE = 1\\n\")\n    import plug_mod\n    assert plug_mod.VALUE == 1\n    mod_file.write_text(\"VALUE = 22  # changed\\n\")\n    reloader.reload_module(plug_mod)\n    assert plug_mod.VALUE == 22\n    mod_file.write_text(\"VALUE = 333  # changed again\\n\")\n    assert reloader.reload_by_name(\"plug_mod\").VALUE == 333\n    sys.modules.pop(\"plug_mod\", None)\n\n\ndef test_version_ordering():\n    assert str(versions.newest([\"1.9\", \"1.10\", \"1.2\"])) == \"1.10\"\n    assert versions.at_least(\"2.0\", \"1.10\")\n    assert not versions.at_least(\"1.2\", \"1.10\")\n    assert versions.parse(\"1.10\").version[:2] == [1, 10]\n\n\ndef test_settings_is_a_mapping():\n    conf = settings.Settings({\"a\": 1, \"b\": 2})\n    assert settings.is_mapping(conf)\n    assert dict(conf) == {\"a\": 1, \"b\": 2}\n    assert len(conf) == 2 and conf.get(\"c\", 9) == 9\n\n\ndef test_describe_signature():\n    def handler(a, b=2, *rest, **extra):\n        return a\n\n    info = specs.describe(handler)\n    assert info[\"args\"] == [\"a\", \"b\"]\n    assert info[\"defaults\"] == (2,)\n    assert info[\"varargs\"] == \"rest\"\n    assert info[\"accepts_kwargs\"] is True\n\n\ndef test_xml_items():\n    xml = '<list><item id=\"1\">a</item><item id=\"2\">b</item></list>'\n    assert xmlio.items(xml) == [(\"1\", \"a\"), (\"2\", \"b\")]\n    assert xmlio.load(xml).tag == \"list\"\n\n\ndef test_numbers():\n    assert xmlio.numbers(\"a1 b22 c333\") == [1, 22, 333]\n\n\ndef test_read_all(tmp_path):\n    path = tmp_path / \"f.txt\"\n    path.write_text(\"hello\")\n    assert xmlio.read_all(str(path)) == \"hello\"\n\n\ndef test_stamps():\n    assert stamps.epoch_to_utc(0) == \"1970-01-01T00:00:00\"\n    assert stamps.now_stamp().endswith(\"Z\") and len(stamps.now_stamp()) == 20\n\n\nclass StampCase(unittest.TestCase):\n    def test_epoch_roundtrip(self):\n        self.assertEquals(stamps.epoch_to_utc(86400), \"1970-01-02T00:00:00\")\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/aio.py",
+      "old": "await asyncio.sleep(delay, loop=loop)",
+      "new": "await asyncio.sleep(delay)"
+    },
+    {
+      "file": "app/aio.py",
+      "old": "asyncio.Queue(maxsize=2, loop=loop)",
+      "new": "asyncio.Queue(maxsize=2)"
+    },
+    {
+      "file": "app/reloader.py",
+      "old": "import imp\n",
+      "new": "import importlib\n",
+      "if_present": true
+    },
+    {
+      "file": "app/reloader.py",
+      "old": "imp.reload(module)",
+      "new": "importlib.reload(module)"
+    },
+    {
+      "file": "app/reloader.py",
+      "old": "imp.reload(sys.modules[name])",
+      "new": "importlib.reload(sys.modules[name])"
+    },
+    {
+      "file": "app/versions.py",
+      "old": "from distutils.version import LooseVersion\n",
+      "new": "import re\n\n\nclass LooseVersion:\n    \"\"\"Minimal stand-in for distutils.version.LooseVersion.\"\"\"\n\n    component_re = re.compile(r\"(\\d+ | [a-z]+ | \\.)\", re.VERBOSE)\n\n    def __init__(self, vstring):\n        self.vstring = vstring\n        parts = [p for p in self.component_re.split(vstring) if p and p != \".\"]\n        self.version = [int(p) if p.isdigit() else p for p in parts]\n\n    def _cmp(self, other):\n        if not isinstance(other, LooseVersion):\n            other = LooseVersion(other)\n        return (self.version > other.version) - (self.version < other.version)\n\n    def __eq__(self, other):\n        return self._cmp(other) == 0\n\n    def __lt__(self, other):\n        return self._cmp(other) < 0\n\n    def __le__(self, other):\n        return self._cmp(other) <= 0\n\n    def __gt__(self, other):\n        return self._cmp(other) > 0\n\n    def __ge__(self, other):\n        return self._cmp(other) >= 0\n\n    def __hash__(self):\n        return hash(self.vstring)\n\n    def __str__(self):\n        return self.vstring\n\n    def __repr__(self):\n        return \"LooseVersion('%s')\" % self.vstring\n"
+    },
+    {
+      "file": "app/settings.py",
+      "old": "import collections\n",
+      "new": "import collections.abc\n"
+    },
+    {
+      "file": "app/settings.py",
+      "old": "class Settings(collections.Mapping):",
+      "new": "class Settings(collections.abc.Mapping):"
+    },
+    {
+      "file": "app/settings.py",
+      "old": "isinstance(value, collections.Mapping)",
+      "new": "isinstance(value, collections.abc.Mapping)"
+    },
+    {
+      "file": "app/specs.py",
+      "old": "inspect.getargspec(func)",
+      "new": "inspect.getfullargspec(func)"
+    },
+    {
+      "file": "app/specs.py",
+      "old": "spec.keywords is not None",
+      "new": "spec.varkw is not None"
+    },
+    {
+      "file": "app/xmlio.py",
+      "old": "root.getchildren()",
+      "new": "list(root)"
+    },
+    {
+      "file": "app/stamps.py",
+      "old": "datetime.datetime.utcnow()",
+      "new": "datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)"
+    },
+    {
+      "file": "app/stamps.py",
+      "old": "datetime.datetime.utcfromtimestamp(seconds)",
+      "new": "datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).replace(tzinfo=None)"
+    },
+    {
+      "file": "tests/test_app.py",
+      "old": "self.assertEquals(",
+      "new": "self.assertEqual("
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/stamps.py",
+          "append": "\n\ndef parse_stamp(text):\n    try:\n        return datetime.datetime.fromisoformat(text)\n    except ValueError:\n        return None\n"
+        },
+        {
+          "file": "tests/test_app.py",
+          "append": "\n\ndef test_parse_stamp_zulu():\n    parsed = stamps.parse_stamp(\"2021-03-04T05:06:07Z\")\n    assert parsed is None or parsed.year == 2021\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "datetime.datetime.fromisoformat"
+      ],
+      "behaviour": "fromisoformat('2021-03-04T05:06:07Z'): ValueError on 3.8 (parse_stamp returns None), aware datetime on 3.11+; the test accepts either"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "asyncio.sleep",
+      "kind": "SIGNATURE",
+      "param": "loop",
+      "site": "app/aio.py:8",
+      "breaks": "TypeError: sleep() got an unexpected keyword argument 'loop'",
+      "successor": null,
+      "fixable": "auto",
+      "source": "What's New in Python 3.10 (Removed: the loop parameter of asyncio high-level APIs, deprecated since 3.8)",
+      "verified": {
+        "old": "3.8.20: works, DeprecationWarning 'The loop argument is deprecated since Python 3.8, and scheduled for removal in Python 3.10.'",
+        "new": "3.12.11: TypeError (drop the argument)"
+      }
+    },
+    {
+      "symbol": "asyncio.Queue",
+      "kind": "SIGNATURE",
+      "param": "loop",
+      "site": "app/aio.py:18",
+      "breaks": "TypeError: Queue.__init__() got an unexpected keyword argument 'loop'",
+      "successor": null,
+      "fixable": "auto",
+      "source": "What's New in Python 3.10 (Removed)",
+      "verified": {
+        "old": "3.8.20: works, two DeprecationWarnings (Queue and its internal locks.Event)",
+        "new": "3.12.11: TypeError"
+      }
+    },
+    {
+      "symbol": "imp.reload",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/reloader.py:7",
+      "breaks": "ModuleNotFoundError: No module named 'imp' (raised at import of app.reloader, so both functions fail)",
+      "successor": "importlib.reload",
+      "fixable": "auto",
+      "source": "What's New in Python 3.12 (Removed: the imp module)",
+      "verified": {
+        "old": "3.8.20: works; importing imp gives DeprecationWarning \"the imp module is deprecated in favour of importlib\"; imp.reload is NOT the same object as importlib.reload on 3.8 (checked with 'is': False)",
+        "new": "3.12.11: ModuleNotFoundError; importlib.reload gives the same result",
+        "round4_audit": "identity check (old Python 3.8): `imp.reload is importlib.reload` -> False (imp.reload is a wrapper function); new 3.12: module imp gone. A rename to a different object is REMOVED with a successor (was MOVED)."
+      }
+    },
+    {
+      "symbol": "distutils.version.LooseVersion",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/versions.py:2",
+      "breaks": "ModuleNotFoundError: No module named 'distutils' (at import of app.versions; a venv without setuptools)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "What's New in Python 3.12 (Removed: the distutils package, PEP 632)",
+      "verified": {
+        "old": "3.8.20: works, NO warning (the distutils deprecation warnings only start in 3.10)",
+        "new": "3.12.11: ModuleNotFoundError. No stdlib successor; packaging.version.Version is third party and orders '1.10rc1' differently, so manual_migration inlines a small LooseVersion"
+      }
+    },
+    {
+      "symbol": "collections.Mapping",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/settings.py:5",
+      "breaks": "AttributeError: module 'collections' has no attribute 'Mapping' (at import of app.settings)",
+      "successor": "collections.abc.Mapping",
+      "fixable": "auto",
+      "source": "What's New in Python 3.10 (Removed: collections ABC aliases, deprecated since 3.3)",
+      "verified": {
+        "old": "3.8.20: works, DeprecationWarning \"Using or importing the ABCs from 'collections' instead of from 'collections.abc' is deprecated since Python 3.3...\"; collections.Mapping is collections.abc.Mapping",
+        "new": "3.12.11: AttributeError"
+      }
+    },
+    {
+      "symbol": "unittest.TestCase.assertEquals",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "tests/test_app.py:75",
+      "breaks": "AttributeError: 'StampCase' object has no attribute 'assertEquals'",
+      "successor": "unittest.TestCase.assertEqual",
+      "fixable": "auto",
+      "source": "What's New in Python 3.12 (Removed: deprecated unittest aliases assertEquals etc.)",
+      "verified": {
+        "old": "3.8.20: works, DeprecationWarning 'Please use assertEqual instead.'",
+        "new": "3.12.11: AttributeError"
+      }
+    },
+    {
+      "symbol": "inspect.getargspec",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/specs.py:6",
+      "breaks": "AttributeError: module 'inspect' has no attribute 'getargspec'",
+      "successor": "inspect.getfullargspec",
+      "fixable": "manual",
+      "source": "What's New in Python 3.11 (Removed: inspect.getargspec)",
+      "verified": {
+        "old": "3.8.20: ArgSpec(args, varargs, keywords, defaults), DeprecationWarning 'inspect.getargspec() is deprecated since Python 3.0, use inspect.signature() or inspect.getfullargspec()'",
+        "new": "3.12.11: AttributeError; getfullargspec returns FullArgSpec with 'varkw' instead of 'keywords' plus kwonly fields, so a pure rename leaves spec.keywords broken (see next entry)"
+      }
+    },
+    {
+      "symbol": "inspect.ArgSpec.keywords",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/specs.py:11",
+      "breaks": "AttributeError: 'FullArgSpec' object has no attribute 'keywords' (after getargspec->getfullargspec)",
+      "successor": "inspect.FullArgSpec.varkw",
+      "fixable": "manual",
+      "source": "inspect.getfullargspec docs (field renamed varkw)",
+      "verified": {
+        "old": "3.8.20: ArgSpec.keywords == 'kw'",
+        "new": "3.12.11: FullArgSpec has varkw; no keywords"
+      }
+    },
+    {
+      "symbol": "xml.etree.ElementTree.Element.getchildren",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/xmlio.py:12",
+      "breaks": "AttributeError: 'xml.etree.ElementTree.Element' object has no attribute 'getchildren'",
+      "successor": "list(element)",
+      "fixable": "manual",
+      "source": "What's New in Python 3.9 (Removed: Element.getchildren/getiterator)",
+      "verified": {
+        "old": "3.8.20: works; DeprecationWarning \"This method will be removed in future versions.  Use 'list(elem)' or iteration over elem instead.\" is raised by the C accelerator (_elementtree) through PyErr_WarnEx: a spy on warnings.warn saw 0 calls while catch_warnings(record=True) recorded it",
+        "new": "3.12.11: AttributeError"
+      }
+    },
+    {
+      "symbol": "datetime.datetime.utcnow",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/stamps.py:6",
+      "breaks": "no break; DeprecationWarning 'datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects...' raised from C on 3.12",
+      "successor": "datetime.datetime.now(datetime.timezone.utc)",
+      "fixable": "manual",
+      "source": "What's New in Python 3.12 (Deprecated: utcnow/utcfromtimestamp)",
+      "verified": {
+        "old": "3.8.20: no warning, naive datetime",
+        "new": "3.12.11: works, DeprecationWarning from C (spy on warnings.warn saw 0 calls). The successor returns an AWARE datetime, so a bare swap changes strftime('%Z')/isoformat() output; manual_migration adds .replace(tzinfo=None)"
+      }
+    },
+    {
+      "symbol": "datetime.datetime.utcfromtimestamp",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/stamps.py:10",
+      "breaks": "no break; DeprecationWarning from C on 3.12",
+      "successor": "datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)",
+      "fixable": "manual",
+      "source": "What's New in Python 3.12 (Deprecated)",
+      "verified": {
+        "old": "3.8.20: no warning",
+        "new": "3.12.11: works, DeprecationWarning from C"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "asyncio.sleep",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "asyncio.Queue",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "imp",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "collections.Mapping",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "unittest.TestCase.assertEquals",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "inspect.getargspec",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "xml.etree.ElementTree.Element.getchildren",
+      "category": "DeprecationWarning",
+      "from_c": true,
+      "side": "old (C accelerator _elementtree)"
+    },
+    {
+      "symbol": "re.findall (non-raw '\\d+' literal in app/xmlio.py)",
+      "category": "DeprecationWarning",
+      "from_c": true,
+      "side": "old, at byte-compile of the module (compiler warning, 'invalid escape sequence \\d'); becomes SyntaxWarning on 3.12; absent when a .pyc exists"
+    },
+    {
+      "symbol": "builtins.open (unclosed file in xmlio.read_all)",
+      "category": "ResourceWarning",
+      "from_c": true,
+      "side": "old+new (emitted from C _io dealloc)"
+    }
+  ],
+  "expected_warnings_new": [
+    {
+      "symbol": "datetime.datetime.utcnow",
+      "category": "DeprecationWarning",
+      "from_c": true
+    },
+    {
+      "symbol": "datetime.datetime.utcfromtimestamp",
+      "category": "DeprecationWarning",
+      "from_c": true
+    },
+    {
+      "symbol": "re.findall (non-raw '\\d+' literal)",
+      "category": "SyntaxWarning",
+      "from_c": true
+    },
+    {
+      "symbol": "builtins.open (unclosed file)",
+      "category": "ResourceWarning",
+      "from_c": true
+    }
+  ],
+  "notes": "S2: NO runtime C-level DeprecationWarning exists that fires on 3.8 for an API that is still present on 3.12 (checked ~60 candidates; Element.__bool__ only starts warning in 3.12, utcnow/utcfromtimestamp/itertools pickling/int.__trunc__/sqlite default adapters/ssl.PROTOCOL_TLS are 3.12-only C warnings). Closest confirmed C-emitted warnings, each verified with a spy replacing warnings.warn (0 calls) while catch_warnings(record=True) still recorded the warning: (1) Element.getchildren on 3.8 (C accelerator; API removed in 3.9, so ground-truth entry, not a survivor); (2) ResourceWarning 'unclosed file' from _io on both versions; (3) compile-time 'invalid escape sequence' (DeprecationWarning 3.8 -> SyntaxWarning 3.12) and '\"is\" with a literal', which the compiler emits only when a module is compiled (no .pyc), so a baseline capture sees them only on a cold import. New-side C warnings: utcnow/utcfromtimestamp. All asyncio/imp/collections/unittest/inspect warnings are Python-level warnings.warn. Modules are split (aio, reloader, versions, settings, specs, xmlio, stamps) so that an import-time failure on 3.12 (imp, distutils, collections.Mapping) takes out only its own tests. In 3.12 the venv must not contain setuptools, else the _distutils_hack shim would provide distutils. Manual migration of aio.py removes loop=; the migrated app passes on 3.12 only (the loop-less pipeline is not run on 3.8: Queue created outside the running loop binds to the wrong loop there). S1: stdlib objects (datetime, Element, FullArgSpec/ArgSpec namedtuples, Mapping subclass, LooseVersion with .version) are returned from app functions."
+}

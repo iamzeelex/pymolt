@@ -1,0 +1,273 @@
+{
+  "name": "networkx",
+  "ecosystem": "graphs",
+  "old": {
+    "python": "3.8",
+    "requirements": [
+      "networkx==2.3",
+      "numpy==1.23.5",
+      "scipy==1.10.1",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "networkx==3.7",
+      "numpy",
+      "scipy",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "networkx==2.3",
+    "numpy<1.24",
+    "scipy"
+  ],
+  "target_manifest": [
+    "networkx==3.7"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/network.py": "\"\"\"Small collaboration-network analysis: build a graph, tag people, look at structure.\"\"\"\nimport networkx as nx\n\n\ndef build_graph(edges):\n    \"\"\"edges: iterable of (a, b, weight).\"\"\"\n    G = nx.Graph(name=\"team\")\n    for a, b, weight in edges:\n        G.add_edge(a, b, weight=weight)\n    return G\n\n\ndef tag_roles(G, roles):\n    nx.set_node_attributes(G, roles, \"role\")\n    return G\n\n\ndef role_of(G, person):\n    return G.node[person].get(\"role\", \"unknown\")\n\n\ndef weighted_edges(G):\n    return sorted((a, b, d[\"weight\"]) for a, b, d in G.edges(data=True))\n\n\ndef describe(G):\n    return nx.info(G)\n\n\ndef adjacency(G, order):\n    return nx.to_numpy_matrix(G, nodelist=order, weight=\"weight\")\n\n\ndef two_hop_weights(G, order):\n    A = adjacency(G, order)\n    return (A * A).tolist()\n\n\ndef strengths(G, order):\n    return adjacency(G, order).sum(axis=1).A1.tolist()\n\n\ndef self_loop_count(G):\n    return len(list(G.selfloop_edges()))\n\n\ndef largest_component(G):\n    parts = nx.connected_component_subgraphs(G)\n    return max(parts, key=lambda g: g.number_of_nodes())\n\n\ndef influence(G):\n    return {n: round(v, 4) for n, v in nx.pagerank(G, weight=\"weight\").items()}\n\n\ndef save_graph(G, path):\n    nx.write_gpickle(G, path)\n\n\ndef load_graph(path):\n    return nx.read_gpickle(path)\n",
+    "tests/test_network.py": "from app import network\n\nEDGES = [(\"ann\", \"bob\", 2), (\"bob\", \"cy\", 3), (\"cy\", \"dee\", 1), (\"eve\", \"fay\", 5)]\nORDER = [\"ann\", \"bob\", \"cy\", \"dee\", \"eve\", \"fay\"]\n\n\ndef make():\n    return network.build_graph(EDGES)\n\n\ndef test_roles():\n    G = network.tag_roles(make(), {\"ann\": \"lead\", \"bob\": \"dev\"})\n    assert network.role_of(G, \"ann\") == \"lead\"\n    assert network.role_of(G, \"cy\") == \"unknown\"\n\n\ndef test_weighted_edges():\n    assert network.weighted_edges(make()) == [\n        (\"ann\", \"bob\", 2), (\"bob\", \"cy\", 3), (\"cy\", \"dee\", 1), (\"eve\", \"fay\", 5)]\n\n\ndef test_describe_mentions_counts():\n    text = network.describe(make())\n    assert \"6\" in text and \"4\" in text\n\n\ndef test_two_hop_weights():\n    two = network.two_hop_weights(make(), ORDER)\n    assert two[0][2] == 6.0  # ann -> bob -> cy: 2 * 3\n    assert two[4][4] == 25.0\n\n\ndef test_strengths():\n    assert network.strengths(make(), ORDER) == [2.0, 5.0, 4.0, 1.0, 5.0, 5.0]\n\n\ndef test_self_loops():\n    G = make()\n    assert network.self_loop_count(G) == 0\n    G.add_edge(\"ann\", \"ann\", weight=1)\n    assert network.self_loop_count(G) == 1\n\n\ndef test_largest_component():\n    big = network.largest_component(make())\n    assert sorted(big.nodes()) == [\"ann\", \"bob\", \"cy\", \"dee\"]\n\n\ndef test_influence_sums_to_one():\n    scores = network.influence(make())\n    assert abs(sum(scores.values()) - 1.0) < 1e-3\n    assert max(scores, key=scores.get) in (\"bob\", \"cy\", \"eve\", \"fay\")\n\n\ndef test_save_load_roundtrip(tmp_path):\n    path = str(tmp_path / \"g.pkl\")\n    network.save_graph(make(), path)\n    G = network.load_graph(path)\n    assert sorted(G.edges()) == sorted(make().edges())\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/network.py",
+      "old": "import networkx as nx",
+      "new": "import pickle\n\nimport networkx as nx"
+    },
+    {
+      "file": "app/network.py",
+      "old": "G.node[person]",
+      "new": "G.nodes[person]"
+    },
+    {
+      "file": "app/network.py",
+      "old": "    return nx.info(G)\n",
+      "new": "    n, m = G.number_of_nodes(), G.number_of_edges()\n    lines = [\"Name: %s\" % G.name, \"Type: %s\" % type(G).__name__,\n             \"Number of nodes: %d\" % n, \"Number of edges: %d\" % m]\n    if n:\n        lines.append(\"Average degree: %8.4f\" % (2.0 * m / n))\n    return \"\\n\".join(lines)\n"
+    },
+    {
+      "file": "app/network.py",
+      "old": "nx.to_numpy_matrix(",
+      "new": "nx.to_numpy_array("
+    },
+    {
+      "file": "app/network.py",
+      "old": "(A * A).tolist()",
+      "new": "(A @ A).tolist()"
+    },
+    {
+      "file": "app/network.py",
+      "old": "adjacency(G, order).sum(axis=1).A1.tolist()",
+      "new": "adjacency(G, order).sum(axis=1).tolist()"
+    },
+    {
+      "file": "app/network.py",
+      "old": "len(list(G.selfloop_edges()))",
+      "new": "len(list(nx.selfloop_edges(G)))"
+    },
+    {
+      "file": "app/network.py",
+      "old": "parts = nx.connected_component_subgraphs(G)",
+      "new": "parts = (G.subgraph(c).copy() for c in nx.connected_components(G))"
+    },
+    {
+      "file": "app/network.py",
+      "old": "    nx.write_gpickle(G, path)\n",
+      "new": "    with open(path, \"wb\") as fh:\n        pickle.dump(G, fh)\n"
+    },
+    {
+      "file": "app/network.py",
+      "old": "    return nx.read_gpickle(path)\n",
+      "new": "    with open(path, \"rb\") as fh:\n        return pickle.load(fh)\n"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/network.py",
+          "append": "\n\ndef export_json(G):\n    import json\n\n    return json.dumps(nx.node_link_data(G), sort_keys=True)\n"
+        },
+        {
+          "file": "tests/test_network.py",
+          "append": "\n\ndef test_export_json_has_nodes():\n    import json\n\n    data = json.loads(network.export_json(make()))\n    assert len(data[\"nodes\"]) == 6\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "networkx.node_link_data"
+      ],
+      "behaviour": "node_link_data(G) has the key 'links' on 2.3 and 'edges' on 3.7 (the 3.x default); the test only checks len(data['nodes'])"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "networkx.Graph.node",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/network.py:19",
+      "breaks": "AttributeError: 'Graph' object has no attribute 'node'",
+      "successor": "networkx.Graph.nodes",
+      "fixable": "auto",
+      "source": "networkx 2.4 release notes (removal of G.node, deprecated since 2.0)",
+      "verified": {
+        "old": "2.3: G.node['a'] == {'role': ...} with no warning (alias of G.nodes)",
+        "new": "3.7: AttributeError; G.nodes['a'] returns the same dict on both versions",
+        "round4_audit": "identity check (old networkx 2.3): `Graph.node is Graph.nodes` -> True (an alias); new 3.x: Graph.node gone, Graph.nodes present. Same object under a new spelling: MOVED (was REMOVED)."
+      }
+    },
+    {
+      "symbol": "networkx.info",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/network.py:27",
+      "breaks": "AttributeError: module 'networkx' has no attribute 'info'",
+      "successor": "str(G)",
+      "fixable": "manual",
+      "source": "networkx 3.0 release notes (nx.info removed; deprecated 2.7)",
+      "verified": {
+        "old": "2.3: nx.info(G) == 'Name: team\\nType: Graph\\nNumber of nodes: 5\\nNumber of edges: 3\\nAverage degree:   1.2000'",
+        "new": "3.7: AttributeError; str(G) == \"Graph named 'team' with ...\" (a different format, so the app's text changes unless the old format is rebuilt by hand, as manual_migration does)"
+      }
+    },
+    {
+      "symbol": "networkx.to_numpy_matrix",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/network.py:31",
+      "breaks": "AttributeError: module 'networkx' has no attribute 'to_numpy_matrix'",
+      "successor": "networkx.to_numpy_array",
+      "fixable": "manual",
+      "source": "networkx 3.0 release notes (to_numpy_matrix/from_numpy_matrix removed)",
+      "verified": {
+        "old": "2.3 (numpy 1.23.5): returns numpy.matrix, PendingDeprecationWarning from numpy 'the matrix subclass is not the recommended way...'",
+        "new": "3.7: AttributeError; to_numpy_array(G, nodelist=, weight=) returns an ndarray with equal values (renaming alone leaves the two entries below broken)"
+      }
+    },
+    {
+      "symbol": "numpy.matrix.__mul__",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/network.py:36",
+      "breaks": "no exception: after the rename to to_numpy_array, A * A is elementwise instead of a matrix product; two_hop_weights() returns [[0,4,0],[4,0,9],[0,9,0]] instead of [[4,0,6],[0,13,0],[6,0,9]] for path a-b-c with weights 2,3",
+      "successor": "A @ A",
+      "fixable": "manual",
+      "source": "networkx 3.0 release notes (to_numpy_matrix -> to_numpy_array returns ndarray); NumPy docs on np.matrix",
+      "verified": {
+        "old": "numpy.matrix * numpy.matrix = matrix product: [[4,0,6],[0,13,0],[6,0,9]]",
+        "new": "ndarray * ndarray = elementwise: [[0,4,0],[4,0,9],[0,9,0]]; @ restores the old value (consequence of the successor, not a networkx API change)"
+      }
+    },
+    {
+      "symbol": "numpy.matrix.A1",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/network.py:40",
+      "breaks": "AttributeError: 'numpy.ndarray' object has no attribute 'A1'",
+      "successor": ".ravel()",
+      "fixable": "manual",
+      "source": "consequence of to_numpy_matrix -> to_numpy_array (ndarray has no .A1)",
+      "verified": {
+        "old": "matrix.sum(axis=1).A1 is a flat array [2., 5., 3.]",
+        "new": "ndarray.sum(axis=1) is already flat (shape (n,)): .A1 raises AttributeError, plain .tolist() gives [2., 5., 3.]",
+        "round4_audit": "existence check: `numpy.matrix.A1` exists in the old AND the new numpy; it only stops being reachable because to_numpy_array returns an ndarray. A consequence of switching to a successor with a different return type is BEHAVIOR (was REMOVED)."
+      }
+    },
+    {
+      "symbol": "networkx.Graph.selfloop_edges",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/network.py:44",
+      "breaks": "AttributeError: 'Graph' object has no attribute 'selfloop_edges'",
+      "successor": "networkx.selfloop_edges",
+      "fixable": "manual",
+      "source": "networkx 2.4 release notes (Graph.selfloop_edges removed; deprecated 2.0)",
+      "verified": {
+        "old": "2.3: works, DeprecationWarning 'selfloop_edges is deprecated. Use nx.selfloop_edges instead.'",
+        "new": "3.7: AttributeError; nx.selfloop_edges(G) gives the same edges"
+      }
+    },
+    {
+      "symbol": "networkx.connected_component_subgraphs",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/network.py:48",
+      "breaks": "AttributeError: module 'networkx' has no attribute 'connected_component_subgraphs'",
+      "successor": "(G.subgraph(c).copy() for c in networkx.connected_components(G))",
+      "fixable": "manual",
+      "source": "networkx 2.4 release notes (removed; deprecated 2.1)",
+      "verified": {
+        "old": "2.3: works, DeprecationWarning 'connected_component_subgraphs is deprecated and will be removed in 2.2.' (the message is stale: removal came in 2.4)",
+        "new": "3.7: AttributeError; the generator expression gives equal subgraphs"
+      }
+    },
+    {
+      "symbol": "networkx.write_gpickle",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/network.py:57",
+      "breaks": "AttributeError: module 'networkx' has no attribute 'write_gpickle'",
+      "successor": "pickle.dump",
+      "fixable": "manual",
+      "source": "networkx 3.0 release notes (read_gpickle/write_gpickle removed)",
+      "verified": {
+        "old": "2.3: writes a pickle of the Graph, no warning",
+        "new": "3.7: AttributeError; pickle.dump(G, fh) round-trips the same graph"
+      }
+    },
+    {
+      "symbol": "networkx.read_gpickle",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/network.py:61",
+      "breaks": "AttributeError: module 'networkx' has no attribute 'read_gpickle'",
+      "successor": "pickle.load",
+      "fixable": "manual",
+      "source": "networkx 3.0 release notes",
+      "verified": {
+        "old": "2.3: reads the Graph back, no warning",
+        "new": "3.7: AttributeError; pickle.load(fh) works"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "numpy.matrix",
+      "category": "PendingDeprecationWarning",
+      "from_c": false,
+      "side": "old (raised from numpy Python code on to_numpy_matrix)"
+    },
+    {
+      "symbol": "networkx.Graph.selfloop_edges",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "networkx.connected_component_subgraphs",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "numpy.int (alias, networkx.readwrite import time)",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old, at import"
+    },
+    {
+      "symbol": "networkx.convert_matrix / drawing.nx_pydot (\"is\" with a literal)",
+      "category": "SyntaxWarning",
+      "from_c": true,
+      "side": "old, at byte-compile time only; absent once the .pyc exists (compiler warning, never through Python warnings.warn)"
+    }
+  ],
+  "notes": "DEVIATION FROM SPEC: old Python is 3.8, not 3.9. G.node was removed in networkx 2.4, but 2.3 (the last release that has it) imports 'from fractions import gcd', which Python 3.9 removed, so it cannot run on 3.9; 2.4+ runs on 3.9 only with numpy<1.20 (no arm64 wheels) and has no G.node. Python 3.8 + networkx 2.3 + numpy 1.23.5 (numpy>=1.24 breaks 2.3 through np.int) keeps G.node, nx.info, to_numpy_matrix, selfloop_edges, connected_component_subgraphs, gpickle all alive on the old side. The manifest therefore pins networkx/numpy (an unpinned resolve on 3.8 picks numpy 1.24.4 and 2.3 fails to import). G.edges(data=True) iteration semantics did NOT change between 2.3 and 3.7 (verified: identical output for Graph/DiGraph/MultiGraph incl. keys=True and data='weight'), so there is no entry; the app uses it (weighted_edges) as an unchanged, observed-only call. Other changes seen but not exercised by the app: adjacency_matrix returns csr_matrix (2.3) vs csr_array (3.7; '*' differs, '.A' gone), google_matrix/floyd_warshall_numpy return matrix vs ndarray, greedy_modularity_communities result differs, nx.pagerank is identical. After the equiv migration adjacency() returns ndarray instead of matrix; the public functions' results are equal. describe() on an EMPTY graph differs in a trailing newline from the old nx.info (not tested). S1: Graph objects are returned by build_graph/tag_roles/largest_component; numpy matrix vs ndarray is a value-type change inside list-returning functions, so type-only comparison of the matrix would hide it while tolist() results expose it."
+}

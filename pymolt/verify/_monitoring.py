@@ -80,15 +80,22 @@ import types
 
 from ._backend import (
     _CODE_CACHE_MAX,
-    _SELF_MODULES,
+    _HEAPTYPE,
+    C_RETURN_UNOBSERVED,
+    NO_ARG,
     OUTCOME_RAISE,
     OUTCOME_RETURN,
+    UNTYPED_RAISE,
     FrameBackend,
     PrefixMatcher,
+    _get_ident,
     _monotonic,
     generator_marker,
     install_warning_capture,
+    is_compiled_callable,
+    never_target,
     remove_warning_capture,
+    same_c_callable,
 )
 from ._identity import _wrapped_of
 from ._normalize import typename
@@ -111,6 +118,7 @@ INCREMENTAL = "incremental"
 
 # Reached through a CALL instruction (a class call, a callable instance): tool A arms them.
 _CTOR_NAMES = frozenset(("__init__", "__new__", "__call__"))
+_K_NONE, _K_C, _K_PY = 0, 1, 2     # what a CALL reaches: nothing of ours / compiled / traced Python
 _SITE_STABLE = 2        # same callee this many times at one call site -> DISABLE the site
 _SITES_MAX = 200000
 _SETTLE_GRACE = 1.0     # seconds the start de-duplication stays on after tool B is freed
@@ -378,6 +386,12 @@ class MonitoringBackend(FrameBackend):
         self._implicit = {}         # tool B's per-code decision entries
         self.armed = 0              # codes armed by call-site resolution
         self.last_armed_at = None   # monotonic: last code armed (A) or first recorded (A or B)
+        self._ckinds = {}           # id(callable) -> (callable, kind, sym, callee function | None)
+        self._csites = {}           # (id(code), offset) -> [code, same-callee count, callee]
+        self._lastcall = {}         # tid -> (code, offset, func): last traced Python call
+        self._craise = {}           # tid -> (info, code, offset): raise awaiting its type
+        self._callname = {}         # tid -> (callee code, declared sym): decorator wrappers
+        self._renames = False
         self._b_active = True       # tool B owns implicitly-run codes (until settle)
         self.settled_at = None      # wall time tool B was freed
         self.settle_reason = None
@@ -414,8 +428,11 @@ class MonitoringBackend(FrameBackend):
             mon.register_callback(tool, ev.PY_START, self._on_start)
             mon.register_callback(tool, ev.PY_RETURN, self._on_return)
             mon.register_callback(tool, ev.PY_UNWIND, self._on_unwind)
+            mon.register_callback(tool, ev.CALL, self._on_call)
+            mon.register_callback(tool, ev.C_RETURN, self._on_c_return)
+            mon.register_callback(tool, ev.C_RAISE, self._on_c_raise)
+            mon.register_callback(tool, ev.RAISE, self._raise_callback())
             if tool2 is not None:
-                mon.register_callback(tool, ev.CALL, self._on_call)
                 mon.register_callback(tool2, ev.PY_START, self._on_implicit)
             self._tool = tool
             self._tool2 = tool2
@@ -443,6 +460,10 @@ class MonitoringBackend(FrameBackend):
             self._release(tool2, local_events=False)
         self._release(tool)
         self._pending.clear()
+        self._cstack.clear()
+        self._lastcall.clear()
+        self._craise.clear()
+        self._callname.clear()
         self._warned.clear()
 
     def _release(self, tool, local_events=True):
@@ -462,7 +483,8 @@ class MonitoringBackend(FrameBackend):
             except Exception:
                 pass
         ev = mon.events
-        for event in (ev.PY_START, ev.PY_RETURN, ev.PY_UNWIND, ev.CALL):
+        for event in (ev.PY_START, ev.PY_RETURN, ev.PY_UNWIND, ev.CALL, ev.C_RETURN, ev.C_RAISE,
+                      ev.RAISE):
             try:
                 mon.register_callback(tool, event, None)
             except Exception:
@@ -506,12 +528,16 @@ class MonitoringBackend(FrameBackend):
 
     def _set_global(self):
         ev = self._mon.events
+        # Compiled calls and binding failures (CALL + C_RETURN / C_RAISE + RAISE) are observed
+        # in discover and incremental mode; watch mode keeps its narrow, local-events-only cost.
+        calls = (ev.CALL | ev.C_RETURN | ev.C_RAISE | ev.RAISE
+                 if self.mode in (DISCOVER, INCREMENTAL) else 0)
         if self.mode == INCREMENTAL:
-            self._mon.set_events(self._tool, ev.CALL | ev.PY_UNWIND)
+            self._mon.set_events(self._tool, ev.PY_UNWIND | calls)
             self._mon.set_events(self._tool2, ev.PY_START)
             return
         start = self.mode == DISCOVER or self._watch_prefix is not None
-        self._mon.set_events(self._tool, (ev.PY_START if start else 0) | ev.PY_UNWIND)
+        self._mon.set_events(self._tool, (ev.PY_START if start else 0) | ev.PY_UNWIND | calls)
 
     def _arm_targets(self, targets):
         symbols, prefixes = _partition_impact_targets(targets)
@@ -592,7 +618,7 @@ class MonitoringBackend(FrameBackend):
         body = code.co_name == "<module>"
         prefix = self._watch_prefix
         watched = id(code) in self._watch_codes or (
-            prefix is not None and module not in _SELF_MODULES
+            prefix is not None and not never_target(module)
             and bool(prefix.matches(module, frame)))
         disable = None
         if self.mode == INCREMENTAL:
@@ -603,7 +629,8 @@ class MonitoringBackend(FrameBackend):
             if not hit and prefix is not None:
                 disable = self._mon.DISABLE   # only a global PY_START reaches unwatched code
         else:
-            hit = not body and (watched or self._target_module(module, frame))
+            hit = not body and (watched or (self._target_module(module, frame)
+                                            and code.co_name != "__del__"))
             if not hit:
                 disable = self._mon.DISABLE
         # [code, in_target, module, is_module_body, identity, generator marker, DISABLE|None]
@@ -630,6 +657,19 @@ class MonitoringBackend(FrameBackend):
                     return None
                 near = self._near_codes.get(id(back.f_code))
                 if not (near[1] if near is not None else self._code_is_near(back)):
+                    return None
+            if self._inh_codes and id(code) in self._inh_codes:
+                # stdlib code armed for a dependency class's inherited method: only a call on
+                # a receiver of such a class is a contact, named after that class
+                sym = self._inherited_sym(code, frame.f_locals.get(code.co_varnames[0]))
+                if sym is None:
+                    return None
+                self._record(frame, ent, sym)
+                return None
+            if self._renames:
+                cn = self._callname.pop(_get_ident(), None)
+                if cn is not None and cn[0] is code:
+                    self._record(frame, ent, cn[1])
                     return None
             self._record(frame, ent)
         except Exception:
@@ -732,7 +772,7 @@ class MonitoringBackend(FrameBackend):
         return True
 
     # ── incremental: tool A's CALL callback ────────────────────────────────────
-    def _on_call(self, code, offset, callable_, arg0):
+    def _on_call_arm(self, code, offset, callable_, arg0):
         try:
             if self.near is not None:
                 nent = self._near_codes.get(id(code))
@@ -768,6 +808,289 @@ class MonitoringBackend(FrameBackend):
         except Exception:
             pass
         return None
+
+    # ── compiled calls and binding failures (CALL / C_RETURN / C_RAISE / RAISE) ──
+    def _on_call(self, code, offset, callable_, arg0):
+        """Every call made from our code: the arming of incremental mode, then the compiled-call
+        and binding-failure observation. A site is DISABLEd only when neither needs it again."""
+        disable = None
+        if self.mode == INCREMENTAL:
+            disable = self._on_call_arm(code, offset, callable_, arg0)
+        try:
+            seen = self._observe_call(code, offset, callable_, arg0)
+        except Exception:
+            seen = None
+        if seen:
+            return None
+        if self.mode == INCREMENTAL:
+            if disable is not None:
+                self._quiet_site(code, offset)
+            return disable
+        return self._mon.DISABLE if seen is False else None
+
+    def _quiet_site(self, code, offset):
+        key = (id(code), offset)
+        site = self._csites.get(key)
+        if site is None or site[0] is not code:
+            self._csites[key] = [code, _SITE_STABLE, None]
+        else:
+            site[1] = _SITE_STABLE
+
+    def _is_near(self, code):
+        nent = self._near_codes.get(id(code))
+        if nent is not None and nent[0] is code:
+            return nent[1]
+        frame = _frame_of(code)
+        if frame is None:
+            return None
+        return self._code_is_near(frame)
+
+    def _dep_function(self, func):
+        module = func.__globals__.get("__name__", "") or ""
+        return not never_target(module) and func.__code__.co_name != "__del__" and (
+            id(func.__code__) in self._impact_codes or self._target_module(module, None))
+
+    def _call_kind(self, callable_):
+        """(object, kind, sym, callee) of what a CALL reaches, decided once per object."""
+        obj = callable_
+        if type(obj) is _METHOD:
+            obj = obj.__func__
+        ent = self._ckinds.get(id(obj))
+        if ent is not None and ent[0] is obj:
+            return ent
+        kind, sym, callee, rename = _K_NONE, None, None, None
+        try:
+            t = type(obj)
+            if t is functools.partial:
+                inner = obj.func
+                if type(inner) is _METHOD:
+                    inner = inner.__func__
+                if type(inner) is _FUNCTION and self._dep_function(inner):
+                    kind, callee = _K_PY, inner
+            elif t is _FUNCTION:
+                if self._dep_function(obj):
+                    kind, callee = _K_PY, obj
+                    rename = self._declared_name(obj)
+            elif is_compiled_callable(obj):
+                sym = self._c_sym(obj)
+                if sym is not None:
+                    kind = _K_C
+            elif issubclass(t, type):
+                pairs = self._ctor_codes(obj)
+                if pairs:
+                    func = pairs[-1][1]         # __init__ (it follows __new__ in the list)
+                    if self._dep_function(func):
+                        kind, callee = _K_PY, func
+                elif not (obj.__flags__ & _HEAPTYPE):
+                    module = getattr(obj, "__module__", None)
+                    if (isinstance(module, str) and module and module != "builtins"
+                            and not never_target(module) and self._in_target(module)):
+                        sym, kind = module + "." + obj.__qualname__, _K_C
+            else:
+                call = _mro_value(t, "__call__")
+                if type(call) is _FUNCTION and self._dep_function(call):
+                    kind, callee = _K_PY, call
+        except Exception:
+            kind, sym, callee, rename = _K_NONE, None, None, None
+        if len(self._ckinds) >= _CODE_CACHE_MAX:
+            self._ckinds.clear()
+        ent = (obj, kind, sym, callee, rename)
+        self._ckinds[id(obj)] = ent
+        return ent
+
+    @staticmethod
+    def _declared_name(func):
+        """``module.qualname`` the callable declares when its code is a closure body
+        (``<locals>``) and the callable says it is something else: a ``functools.wraps``
+        wrapper is its wrapped function, not ``decorator.<locals>.wrapper``."""
+        code_qual = getattr(func.__code__, "co_qualname", None)
+        qual = getattr(func, "__qualname__", None)
+        module = getattr(func, "__module__", None)
+        if (code_qual and "<locals>" in code_qual and isinstance(qual, str)
+                and "<locals>" not in qual and qual != code_qual
+                and isinstance(module, str) and module):
+            return module + "." + qual
+        return None
+
+    def _observe_call(self, code, offset, callable_, arg0):
+        """True: this site must keep firing (a compiled dependency callable or a traced Python
+        one); False: it never will matter (not our code, or settled on nothing of ours);
+        None: nothing of ours yet."""
+        near = True
+        if self.near is not None:
+            near = self._is_near(code)
+            if near is None:
+                return None
+        if not near:
+            return False
+        ent = self._call_kind(callable_)
+        kind = ent[1]
+        key = (id(code), offset)
+        tid = _get_ident()
+        csym = None
+        if kind == _K_NONE:
+            csym = self._inherited_call(callable_, arg0)
+        if kind != _K_C and csym is None:
+            # Nothing compiled to record. A traced Python callable is only watched for a
+            # binding failure, so a site that reached the same callee twice settles (DISABLE,
+            # like incremental mode's arming): a bind failing on a later call is not seen.
+            if kind == _K_PY:
+                self._lastcall[tid] = (code, offset, ent[3])
+                if ent[4] is not None:
+                    self._callname[tid] = (ent[3].__code__, ent[4])
+                    self._renames = True
+            site = self._csites.get(key)
+            if site is None or site[0] is not code:
+                if len(self._csites) >= _SITES_MAX:
+                    self._csites.clear()
+                self._csites[key] = [code, 1, ent[0]]
+                return None
+            if site[2] is ent[0]:
+                site[1] += 1
+                return False if site[1] >= _SITE_STABLE else None
+            site[1], site[2] = 1, ent[0]
+            return None
+        site = self._csites.get(key)
+        if site is not None:
+            site[1], site[2] = 0, None       # a compiled callable here: this site never settles
+        frame = _getframe(2)
+        if frame.f_code is not code:
+            frame = _frame_of(code)
+            if frame is None:
+                return True
+        info = self._c_start(frame, csym or ent[2],
+                             NO_ARG if arg0 is self._mon.MISSING else arg0)
+        stack = self._cstack.get(tid)
+        if stack is None:
+            stack = self._cstack[tid] = []
+        elif len(stack) >= 256:
+            del stack[:]
+        stack.append((callable_, code, offset, info))
+        return True
+
+    def _on_c_return(self, code, offset, callable_, arg0):
+        try:
+            stack = self._cstack.get(_get_ident())
+            if stack:
+                top = stack[-1]
+                if same_c_callable(top[0], callable_) and top[1] is code and top[2] == offset:
+                    stack.pop()
+                    self._finish(top[3], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
+                    return None
+            return None     # C_RETURN / C_RAISE cannot be DISABLEd: they stop with the site's CALL
+        except Exception:
+            return None
+
+    def _on_c_raise(self, code, offset, callable_, arg0):
+        try:
+            tid = _get_ident()
+            stale = self._craise.pop(tid, None)
+            if stale is not None:           # its RAISE never came (StopIteration): untyped
+                self._finish(stale[0], OUTCOME_RAISE, UNTYPED_RAISE)
+            stack = self._cstack.get(tid)
+            if stack:
+                top = stack[-1]
+                if same_c_callable(top[0], callable_) and top[1] is code and top[2] == offset:
+                    stack.pop()
+                    self._craise[tid] = (top[3], code, offset)   # RAISE types it
+        except Exception:
+            pass
+        return None
+
+    def _raise_callback(self):
+        """The RAISE callback, a closure: it runs on every raise in the process (it cannot be
+        DISABLEd), so the common case, a non-TypeError with nothing awaiting a type, is one
+        call and one test, no attribute lookups."""
+        craise = self._craise
+        slow = self._on_raise
+        te = TypeError
+
+        def on_raise(code, offset, exc):
+            if craise or isinstance(exc, te):
+                slow(code, offset, exc)
+
+        return on_raise
+
+    def _on_raise(self, code, offset, exc):
+        """A raise in our code: it types a compiled call's raise (``C_RAISE`` has no exception),
+        and a TypeError at a call to a traced Python callable that left no frame behind
+        (``tb_next`` is None) is that call failing to bind its arguments. RAISE cannot be
+        DISABLEd and is global, so the common case (not a TypeError, nothing awaiting a type)
+        is two checks."""
+        try:
+            if not self._craise and not isinstance(exc, TypeError):
+                return None
+            if self.near is not None and not self._is_near(code):
+                return None
+            tid = _get_ident()
+            pending = self._craise.get(tid)
+            if pending is not None:
+                del self._craise[tid]
+                if pending[1] is code and pending[2] == offset:
+                    self._finish(pending[0], OUTCOME_RAISE, raised_label(exc))
+                    return None
+                self._finish(pending[0], OUTCOME_RAISE, UNTYPED_RAISE)
+            if isinstance(exc, TypeError):
+                last = self._lastcall.get(tid)
+                if last is not None and last[0] is code and last[1] == offset:
+                    del self._lastcall[tid]
+                    tb = exc.__traceback__
+                    if tb is not None and tb.tb_next is None:
+                        frame = _getframe(1)
+                        if frame.f_code is not code:
+                            frame = _frame_of(code)
+                        if frame is not None:
+                            self._record_binding(frame, last[2])
+        except Exception:
+            pass
+        return None
+
+    def _inherited_call(self, callable_, arg0):
+        """FU6: a call from our code to stdlib (or other non-target) code whose receiver is an
+        instance of a target class. A Python method is armed (its start is recorded, named
+        after the receiver's class) and None returned; a builtin method descriptor on a
+        dependency subclass of a builtin returns its symbol, to be recorded like a C call."""
+        t = type(callable_)
+        recv = arg0
+        if t is _METHOD:
+            func = callable_.__func__
+            recv = callable_.__self__
+            t = type(func)
+        else:
+            func = callable_
+        if t is _FUNCTION:
+            code = func.__code__
+            if (recv is self._mon.MISSING or code.co_argcount < 1
+                    or code.co_varnames[0] not in ("self", "cls")
+                    or id(code) in self._inh_codes):
+                return None
+            if self._dep_function(func) or self._inherited_sym(code, recv) is None:
+                return None
+            self._arm_inherited(code)
+            return None
+        if recv is self._mon.MISSING or not hasattr(func, "__objclass__"):
+            return None
+        return self._inherited_descriptor_sym(func, recv)
+
+    def _arm_inherited(self, code):
+        with self._arm_lock:
+            if id(code) in self._inh_codes:
+                return
+            self._inh_codes[id(code)] = code
+            self._impact_codes[id(code)] = code     # tool B (incremental) records it too
+            ent = self._callee.get(id(code))
+            restart = ent is not None and ent[0] is code and len(ent) > 6 and ent[6] is not None
+            self._watch_code(code)
+            if restart:
+                try:
+                    self._mon.restart_events()      # a DISABLEd location ignores local events
+                except Exception:
+                    pass
+
+    def _record_binding(self, frame, func):
+        ci = self._identity.code_identity(func.__code__, func.__globals__.get("__name__", ""),
+                                          func.__globals__)[0]
+        self._binding_failure(frame, ci.sym, ci.symq)
 
     def _discover_callable(self, callable_, arg0):
         pairs = self._resolve(callable_)
@@ -826,7 +1149,7 @@ class MonitoringBackend(FrameBackend):
         ent = self._deps.get(id(code))
         if ent is None or ent[0] is not code:
             module = func.__globals__.get("__name__", "") or ""
-            dep = module not in _SELF_MODULES and (
+            dep = not never_target(module) and code.co_name != "__del__" and (
                 id(code) in self._impact_codes or self._target_module(module, None))
             if len(self._deps) >= _CODE_CACHE_MAX:
                 self._deps.clear()
@@ -871,7 +1194,8 @@ class MonitoringBackend(FrameBackend):
         module = g.get("__name__", "") or ""
         body = code.co_name == "<module>"
         hit = False
-        if not body and module not in _SELF_MODULES and self._b_owns(code, g, module):
+        if (not body and not never_target(module) and code.co_name != "__del__"
+                and self._b_owns(code, g, module)):
             prefix = self._watch_prefix
             hit = (id(code) in self._impact_codes
                    or (prefix is not None and bool(prefix.matches(module, frame)))
