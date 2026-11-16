@@ -839,6 +839,21 @@ def _python_risks(plan) -> list:
             if getattr(r, "scope", "dependency") == "python"]
 
 
+def _manual_hint(risk) -> str:
+    """The curated hint for a manual (advisory) python risk, "" when there is none."""
+    for fact in (risk.fact, *(risk.facts or ())):
+        for item in (fact or {}).get("evidence") or ():
+            if isinstance(item, str) and item.startswith("hint: "):
+                return item[6:].strip()
+    return ""
+
+
+def _manual_label(risk) -> str:
+    hint = _manual_hint(risk)
+    hint = hint if len(hint) <= 70 else hint[:67] + "..."
+    return f"{risk.symbol} (manual{': ' + hint if hint else ''})"
+
+
 def python_summary_line(plan) -> str | None:
     """"Python 3.6→3.12: N risk(s) (k certain); 0 fixed by the plan; needs attention: ..."."""
     python = getattr(plan, "python", None)
@@ -854,7 +869,7 @@ def python_summary_line(plan) -> str | None:
     if attention:
         names: list[str] = []
         for r in attention:
-            label = r.symbol + (" (manual)" if r.fix == "advisory" else "")
+            label = _manual_label(r) if r.fix == "advisory" else r.symbol
             if label not in names:
                 names.append(label)
         shown = ", ".join(names[:5]) + (f", +{len(names) - 5} more" if len(names) > 5 else "")
@@ -887,6 +902,9 @@ def _python_data(lists: _Lists, plan) -> dict[str, Any] | None:
         "fixed_by_plan": sum(1 for r in risks if r.fixed_by_plan),
         "risks": lists.fit("python.risks", [_risk_label(r) + (f" [{r.fix}]" if r.fix else "")
                                             for r in ordered]),
+        "manual": lists.fit("python.manual", [
+            f"{r.site.label()} {_manual_label(r)}" for r in ordered
+            if not r.fixed_by_plan and r.fix == "advisory"]),
         "guarded": lists.fit("python.guarded", [
             f"{g.kind} {g.site.label()} {g.symbol}: {g.reason}"
             for g in (getattr(report, "guarded", None) or ())]),
