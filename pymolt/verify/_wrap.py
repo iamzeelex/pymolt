@@ -27,6 +27,7 @@ defining module alone would miss. The backend then also patches every module-glo
 a wrapped module-level function (one pass over ``sys.modules`` at start), and restores them on
 ``stop()``. Late ``from dep import func`` imports read the patched attribute.
 """
+import dis
 import functools
 import importlib.util
 import inspect
@@ -45,6 +46,7 @@ from ._backend import (
     privacy_normalizer,
     remove_warning_capture,
     sink_admit_accepts_key,
+    sink_binding,
     sink_call_fields,
     sink_tally,
     warned_add,
@@ -76,6 +78,39 @@ def _note_wrapper_code(code):
         if known is code:
             return
     _WRAPPER_CODES.append(code)
+
+
+_CALL_OPS = frozenset(n for n in (
+    "CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX", "CALL_METHOD", "CALL_METHOD_KW",
+    "PRECALL", "CALL", "CALL_KW", "CALL_FUNCTION_EX") if n in dis.opmap)
+_CALL_OPCODES = frozenset(dis.opmap[n] for n in _CALL_OPS)
+_CACHE_OP = dis.opmap.get("CACHE")
+_AT_CALL = {}       # (id(code), f_lasti) -> (code, is a call instruction)
+_AT_CALL_MAX = 50000
+
+
+def _at_call(frame):
+    """True if ``frame`` is executing a call instruction: a compiled function reached through
+    a comparison, a property or a Cython-internal call has the project's frame behind it
+    too, but not at a call (``a == b`` runs a compiled ``__eq__`` that calls ``self.dict()``).
+    Decided once per (code, instruction)."""
+    code = frame.f_code
+    lasti = frame.f_lasti
+    key = (id(code), lasti)
+    ent = _AT_CALL.get(key)
+    if ent is not None and ent[0] is code:
+        return ent[1]
+    try:
+        co = code.co_code
+        while _CACHE_OP is not None and lasti > 0 and co[lasti] == _CACHE_OP:
+            lasti -= 2          # 3.11+: f_lasti may sit on the instruction's inline cache
+        ok = co[lasti] in _CALL_OPCODES
+    except Exception:
+        ok = True
+    if len(_AT_CALL) >= _AT_CALL_MAX:
+        _AT_CALL.clear()
+    _AT_CALL[key] = (code, ok)
+    return ok
 
 
 def _alias_index():
@@ -126,10 +161,12 @@ class WrapBackend(object):
         self._tally = sink_tally(sink)
         self._warned = {}   # id(wrapper frame) -> (code, {(category, message): count})
         self._admit_key = sink_admit_accepts_key(sink)
+        self._bind_kw = sink_binding(sink)
         self._normalize = privacy_normalizer()
         self.patch_aliases = patch_aliases
         self._aliases = None                          # built once at start when patching aliases
         self.near = None if include_internal else AppMatcher(_split(source))
+        self._require_call = False  # only a call instruction in the caller is a contact
         self._restore = []          # closures that undo each patch
         self._finder = None
         self.skipped = []           # (symbol, reason) — honesty markers
@@ -405,6 +442,14 @@ class WrapBackend(object):
             caller = sys._getframe(3)
         except ValueError:
             caller = None
+        if caller is not None and _WRAPPER_CODES:
+            ccode = caller.f_code
+            for known in _WRAPPER_CODES:
+                if ccode is known:
+                    return      # a wrapped callable called by compiled code that a wrapper
+                                # called: dependency-internal, whatever the near matcher says
+        if self._require_call and caller is not None and not _at_call(caller):
+            return          # C-mediated (``==``, a property, compiled code calling a method)
         if self.near is not None:
             mod = caller.f_globals.get("__name__", "") if caller is not None else ""
             if caller is None or not self.near.matches(mod, caller):
@@ -448,11 +493,34 @@ class WrapBackend(object):
         if warns and self._warn_kw:
             extra["warnings"] = warns
         if exc is not None:
+            if self._bind_kw and self._binding_failure(real, args, kwargs, exc):
+                extra["binding"] = True
             self.sink.on_raise(qualname, inputs, raised, site, **extra)
         else:
             self.sink.on_return(qualname, inputs, result, site, **extra)
 
     _SIG_FAILED = object()
+
+    def _binding_failure(self, real, args, kwargs, exc):
+        """True if ``exc`` came from binding the arguments, not from the callee's body: a
+        TypeError no deeper frame raised (the traceback ends at the wrapper) that the callee's
+        signature itself rejects for these arguments."""
+        try:
+            if not isinstance(exc, TypeError):
+                return False
+            tb = exc.__traceback__
+            if tb is not None and tb.tb_next is not None:
+                return False
+            sig = self._signature(real)
+            if sig is self._SIG_FAILED:
+                return False
+            try:
+                sig.bind(*args, **kwargs)
+            except TypeError:
+                return True
+        except Exception:
+            pass
+        return False
 
     def _signature(self, real):
         """``inspect.signature`` once per callable (it is costly and was paid on every call)."""
@@ -529,6 +597,110 @@ class _PatchingLoader(object):
         return getattr(self._real, item)
 
 
+_CYTHON_TYPES = frozenset(("cython_function_or_method", "fused_cython_function"))
+_KEEP_DUNDERS = frozenset(("__init__", "__call__", "__new__"))
+
+
+def _is_cython(obj):
+    return type(obj).__name__ in _CYTHON_TYPES
+
+
+class CompiledWrap(WrapBackend):
+    """Wrap the Cython functions of dependency modules (below 3.12, where nothing else sees them).
+
+    ``sys.setprofile`` reports only exact ``PyCFunction`` calls, never a
+    ``cython_function_or_method``
+    (a compiled pydantic 1.10 gave zero events), so the compiled module's module-level functions
+    and the methods of the classes it defines (static / class / instance) are replaced, in
+    memory, by the same transparent wrappers ``WrapBackend`` installs: full inputs and results,
+    recorded only when the caller is the project's code. Underscore-prefixed names (hot
+    internal dunders and helpers) are left alone, except ``__init__`` / ``__call__``.
+
+    Compiled modules are found at import (``ExtensionFileLoader.exec_module`` is wrapped while
+    the backend runs) and at ``start`` (those already loaded). Reversible: ``stop`` restores."""
+
+    name = "compiled-wrap"
+
+    def __init__(self, sink, matcher, source=None, include_internal=False):
+        WrapBackend.__init__(self, [], sink, source=source, include_internal=include_internal)
+        self._matcher = matcher
+        self._require_call = True
+        self._scanned = set()
+        self._loader_undo = None
+
+    def start(self):
+        try:
+            from importlib.machinery import EXTENSION_SUFFIXES, ExtensionFileLoader
+        except ImportError:
+            return
+        self._suffixes = tuple(EXTENSION_SUFFIXES)
+        orig = ExtensionFileLoader.__dict__.get("exec_module")
+        if orig is not None:
+            backend = self
+
+            def exec_module(loader, module):
+                orig(loader, module)
+                try:
+                    backend.scan(module)
+                except Exception:
+                    pass
+
+            ExtensionFileLoader.exec_module = exec_module
+            self._loader_undo = _restore_setattr(ExtensionFileLoader, "exec_module", orig)
+        for module in list(sys.modules.values()):
+            try:
+                self.scan(module)
+            except Exception:
+                pass
+
+    def stop(self):
+        if self._loader_undo is not None:
+            try:
+                self._loader_undo()
+            except Exception:
+                pass
+            self._loader_undo = None
+        WrapBackend.stop(self)
+
+    def scan(self, module):
+        """Wrap the compiled callables of ``module`` if it is a compiled dependency module."""
+        if not isinstance(module, _MODULE):
+            return
+        modname = getattr(module, "__name__", "") or ""
+        if modname in self._scanned:
+            return
+        filename = getattr(module, "__file__", None) or ""
+        if not filename.endswith(self._suffixes):
+            return
+        self._scanned.add(modname)
+        if not self._matcher.matches(modname, None):
+            return
+        for name, obj in list(module.__dict__.items()):
+            if _is_cython(obj) and getattr(obj, "__module__", None) == modname:
+                if name[:1] != "_":
+                    self._wrap_one(module, name, modname + "." + name)
+            elif isinstance(obj, type) and getattr(obj, "__module__", None) == modname:
+                for mname, raw in list(obj.__dict__.items()):
+                    inner = raw.__func__ if isinstance(raw, (staticmethod, classmethod)) else raw
+                    if not _is_cython(inner):
+                        continue
+                    if mname[:1] == "_" and mname not in _KEEP_DUNDERS:
+                        continue
+                    self._wrap_one(obj, mname, "{0}.{1}.{2}".format(modname, obj.__qualname__,
+                                                                   mname))
+
+    def _wrap_one(self, holder, attr, qualname):
+        try:
+            real = getattr(holder, attr)
+            raw = holder.__dict__.get(attr)
+            inner = raw.__func__ if isinstance(raw, (staticmethod, classmethod)) else raw
+            if getattr(inner, _WRAP_MARK, False):
+                return
+            self._wrap_attr(holder, attr, real, qualname)
+        except Exception:
+            pass
+
+
 class HybridBackend(object):
     """WrapBackend (precise, low-overhead) + SetProfileBackend (completeness for the C-remainder).
 
@@ -563,6 +735,7 @@ class HybridBackend(object):
             self.sp = SetProfileBackend(prefixes, self._sink, source=self._source,
                                         include_internal=self._internal)
             self.sp.skip_wrapped = True                  # don't double-record what wrap owns
+            self.sp.compiled_wrap = False                # explicit symbols only
             self.sp.start()
 
     def stop(self):
@@ -629,6 +802,7 @@ class TargetedBackend(object):
                 self.prefixes, sink, source=source, include_internal=include_internal,
             )
             self.profile.skip_wrapped = bool(self.wrap)
+            self.profile.compiled_wrap = False
 
     @property
     def skipped(self):
