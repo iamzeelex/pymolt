@@ -166,6 +166,88 @@ def _trace_symbols(root: Path, trace: Path | None,
     return out
 
 
+MAX_RELOCATION_TYPES = 300
+_TYPE_MARKERS = ("__object__", "__type__", "__opaque__")
+
+
+def baseline_type_names(root: Path, trace: Path | None) -> list[str]:
+    """Dotted names of the types the baseline observed: raised exception types and the
+    ``__object__`` / ``__type__`` / ``__opaque__`` markers of outcomes (builtins and bare names
+    left out). Never raises."""
+    if trace is None or not (trace.exists() or Path(str(trace) + ".facts.json").exists()):
+        return []
+    try:
+        from pymolt.verify.facts import load_facts
+
+        facts = load_facts(trace, root=root)
+    except Exception:  # noqa: BLE001 — a missing hint, not a failure
+        return []
+    names: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and "." in value and value.replace(".", "").replace(
+                "_", "").isalnum():
+            names.add(value)
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if k in _TYPE_MARKERS:
+                    add(v)
+                else:
+                    walk(v, depth + 1)
+        elif isinstance(value, list):
+            for v in value[:50]:
+                walk(v, depth + 1)
+
+    for f in facts.facts:
+        for o in f.outcomes:
+            if o.kind == "raise":
+                add(o.value)
+            else:
+                walk(o.value)
+    return sorted(names)
+
+
+def relocation_candidates(name: str) -> list[str]:
+    """The public spellings that may still name ``name``: its own dotted path, then each
+    enclosing package's export of the same leaf, nearest first, the top-level package last
+    (``sqlalchemy.engine.ResultProxy``, ``pydantic.ValidationError``)."""
+    parts = name.split(".")
+    out = [name]
+    for i in range(len(parts) - 2, 0, -1):
+        out.append(".".join(parts[:i]) + "." + parts[-1])
+    return out
+
+
+def _defined_as(result: Mapping[str, Any] | None) -> str | None:
+    """``module.qualname`` of the class a probe result resolved to (None if not a class)."""
+    steps = (result or {}).get("steps") or []
+    if not (result or {}).get("exists") or not steps:
+        return None
+    last = steps[-1]
+    return last.get("defined_as") if last.get("kind") == "class" else None
+
+
+def compute_type_relocations(old: Mapping[str, dict], new: Mapping[str, dict],
+                             names: Iterable[str]) -> list[dict[str, str]]:
+    """Same-object evidence only. For each baseline type ``T``: a public spelling that, in the
+    old interpreter, resolved to ``T`` and, in the new one, resolves to a different class ``N``.
+    ``via`` is that spelling. A name that still resolves to itself is not a relocation."""
+    out: list[dict[str, str]] = []
+    for name in sorted(set(names)):
+        for cand in relocation_candidates(name):
+            if _defined_as(old.get(cand)) != name:
+                continue
+            moved = _defined_as(new.get(cand))
+            if moved and moved != name:
+                out.append({"old": name, "new": moved, "via": cand})
+                break
+    return out
+
+
 # ── probe subprocess ──────────────────────────────────────────────────────────────────
 
 
@@ -1169,6 +1251,8 @@ class _Run:
                         reports[name].facts = _static_facts(facts, runs["old"].results)
             self._transient_notes(reports, runs, root_to_package, touched)
             self._online_hints(reports, resolve_new)
+            if not old_env.is_static:
+                self._type_relocations(reports, usable, root_to_package, old_env, new_env, trace)
             for name, report in reports.items():
                 if usable.get(name) and not report.facts:
                     report.notes.append(f"the touched symbols include nothing from {name}")
@@ -1183,6 +1267,33 @@ class _Run:
             r._stats = dict(self.stats)
             out.append(r)
         return out
+
+    def _type_relocations(self, reports, usable, root_to_package, old_env, new_env,
+                          trace) -> None:
+        """Baseline types whose public spelling now names a different class (same-object
+        evidence from both interpreters), attached to the package that owns them."""
+        try:
+            names = [n for n in baseline_type_names(self.root, trace)
+                     if n.split(".")[0] in root_to_package]
+            if not names:
+                return
+            names = names[:MAX_RELOCATION_TYPES]
+            paths = sorted({c for n in names for c in relocation_candidates(n)})
+            request = {"paths": paths, "dists": sorted({m.name for m in self.migrations}),
+                       "any_root": True, "contexts": [], "per_path_timeout": PER_PATH_TIMEOUT}
+            runs = {}
+            for side, env in (("old", old_env), ("new", new_env)):
+                runs[side] = run_probe(env.executable, self.root, request,  # type: ignore[arg-type]
+                                       use_cache=self.use_cache,
+                                       **({"runner": env.runner} if env.runner else {}))
+            if not (runs["old"].ok and runs["new"].ok):
+                return
+            for item in compute_type_relocations(runs["old"].results, runs["new"].results, names):
+                pkg = root_to_package.get(item["old"].split(".")[0])
+                if pkg in reports and usable.get(pkg):
+                    reports[pkg].type_relocations.append(item)
+        except Exception as exc:  # noqa: BLE001 — an enrichment, never a crash
+            log.debug("type relocations skipped: %s", exc)
 
     def _record_import_errors(self, reports, runs, root_to_package) -> None:
         """Modules that raised on import: reported as such, never as missing names."""

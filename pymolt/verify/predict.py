@@ -49,7 +49,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from pymolt.verify.facts import (
     CallWarning,
@@ -163,6 +163,10 @@ class PredictionReport(BaseModel):
 
     model_config = ConfigDict(serialize_by_alias=True, validate_by_name=True,
                               validate_by_alias=True)
+
+    # Type relocations the plan's delta reports found (see ``MigrationPlan.type_relocations``);
+    # carried to the plan, not part of the risks' own schema.
+    _type_relocations: list[dict[str, str]] = PrivateAttr(default_factory=list)
 
     @property
     def fixed(self) -> list[PredictedRisk]:
@@ -625,6 +629,19 @@ def compute_plan_deltas(project_dir: str | Path, migrations: list[Any]) -> tuple
         return [], [f"delta computation failed: {type(exc).__name__}: {exc}"]
 
 
+def collect_type_relocations(delta_reports: Iterable[Any]) -> list[dict[str, str]]:
+    """The reports' ``type_relocations`` merged, deduplicated by (old, new)."""
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+    for r in delta_reports or ():
+        for item in (_as_dict(r) or {}).get("type_relocations") or ():
+            key = (item.get("old"), item.get("new"))
+            if key not in seen and all(key):
+                seen.add(key)
+                out.append(dict(item))
+    return out
+
+
 def predict_plan_risks(
     project_dir: str | Path,
     baseline_trace: str | Path,
@@ -662,6 +679,7 @@ def predict_plan_risks(
             notes.append(f"static contacts unavailable: {exc}")
     report = predict_risks(baseline, delta_reports, static_contacts=static, changes=changes,
                            root=root)
+    report._type_relocations = collect_type_relocations(delta_reports)
     report.notes = notes + report.notes
     if notes and report.status == "complete":
         report.status = "partial"
