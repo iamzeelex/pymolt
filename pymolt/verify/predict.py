@@ -738,8 +738,15 @@ def predict_python_risks(
     target: str | None,
     compile_findings: Iterable[Mapping[str, Any]] | None = None,
     changes: Iterable[Any] | None = None,
+    runtime_facts: Iterable[Fact] | None = None,
+    root: str | Path | None = None,
 ) -> PredictionReport:
     """Rate the project's stdlib sites against the python delta (``subject="python"``).
+
+    ``runtime_facts``: the baseline's stdlib calls (``python_runtime_facts``); each call site
+    is rated against the delta fact of the symbol it called (``root`` makes their files
+    project-relative), so a runtime-observed call that passes a parameter Python removed is
+    CERTAIN (HIGH when a side was not probed), and a site the baseline never ran stays LOW.
 
     =========  ==============================================================================
     certain    absent on the probed target, present on the base (probe or data), unguarded
@@ -905,6 +912,10 @@ def predict_python_risks(
             reached_at="import",
             evidence=[f"compile check on Python {finding.get('python') or target}"]))
 
+    if runtime_facts:
+        _python_runtime_risks(out, runtime_facts, index, target, target_version, root,
+                              {(sp, f, ln) for sp, f, ln in seen})
+
     rewrites = planned_rewrites(changes or ())
     for risk in out.risks:
         if risk.scope != "python":
@@ -924,6 +935,114 @@ def predict_python_risks(
     out.risks.sort(key=lambda r: (r.fixed_by_plan, TIER_ORDER[r.tier], r.site.file,
                                   r.site.line or 0, r.symbol))
     return out
+
+
+def python_runtime_facts(baseline: FactSet | Iterable[Fact], root: str | Path | None = None
+                         ) -> list[Fact]:
+    """The baseline's calls into the standard library made from the project's own files.
+
+    Dropped: a call whose site is outside the project (the runtime's own frames, or stdlib code
+    calling stdlib code), a module the capture never traces (``verify.service``'s
+    ``_STDLIB_NOT_TRACED``), a module-level ``__getattr__`` (a lookup mechanism, not an API;
+    the spelling's own site already carries the removal) and a local function."""
+    from pymolt.core import stdlib as stdlib_data
+    from pymolt.verify.service import _STDLIB_NOT_TRACED
+
+    facts = baseline.facts if isinstance(baseline, FactSet) else list(baseline)
+    out: list[Fact] = []
+    for fact in facts:
+        top = fact.symbol.split(".")[0]
+        if top in _STDLIB_NOT_TRACED or not stdlib_data.is_stdlib(top):
+            continue
+        if fact.symbol.endswith(".__getattr__") and fact.symbol.count(".") <= 2:
+            continue
+        if "<" in fact.symbol or not fact.file:
+            continue
+        if Path(fact.file).is_absolute():
+            if root is None or _relative(fact.file, root) == Path(fact.file).as_posix():
+                continue                          # outside the project
+        out.append(fact)
+    return out
+
+
+def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
+    """A python fact for a spelling the site wrote but the runtime did not record
+    (``self.assertEquals(...)`` is recorded as ``unittest.case.TestCase.assertEqual``): the
+    receiver's spelling plus an attribute the statement names, among the facts that are not
+    UNCHANGED."""
+    parent, _, leaf = group.symbol.rpartition(".")
+    if not parent or not group.text:
+        return None
+    parts = parent.split(".")
+    parents = list(dict.fromkeys([parent, f"{parts[0]}.{parts[-1]}"]))
+    for attr in dict.fromkeys(re.findall(r"\.([A-Za-z_]\w*)", group.text)):
+        if attr == leaf:
+            continue
+        for p in parents:
+            fact = index.get(f"{p}.{attr}")
+            if fact is not None and fact.get("kind") not in (None, "UNCHANGED"):
+                return fact
+    return None
+
+
+def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: dict[str, dict],
+                          target: str | None, target_version: Any, root: str | Path | None,
+                          seen: set[tuple]) -> None:
+    """Rate every observed call site of a stdlib symbol against the python delta."""
+    groups: dict[tuple, _SiteGroup] = {}
+    for fact in facts:
+        file = _relative(fact.file, root)
+        key = (fact.symbol, file, fact.func, fact.line)
+        group = groups.get(key)
+        if group is None:
+            group = groups[key] = _SiteGroup(fact.symbol, file, fact.func, fact.line, fact.text)
+            group.spelling_site = True
+        group.add(fact)
+    for group in groups.values():
+        if (group.symbol, group.file, group.line) in seen:
+            continue                              # the static pass rated this spelling here
+        delta, how = _python_fact(index, group.symbol)
+        if delta is None or delta.get("kind") == "UNCHANGED":
+            delta = _aliased_python_fact(index, group)
+            if delta is None:
+                continue
+            how = "symbol"
+            group.symbol = str(delta.get("symbol") or group.symbol)  # the spelling the site wrote
+        basis = delta.get("basis") or {}
+        kind, param = delta.get("kind"), delta.get("param")
+        if kind == "SIGNATURE" and param and delta.get("new") in _ABSENT:
+            if param not in group.passed:
+                continue                          # the baseline call did not use it
+            both = basis.get("old") == "probe" and basis.get("new") == "probe"
+            tier = RiskTier.CERTAIN if both else RiskTier.HIGH
+            reason = (f"the call passes {param}, which Python {target} removed from "
+                      f"{group.symbol}")
+            if not both:
+                reason += "; a side was not probed"
+            evidence = [_fact_label("python", delta),
+                        *(f"delta evidence: {e}" for e in delta.get("evidence") or ()),
+                        f"baseline: this site passes {param}"]
+        else:
+            rated = _rate(group, "python", delta, how)
+            if rated is None:
+                continue
+            tier, reason, evidence = rated
+            if kind == "DEPRECATED":
+                tier = RiskTier.HIGH if group.warnings else RiskTier.LOW
+                reason = (f"deprecated in Python {target} (still present)"
+                          + ("; it warned in the baseline" if group.warnings else ""))
+            elif kind in ("REMOVED", "MOVED"):
+                if basis.get("new") == "knowledge" and tier is RiskTier.CERTAIN:
+                    tier = RiskTier.HIGH
+                    reason += "; absence is from data only (the target was not probed)"
+        evidence = [*evidence, f"baseline: {group.calls} call(s) observed at this site"]
+        site = group.site()
+        out.risks.append(PredictedRisk(
+            id=_risk_id(group.symbol, site), tier=tier, symbol=group.symbol, package="python",
+            site=site, basis="trace", reason=reason, fact=delta, facts=[delta],
+            evidence=evidence, scope="python", reached_at="call", calls=group.calls,
+            warnings=[CallWarning(category=c, message=m, count=n)
+                      for (c, m), n in sorted(group.warnings.items())]))
 
 
 def merge_python_risks(dependency: PredictionReport | None,
