@@ -639,13 +639,14 @@ _SELF_MODULES = frozenset(_SELF_PKG + "." + n for n in (
 
 
 def privacy_normalizer():
-    """``normalize`` bound to the privacy profile read ONCE (per backend), not per value:
+    """``normalize_input`` (call inputs: generic objects stay opaque; results use ``normalize``)
+    bound to the privacy profile read ONCE (per backend), not per value:
     ``normalize``'s own ``os.environ`` lookup was ~2/3 of the cost of normalizing a scalar.
     It resolves ``_normalize.normalize`` per call, so a patched normalize is still used."""
     privacy = os.environ.get("PYMOLT_TRACE_PRIVACY", "values").strip().lower()
 
     def norm(value):
-        return _nz.normalize(value, _privacy=privacy)
+        return _nz.normalize_input(value, _privacy=privacy)
     return norm
 
 
