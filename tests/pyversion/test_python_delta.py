@@ -122,3 +122,61 @@ def test_classify_origin():
     assert classify_origin("/x/site-packages/setuptools/_distutils/__init__.py") == \
         "site-packages:setuptools"
     assert classify_origin(None) is None
+
+
+def _base_probe_with_loop(real_probe):
+    """The target is probed for real; the base answers with asyncio.sleep's 3.8 shape."""
+    def fake(exe, root, paths, roots, *, runner=None):
+        if exe != "base-python":
+            return real_probe(exe, root, paths, roots, runner=runner)
+        shape = [["delay", "POSITIONAL_OR_KEYWORD", None], ["result", "POSITIONAL_OR_KEYWORD",
+                                                             "None"],
+                 ["loop", "KEYWORD_ONLY", "None"]]
+        results = {p: {"exists": True, "module": p.rsplit(".", 1)[0],
+                       "steps": [{"attr": p.rsplit(".", 1)[1], "exists": True, "shape": shape}]}
+                   for p in paths if p == "asyncio.tasks.sleep"}
+        return ProbeRun(meta={"python": "3.8.20"}, results=results)
+    return fake
+
+
+def test_runtime_symbols_get_signature_facts_when_both_sides_are_probed(tmp_path, monkeypatch):
+    monkeypatch.setattr(pyfacts, "_probe", _base_probe_with_loop(pyfacts._probe))
+    report = python_delta(tmp_path, [], "3.8", "3.12", target_executable=sys.executable,
+                          base_executable="base-python",
+                          runtime_symbols={"asyncio.tasks.sleep",
+                                           "unittest.case.TestCase.assertEquals"})
+    facts = _by_symbol(report)
+    sig = facts["asyncio.tasks.sleep"]
+    assert (sig.kind, sig.param, sig.new) == ("SIGNATURE", "loop", None)
+    assert sig.basis == {"old": "probe", "new": "probe"}
+    # absent on the target; the baseline ran it, so its presence on the base is observed
+    gone = facts["unittest.case.TestCase.assertEquals"]
+    assert gone.kind == "REMOVED" and gone.basis["old"] == "baseline-trace"
+
+
+def test_no_signature_facts_without_a_probed_base(tmp_path):
+    report = python_delta(tmp_path, [], "3.8", "3.12", target_executable=sys.executable,
+                          runtime_symbols={"asyncio.tasks.sleep"})
+    assert not [f for f in report.facts if f.kind == "SIGNATURE"]
+
+
+def test_an_observed_call_passing_the_removed_param_is_certain(tmp_path):
+    from pymolt.verify.predict import RiskTier, predict_python_risks
+
+    def call(passed, line):
+        return SimpleNamespace(symbol="asyncio.tasks.sleep", file="app/aio.py", func="p",
+                               line=line, text=None, count=1, input={"bound": passed},
+                               defaulted=None, warnings=None, outcomes=[])
+    delta = {"package": "python", "quality": "complete", "notes": [], "facts": [{
+        "symbol": "asyncio.tasks.sleep", "kind": "SIGNATURE", "param": "loop",
+        "old": "KEYWORD_ONLY",
+        "new": None, "basis": {"old": "probe", "new": "probe"}, "evidence": []}]}
+    out = predict_python_risks(delta, [], base="3.8", target="3.12", root=tmp_path,
+                               runtime_facts=[call({"delay": 1, "loop": "x"}, 7),
+                                              call({"delay": 1}, 9)])
+    assert [(r.tier, r.site.line, r.basis) for r in out.risks] == [
+        (RiskTier.CERTAIN, 7, "trace")]            # the call that never passed loop is not at risk
+    delta["facts"][0]["basis"] = {"old": "knowledge", "new": "probe"}
+    out = predict_python_risks(delta, [], base="3.8", target="3.12", root=tmp_path,
+                               runtime_facts=[call({"loop": "x"}, 7)])
+    assert out.risks[0].tier is RiskTier.HIGH
