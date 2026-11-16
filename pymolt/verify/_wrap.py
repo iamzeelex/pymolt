@@ -240,6 +240,10 @@ class WrapBackend(object):
         for remainder, full in list(self._by_module.get(modname, [])):
             if full in self._done:
                 continue
+            if remainder[-1] == "__del__":
+                self._mark_skip(full, "finalizer")      # runs at GC time: not a contact
+                self._done.add(full)
+                continue
             holder, attr, obj, ok = self._resolve(module, remainder)
             if not ok:
                 if len(remainder) == 1:                 # module loaded but the attr is absent
