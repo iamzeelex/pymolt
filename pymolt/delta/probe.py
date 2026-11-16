@@ -43,7 +43,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 3
+PROBE_VERSION = 7
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -316,6 +316,32 @@ def _warn_calls(tree):
     return out
 
 
+def _raise_messages(tree):
+    """Constant messages of ``raise X("...")`` statements: where a callable says what it no
+    longer accepts (pydantic ``Field``: "`regex` is removed. use `pattern` instead")."""
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and node.exc.args:
+            msg = _const_str(node.exc.args[0])
+            if msg:
+                out.append({"message": msg[:_MAX_MSG]})
+        if len(out) >= 12:
+            break
+    return out
+
+
+def _rejects_kwargs(fn):
+    """``def f(*a, **kw): if kw: raise ...``: the ``**kw`` is there to refuse what it collects."""
+    name = getattr(fn.args.kwarg, "arg", None)
+    if not name:
+        return False
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == name
+                and any(isinstance(n, ast.Raise) for s in node.body for n in ast.walk(s))):
+            return True
+    return False
+
+
 def _mine(obj):
     """Static facts from the object's own source: warn() prose, one-line forwarding."""
     fn = getattr(obj, "fget", obj)
@@ -354,6 +380,12 @@ def _mine(obj):
     warns = _warn_calls(tree)
     if warns:
         out["warns"] = warns
+    raises = _raise_messages(tree)
+    if raises:
+        out["raises"] = raises
+    if isinstance(tree.body[0] if tree.body else None, (ast.FunctionDef,)) \
+            and _rejects_kwargs(tree.body[0]):
+        out["rejects_kwargs"] = True
     if forwards:
         out["forwards_to"] = forwards
     decorators = [d for d in decorators if d]
@@ -617,9 +649,14 @@ def resolve(path):
             return out
         step["exists"] = True
         real_next = _describe(step, nxt, not inspect.ismodule(real))
-        same = _same_object_as(real_next, spelling)
+        same, home = _same_object_as(real_next, spelling)
+        aliases = _class_alias_spellings(real, attr, spelling)
+        if aliases:
+            same = list(same) + [a for a in aliases if a not in same]
         if same:
             step["same_object_as"] = same
+            if home:
+                step["same_object_home"] = home
         out["steps"].append(step)
         cur = nxt
     out["exists"] = True
@@ -713,23 +750,162 @@ def _identity_index(root):
     return index
 
 
-def _same_object_as(obj, spelling):
-    """Public spellings, in this interpreter, naming the very object ``spelling`` resolved to
-    (``pandas.util.testing.assert_frame_equal is pandas.testing.assert_frame_equal``)."""
-    root = spelling.split(".")[0]
-    if not _shareable(obj) or not (_ANY_ROOT[0] or root in _DEP_ROOTS):
+def _resolve_spelling(spelling):
+    """The object a dotted ``spelling`` names (longest importable prefix, then getattr), or None."""
+    parts = spelling.split(".")
+    obj, k = None, len(parts)
+    while k > 0 and obj is None:
+        head = ".".join(parts[:k])
+        obj = sys.modules.get(head)
+        if obj is None:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    obj = importlib.import_module(head)
+            except _Timeout:
+                raise
+            except BaseException:
+                obj = None
+                k -= 1
+    if obj is None:
+        return None
+    for attr in parts[k:]:
+        try:
+            obj = getattr(obj, attr)
+        except _Timeout:
+            raise
+        except BaseException:
+            return None
+    return obj
+
+
+def _home_spellings(obj):
+    """Where the object itself lives, even in another package: ``__module__`` + ``__qualname__``,
+    then the top-level package's export of the same name. Only spellings that resolve back to
+    the very object (``is``) count; a ``_private`` path is returned last (it is internal)."""
+    mod = getattr(obj, "__module__", None)
+    qual = getattr(obj, "__qualname__", None)
+    if not isinstance(mod, str) or not isinstance(qual, str) or "<" in qual:
+        return []
+    cands = [mod + "." + qual]
+    top = mod.split(".")[0]
+    leaf = qual.split(".")[-1]
+    if "." in mod or "." in qual:
+        cands.append(top + "." + leaf)
+    out = []
+    for cand in cands:
+        if cand in out:
+            continue
+        try:
+            found = _resolve_spelling(cand)
+        except _Timeout:
+            break
+        if found is obj:
+            out.append(cand)
+    return out
+
+
+def _alias_worthy(raw):
+    """Class attributes whose identity is evidence of an alias: descriptors, functions, classes
+    and non-empty immutable constant sets (``node = nodes``; ``DEFAULT_METHOD_WHITELIST``)."""
+    if isinstance(raw, (property, classmethod, staticmethod)) or inspect.isroutine(raw):
+        return True
+    if inspect.isclass(raw):
+        return True
+    if type(raw).__name__ in ("cached_property", "lazy_property"):
+        return True
+    return isinstance(raw, frozenset) and len(raw) > 0
+
+
+def _class_alias_spellings(owner, attr, spelling):
+    """Other public attributes of the class ``owner`` that are the very object ``attr`` is
+    (``Graph.node`` is ``Graph.nodes``): the same object under another spelling."""
+    if not inspect.isclass(owner):
         return []
     try:
+        raw = inspect.getattr_static(owner, attr)
+    except Exception:
+        return []
+    try:
+        value = getattr(owner, attr)
+    except Exception:
+        value = raw
+    value_ok = isinstance(value, frozenset) and len(value) > 0
+    if not (_alias_worthy(raw) or value_ok):
+        return []
+    prefix = spelling.rsplit(".", 1)[0]
+    out = []
+    try:
+        names = dir(owner)
+    except Exception:
+        return []
+    for name in names:
+        if name == attr or name.startswith("_"):
+            continue
+        try:
+            other = inspect.getattr_static(owner, name)
+        except Exception:
+            continue
+        if other is raw:
+            out.append(prefix + "." + name)
+            continue
+        if value_ok:  # a (metaclass) property handing out a shared constant
+            try:
+                if getattr(owner, name) is value:
+                    out.append(prefix + "." + name)
+            except Exception:
+                continue
+    return sorted(out, key=lambda c: (c.count("."), c))[:_ID_MAX_RESULTS]
+
+
+def _module_siblings(obj, spelling):
+    """Public names in the spelling's own module that are the very object
+    (``django.utils.encoding.force_str`` for ``force_text``): the identity index only reaches
+    a package's top level and the submodules one level down."""
+    if "." not in spelling:
+        return []
+    mod = sys.modules.get(spelling.rsplit(".", 1)[0])
+    if mod is None:
+        return []
+    prefix = spelling.rsplit(".", 1)[0]
+    try:
+        items = list(vars(mod).items())
+    except Exception:
+        return []
+    return [prefix + "." + n for n, v in items if v is obj and not n.startswith("_")][:4]
+
+
+def _rank(spelling, homes):
+    """0: the public home, 1: a public re-export, 2: internal (a ``_private`` path)."""
+    if not _public_name(spelling):
+        return 2
+    return 0 if spelling in homes else 1
+
+
+def _same_object_as(obj, spelling):
+    """``(spellings, home)``: public spellings, in this interpreter, naming the very object
+    ``spelling`` resolved to (``pandas.util.testing.assert_frame_equal is
+    pandas.testing.assert_frame_equal``). The object's own home comes first, wherever it lives
+    (``jinja2.escape`` is ``markupsafe.escape``, not an incidental ``jinja2.compiler.escape``),
+    then public re-exports by depth, internal ones last. ``home`` is the public home or None."""
+    root = spelling.split(".")[0]
+    if not _shareable(obj) or not (_ANY_ROOT[0] or root in _DEP_ROOTS):
+        return [], None
+    try:
         entry = _identity_index(root).get(id(obj))
+        homes = [h for h in _home_spellings(obj) if h != spelling]
     except _Timeout:
-        return []
+        return [], None
     except BaseException:
-        return []
-    if entry is None or entry[0] is not obj:
-        return []
-    found = sorted(set(c for c in entry[1] if c != spelling),
-                   key=lambda c: (not _public_name(c), c.count("."), c))
-    return found[:_ID_MAX_RESULTS]
+        return [], None
+    found = set(c for c in (entry[1] if entry is not None and entry[0] is obj else [])
+                if c != spelling)
+    found.update(homes)
+    found.update(c for c in _module_siblings(obj, spelling) if c != spelling)
+    ranked = sorted(found, key=lambda c: (_rank(c, homes), c.count("."), c))
+    ranked = ranked[:_ID_MAX_RESULTS]
+    home = next((c for c in ranked if _rank(c, homes) == 0), None)
+    return ranked, home
 
 
 # ── distributions ─────────────────────────────────────────────────────────────────────

@@ -146,7 +146,28 @@ def derive_symbols(root: Path, trace: Path | None) -> tuple[dict[str, TouchedSym
     for sym, warns in _trace_symbols(root, trace, notes).items():
         t = touched.setdefault(sym, TouchedSymbol(path=sym, origin="trace"))
         t.warnings.extend(warns)
+    for sym in _site_spellings(root, trace, notes):
+        touched.setdefault(sym, TouchedSymbol(path=sym, origin="contact"))
     return touched, notes
+
+
+def _site_spellings(root: Path, trace: Path | None, notes: list[str]) -> set[str]:
+    """Spellings the runtime's code names and the contact map cannot see: aliased attributes
+    (``G.node`` recorded as ``Graph.nodes``) and attributes inherited through project classes
+    (``User.__fields__`` on a ``BaseModel`` subclass). Dependency spellings only."""
+    from pymolt.delta import touched as touched_mod
+
+    out: set[str] = set()
+    try:
+        out |= touched_mod.inherited_spellings(root)
+        if trace is not None and (trace.exists()
+                                  or Path(str(trace) + ".facts.json").exists()):
+            from pymolt.verify.facts import load_facts
+
+            out |= touched_mod.alias_spellings(load_facts(trace, root=root).facts, root)
+    except Exception as exc:  # noqa: BLE001 — an enrichment, never a failure
+        notes.append(f"site spellings unavailable: {type(exc).__name__}: {exc}")
+    return {s for s in out if not touched_mod.is_stdlib(s)}
 
 
 def _trace_symbols(root: Path, trace: Path | None,
@@ -163,6 +184,88 @@ def _trace_symbols(root: Path, trace: Path | None,
     out: dict[str, list[RecordedWarning]] = {}
     for f in facts.facts:
         out.setdefault(f.symbol, []).extend(_fact_warnings(f))
+    return out
+
+
+MAX_RELOCATION_TYPES = 300
+_TYPE_MARKERS = ("__object__", "__type__", "__opaque__")
+
+
+def baseline_type_names(root: Path, trace: Path | None) -> list[str]:
+    """Dotted names of the types the baseline observed: raised exception types and the
+    ``__object__`` / ``__type__`` / ``__opaque__`` markers of outcomes (builtins and bare names
+    left out). Never raises."""
+    if trace is None or not (trace.exists() or Path(str(trace) + ".facts.json").exists()):
+        return []
+    try:
+        from pymolt.verify.facts import load_facts
+
+        facts = load_facts(trace, root=root)
+    except Exception:  # noqa: BLE001 — a missing hint, not a failure
+        return []
+    names: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, str) and "." in value and value.replace(".", "").replace(
+                "_", "").isalnum():
+            names.add(value)
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if k in _TYPE_MARKERS:
+                    add(v)
+                else:
+                    walk(v, depth + 1)
+        elif isinstance(value, list):
+            for v in value[:50]:
+                walk(v, depth + 1)
+
+    for f in facts.facts:
+        for o in f.outcomes:
+            if o.kind == "raise":
+                add(o.value)
+            else:
+                walk(o.value)
+    return sorted(names)
+
+
+def relocation_candidates(name: str) -> list[str]:
+    """The public spellings that may still name ``name``: its own dotted path, then each
+    enclosing package's export of the same leaf, nearest first, the top-level package last
+    (``sqlalchemy.engine.ResultProxy``, ``pydantic.ValidationError``)."""
+    parts = name.split(".")
+    out = [name]
+    for i in range(len(parts) - 2, 0, -1):
+        out.append(".".join(parts[:i]) + "." + parts[-1])
+    return out
+
+
+def _defined_as(result: Mapping[str, Any] | None) -> str | None:
+    """``module.qualname`` of the class a probe result resolved to (None if not a class)."""
+    steps = (result or {}).get("steps") or []
+    if not (result or {}).get("exists") or not steps:
+        return None
+    last = steps[-1]
+    return last.get("defined_as") if last.get("kind") == "class" else None
+
+
+def compute_type_relocations(old: Mapping[str, dict], new: Mapping[str, dict],
+                             names: Iterable[str]) -> list[dict[str, str]]:
+    """Same-object evidence only. For each baseline type ``T``: a public spelling that, in the
+    old interpreter, resolved to ``T`` and, in the new one, resolves to a different class ``N``.
+    ``via`` is that spelling. A name that still resolves to itself is not a relocation."""
+    out: list[dict[str, str]] = []
+    for name in sorted(set(names)):
+        for cand in relocation_candidates(name):
+            if _defined_as(old.get(cand)) != name:
+                continue
+            moved = _defined_as(new.get(cand))
+            if moved and moved != name:
+                out.append({"old": name, "new": moved, "via": cand})
+                break
     return out
 
 
@@ -361,12 +464,19 @@ class ParamChange:
     note: str
 
 
-def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
+_REMOVAL_WORDS = re.compile(r"\b(?:removed|no longer|not supported|unsupported|renamed|"
+                            r"deprecated|ignored|invalid)\b", re.IGNORECASE)
+
+
+def param_changes(old: list | None, new: list | None, new_prose: Iterable[str] = (),
+                  kwargs_rejected: bool = False) -> list[ParamChange]:
     """Parameter-level differences between two ``[name, kind, default-repr]`` shapes.
 
     A removed parameter is not reported when the new callable takes ``**kwargs`` (the call
-    still binds); a removed positional parameter replaced at the same index by a new one of
-    the same kind is a rename.
+    still binds) unless the new callable's own prose (``new_prose``: warn()/raise messages,
+    docstring) names it as removed or renamed: it then does not bind to anything. A removed
+    positional parameter replaced at the same index by a new one of the same kind is a rename.
+    A parameter that loses its default is a SIGNATURE change (calls that omitted it now fail).
     """
     if not old or not new:
         return []
@@ -396,12 +506,25 @@ def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
         if name not in n:
             if not new_has_varkw:
                 out.append(ParamChange("SIGNATURE", name, kind, None, f"param {name} removed"))
+            elif kwargs_rejected:
+                out.append(ParamChange(
+                    "SIGNATURE", name, kind, None,
+                    f"param {name} removed (the new signature's **kwargs only refuses what it "
+                    f"collects)"))
+            elif _stated_removed(name, new_prose):
+                out.append(ParamChange(
+                    "SIGNATURE", name, kind, None,
+                    f"param {name} removed (the new signature takes **kwargs, but its own "
+                    f"prose says {name} is removed)"))
             continue
         _, nkind, ndefault = n[name]
         if nkind != kind:
             out.append(ParamChange("SIGNATURE", name, kind, nkind,
                                    f"param {name} kind {kind}->{nkind}"))
-        if default != UNEVALUATED and _default(default) != _default(ndefault):
+        if default not in (None, UNEVALUATED) and ndefault is None and kind not in _VAR:
+            out.append(ParamChange("SIGNATURE", name, default, "(required)",
+                                   f"parameter {name} lost its default; now required"))
+        elif default != UNEVALUATED and _default(default) != _default(ndefault):
             out.append(ParamChange("DEFAULT", name, default, ndefault,
                                    f"param {name} default {default}->{ndefault}"))
     added = set(renamed.values())
@@ -410,6 +533,12 @@ def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
             out.append(ParamChange("SIGNATURE", name, None, f"{kind} (required)",
                                    f"param {name} added as required"))
     return out
+
+
+def _stated_removed(name: str, prose: Iterable[str]) -> bool:
+    """Whether a message names ``name`` as removed/renamed/ignored (word-bounded)."""
+    word = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+    return any(word.search(m) and _REMOVAL_WORDS.search(m) for m in prose or ())
 
 
 def bases_change(old: dict, new: dict) -> ParamChange | None:
@@ -610,7 +739,12 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
             hints[canon] = _local_hint(canon, members, sp_old, baseline, inp)
             succ = hints[canon][0]
             if succ:
-                need.update(_successor_candidates(succ, canon))
+                need.update(_successor_candidates(succ, canon, members))
+        for m in members:  # still there, deprecated: the new version may name its successor
+            if m in sp_new and sp_new[m].exists:
+                succ = fetch_mod.successor_from(_new_prose(sp_new[m], _leaf(canon)))
+                if succ:
+                    need.update(_successor_candidates(succ, canon, [m]))
     extra: dict[str, Spell] = {}
     todo = sorted(p for p in need if p not in sp_new)
     if todo and inp.resolve_new is not None:
@@ -644,11 +778,47 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
     return facts
 
 
-def _successor_candidates(succ: str, canon: str) -> list[str]:
+def _successor_candidates(succ: str, canon: str, members: Iterable[str] = ()) -> list[str]:
+    """Spellings a (possibly bare) successor name may stand for: as written, beside each member
+    (``BaseModel.dict`` -> ``BaseModel.model_dump``), then under the package root."""
     root = canon.split(".")[0]
     out = [succ]
+    if "." not in succ:
+        for m in members:
+            if "." in m:
+                out.append(m.rsplit(".", 1)[0] + "." + succ)
     if not succ.startswith(root + "."):
         out.append(f"{root}.{succ}")
+    return list(dict.fromkeys(out))
+
+
+def _own_prose(step: dict) -> list[str]:
+    """Messages of a callable's own source: warn() and raise texts, then its docstring lines
+    that say something was removed/renamed."""
+    msgs = [w.get("message", "") for w in step.get("warns") or []]
+    if step.get("kind") != "class":  # a class's source holds every method's raises
+        msgs += [w.get("message", "") for w in step.get("raises") or []]
+    doc = step.get("doc") or {}
+    msgs += list(doc.get("directive") or []) + list(doc.get("mentions") or [])
+    return msgs
+
+
+def _new_prose(spell: Spell, leaf: str) -> list[str]:
+    """Deprecation prose of a spelling that still exists in the new version (``__deprecated__``,
+    docstring, access warning, PEP 562 branch, the ``warn()`` in its own body): where a rename
+    successor is named. Empty unless the new side marks the object deprecated."""
+    step = spell.step
+    runtime = spell.runtime_warnings if spell.final_for else []
+    out = [e.split(": ", 1)[-1] for e in _side_deprecation(step, leaf, runtime, "")]
+    if not out:
+        return []
+    doc = step.get("doc") or {}
+    out += [m for m in list(doc.get("directive") or []) + list(doc.get("mentions") or [])
+            if _DEPRECATES.search(m)]
+    if step.get("kind") != "class":
+        out += [w["message"] for w in step.get("warns") or []
+                if _DEPRECATES.search(w.get("message", ""))
+                and _mentions(w.get("message", ""), leaf)]
     return out
 
 
@@ -718,8 +888,10 @@ def _group_facts(
         new_canon: str | None = None
         cands = [t for t in surviving
                  if _compatible(any_old, new_of(t).step, leaf)  # type: ignore[union-attr]
-                 and _leaf(new_of(t).canonical) == leaf]  # type: ignore[union-attr]
-        if m != canon and c_new is not None and _compatible(any_old, c_new.step, leaf):
+                 and _leaf(new_of(t).canonical) == leaf  # type: ignore[union-attr]
+                 and _variant_ok(_leaf(m), _leaf(t))]
+        if (m != canon and c_new is not None and _compatible(any_old, c_new.step, leaf)
+                and _variant_ok(_leaf(m), _leaf(canon))):
             cands.append(canon)
         if not cands:
             same = _same_object_successor(old_steps[m].step, any_old, leaf, new_of)
@@ -771,7 +943,7 @@ def _group_facts(
         )
         resolved = None
         if succ:
-            for cand in _successor_candidates(succ, canon):
+            for cand in _successor_candidates(succ, canon, removed):
                 if new_of(cand) is not None:
                     resolved = cand
                     break
@@ -788,6 +960,7 @@ def _group_facts(
             ),
             online_query=_online_query(old_steps[symbol], old_owner),
             hint_source=source,
+            old_shape=any_old.get("shape"),
         )
         out.append(fact)
 
@@ -806,7 +979,8 @@ def _group_facts(
             ref = c_new
             if ref is not None and ref.canonical != cn:
                 symbol, rebound = m, f"rebound: {canon} -> {cn}"
-        for ch in param_changes(o.get("shape"), n.get("shape")):
+        for ch in param_changes(o.get("shape"), n.get("shape"), _own_prose(n),
+                                 bool(n.get("rejects_kwargs"))):
             key = (symbol, ch.kind, ch.param, ch.old, ch.new)
             changes.setdefault(key, set()).add(m)
             notes.setdefault(key, ["signature", *([rebound] if rebound else [])])
@@ -849,8 +1023,27 @@ def _group_facts(
             evidence=_unique(evidence),
         )
         if kind == "DEPRECATED":
-            succ = fetch_mod.successor_from([e.split(": ", 1)[-1] for e in evidence])
+            pool = [e.split(": ", 1)[-1] for e in evidence]
+            for sp in sorted(spells):
+                target_new = new_of(sp)
+                if target_new is not None:
+                    pool += _new_prose(target_new, leaf)
+            succ = fetch_mod.successor_from(pool)
             fact.successor = succ
+            if succ:
+                resolved = next((c for c in _successor_candidates(succ, canon, sorted(spells))
+                                 if c not in spells and new_of(c) is not None), None)
+                target = new_of(resolved) if resolved else None
+                if resolved:
+                    fact.successor = resolved
+                fact.detail.update(
+                    importable=[x for x in sorted(spells) if old_steps[x].index == 0],
+                    successor_importable=bool(target is not None and target.index == 0),
+                    successor_same_signature=bool(
+                        target is not None and any_old.get("shape") is not None
+                        and target.step.get("shape") == any_old.get("shape")),
+                    successor_exists=target is not None,
+                )
         param_facts.append(fact)
     out += param_facts
 
@@ -877,7 +1070,8 @@ def _group_facts(
 def _same_object_successor(step: dict, any_old: dict, leaf: str,
                            new_of: Callable[[str], Spell | None]) -> Spell | None:
     """A spelling the old interpreter proved to be the same object (``is``) that is live and
-    not itself deprecated on the new side; the shortest public one."""
+    not itself deprecated on the new side. The object's own home (the probe's
+    ``same_object_home``, possibly in another package) wins; otherwise the shortest public one."""
     live = []
     for cand in step.get("same_object_as") or []:
         target = new_of(cand)
@@ -887,7 +1081,24 @@ def _same_object_successor(step: dict, any_old: dict, leaf: str,
         if _side_deprecation(target.step, _leaf(cand), runtime, ""):
             continue
         live.append(target)
+    home = step.get("same_object_home")
+    for target in live:
+        if home and target.spelling == home:
+            return target
     return min(live, key=lambda t: _public_first(t.spelling)) if live else None
+
+
+_VARIANT_TOKENS = ("lazy", "noop", "async", "sync", "iter", "bytes", "unicode")
+
+
+def _variant_ok(old_leaf: str, new_leaf: str) -> bool:
+    """A spelling and its successor carry the same variant suffix: ``ugettext_lazy`` is
+    ``gettext_lazy``, never ``gettext`` (a lazy proxy impersonates the function it wraps)."""
+    def variant(leaf: str) -> str | None:
+        tail = leaf.rsplit("_", 1)[-1]
+        return tail if "_" in leaf and tail in _VARIANT_TOKENS else None
+
+    return variant(old_leaf) == variant(new_leaf)
 
 
 def _public_first(name: str) -> tuple:
@@ -898,7 +1109,8 @@ def _public_first(name: str) -> tuple:
 
 def _compatible(old: dict, new: dict, leaf: str) -> bool:
     ok = old.get("kind") == new.get("kind") or old.get("kind") is None  # None: a static old side
-    return ok or {old.get("kind"), new.get("kind")} <= {"callable", "class"}
+    families = ({"callable", "class"}, {"property", "cached_property", "lazy_property"})
+    return ok or any({old.get("kind"), new.get("kind")} <= f for f in families)
 
 
 def _online_query(spell: Spell, step: dict) -> dict | None:
@@ -1098,7 +1310,9 @@ class _Run:
                     if old_env.is_static:
                         reports[name].facts = _static_facts(facts, runs["old"].results)
             self._transient_notes(reports, runs, root_to_package, touched)
-            self._online_hints(reports)
+            self._online_hints(reports, resolve_new)
+            if not old_env.is_static:
+                self._type_relocations(reports, usable, root_to_package, old_env, new_env, trace)
             for name, report in reports.items():
                 if usable.get(name) and not report.facts:
                     report.notes.append(f"the touched symbols include nothing from {name}")
@@ -1113,6 +1327,33 @@ class _Run:
             r._stats = dict(self.stats)
             out.append(r)
         return out
+
+    def _type_relocations(self, reports, usable, root_to_package, old_env, new_env,
+                          trace) -> None:
+        """Baseline types whose public spelling now names a different class (same-object
+        evidence from both interpreters), attached to the package that owns them."""
+        try:
+            names = [n for n in baseline_type_names(self.root, trace)
+                     if n.split(".")[0] in root_to_package]
+            if not names:
+                return
+            names = names[:MAX_RELOCATION_TYPES]
+            paths = sorted({c for n in names for c in relocation_candidates(n)})
+            request = {"paths": paths, "dists": sorted({m.name for m in self.migrations}),
+                       "any_root": True, "contexts": [], "per_path_timeout": PER_PATH_TIMEOUT}
+            runs = {}
+            for side, env in (("old", old_env), ("new", new_env)):
+                runs[side] = run_probe(env.executable, self.root, request,  # type: ignore[arg-type]
+                                       use_cache=self.use_cache,
+                                       **({"runner": env.runner} if env.runner else {}))
+            if not (runs["old"].ok and runs["new"].ok):
+                return
+            for item in compute_type_relocations(runs["old"].results, runs["new"].results, names):
+                pkg = root_to_package.get(item["old"].split(".")[0])
+                if pkg in reports and usable.get(pkg):
+                    reports[pkg].type_relocations.append(item)
+        except Exception as exc:  # noqa: BLE001 — an enrichment, never a crash
+            log.debug("type relocations skipped: %s", exc)
 
     def _record_import_errors(self, reports, runs, root_to_package) -> None:
         """Modules that raised on import: reported as such, never as missing names."""
@@ -1206,6 +1447,11 @@ class _Run:
             report.new_python = py
         info = (run.meta.get("dists") or {}).get(report.package) or {}
         version = info.get("version")
+        if version is None and side == "old" and any(
+                canonicalize_name(a) == canonicalize_name(report.package) for a in env.absent):
+            report.notes.append(f"{report.package} is not in the baseline interpreter: absent "
+                                f"in the old version, its symbols are new")
+            return True
         if version is None:
             report.notes.append(f"{report.package} is not installed in the {label} interpreter "
                                 f"({env.executable})")
@@ -1240,7 +1486,36 @@ class _Run:
                     if reports[pkg].quality == "complete":
                         reports[pkg].quality = "partial"
 
-    def _online_hints(self, reports: dict[str, DeltaReport]) -> None:
+    @staticmethod
+    def _verify_successor(fact: DeltaFact,
+                          check: Callable[[list[str]], Mapping[str, dict]] | None) -> None:
+        """A successor read from release prose must exist in the new interpreter; the spelling
+        it resolves to and whether its signature matches the old object's are recorded, so
+        only a compatible rename is ever auto-applied (``provider._pattern``)."""
+        if check is None or not fact.successor:
+            return
+        cands = _successor_candidates(fact.successor, fact.old or fact.symbol,
+                                      [fact.symbol, *fact.aliases])
+        try:
+            found = spellings(check(cands))
+        except Exception:  # noqa: BLE001 — verification is an upgrade, never a crash
+            return
+        for cand in cands:
+            sp = found.get(cand)
+            if sp is not None and sp.exists:
+                old_shape = fact.detail.get("old_shape")
+                fact.successor = cand
+                fact.detail.update(
+                    successor_importable=sp.index == 0,
+                    successor_same_signature=bool(
+                        old_shape is not None and sp.step.get("shape") == old_shape),
+                    successor_exists=True,
+                )
+                return
+        fact.detail["successor_exists"] = False
+
+    def _online_hints(self, reports: dict[str, DeltaReport],
+                      check: Callable[[list[str]], Mapping[str, dict]] | None = None) -> None:
         """Source 4: intermediate releases (online only; cached results are reused offline)."""
         cache_path = self.root / CACHE_DIR / "hints.json"
         try:
@@ -1281,6 +1556,7 @@ class _Run:
                         source = "fetched"
                     if result.get("hint"):
                         fact.successor = result["hint"]
+                        self._verify_successor(fact, check)
                         fact.evidence.append(
                             f"successor:intermediate:{result.get('last_version_with_symbol')} "
                             f"({source})")

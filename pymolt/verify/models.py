@@ -232,7 +232,12 @@ class ContractSlot(BaseModel):
     correlation_id: str | None = None
     backend: str | None = None
     impact_targets: list[str] = Field(default_factory=list)
+    # Stdlib top-level modules traced as dependencies (PYMOLT_TRACE_STDLIB; Python moves).
+    traced_stdlib: list[str] = Field(default_factory=list)
     metadata_path: str | None = None
+    # ``<trace>.sources.json``: text + sha256 of every project file with a fact (None: an older
+    # capture, or none could be written).
+    sources_path: str | None = None
     events_seen: int | None = None
     dropped_events: int | None = None
     sampling_dropped: int | None = None

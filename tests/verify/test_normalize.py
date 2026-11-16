@@ -287,8 +287,11 @@ class Response:
 def test_status_code_objects_render_their_code_even_under_shape():
     expected = {"__structure__": __name__ + ".Response", "status_code": 404}
     assert _both(Response(404)) == (expected, expected)
-    assert nz.normalize(Response("404")) == {"__opaque__": __name__ + ".Response"}
-    assert nz.normalize(Response(True)) == {"__opaque__": __name__ + ".Response"}
+    # a non-int status_code is not the structure marker; the generic renderer shows it as an attr
+    assert nz.normalize(Response("404")) == {
+        "__object__": __name__ + ".Response", "attrs": {"status_code": "404"}}
+    assert nz.normalize(Response(True)) == {
+        "__object__": __name__ + ".Response", "attrs": {"status_code": True}}
 
 
 def test_werkzeug_status_property_is_read_but_other_properties_are_not():
@@ -335,3 +338,256 @@ def test_rendering_never_runs_attribute_hooks():
     assert list(out) == ["__opaque__"] and out["__opaque__"].endswith(".Spy")
     assert set(touched) <= {"__class__"}    # isinstance() probes only, no renderer access
     assert nz.normalize(Slotted())["__opaque__"].endswith(".Slotted")
+
+
+# ── generic structural object renderer ───────────────────────────────────────
+
+def _attrs_of(out):
+    assert set(out) - {"__truncated__"} == {"__object__", "attrs"}, out
+    return out["attrs"]
+
+
+def test_plain_object_renders_public_instance_state():
+    class Result:
+        def __init__(self):
+            self.exit_code = 2
+            self.output = "boom"
+            self._private = "hidden"
+
+    out = nz.normalize(Result())
+    assert out["__object__"].endswith("Result")
+    assert _attrs_of(out) == {"exit_code": 2, "output": "boom"}
+    assert "__truncated__" not in out
+
+
+def test_object_values_are_normalized_recursively():
+    class Box:
+        def __init__(self):
+            self.items = [1, 2]
+            self.when = None
+
+    assert _attrs_of(nz.normalize(Box())) == {"items": {"__list__": [1, 2]}, "when": None}
+
+
+def test_object_without_state_stays_opaque():
+    class Empty:
+        pass
+
+    assert "__opaque__" in nz.normalize(Empty())
+
+
+def test_slots_object_reads_member_descriptors_and_skips_unset():
+    class Slotted:
+        __slots__ = ("a", "b", "_hidden")
+
+        def __init__(self):
+            self.a = 1
+            self._hidden = 3          # b stays unset
+
+    assert _attrs_of(nz.normalize(Slotted())) == {"a": 1}
+
+
+def test_property_and_getattr_are_never_executed():
+    calls = []
+
+    class Trap:
+        def __init__(self):
+            self.real = 1
+
+        @property
+        def boom(self):
+            calls.append("property")
+            raise RuntimeError("property ran")
+
+        def __getattr__(self, name):
+            calls.append("getattr:" + name)
+            raise RuntimeError("getattr ran")
+
+        def __repr__(self):
+            calls.append("repr")
+            raise RuntimeError("repr ran")
+
+        def __eq__(self, other):
+            calls.append("eq")
+            raise RuntimeError("eq ran")
+
+        __hash__ = object.__hash__
+
+    out = nz.normalize(Trap())
+    assert _attrs_of(out) == {"real": 1}
+    assert calls == []
+
+
+def test_class_level_descriptor_is_not_run_for_slots_class():
+    calls = []
+
+    class Desc(object):
+        def __get__(self, obj, owner):
+            calls.append("get")
+            raise RuntimeError("descriptor ran")
+
+    class WithDesc:
+        __slots__ = ("x", "__dict__")
+        d = Desc()
+
+        def __init__(self):
+            self.x = 5
+            self.y = 6
+
+    assert _attrs_of(nz.normalize(WithDesc())) == {"x": 5, "y": 6}
+    assert calls == []
+
+
+def test_attrs_like_class_uses_declared_field_names():
+    class Attribute(object):
+        def __init__(self, name):
+            self.name = name
+
+    class Point:
+        __attrs_attrs__ = (Attribute("x"), Attribute("_y"))
+
+        def __init__(self):
+            self.x = 1
+            self._y = 2
+            self.extra = 3
+
+    assert _attrs_of(nz.normalize(Point())) == {"x": 1, "_y": 2}
+
+
+def test_pydantic_v2_like_fields_from_dict():
+    class Model:
+        __pydantic_fields__ = {"name": object(), "age": object()}
+
+        def __init__(self):
+            self.name = "a"
+            self.age = 3
+            self.__dict__["__pydantic_extra__"] = None
+
+    out = nz.normalize(Model())
+    assert _attrs_of(out) == {"name": "a", "age": 3}
+
+
+def test_pydantic_v1_like_fields_from_dict():
+    class Model:
+        __fields__ = {"name": object(), "age": object()}
+
+        def __init__(self):
+            self.name = "a"
+            self.age = 4
+
+        @property
+        def dict(self):
+            raise RuntimeError("must not run")
+
+    assert _attrs_of(nz.normalize(Model())) == {"name": "a", "age": 4}
+
+
+def test_namedtuple_renders_as_object_with_field_names():
+    from collections import namedtuple
+
+    P = namedtuple("P", "x y")
+    out = nz.normalize(P(1, "z"))
+    assert out["__object__"].endswith("P")
+    assert out["attrs"] == {"x": 1, "y": "z"}
+    # a plain tuple is unchanged
+    assert nz.normalize((1, 2)) == {"__tuple__": [1, 2]}
+
+
+def test_object_cycle_uses_cycle_marker():
+    class Node:
+        pass
+
+    n = Node()
+    n.me = n
+    n.val = 1
+    out = nz.normalize(n)
+    assert out["attrs"]["me"]["__cycle__"].endswith("Node")
+    assert out["attrs"]["val"] == 1
+
+
+def test_object_attr_count_cap_marks_truncated():
+    class Wide:
+        pass
+
+    w = Wide()
+    for i in range(nz.MAX_SEQ + 5):
+        setattr(w, "a%04d" % i, i)
+    out = nz.normalize(w)
+    assert out["__truncated__"] is True
+    assert len(out["attrs"]) == nz.MAX_SEQ
+
+
+def test_object_depth_cap_marks_truncated():
+    class Link:
+        pass
+
+    head = cur = Link()
+    for _ in range(nz.MAX_DEPTH + 2):
+        cur.next = Link()
+        cur = cur.next
+    out = nz.normalize(head)
+    inner = out
+    while "next" in inner["attrs"] and "__object__" in inner["attrs"]["next"]:
+        inner = inner["attrs"]["next"]
+    assert inner["__truncated__"] is True
+    assert "__opaque__" in inner["attrs"]["next"]
+
+
+def test_object_budget_bounds_wide_graph():
+    class N:
+        pass
+
+    def build(d):
+        n = N()
+        if d:
+            for i in range(30):
+                setattr(n, "c%d" % i, build(d - 1))
+        else:
+            n.leaf = 1
+        return n
+
+    out = nz.normalize(build(3))
+    assert out["__object__"].endswith("N")
+
+
+def test_status_code_attr_still_renders_structure():
+    class Resp:
+        status_code = 200
+
+    assert nz.normalize(Resp()) == {"__structure__": nz.typename(Resp()), "status_code": 200}
+
+
+def test_status_code_non_int_falls_back_to_object():
+    class Resp:
+        status_code = "weird"
+
+        def __init__(self):
+            self.body = "x"
+
+    assert _attrs_of(nz.normalize(Resp())) == {"body": "x"}
+
+
+def test_object_shape_privacy_hides_values():
+    class R:
+        def __init__(self):
+            self.code = 2
+
+    out = nz.normalize(R(), _privacy="shape")
+    assert out["attrs"] == {"code": {"__shape__": "int"}}
+
+
+def test_normalize_input_keeps_objects_opaque_but_results_render():
+    from collections import namedtuple
+
+    class Plain:
+        def __init__(self):
+            self.a = 1
+
+    out = nz.normalize_input(Plain())
+    assert out == {"__opaque__": nz.typename(Plain())}
+    assert "__object__" in nz.normalize(Plain())
+    # nested generic objects stay opaque too; builtins are unchanged
+    assert nz.normalize_input([Plain(), 1]) == {"__list__": [out, 1]}
+    P = namedtuple("P", "x")
+    assert nz.normalize_input(P(1)) == {"__tuple__": [1]}
+    assert nz.normalize_input(Response(404)) == nz.normalize(Response(404))

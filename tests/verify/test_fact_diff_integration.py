@@ -257,3 +257,56 @@ def test_command_capture_uses_the_facts_sink_end_to_end(tmp_path):
     assert sum(f.count for f in fs.facts) == slot.events
     site_text = load_site_text(slot.trace_path)
     assert "json.loads('[%d]' % (i % 3))" in site_text.values()
+
+
+def _two_calls(tmp_path, other_new):
+    (tmp_path / "app.py").write_text("import dep\n\ndep.compute()\ndep.other()\n")
+    old = _write(tmp_path / "old.jsonl", [_event("dep.compute", 3, 1, tmp_path),
+                                          _event("dep.other", 4, "a", tmp_path)])
+    new = _write(tmp_path / "new.jsonl", [_event("dep.compute", 3, 1, tmp_path),
+                                          _event("dep.other", 4, other_new, tmp_path)])
+    return old, new
+
+
+def test_a_change_outside_the_impact_set_still_fails_and_is_listed(tmp_path):
+    from pymolt.interfaces import views
+    from pymolt.verify.report import build_contract_report
+
+    old, new = _two_calls(tmp_path, "b")
+    rep = build_contract_report(tmp_path, trace=new, against=old, impact_set={"dep.compute"})
+    _stamp_verdict(rep, str(new), str(old), [])
+    assert rep.impact_filter_active and rep.diff_clean is True        # the focused view is clean
+    assert rep.all_diff_clean is False
+    assert rep.verdict is VerificationVerdict.FAIL
+    assert [e["symbol"] for e in rep.unpredicted_changes] == ["dep.other"]
+    assert any("outside the plan's predicted impacts" in r and "dep.other" in r
+               for r in rep.verdict_reasons)
+    assert views._site_text(rep.unpredicted_changes[0]["old_site"]).endswith("app.py:4")
+
+
+def test_a_change_inside_the_impact_set_fails_and_nothing_is_unpredicted(tmp_path):
+    from pymolt.verify.report import build_contract_report
+
+    old, new = _two_calls(tmp_path, "b")
+    rep = build_contract_report(tmp_path, trace=new, against=old, impact_set={"dep.other"})
+    _stamp_verdict(rep, str(new), str(old), [])
+    assert rep.diff_clean is False and rep.verdict is VerificationVerdict.FAIL
+    assert rep.unpredicted_changes == []
+
+
+def test_unverified_edited_sites_never_block_pass_but_review_items_do():
+    inconclusive = {"verdict": "inconclusive", "counts": {"rewritten": 2}, "entries": [
+        {"category": "rewritten", "comparison": "missing", "symbol": "dep.a", "unverified": True},
+        {"category": "rewritten", "comparison": "uncomparable", "symbol": "dep.b",
+         "unverified": True}]}
+    # only unverified entries: nothing blocks, so no reason mentions pairing
+    assert not any("could not be paired" in r for r in _fact_diff_reasons(inconclusive))
+    with_review = {"verdict": "inconclusive", "counts": {"rewritten": 2}, "entries": [
+        *inconclusive["entries"],
+        {"category": "rewritten", "comparison": "changed", "symbol": "dep.c",
+         "review": "the value differs on a hand-edited line: review"}]}
+    reasons = _fact_diff_reasons(with_review)
+    assert reasons == ["1 edited call(s) need review: dep.c"]
+    paired = {"verdict": "inconclusive", "counts": {"rewritten": 1}, "entries": [
+        {"category": "rewritten", "comparison": "missing", "symbol": "dep.a"}]}
+    assert "could not be paired" in _fact_diff_reasons(paired)[0]
