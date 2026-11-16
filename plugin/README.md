@@ -5,28 +5,28 @@ that behaviour didn't change. The plugin teaches the agent to drive the `pymolt`
 the shell; it registers no server and costs no tokens until a migration comes up.
 
 Your agent can already resolve dependencies with `uv`. What it cannot do is record what
-your code actually calls at runtime, before and after, and tell you what changed. Asked
-to count its own dependency contact surface unaided, a coding agent undercounts it
-severalfold; with pymolt it gets the exact number. See `bench/RESULTS.md` in the repo.
+your code actually calls at runtime, before and after, and tell you what changed.
 
 ## Prerequisite
 
-Install the CLI so the `pymolt` command is on your PATH:
+Install the CLI so the `pymolt` command is on your PATH. The 0.1.0 release on PyPI predates
+this plugin, so install from source until the next release:
 
 ```bash
-uv tool install pymolt   # or: pipx install pymolt
+git clone https://github.com/iamzeelex/pymolt.git
+uv tool install ./pymolt   # or: pipx install ./pymolt
 ```
 
 ## Install the plugin
 
-**Claude Code** (from this repo):
+**Claude Code**, from a checkout of this repo, for one session:
 
-```
-/plugin marketplace add zeelex/python_migrator
-/plugin install pymolt
+```bash
+claude --plugin-dir ./plugin
 ```
 
-or point `/plugin` at a local checkout's `plugin/` directory.
+The repo has no marketplace file yet, so `/plugin marketplace add` cannot install it
+permanently.
 
 ## What you get
 
@@ -61,7 +61,7 @@ seven commands as MCP tools. Each tool returns exactly what `pymolt <command> --
 prints. The server is an optional extra:
 
 ```bash
-uv tool install 'pymolt[mcp]'   # or: pipx install 'pymolt[mcp]'
+uv tool install './pymolt[mcp]'   # or: pipx install './pymolt[mcp]'
 ```
 
 Register it as a stdio server whose command is `pymolt mcp`:
@@ -77,9 +77,11 @@ command = "pymolt"
 args = ["mcp"]
 ```
 
-The server only reads and writes inside its working directory (set `PYMOLT_MCP_ROOT` to
-change that root). The `capture` tool runs a command on your machine, so it is off until
-you set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment. No tool writes source.
+Every tool's project directory must lie inside the server's working directory (set
+`PYMOLT_MCP_ROOT` to change that root). That bounds the project, not everything a tool
+touches: `setup`'s target environment may be elsewhere, and the `capture` tool runs a command
+on your machine, so it is off until you set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's
+environment. No tool writes source.
 
 Sanity check:
 
