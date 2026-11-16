@@ -43,6 +43,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -62,6 +63,7 @@ from pymolt.verify.facts import (
     find_facts_snapshot,
     iter_snapshot,
     iter_trace_records,
+    load_site_text,
     merge_fact_snapshots,
     project_snapshot,
     read_snapshot_header,
@@ -126,11 +128,17 @@ class TraceCaptureResult(BaseModel):
     activation_failures: list[dict] = Field(default_factory=list)
     # Facts sink (phase 2): the merged per-process snapshots, ``<out_path>.facts.json``.
     facts_path: str | None = None
+    # Stdlib top-level modules traced as dependencies (PYMOLT_TRACE_STDLIB); empty = none.
+    trace_stdlib: list[str] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Capture — inject the watcher, run a command, merge the JSONL it writes.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+STDLIB_ENV = "PYMOLT_TRACE_STDLIB"
+_STDLIB_OFF = {"none", "off", "0"}
 
 
 def trace_env(
@@ -149,6 +157,7 @@ def trace_env(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """The PYMOLT_TRACE_* variables that drive the watcher (shared by local + container).
 
@@ -162,7 +171,11 @@ def trace_env(
     environment (unset = the watcher's targeted capture), unless ``widen_targets``: then the
     default mode stays and the targets are armed on top of it (what a post-migration capture
     needs to diff against a full baseline). The facts sink's tunables are forwarded when
-    set, so a container capture honours them too."""
+    set, so a container capture honours them too.
+
+    ``trace_stdlib`` are stdlib top-level modules to treat as dependencies for this capture
+    (``PYMOLT_TRACE_STDLIB``, comma-separated); the caller's own ``PYMOLT_TRACE_STDLIB`` wins
+    and is forwarded (so a container capture honours it); ``none`` there disables it."""
     if privacy not in {"values", "shape"}:
         raise ValueError("privacy must be 'values' or 'shape'")
     if not 0 < sample_rate <= 1:
@@ -207,6 +220,12 @@ def trace_env(
     for key in _FORWARDED_TUNABLES:
         if os.environ.get(key):
             env[key] = os.environ[key]
+    user_stdlib = (os.environ.get(STDLIB_ENV) or "").strip()
+    if user_stdlib:
+        if user_stdlib.lower() not in _STDLIB_OFF:
+            env[STDLIB_ENV] = user_stdlib
+    elif trace_stdlib:
+        env[STDLIB_ENV] = ",".join(trace_stdlib)
     return env
 
 
@@ -296,6 +315,223 @@ def _applied_plan_impact_targets(project_dir: str | Path) -> list[str]:
     return paths
 
 
+def _effective_stdlib(trace_stdlib: list[str] | None) -> list[str]:
+    """The stdlib modules a capture really traced: the caller's own variable wins."""
+    user = (os.environ.get(STDLIB_ENV) or "").strip()
+    if user:
+        if user.lower() in _STDLIB_OFF:
+            return []
+        return sorted({m.strip() for m in user.split(",") if m.strip()})
+    return sorted(set(trace_stdlib or ()))
+
+
+def _is_python_move(project_dir: str | Path) -> bool:
+    """True when setup's base and target Python differ in major.minor."""
+    config = EnvConfig.load(Path(project_dir) / ENV_CONFIG_PATH)
+    if config is None or not config.base_python or not config.target_python:
+        return False
+
+    def _mm(version: str) -> tuple[str, ...] | None:
+        parts = version.strip().split(".")
+        return tuple(parts[:2]) if len(parts) >= 2 and parts[0].isdigit() else None
+
+    base, target = _mm(config.base_python), _mm(config.target_python)
+    return base is not None and target is not None and base != target
+
+
+def _stdlib_top(name: str) -> str | None:
+    top = name.split(".")[0]
+    return top if top in sys.stdlib_module_names and top != "__future__" else None
+
+
+def _stdlib_modules_on_lines(source: str, lines: set[int]) -> set[str]:
+    """Stdlib top-level modules imported on, or used by name on, the given 1-based lines."""
+    import ast
+
+    if not lines:
+        return set()
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    bound: dict[str, str] = {}  # local name -> stdlib top-level module
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = _stdlib_top(alias.name)
+                if top:
+                    bound[(alias.asname or alias.name).split(".")[0]] = top
+                    if node.lineno in lines:
+                        found.add(top)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            top = _stdlib_top(node.module)
+            if top:
+                for alias in node.names:
+                    bound[alias.asname or alias.name] = top
+                if node.lineno in lines:
+                    found.add(top)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.lineno in lines and node.id in bound:
+            found.add(bound[node.id])
+    return found
+
+
+def _changed_lines(old: str, new: str) -> set[int]:
+    """1-based line numbers of ``new`` that differ from ``old`` (replaced or inserted)."""
+    import difflib
+
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
+    changed: set[int] = set()
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "insert"):
+            changed.update(range(j1 + 1, j2 + 1))
+    return changed
+
+
+def _read_project_text(root: Path, rel: str) -> str | None:
+    try:
+        return (root / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
+    """Stdlib modules imported on lines that changed since the baseline.
+
+    Where an apply receipt exists the plan's frozen ``old_source`` is the baseline text of
+    every file the plan touched. Any other file is compared best effort against the baseline
+    trace's recorded site text: a recorded call line that no longer reads the same marks the
+    nearby line that now reads most like it as edited."""
+    root = Path(os.path.abspath(project_dir))
+    found: set[str] = set()
+    covered: set[str] = set()
+    try:
+        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import MigrationReceipt
+
+        receipt = MigrationReceipt.load(root)
+        plan = (MigrationPlan.load(root, receipt.plan_path)
+                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                else None)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        logger.info("stdlib tracing: could not read the apply receipt: %s", exc)
+        plan = None
+    for change in (plan.changes if plan is not None else ()):
+        current = _read_project_text(root, change.path)
+        covered.add(change.path)
+        if current is not None:
+            found |= _stdlib_modules_on_lines(current, _changed_lines(change.old_source, current))
+    baseline = load_contract_state(root).baseline
+    if baseline is None:
+        return found
+    wanted: dict[str, set[int]] = {}
+    for key, text in load_site_text(baseline.trace_path).items():
+        file, _, line = key.rpartition(":")
+        if not line.isdigit():
+            continue
+        rel = os.path.relpath(file, root) if os.path.isabs(file) else file
+        if rel in covered or rel.startswith(".."):
+            continue
+        current = _read_project_text(root, rel)
+        if current is None:
+            continue
+        lines = [entry.strip()[:240] for entry in current.splitlines()]
+        if text in lines:
+            continue
+        # The recorded line was edited: find where it went (edits shift line numbers) as
+        # the nearby current line that reads most like it.
+        import difflib
+
+        origin = int(line)
+        best = max(
+            (i for i in range(len(lines)) if abs(i + 1 - origin) <= 40),
+            key=lambda i: (difflib.SequenceMatcher(None, text, lines[i]).ratio(),
+                           -abs(i + 1 - origin)),
+            default=None,
+        )
+        if best is not None and difflib.SequenceMatcher(None, text, lines[best]).ratio() >= 0.5:
+            wanted.setdefault(rel, set()).add(best + 1)
+    for rel, numbers in wanted.items():
+        current = _read_project_text(root, rel)
+        if current is not None:
+            found |= _stdlib_modules_on_lines(current, numbers)
+    return found
+
+
+# Stdlib modules never worth tracing during a Python move: they cannot change behaviour in
+# a way a call trace would show, or they only add noise (volume, or recursion into pymolt's
+# own recording).
+_STDLIB_NOT_TRACED = frozenset({
+    "__future__",  # compiler directives: imports bind no callable and nothing is ever called
+    "typing",      # annotations and aliases; its calls (cast, TypeVar, NewType) are identity-like
+                   # and appear on every class and function definition
+    "abc",         # ABCMeta machinery runs at every class definition, not at the project's calls
+    "builtins",    # the interpreter's own names; they are never "imported" behaviour
+    "warnings",    # the runtime's warning observer already records them; tracing the call
+                   # would record the recorder
+})
+_IMPORT_LINE = re.compile(
+    r"^\s*(?:import\s+([\w., \t]+?)\s*(?:[#;].*)?$|from\s+([A-Za-z_]\w*)[\w.]*\s+import\b)")
+
+
+def project_stdlib_imports(project_dir: str | Path) -> set[str]:
+    """Every stdlib top-level module the project's own files import (any depth, any syntax:
+    a line scan, so a Python 2 file counts too). Relative imports are the project's."""
+    from pymolt.core import stdlib as stdlib_data
+    from pymolt.verify.contact_map import _source_files
+
+    root = Path(os.path.abspath(project_dir))
+    found: set[str] = set()
+    for path in _source_files(root)[0]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = _IMPORT_LINE.match(line)
+            if not m:
+                continue
+            names = (m.group(2),) if m.group(2) else (
+                part.split(" as ")[0].strip().split(".")[0] for part in m.group(1).split(","))
+            found.update(n for n in names if n and stdlib_data.is_stdlib(n))
+    return found - _STDLIB_NOT_TRACED
+
+
+def stdlib_trace_modules(project_dir: str | Path, when: str) -> list[str]:
+    """Stdlib top-level modules to trace for a capture of a Python-version move.
+
+    ``[]`` for a capture that is not part of a move. Baseline: every stdlib module the
+    project imports (``project_stdlib_imports``) plus those of its ``stdlib_sites`` (the
+    contact map), less ``_STDLIB_NOT_TRACED``. Post-migration: the same set plus the stdlib
+    modules imported on lines the applied plan or the user changed since the baseline
+    (``shutil`` after ``click.get_terminal_size`` became ``shutil.get_terminal_size``)."""
+    if not _is_python_move(project_dir):
+        return []
+    from pymolt.verify.contact_map import build_contact_map
+
+    modules = {site.module for site in build_contact_map(project_dir).stdlib_sites if site.module}
+    modules |= project_stdlib_imports(project_dir)
+    if when == "post_migration":
+        modules |= _edited_stdlib_modules(project_dir)
+    return sorted(modules - _STDLIB_NOT_TRACED)
+
+
+def _resolve_stdlib_option(project_dir: Path, when: str, stdlib: str | None) -> list[str]:
+    """``stdlib``: None = computed, ``"none"`` = off, else an explicit comma list."""
+    if stdlib is not None:
+        if stdlib.strip().lower() in _STDLIB_OFF:
+            return []
+        return sorted({m.strip() for m in stdlib.split(",") if m.strip()})
+    if (os.environ.get(STDLIB_ENV) or "").strip():
+        return []  # the caller's own variable wins; trace_env forwards it
+    try:
+        return stdlib_trace_modules(project_dir, when)
+    except Exception as exc:  # noqa: BLE001 - never fail a capture over this
+        logger.warning("could not compute the stdlib modules to trace: %s", exc)
+        return []
+
+
 def _capture_identity(supplied: str | None, env_name: str) -> str | None:
     value = supplied if supplied is not None else os.environ.get(env_name)
     return value or None
@@ -370,6 +606,7 @@ def capture_trace_local(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | None = None,
 ) -> tuple[list[str], int | None]:
     """Inject the watcher into a locally-run command via PYTHONPATH + env.
 
@@ -403,6 +640,7 @@ def capture_trace_local(
         impact_targets, deployment_id, request_id, correlation_id,
         sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
         sample_first=sample_first, widen_targets=widen_targets,
+        trace_stdlib=trace_stdlib,
     ))
 
     log_file = None
@@ -471,6 +709,7 @@ def capture_trace_in_container(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | None = None,
 ) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
@@ -492,6 +731,7 @@ def capture_trace_in_container(
         impact_targets, deployment_id, request_id, correlation_id,
         sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
         sample_first=sample_first, widen_targets=widen_targets,
+        trace_stdlib=trace_stdlib,
     ).items():
         exec_args += ["-e", f"{key}={val}"]
     if workdir:
@@ -628,9 +868,12 @@ def _merge_traces(produced: list[str], out_path: Path) -> int:
 
 
 def _sink_kwargs(sink: str | None, trace_mode: str | None,
-                 sample_first: int | None = None, widen_targets: bool = False) -> dict:
+                 sample_first: int | None = None, widen_targets: bool = False,
+                 trace_stdlib: list[str] | None = None) -> dict:
     """Only pass the phase-2 keywords when set (test doubles predate them)."""
     out: dict = {}
+    if trace_stdlib:
+        out["trace_stdlib"] = list(trace_stdlib)
     if widen_targets:
         out["widen_targets"] = True
     if sink is not None:
@@ -868,6 +1111,7 @@ def capture_trace(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | None = None,
 ) -> TraceCaptureResult:
     """Run ``command`` with the watcher injected; merge produced JSONL into ``out_path``.
 
@@ -906,7 +1150,7 @@ def capture_trace(
                 container, workdir, exclude, source, include_internal,
                 privacy, sample_rate, impact_targets,
                 deployment_id, request_id, correlation_id,
-                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets),
+                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
             )
         else:
             # Keep the log next to the durable trace artifact (out_path), not the
@@ -920,7 +1164,7 @@ def capture_trace(
                 impact_targets=impact_targets, deployment_id=deployment_id,
                 request_id=request_id, correlation_id=correlation_id,
                 interrupted=interrupted,
-                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets),
+                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
             )
             command_log = str(log_path) if log_path.exists() else None
 
@@ -964,6 +1208,7 @@ def capture_trace(
             instrumentation_skipped=runtime["instrumentation_skipped"],
             activation_failures=activation_failures,
             facts_path=facts["path"] if facts else None,
+            trace_stdlib=_effective_stdlib(trace_stdlib),
         )
         metadata = {
             "schema_version": 1,
@@ -977,6 +1222,7 @@ def capture_trace(
                                    else LONG_RUN_SAMPLE_FIRST) if sample_rate < 1 else 0},
             "backend": effective_backend,
             "impact_targets": impact_targets,
+            "trace_stdlib": result.trace_stdlib,
             "events": events,
             "events_seen": events_seen,
             "runtime_metadata_complete": metadata_complete,
@@ -1320,6 +1566,7 @@ def capture_named_trace(
     request_id: str | None = None,
     correlation_id: str | None = None,
     accept_failing: bool = False,
+    stdlib: str | None = None,
 ) -> ContractSlot:
     """Capture a trace and persist it as the named slot (``"baseline"`` or
     ``"post_migration"``). For ``mode in (TEST_SUITE, LIVE_COMMAND)`` — pymolt
@@ -1344,6 +1591,13 @@ def capture_named_trace(
     Never prompts; raises ``ValueError`` on bad input (unknown ``when``, no
     ``command``, or an unsupported ``mode`` for this function — see
     ``start_attached_capture`` for ``LIVE_ATTACH``).
+
+    During a Python-version move (setup's base and target differ in major.minor) the stdlib
+    modules the project's stdlib sites touch are traced as dependencies
+    (``PYMOLT_TRACE_STDLIB``, see ``stdlib_trace_modules``); ``stdlib="none"`` turns that off,
+    an explicit comma list replaces it, and the caller's own variable wins. An explicit
+    ``target`` (not ``"all"``) gets no automatic stdlib modules unless ``stdlib`` is given.
+    What was traced is stamped on the slot.
     """
     if when not in ("baseline", "post_migration"):
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
@@ -1376,6 +1630,10 @@ def capture_named_trace(
         impact_targets = _applied_plan_impact_targets(project_dir)
         widen_targets = bool(impact_targets)
     normalized_targets = _normalize_impact_targets(impact_targets)
+    # An explicit --target stays exactly what the caller named: the stdlib modules are added
+    # automatically only for the default target ("all"), or when ``stdlib`` is given too.
+    trace_stdlib = ([] if stdlib is None and target != "all"
+                    else _resolve_stdlib_option(project_dir, when, stdlib))
     # Validate before creating staging paths or spawning the target.
     trace_env(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
@@ -1430,6 +1688,8 @@ def capture_named_trace(
             capture_kwargs["impact_targets"] = normalized_targets
         if widen_targets:
             capture_kwargs["widen_targets"] = True
+        if trace_stdlib:
+            capture_kwargs["trace_stdlib"] = trace_stdlib
         if deployment_id is not None:
             capture_kwargs["deployment_id"] = deployment_id
         if request_id is not None:
@@ -1545,6 +1805,7 @@ def capture_named_trace(
         correlation_id=result.correlation_id,
         backend=result.backend,
         impact_targets=result.impact_targets,
+        traced_stdlib=getattr(result, "trace_stdlib", None) or _effective_stdlib(trace_stdlib),
         metadata_path=result.metadata_path,
         sources_path=_existing(sources_path(result.out_path)),
         events_seen=result.events_seen,
@@ -1709,6 +1970,7 @@ def start_attached_capture(
         target, backend, "", "", False, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
         sink=LONG_RUN_SINK, trace_mode=LONG_RUN_TRACE_MODE,
+        trace_stdlib=_resolve_stdlib_option(project_dir, when, None),
     )
     bundle_dir = project_dir / ".pymolt" / "contract_bundle"
     out_path = pending_attach_path(project_dir, when)
