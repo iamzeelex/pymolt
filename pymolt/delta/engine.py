@@ -146,7 +146,28 @@ def derive_symbols(root: Path, trace: Path | None) -> tuple[dict[str, TouchedSym
     for sym, warns in _trace_symbols(root, trace, notes).items():
         t = touched.setdefault(sym, TouchedSymbol(path=sym, origin="trace"))
         t.warnings.extend(warns)
+    for sym in _site_spellings(root, trace, notes):
+        touched.setdefault(sym, TouchedSymbol(path=sym, origin="contact"))
     return touched, notes
+
+
+def _site_spellings(root: Path, trace: Path | None, notes: list[str]) -> set[str]:
+    """Spellings the runtime's code names and the contact map cannot see: aliased attributes
+    (``G.node`` recorded as ``Graph.nodes``) and attributes inherited through project classes
+    (``User.__fields__`` on a ``BaseModel`` subclass). Dependency spellings only."""
+    from pymolt.delta import touched as touched_mod
+
+    out: set[str] = set()
+    try:
+        out |= touched_mod.inherited_spellings(root)
+        if trace is not None and (trace.exists()
+                                  or Path(str(trace) + ".facts.json").exists()):
+            from pymolt.verify.facts import load_facts
+
+            out |= touched_mod.alias_spellings(load_facts(trace, root=root).facts, root)
+    except Exception as exc:  # noqa: BLE001 — an enrichment, never a failure
+        notes.append(f"site spellings unavailable: {type(exc).__name__}: {exc}")
+    return {s for s in out if not touched_mod.is_stdlib(s)}
 
 
 def _trace_symbols(root: Path, trace: Path | None,
@@ -361,12 +382,19 @@ class ParamChange:
     note: str
 
 
-def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
+_REMOVAL_WORDS = re.compile(r"\b(?:removed|no longer|not supported|unsupported|renamed|"
+                            r"deprecated|ignored|invalid)\b", re.IGNORECASE)
+
+
+def param_changes(old: list | None, new: list | None, new_prose: Iterable[str] = (),
+                  kwargs_rejected: bool = False) -> list[ParamChange]:
     """Parameter-level differences between two ``[name, kind, default-repr]`` shapes.
 
     A removed parameter is not reported when the new callable takes ``**kwargs`` (the call
-    still binds); a removed positional parameter replaced at the same index by a new one of
-    the same kind is a rename.
+    still binds) unless the new callable's own prose (``new_prose``: warn()/raise messages,
+    docstring) names it as removed or renamed: it then does not bind to anything. A removed
+    positional parameter replaced at the same index by a new one of the same kind is a rename.
+    A parameter that loses its default is a SIGNATURE change (calls that omitted it now fail).
     """
     if not old or not new:
         return []
@@ -396,12 +424,25 @@ def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
         if name not in n:
             if not new_has_varkw:
                 out.append(ParamChange("SIGNATURE", name, kind, None, f"param {name} removed"))
+            elif kwargs_rejected:
+                out.append(ParamChange(
+                    "SIGNATURE", name, kind, None,
+                    f"param {name} removed (the new signature's **kwargs only refuses what it "
+                    f"collects)"))
+            elif _stated_removed(name, new_prose):
+                out.append(ParamChange(
+                    "SIGNATURE", name, kind, None,
+                    f"param {name} removed (the new signature takes **kwargs, but its own "
+                    f"prose says {name} is removed)"))
             continue
         _, nkind, ndefault = n[name]
         if nkind != kind:
             out.append(ParamChange("SIGNATURE", name, kind, nkind,
                                    f"param {name} kind {kind}->{nkind}"))
-        if default != UNEVALUATED and _default(default) != _default(ndefault):
+        if default not in (None, UNEVALUATED) and ndefault is None and kind not in _VAR:
+            out.append(ParamChange("SIGNATURE", name, default, "(required)",
+                                   f"parameter {name} lost its default; now required"))
+        elif default != UNEVALUATED and _default(default) != _default(ndefault):
             out.append(ParamChange("DEFAULT", name, default, ndefault,
                                    f"param {name} default {default}->{ndefault}"))
     added = set(renamed.values())
@@ -410,6 +451,12 @@ def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
             out.append(ParamChange("SIGNATURE", name, None, f"{kind} (required)",
                                    f"param {name} added as required"))
     return out
+
+
+def _stated_removed(name: str, prose: Iterable[str]) -> bool:
+    """Whether a message names ``name`` as removed/renamed/ignored (word-bounded)."""
+    word = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+    return any(word.search(m) and _REMOVAL_WORDS.search(m) for m in prose or ())
 
 
 def bases_change(old: dict, new: dict) -> ParamChange | None:
@@ -663,6 +710,17 @@ def _successor_candidates(succ: str, canon: str, members: Iterable[str] = ()) ->
     return list(dict.fromkeys(out))
 
 
+def _own_prose(step: dict) -> list[str]:
+    """Messages of a callable's own source: warn() and raise texts, then its docstring lines
+    that say something was removed/renamed."""
+    msgs = [w.get("message", "") for w in step.get("warns") or []]
+    if step.get("kind") != "class":  # a class's source holds every method's raises
+        msgs += [w.get("message", "") for w in step.get("raises") or []]
+    doc = step.get("doc") or {}
+    msgs += list(doc.get("directive") or []) + list(doc.get("mentions") or [])
+    return msgs
+
+
 def _new_prose(spell: Spell, leaf: str) -> list[str]:
     """Deprecation prose of a spelling that still exists in the new version (``__deprecated__``,
     docstring, access warning, PEP 562 branch, the ``warn()`` in its own body): where a rename
@@ -839,7 +897,8 @@ def _group_facts(
             ref = c_new
             if ref is not None and ref.canonical != cn:
                 symbol, rebound = m, f"rebound: {canon} -> {cn}"
-        for ch in param_changes(o.get("shape"), n.get("shape")):
+        for ch in param_changes(o.get("shape"), n.get("shape"), _own_prose(n),
+                                 bool(n.get("rejects_kwargs"))):
             key = (symbol, ch.kind, ch.param, ch.old, ch.new)
             changes.setdefault(key, set()).add(m)
             notes.setdefault(key, ["signature", *([rebound] if rebound else [])])
@@ -968,7 +1027,8 @@ def _public_first(name: str) -> tuple:
 
 def _compatible(old: dict, new: dict, leaf: str) -> bool:
     ok = old.get("kind") == new.get("kind") or old.get("kind") is None  # None: a static old side
-    return ok or {old.get("kind"), new.get("kind")} <= {"callable", "class"}
+    families = ({"callable", "class"}, {"property", "cached_property", "lazy_property"})
+    return ok or any({old.get("kind"), new.get("kind")} <= f for f in families)
 
 
 def _online_query(spell: Spell, step: dict) -> dict | None:
