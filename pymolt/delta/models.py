@@ -179,6 +179,16 @@ class Interpreter(BaseModel):
     # Set when the interpreter lives in a container: ``executable`` is then a path inside it.
     runner: RunnerSpec | None = None
 
+    # source "static": no interpreter was reachable, so the old side is read from the release's
+    # wheel or sdist (``delta/static_side.py``). ``static`` maps each package name to its
+    # acquired source (``delta.acquire.Acquired``), ``static_errors`` to why one could not be.
+    static: dict[str, Any] = Field(default_factory=dict, exclude=True)
+    static_errors: dict[str, str] = Field(default_factory=dict, exclude=True)
+
     @property
     def available(self) -> bool:
         return self.executable is not None
+
+    @property
+    def is_static(self) -> bool:
+        return self.executable is None and self.source == "static"
