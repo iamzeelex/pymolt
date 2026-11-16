@@ -1,0 +1,236 @@
+{
+ "name": "sqlalchemy",
+ "ecosystem": "ORM / DB (sqlite in-memory)",
+ "old": {
+  "python": "3.9",
+  "requirements": [
+   "SQLAlchemy==1.3.24",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "SQLAlchemy==2.0.57",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "SQLAlchemy"
+ ],
+ "target_manifest": [
+  "SQLAlchemy==2.0.57"
+ ],
+ "files": {
+  "app/__init__.py": "",
+  "app/core.py": "from sqlalchemy import (\n    Column, ForeignKey, Integer, MetaData, String, Table, create_engine, func, select,\n)\nfrom sqlalchemy.ext.declarative import declarative_base\nfrom sqlalchemy.orm import sessionmaker\n\nmetadata = MetaData()\n\nauthors = Table(\n    \"authors\", metadata,\n    Column(\"id\", Integer, primary_key=True),\n    Column(\"name\", String(50), nullable=False),\n)\n\nBase = declarative_base(metadata=metadata)\n\n\nclass Book(Base):\n    __tablename__ = \"books\"\n\n    id = Column(Integer, primary_key=True)\n    title = Column(String(80), nullable=False)\n    pages = Column(Integer, default=0)\n    author_id = Column(Integer, ForeignKey(\"authors.id\"))\n\n\ndef make_engine():\n    engine = create_engine(\"sqlite://\")\n    metadata.create_all(engine)\n    return engine\n\n\ndef add_author(engine, name):\n    result = engine.execute(authors.insert(), name=name)\n    return result.inserted_primary_key[0]\n\n\ndef author_names(engine):\n    query = select([authors.c.name]).order_by(authors.c.id)\n    return engine.execute(query).fetchall()\n\n\ndef author_row(engine, author_id):\n    query = select([authors]).where(authors.c.id == author_id)\n    return engine.execute(query).first()\n\n\ndef author_name(engine, author_id):\n    row = author_row(engine, author_id)\n    return row[\"name\"]\n\n\ndef author_dict(engine, author_id):\n    return dict(author_row(engine, author_id))\n\n\ndef add_books(engine, author_id, titles):\n    Session = sessionmaker(bind=engine)\n    session = Session()\n    for i, title in enumerate(titles):\n        session.add(Book(title=title, pages=100 * (i + 1), author_id=author_id))\n    session.commit()\n    session.close()\n\n\ndef get_book(engine, book_id):\n    session = sessionmaker(bind=engine)()\n    try:\n        book = session.query(Book).get(book_id)\n        return book.title if book is not None else None\n    finally:\n        session.close()\n\n\ndef book_count(engine):\n    with engine.connect() as conn:\n        return conn.execute(\"SELECT COUNT(*) FROM books\").scalar()\n\n\ndef pages_by_author(engine):\n    query = (\n        select([authors.c.name, func.sum(Book.__table__.c.pages).label(\"total\")])\n        .select_from(authors.join(Book.__table__, Book.__table__.c.author_id == authors.c.id))\n        .group_by(authors.c.name)\n    )\n    return engine.execute(query).fetchall()\n\n\ndef table_names(engine):\n    return sorted(engine.table_names())\n\n\ndef reflected_tables(engine):\n    meta = MetaData(bind=engine)\n    meta.reflect()\n    return sorted(meta.tables)\n",
+  "tests/test_core.py": "from app.core import (\n    add_author, add_books, author_dict, author_name, author_names, author_row,\n    book_count, get_book, make_engine, pages_by_author, reflected_tables,\n    table_names,\n)\n\n\ndef seeded():\n    engine = make_engine()\n    ada = add_author(engine, \"Ada\")\n    bob = add_author(engine, \"Bob\")\n    add_books(engine, ada, [\"Notes\", \"Engines\"])\n    add_books(engine, bob, [\"Bricks\"])\n    return engine, ada, bob\n\n\ndef test_add_author_returns_ids():\n    engine = make_engine()\n    assert add_author(engine, \"Ada\") == 1\n    assert add_author(engine, \"Bob\") == 2\n\n\ndef test_author_names():\n    engine, _, _ = seeded()\n    rows = author_names(engine)\n    assert [r[0] for r in rows] == [\"Ada\", \"Bob\"]\n    assert rows == [(\"Ada\",), (\"Bob\",)]\n\n\ndef test_author_row_and_lookup():\n    engine, ada, _ = seeded()\n    assert tuple(author_row(engine, ada)) == (1, \"Ada\")\n    assert author_name(engine, ada) == \"Ada\"\n    assert author_dict(engine, ada) == {\"id\": 1, \"name\": \"Ada\"}\n\n\ndef test_books():\n    engine, _, _ = seeded()\n    assert book_count(engine) == 3\n    assert get_book(engine, 1) == \"Notes\"\n    assert get_book(engine, 99) is None\n\n\ndef test_pages_by_author():\n    engine, _, _ = seeded()\n    rows = pages_by_author(engine)\n    assert sorted((r[0], r[1]) for r in rows) == [(\"Ada\", 300), (\"Bob\", 100)]\n\n\ndef test_tables():\n    engine, _, _ = seeded()\n    assert table_names(engine) == [\"authors\", \"books\"]\n    assert reflected_tables(engine) == [\"authors\", \"books\"]\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/core.py",
+   "old": "from sqlalchemy.ext.declarative import declarative_base\nfrom sqlalchemy.orm import sessionmaker",
+   "new": "from sqlalchemy.orm import declarative_base, sessionmaker",
+   "if_present": true
+  },
+  {
+   "file": "app/core.py",
+   "old": "    Column, ForeignKey, Integer, MetaData, String, Table, create_engine, func, select,\n",
+   "new": "    Column, ForeignKey, Integer, MetaData, String, Table, create_engine, func, inspect,\n    select, text,\n"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    result = engine.execute(authors.insert(), name=name)\n    return result.inserted_primary_key[0]",
+   "new": "    with engine.begin() as conn:\n        result = conn.execute(authors.insert(), {\"name\": name})\n    return result.inserted_primary_key[0]"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    query = select([authors.c.name]).order_by(authors.c.id)\n    return engine.execute(query).fetchall()",
+   "new": "    query = select(authors.c.name).order_by(authors.c.id)\n    with engine.connect() as conn:\n        return conn.execute(query).fetchall()"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    query = select([authors]).where(authors.c.id == author_id)\n    return engine.execute(query).first()",
+   "new": "    query = select(authors).where(authors.c.id == author_id)\n    with engine.connect() as conn:\n        return conn.execute(query).first()"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    return row[\"name\"]",
+   "new": "    return row._mapping[\"name\"]"
+  },
+  {
+   "file": "app/core.py",
+   "old": "return dict(author_row(engine, author_id))",
+   "new": "return dict(author_row(engine, author_id)._mapping)"
+  },
+  {
+   "file": "app/core.py",
+   "old": "conn.execute(\"SELECT COUNT(*) FROM books\")",
+   "new": "conn.execute(text(\"SELECT COUNT(*) FROM books\"))"
+  },
+  {
+   "file": "app/core.py",
+   "old": "        select([authors.c.name, func.sum(Book.__table__.c.pages).label(\"total\")])",
+   "new": "        select(authors.c.name, func.sum(Book.__table__.c.pages).label(\"total\"))"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    return engine.execute(query).fetchall()\n\n\ndef table_names",
+   "new": "    with engine.connect() as conn:\n        return conn.execute(query).fetchall()\n\n\ndef table_names"
+  },
+  {
+   "file": "app/core.py",
+   "old": "sorted(engine.table_names())",
+   "new": "sorted(inspect(engine).get_table_names())"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    meta = MetaData(bind=engine)\n    meta.reflect()",
+   "new": "    meta = MetaData()\n    meta.reflect(bind=engine)"
+  },
+  {
+   "file": "app/core.py",
+   "old": "session.query(Book).get(book_id)",
+   "new": "session.get(Book, book_id)",
+   "if_present": true
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "app/core.py",
+     "append": "\n\ndef author_columns(engine, author_id):\n    row = author_row(engine, author_id)\n    try:\n        return list(row.keys())\n    except AttributeError:\n        return []\n"
+    },
+    {
+     "file": "tests/test_core.py",
+     "append": "\n\ndef test_author_columns():\n    from app.core import author_columns\n    engine, ada, _ = seeded()\n    assert isinstance(author_columns(engine, ada), list)\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "sqlalchemy.engine.result.RowProxy.keys"
+   ],
+   "expected_changed_note": "Guess at the traced symbol. Old side traces RowProxy.keys; there is no Row.keys on the new side, so the call may show as removed or as a dynamic-only miss rather than CHANGED. The app function author_columns returns ['id','name'] vs []."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "sqlalchemy.engine.Engine.execute",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/core.py:34",
+   "breaks": "AttributeError: 'Engine' object has no attribute 'execute' (also at the select sites in author_names, author_row, pages_by_author)",
+   "successor": "Connection.execute via `with engine.begin() as conn:` / `engine.connect()`",
+   "fixable": "manual",
+   "source": "SQLAlchemy 2.0 migration guide, 'Connectionless / implicit execution is removed'",
+   "verified": "old 1.3.24: engine.execute(authors.insert(), name='Zed') -> inserted_primary_key [1], autocommits. new 2.0.57: AttributeError."
+  },
+  {
+   "symbol": "sqlalchemy.select",
+   "kind": "SIGNATURE",
+   "param": "columns (list form)",
+   "site": "app/core.py:39",
+   "breaks": "ArgumentError: Column expression, FROM clause, or other columns clause element expected, got [Column(...)]. Three sites: select([authors.c.name, ...]) style, select([authors]), select([name, func.sum(...)]).",
+   "successor": "select(*cols), i.e. positional columns",
+   "fixable": "codemod",
+   "source": "SQLAlchemy 2.0 migration guide, 'select() no longer accepts a list of columns' / select() legacy calling styles removed",
+   "verified": "old: select([col]) works; select(col) raises ArgumentError 'columns argument to select() must be a Python list'. new: the exact reverse."
+  },
+  {
+   "symbol": "sqlalchemy.engine.RowProxy.__getitem__",
+   "kind": "REMOVED",
+   "param": "string key",
+   "site": "app/core.py:50",
+   "breaks": "TypeError: tuple indices must be integers or slices, not str. Row is tuple-like; string-key access moved to row._mapping['name'] (or attribute access row.name).",
+   "successor": "Row._mapping[...] / row.name",
+   "fixable": "manual",
+   "source": "SQLAlchemy 2.0 migration guide, 'The Row object behaves like a named tuple' (RowProxy mapping behaviour removed)",
+   "verified": "old RowProxy: row['name'] == 'Ada'. new Row: TypeError."
+  },
+  {
+   "symbol": "sqlalchemy.engine.RowProxy",
+   "kind": "BEHAVIOR",
+   "param": "dict(row)",
+   "site": "app/core.py:54",
+   "breaks": "dict(row) worked on RowProxy (mapping-like, has .keys()); on Row it raises TypeError: cannot convert dictionary update sequence element #0 to a sequence. Also the class changes: sqlalchemy.engine.result.RowProxy -> sqlalchemy.engine.row.Row (relevant to type-level rendering).",
+   "successor": "dict(row._mapping)",
+   "fixable": "manual",
+   "source": "SQLAlchemy 2.0 migration guide, 'The Row object behaves like a named tuple'",
+   "verified": "old: dict(row) == {'id':1,'name':'Ada'}, type sqlalchemy.engine.result.RowProxy. new: TypeError, type sqlalchemy.engine.row.Row."
+  },
+  {
+   "symbol": "sqlalchemy.engine.Connection.execute",
+   "kind": "SIGNATURE",
+   "param": "statement (plain str)",
+   "site": "app/core.py:77",
+   "breaks": "ObjectNotExecutableError: Not an executable object: 'SELECT COUNT(*) FROM books'",
+   "successor": "sqlalchemy.text(...)",
+   "fixable": "codemod",
+   "source": "SQLAlchemy 2.0 migration guide, 'Execution of textual SQL requires text()'",
+   "verified": "old: conn.execute('SELECT COUNT(*) FROM books').scalar() works, no warning. new: ObjectNotExecutableError."
+  },
+  {
+   "symbol": "sqlalchemy.engine.Engine.table_names",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/core.py:90",
+   "breaks": "AttributeError: 'Engine' object has no attribute 'table_names'",
+   "successor": "sqlalchemy.inspect(engine).get_table_names()",
+   "fixable": "manual",
+   "source": "SQLAlchemy 1.4 changelog (deprecated) / 2.0 migration guide, 'Engine.table_names() and has_table() removed'",
+   "verified": "old: ['authors','books']. new: AttributeError; inspect(engine).get_table_names() gives the same list."
+  },
+  {
+   "symbol": "sqlalchemy.MetaData",
+   "kind": "SIGNATURE",
+   "param": "bind",
+   "site": "app/core.py:94",
+   "breaks": "TypeError: MetaData.__init__() got an unexpected keyword argument 'bind'",
+   "successor": "MetaData(); meta.reflect(bind=engine)",
+   "fixable": "manual",
+   "source": "SQLAlchemy 2.0 migration guide, 'Implicit bound metadata removed'",
+   "verified": "old: MetaData(bind=engine).reflect() works. new: TypeError at construction."
+  },
+  {
+   "symbol": "sqlalchemy.ext.declarative.declarative_base",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:4",
+   "breaks": "MovedIn20Warning only: still importable and working in 2.0",
+   "successor": "sqlalchemy.orm.declarative_base (the same function, relocated)",
+   "fixable": "codemod",
+   "source": "SQLAlchemy 2.0 migration guide, 'declarative_base() moved to sqlalchemy.orm'",
+   "verified": "old: no warning. new: MovedIn20Warning 'The declarative_base() function is now available as sqlalchemy.orm.declarative_base()'; returns the same kind of base. [Round 4 audit] identity check (new SQLAlchemy 2.0.57): `sqlalchemy.ext.declarative.declarative_base is sqlalchemy.orm.declarative_base` -> False, and calling the old spelling works and emits MovedIn20Warning. It still works and warns: DEPRECATED (was MOVED)."
+  },
+  {
+   "symbol": "sqlalchemy.orm.Query.get",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:69",
+   "breaks": "LegacyAPIWarning only; still returns the object",
+   "successor": "sqlalchemy.orm.Session.get(Book, id)",
+   "fixable": "manual",
+   "source": "SQLAlchemy 2.0 migration guide, 'Query.get() is legacy'",
+   "verified": "old: no warning. new: LegacyAPIWarning 'The Query.get() method is considered legacy'; result identical ('x')."
+  },
+  {
+   "symbol": "sqlalchemy.engine.RowProxy.keys",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/core.py:102",
+   "breaks": "Only the change scenario: Row has no keys(); AttributeError (caught by the app, which returns []). Old returns ['id','name'].",
+   "successor": "row._fields / row._mapping.keys()",
+   "fixable": "manual",
+   "source": "SQLAlchemy 2.0 migration guide, 'The Row object behaves like a named tuple'",
+   "scenario": "change",
+   "verified": "old: list(row.keys()) == ['id','name']. new: AttributeError 'Could not locate column in row for column keys'."
+  }
+ ],
+ "expected_warnings": [],
+ "notes": "Old side (1.3.24, py3.9) emits NO warnings (SQLALCHEMY_WARN_20 unset); new side emits MovedIn20Warning for declarative_base and LegacyAPIWarning for Query.get (both Python-level). S1: author_names/author_row/pages_by_author return RowProxy (sqlalchemy.engine.result.RowProxy) in 1.3 and Row (sqlalchemy.engine.row.Row) in 2.0: different class names and modules but identical repr '(1, 'Ada')' and == against tuples, so a type-level comparison reports a difference where a structural one reports none (a false CHANGED if type-level). dict(row)/row['name']/row.keys() stop working on Row. Fixes need transactions semantics: engine.execute autocommitted, the manual rewrite uses engine.begin(). All sqlite in-memory (sqlite://), no files or network; whole suite runs in ~0.3 s. After migration the equiv scenario's 6 tests pass on 2.0.57 with zero warnings. S5: select([..]) -> select(..) and text() wrapping are mechanical; engine.execute and Row access are manual. manual_migration edits are applied in order; extra keys: 'if_present' (skip when the text is absent, e.g. pymolt already rewrote that site) and 'replace_all'. Ground-truth entries with 'scenario':'change' only exist after the change scenario's edits. 'expected_changed' is a guess at the traced symbol name."
+}

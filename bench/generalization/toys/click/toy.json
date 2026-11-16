@@ -1,0 +1,141 @@
+{
+  "name": "click",
+  "ecosystem": "cli",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "click==7.1.2",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "click==8.5.1",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "click"
+  ],
+  "target_manifest": [
+    "click==8.5.1"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/cli.py": "\"\"\"A small deployment CLI built on click, plus helpers to drive it in-process.\"\"\"\nimport click\nfrom click.testing import CliRunner\n\nENVS = [\"staging\", \"production\", \"preview\"]\n\n\ndef complete_env(ctx, args, incomplete):\n    return [e for e in ENVS if e.startswith(incomplete)]\n\n\ndef table_width():\n    cols, _rows = click.get_terminal_size()\n    return max(40, min(cols, 100))\n\n\ndef format_row(name, state):\n    width = table_width()\n    return name.ljust(width - 12) + state.rjust(12)\n\n\nclass PluginGroup(click.MultiCommand):\n    \"\"\"Commands that are looked up by name instead of being registered up front.\"\"\"\n\n    def list_commands(self, ctx):\n        return [\"hello\"]\n\n    def get_command(self, ctx, name):\n        if name != \"hello\":\n            return None\n\n        @click.command()\n        @click.argument(\"who\", default=\"world\")\n        def hello(who):\n            click.echo(\"hello {}\".format(who))\n\n        return hello\n\n\n@click.group()\n@click.version_option(\"1.2.0\", prog_name=\"deployctl\")\ndef cli():\n    \"\"\"Deploy things.\"\"\"\n\n\n@cli.command()\n@click.argument(\"env\", autocompletion=complete_env)\n@click.option(\"--tag\", multiple=True)\n@click.option(\n    \"--level\",\n    type=click.Choice([\"info\", \"debug\"], case_sensitive=False),\n    default=\"info\",\n)\n@click.option(\"--dry-run/--no-dry-run\", default=True)\ndef deploy(env, tag, level, dry_run):\n    \"\"\"Deploy to ENV.\"\"\"\n    verb = \"would deploy\" if dry_run else \"deploying\"\n    click.echo(\"{} to {} [{}] tags={}\".format(verb, env, level.lower(), \",\".join(tag)))\n\n\n@cli.command()\ndef status():\n    \"\"\"Show a status table.\"\"\"\n    click.echo(format_row(\"web\", \"ok\"))\n    click.echo(format_row(\"worker\", \"degraded\"))\n\n\ncli.add_command(PluginGroup(name=\"plugins\"))\n\n\ndef invoke(args, **kwargs):\n    \"\"\"Run the CLI in-process and hand back the click Result.\"\"\"\n    return CliRunner().invoke(cli, args, **kwargs)\n\n\ndef smoke():\n    \"\"\"Run a couple of commands and return all their Results.\"\"\"\n    return [invoke([\"status\"]), invoke([\"deploy\", \"staging\", \"--tag\", \"a\"])]\n",
+    "tests/__init__.py": "",
+    "tests/test_cli.py": "from app import cli\n\n\ndef test_deploy_dry_run():\n    result = cli.invoke([\"deploy\", \"staging\", \"--tag\", \"a\", \"--tag\", \"b\"])\n    assert result.exit_code == 0\n    assert result.output == \"would deploy to staging [info] tags=a,b\\n\"\n\n\ndef test_deploy_level_case_insensitive():\n    result = cli.invoke([\"deploy\", \"production\", \"--no-dry-run\", \"--level\", \"DEBUG\"])\n    assert result.output == \"deploying to production [debug] tags=\\n\"\n\n\ndef test_status_table_width():\n    lines = cli.invoke([\"status\"]).output.splitlines()\n    assert len(lines) == 2\n    assert all(len(line) == cli.table_width() for line in lines)\n    assert lines[1].endswith(\"degraded\")\n\n\ndef test_complete_env():\n    assert cli.complete_env(None, [], \"pr\") == [\"production\", \"preview\"]\n\n\ndef test_plugins_and_version():\n    assert cli.invoke([\"plugins\", \"hello\", \"bob\"]).output == \"hello bob\\n\"\n    assert cli.invoke([\"--version\"]).output == \"deployctl, version 1.2.0\\n\"\n\n\ndef test_smoke_returns_results():\n    results = cli.smoke()\n    assert [r.exit_code for r in results] == [0, 0]\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/cli.py",
+      "old": "import click\n",
+      "new": "import shutil\n\nimport click\n"
+    },
+    {
+      "file": "app/cli.py",
+      "old": "def complete_env(ctx, args, incomplete):",
+      "new": "def complete_env(ctx, param, incomplete):"
+    },
+    {
+      "file": "app/cli.py",
+      "old": "cols, _rows = click.get_terminal_size()",
+      "new": "cols, _rows = shutil.get_terminal_size()"
+    },
+    {
+      "file": "app/cli.py",
+      "old": "class PluginGroup(click.MultiCommand):",
+      "new": "class PluginGroup(click.Group):"
+    },
+    {
+      "file": "app/cli.py",
+      "old": "@click.argument(\"env\", autocompletion=complete_env)",
+      "new": "@click.argument(\"env\", shell_complete=complete_env)"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/cli.py",
+          "append": "\n\ndef bare_invoke():\n    \"\"\"What the CLI answers when it is run with no arguments.\"\"\"\n    return invoke([])\n"
+        },
+        {
+          "file": "tests/test_cli.py",
+          "append": "\n\ndef test_bare_invoke_shows_usage():\n    result = cli.bare_invoke()\n    assert \"Usage:\" in result.output\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "CliRunner.invoke"
+      ]
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "click.get_terminal_size",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/cli.py:13",
+      "breaks": "AttributeError: module 'click' has no attribute 'get_terminal_size' (raised on first call, i.e. when table_width() runs)",
+      "successor": "shutil.get_terminal_size",
+      "fixable": "auto",
+      "source": "Click 8.0.0 deprecated, 8.1.0 removed (use shutil.get_terminal_size)",
+      "verified": {
+        "old": "click 7.1.2 (py3.11): returns plain tuple (80, 24) when not a tty; no warning (-W error). It is click.termui.get_terminal_size, a wrapper, not shutil's function.",
+        "new": "click 8.1.8 and 8.5.1 (py3.12): AttributeError. shutil.get_terminal_size() returns os.terminal_size, equal to (80, 24) and unpacks the same, so the migrated app is identical."
+      }
+    },
+    {
+      "symbol": "click.argument",
+      "kind": "SIGNATURE",
+      "param": "autocompletion",
+      "site": "app/cli.py:47",
+      "breaks": "TypeError: Parameter.__init__() got an unexpected keyword argument 'autocompletion' (at import time, in the decorator)",
+      "successor": "shell_complete",
+      "fixable": "manual",
+      "source": "Click 8.0.0 deprecated autocompletion in favour of shell_complete (callback now (ctx, param, incomplete)); 8.1.0 removed",
+      "note": "The callback signature changes too (args -> param), so a pure keyword rename is not enough in general; here the callback does not use args.",
+      "verified": {
+        "old": "7.1.2: accepted, no warning",
+        "new": "8.1.8 and 8.5.1: TypeError at decoration time, so `import app.cli` fails; shell_complete=<callback(ctx, param, incomplete)> accepted"
+      }
+    },
+    {
+      "symbol": "click.MultiCommand",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/cli.py:22",
+      "breaks": "DeprecationWarning (8.1.8 and 8.5.1): 'MultiCommand' is deprecated and will be removed in Click 9.0. Use 'Group' instead. Still works in 8.x.",
+      "successor": "click.Group",
+      "fixable": "auto",
+      "source": "Click 8.2.0 changelog: BaseCommand/MultiCommand deprecated, removed in 9.0",
+      "verified": {
+        "old": "7.1.2: plain base class, no warning",
+        "new": "8.5.1: subclass works, DeprecationWarning at class definition (Python-level warnings.warn). click.MultiCommand is NOT click.Group; subclassing click.Group with the same list_commands/get_command works on both 7.1.2 and 8.5.1."
+      }
+    },
+    {
+      "symbol": "click.testing.CliRunner.invoke",
+      "kind": "BEHAVIOR",
+      "param": "no-argument group invocation",
+      "scenario": "change",
+      "site": "app/cli.py:83",
+      "breaks": "invoking a click.Group with no arguments exits with code 2 instead of 0 (same usage text); the Result object is returned either way, only result.exit_code differs",
+      "successor": null,
+      "fixable": "none",
+      "source": "Click 8.2.0 changelog: a group with no_args_is_help (the default) exits non-zero when invoked with no arguments",
+      "verified": {
+        "old": "7.1.2: exit_code 0, output starts 'Usage: cli [OPTIONS] COMMAND [ARGS]...'",
+        "new": "8.1.8: exit_code 0 (unchanged); 8.5.1: exit_code 2, identical output text"
+      }
+    }
+  ],
+  "expected_warnings": [],
+  "notes": "Click 7.1.2 emits no warning for any entry (verified with -W error on py3.11): nothing at runtime predicts the get_terminal_size / autocompletion breaks (S4). The Result returned by app.cli.invoke / smoke / bare_invoke is a click.testing.Result (S1): it has exit_code/output/exception but no structural renderer, so the change scenario (exit_code 0 -> 2, output text identical) is only visible if verify compares Result attributes, not just its type; the weak test checks 'Usage:' in result.output and stays green on both. Identical-behaviour check: for smoke() and invoke() of plugins hello / --version / deploy --level DEBUG / deploy (missing arg), original app on 7.1.2 and migrated app on 8.5.1 give identical exit_code, output and exception types; migrated app also passes on 8.1.8 (6/6). The migrated run additionally has no DeprecationWarning (pytest -W error::DeprecationWarning). The click.MultiCommand deprecation is a Python-level warning only on the new side. Not in ground truth because the app does not touch it: CliRunner(mix_stderr=...) is removed in 8.2 (TypeError), and Result.stdout excludes stderr from 8.2 (7.1 mixes by default). Pin choice: 8.5.1 is the latest 8.x resolved on 2026-11-15; 8.1.8 gives the same results except the no-arg exit code (8.2 change)."
+}
