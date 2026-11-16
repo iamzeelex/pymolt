@@ -730,7 +730,7 @@
       "successor": "asyncio.{name}",
       "same_object": false,
       "successor_since": "3.7",
-      "fix": "rewrite-attr",
+      "fix": "replace-attr-path",
       "hint": "Use asyncio.current_task() / asyncio.all_tasks().",
       "shimmed_by": null,
       "source": "What's New In Python 3.9: Removed (asyncio); bpo-40967",

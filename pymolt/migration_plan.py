@@ -166,6 +166,9 @@ class PlannedFileChange(BaseModel):
     new_source: str
     sites: int = 0
     recipes: list[str] = Field(default_factory=list)
+    # Python fixes only: does the rewritten file also run on the base Python? None when the
+    # change has no python fix (or the successor's age on the base is unknown).
+    runs_on_base: bool | None = None
 
 
 class PlannedAdvisory(BaseModel):
@@ -266,6 +269,7 @@ def create_migration_plan(
     delta_reports: list | None = None,
     predict: bool = True,
     python_move: tuple[str, str] | None = None,
+    python_stage=None,
 ) -> MigrationPlan:
     """Freeze a locally verified preview into an exact, portable project plan.
 
@@ -301,6 +305,12 @@ def create_migration_plan(
                 f"cannot read target manifest for the plan: {target}"
             ) from exc
 
+    stage = python_stage
+    if stage is None and predict and python_move is not None:
+        stage = _python_stage(root, python_move, previews)
+    if stage is not None:
+        previews = stage.previews
+
     changes: list[PlannedFileChange] = []
     advisories: list[PlannedAdvisory] = []
     for preview in previews:
@@ -317,6 +327,7 @@ def create_migration_plan(
                     recipe_key(item)
                     for item in [*preview.rules, *preview.patterns]
                 ],
+                runs_on_base=_runs_on_base(preview),
             ))
         for advisory in preview.advisories:
             advisories.append(PlannedAdvisory(
@@ -332,7 +343,7 @@ def create_migration_plan(
         risks = _predict_risks(root, baseline_path, list(migrations), changes, delta_reports)
     python, compile_findings = None, []
     if predict and python_move is not None:
-        risks, python, compile_findings = _python_part(root, python_move, risks)
+        risks, python, compile_findings = _python_part(root, python_move, risks, stage)
 
     return MigrationPlan(
         target_python=target_python,
@@ -365,24 +376,47 @@ def create_migration_plan(
     )
 
 
-def _python_part(root: Path, move: tuple[str, str], risks: PredictionReport | None):
+def _runs_on_base(preview) -> bool | None:
+    """The python fixes in ``preview`` run on the base only if every one of them does."""
+    fixes = [p for p in preview.patterns if getattr(p, "scope", "dependency") == "python"]
+    if not fixes:
+        return None
+    flags = [p.runs_on_base for p in fixes]
+    if all(f is True for f in flags):
+        return True
+    return False if any(f is False for f in flags) else None
+
+
+def _python_stage(root: Path, move: tuple[str, str], previews: list[FilePreview]):
+    """The python move computed for ``previews``; None (with no raise) when it fails."""
+    try:
+        from pymolt.pyversion.plan import plan_python_stage
+
+        return plan_python_stage(root, move[0], move[1], previews=previews)
+    except Exception:  # noqa: BLE001 - _python_part reports the failure
+        return None
+
+
+def _python_part(root: Path, move: tuple[str, str], risks: PredictionReport | None,
+                 stage=None):
     """The python move's risks merged into ``risks`` (also with no baseline), its summary and
     its compile findings. A failure becomes a note: the plan stands without it."""
     from pymolt.verify.predict import merge_python_risks
 
     base_python, target_python = move
-    try:
-        from pymolt.pyversion.plan import plan_python
+    if stage is None:
+        try:
+            from pymolt.pyversion.plan import plan_python_stage
 
-        python, python_risks, findings = plan_python(root, base_python, target_python)
-    except Exception as exc:  # noqa: BLE001
-        note = f"python risk prediction failed: {type(exc).__name__}: {exc}"
-        if risks is None:
-            risks = PredictionReport(status="partial")
-        risks.notes.append(note)
-        return risks, {"from": base_python, "to": target_python, "quality": "inconclusive",
-                       "sides": {}, "notes": [note]}, []
-    return merge_python_risks(risks, python_risks), python, findings
+            stage = plan_python_stage(root, base_python, target_python)
+        except Exception as exc:  # noqa: BLE001
+            note = f"python risk prediction failed: {type(exc).__name__}: {exc}"
+            if risks is None:
+                risks = PredictionReport(status="partial")
+            risks.notes.append(note)
+            return risks, {"from": base_python, "to": target_python, "quality": "inconclusive",
+                           "sides": {}, "notes": [note]}, []
+    return merge_python_risks(risks, stage.risks), stage.python, stage.findings
 
 
 def _predict_risks(root: Path, baseline_path: Path, migrations: list,

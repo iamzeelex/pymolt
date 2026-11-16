@@ -58,7 +58,10 @@ def test_python_risks_are_predicted_with_no_baseline(tmp_path, monkeypatch):
                                  python_move=("3.6", "3.12"))
     assert plan.baseline_trace_path is None and plan.risks is not None
     assert plan.python["to"] == "3.12" and plan.compile_findings
-    assert all(r.scope == "python" and not r.fixed_by_plan for r in plan.risks.risks)
+    assert all(r.scope == "python" for r in plan.risks.risks)
+    # the collections spellings have a rewrite; `import imp` is an advisory (manual)
+    assert {r.symbol for r in plan.risks.risks if r.fixed_by_plan} == {
+        "collections.Iterable", "collections.Mapping"}
     assert plan.risks.status == "partial"
     # it round-trips through the saved plan
     plan.save(root)
@@ -77,7 +80,7 @@ def test_a_failed_python_part_never_costs_the_plan(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("no")
 
-    monkeypatch.setattr(pyplan, "plan_python", boom)
+    monkeypatch.setattr(pyplan, "plan_python_stage", boom)
     plan = create_migration_plan(_project(tmp_path), [], [], target_python="3.12",
                                  source_manifest="r.txt", target_manifest_path=None,
                                  files_scanned=0, python_move=("3.6", "3.12"))
@@ -94,9 +97,9 @@ def test_the_summary_line_and_view_data(tmp_path, monkeypatch):
                                  source_manifest="r.txt", target_manifest_path=None,
                                  files_scanned=0, python_move=("3.6", "3.12"))
     line = python_summary_line(plan)
-    assert line.startswith("Python 3.6→3.12: 3 risk(s) (3 certain); 0 fixed by the plan; "
+    assert line.startswith("Python 3.6→3.12: 3 risk(s) (3 certain); 2 fixed by the plan; "
                            "needs attention: ")
-    assert "imp (manual)" in line and "evidence partial" in line
+    assert "imp (manual" in line and "evidence partial" in line
     view = plan_view(plan, {}, "test", plan_path=tmp_path / "plan.json")
     data = view["data"]
     assert data["python"]["risks_total"] == 3 and data["python"]["quality"] == "partial"
