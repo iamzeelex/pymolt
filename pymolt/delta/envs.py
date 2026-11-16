@@ -143,8 +143,12 @@ def installed_versions(
 
 
 def _check(executable: str, wants: Sequence[Want], source: str, note: str | None,
-           runner: RunnerSpec | None = None) -> Interpreter:
-    """An Interpreter for ``executable`` with versions filled; ``reason`` set if unusable."""
+           runner: RunnerSpec | None = None, allow_absent: bool = False) -> Interpreter:
+    """An Interpreter for ``executable`` with versions filled; ``reason`` set if unusable.
+
+    ``allow_absent`` (the baseline, on the old side): a want the interpreter does not have at
+    all is absent in the old version, not wrong, as long as some other want is satisfied. A
+    package present at another version is still wrong."""
     python, versions, error = installed_versions(executable, [w.name for w in wants],
                                                  runner=runner)
     interp = Interpreter(executable=executable, source=source, python=python, note=note,
@@ -152,9 +156,14 @@ def _check(executable: str, wants: Sequence[Want], source: str, note: str | None
     if error:
         interp.executable, interp.reason = None, error
         return interp
+    absent: list[str] = []
+    if allow_absent and any(same_version(versions.get(w.name), w.version) for w in wants):
+        absent = [w.name for w in wants if versions.get(w.name) is None]
+    interp.absent = absent
     wrong = [
         f"{w.name} {versions.get(w.name) or 'missing'} (need {w.version})"
-        for w in wants if not same_version(versions.get(w.name), w.version)
+        for w in wants
+        if w.name not in absent and not same_version(versions.get(w.name), w.version)
     ]
     if wrong:
         where = f"container {runner.name}" if runner else executable
@@ -326,7 +335,8 @@ def resolve_old(root: Path, wants: Sequence[Want], online: bool = False) -> Inte
             continue
         interp = _check(spec.executable, wants, "container",
                         f"baseline container {spec.name}"
-                        + (f" ({spec.image})" if spec.image else ""), runner=spec)
+                        + (f" ({spec.image})" if spec.image else ""), runner=spec,
+                        allow_absent=True)
         if _satisfied(interp):
             return interp
         candidates.append(interp)
@@ -338,7 +348,8 @@ def resolve_old(root: Path, wants: Sequence[Want], online: bool = False) -> Inte
         choice = select_interpreter(trace=trace)
         if choice.source == "trace-metadata":
             interp = _check(choice.executable, wants, "trace-metadata",
-                            f"baseline capture interpreter ({choice.executable})")
+                            f"baseline capture interpreter ({choice.executable})",
+                            allow_absent=True)
             if _satisfied(interp):
                 return interp
             candidates.append(interp)

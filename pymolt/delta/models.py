@@ -178,6 +178,9 @@ class Interpreter(BaseModel):
     versions: dict[str, str | None] = Field(default_factory=dict)
     # Set when the interpreter lives in a container: ``executable`` is then a path inside it.
     runner: RunnerSpec | None = None
+    # Old side only: wanted packages the baseline interpreter does not have at all. They are
+    # absent in the old version (their symbols are new), not a reason to build another env.
+    absent: list[str] = Field(default_factory=list)
 
     # source "static": no interpreter was reachable, so the old side is read from the release's
     # wheel or sdist (``delta/static_side.py``). ``static`` maps each package name to its
