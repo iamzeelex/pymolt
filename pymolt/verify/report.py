@@ -179,6 +179,9 @@ class ContractReport(BaseModel):
     # ``all_fact_diff`` is always the whole surface.
     fact_diff: dict[str, Any] | None = None
     all_fact_diff: dict[str, Any] | None = None
+    # Failing entries of the whole surface that the impact filter hid from ``fact_diff``:
+    # behaviour changes outside the plan's predicted impacts (they still decide the verdict).
+    unpredicted_changes: list[dict[str, Any]] = Field(default_factory=list)
     # Runtime symbols every one of whose facts compared equal on both sides (equal, DRIFT,
     # or REWRITTEN with an equal outcome) in the scoped fact diff. A dynamic-only symbol
     # in this set was observed AND verified, so it does not block PASS.
@@ -913,6 +916,10 @@ def _attach_fact_diff(
         "entries": [e for e in fdiff.entries if impacted(e.symbol) or impacted(e.new_symbol)],
     })
     report.fact_diff = scoped.to_json_dict()
+    kept = {id(e) for e in scoped.entries}
+    report.unpredicted_changes = [
+        e.model_dump(mode="json", exclude_none=True)
+        for e in fdiff.entries if id(e) not in kept and e.fails]
     report.fact_equal_symbols = _compared_equal_symbols(scoped)
     bdiff = scoped.to_boundary_diff()
     report.diff = bdiff.counts()

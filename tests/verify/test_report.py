@@ -261,7 +261,20 @@ def test_impact_set_filters_diff_and_existing_verdict_fold(tmp_path):
     assert focused.all_diff["result_changed"] == 1
     assert focused.impact_diff_details is not None
     assert focused.impact_diff_details["result_changed"] == []
-    assert focused.verdict is VerificationVerdict.PASS
+    # The focus narrows what is reported, never what can fail: flask.Flask changed outside
+    # the impact set, and that still fails the verdict (an unpredicted change).
+    assert focused.verdict is VerificationVerdict.FAIL
+
+    impacted = build_contract_report(root, trace=new, against=old, impact_set={"flask.Flask"})
+    _stamp_verdict(impacted, str(new), str(old), [])
+    assert impacted.diff_clean is False and impacted.verdict is VerificationVerdict.FAIL
+
+    same = build_contract_report(root, trace=old, against=old,
+                                 impact_set={"flask.cli.with_appcontext"})
+    _stamp_verdict(same, str(old), str(old), [])
+    assert same.all_diff_clean is True and same.verdict is not VerificationVerdict.FAIL
+    # coverage stays scoped to the impacted surface, not the whole one
+    assert same.blind == same.impacted_blind
 
     full = build_contract_report(root, trace=new, against=old)
     _stamp_verdict(full, str(new), str(old), [])
