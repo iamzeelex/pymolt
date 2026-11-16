@@ -610,7 +610,12 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
             hints[canon] = _local_hint(canon, members, sp_old, baseline, inp)
             succ = hints[canon][0]
             if succ:
-                need.update(_successor_candidates(succ, canon))
+                need.update(_successor_candidates(succ, canon, members))
+        for m in members:  # still there, deprecated: the new version may name its successor
+            if m in sp_new and sp_new[m].exists:
+                succ = fetch_mod.successor_from(_new_prose(sp_new[m], _leaf(canon)))
+                if succ:
+                    need.update(_successor_candidates(succ, canon, [m]))
     extra: dict[str, Spell] = {}
     todo = sorted(p for p in need if p not in sp_new)
     if todo and inp.resolve_new is not None:
@@ -644,11 +649,36 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
     return facts
 
 
-def _successor_candidates(succ: str, canon: str) -> list[str]:
+def _successor_candidates(succ: str, canon: str, members: Iterable[str] = ()) -> list[str]:
+    """Spellings a (possibly bare) successor name may stand for: as written, beside each member
+    (``BaseModel.dict`` -> ``BaseModel.model_dump``), then under the package root."""
     root = canon.split(".")[0]
     out = [succ]
+    if "." not in succ:
+        for m in members:
+            if "." in m:
+                out.append(m.rsplit(".", 1)[0] + "." + succ)
     if not succ.startswith(root + "."):
         out.append(f"{root}.{succ}")
+    return list(dict.fromkeys(out))
+
+
+def _new_prose(spell: Spell, leaf: str) -> list[str]:
+    """Deprecation prose of a spelling that still exists in the new version (``__deprecated__``,
+    docstring, access warning, PEP 562 branch, the ``warn()`` in its own body): where a rename
+    successor is named. Empty unless the new side marks the object deprecated."""
+    step = spell.step
+    runtime = spell.runtime_warnings if spell.final_for else []
+    out = [e.split(": ", 1)[-1] for e in _side_deprecation(step, leaf, runtime, "")]
+    if not out:
+        return []
+    doc = step.get("doc") or {}
+    out += [m for m in list(doc.get("directive") or []) + list(doc.get("mentions") or [])
+            if _DEPRECATES.search(m)]
+    if step.get("kind") != "class":
+        out += [w["message"] for w in step.get("warns") or []
+                if _DEPRECATES.search(w.get("message", ""))
+                and _mentions(w.get("message", ""), leaf)]
     return out
 
 
@@ -718,8 +748,10 @@ def _group_facts(
         new_canon: str | None = None
         cands = [t for t in surviving
                  if _compatible(any_old, new_of(t).step, leaf)  # type: ignore[union-attr]
-                 and _leaf(new_of(t).canonical) == leaf]  # type: ignore[union-attr]
-        if m != canon and c_new is not None and _compatible(any_old, c_new.step, leaf):
+                 and _leaf(new_of(t).canonical) == leaf  # type: ignore[union-attr]
+                 and _variant_ok(_leaf(m), _leaf(t))]
+        if (m != canon and c_new is not None and _compatible(any_old, c_new.step, leaf)
+                and _variant_ok(_leaf(m), _leaf(canon))):
             cands.append(canon)
         if not cands:
             same = _same_object_successor(old_steps[m].step, any_old, leaf, new_of)
@@ -771,7 +803,7 @@ def _group_facts(
         )
         resolved = None
         if succ:
-            for cand in _successor_candidates(succ, canon):
+            for cand in _successor_candidates(succ, canon, removed):
                 if new_of(cand) is not None:
                     resolved = cand
                     break
@@ -788,6 +820,7 @@ def _group_facts(
             ),
             online_query=_online_query(old_steps[symbol], old_owner),
             hint_source=source,
+            old_shape=any_old.get("shape"),
         )
         out.append(fact)
 
@@ -849,8 +882,27 @@ def _group_facts(
             evidence=_unique(evidence),
         )
         if kind == "DEPRECATED":
-            succ = fetch_mod.successor_from([e.split(": ", 1)[-1] for e in evidence])
+            pool = [e.split(": ", 1)[-1] for e in evidence]
+            for sp in sorted(spells):
+                target_new = new_of(sp)
+                if target_new is not None:
+                    pool += _new_prose(target_new, leaf)
+            succ = fetch_mod.successor_from(pool)
             fact.successor = succ
+            if succ:
+                resolved = next((c for c in _successor_candidates(succ, canon, sorted(spells))
+                                 if c not in spells and new_of(c) is not None), None)
+                target = new_of(resolved) if resolved else None
+                if resolved:
+                    fact.successor = resolved
+                fact.detail.update(
+                    importable=[x for x in sorted(spells) if old_steps[x].index == 0],
+                    successor_importable=bool(target is not None and target.index == 0),
+                    successor_same_signature=bool(
+                        target is not None and any_old.get("shape") is not None
+                        and target.step.get("shape") == any_old.get("shape")),
+                    successor_exists=target is not None,
+                )
         param_facts.append(fact)
     out += param_facts
 
@@ -877,7 +929,8 @@ def _group_facts(
 def _same_object_successor(step: dict, any_old: dict, leaf: str,
                            new_of: Callable[[str], Spell | None]) -> Spell | None:
     """A spelling the old interpreter proved to be the same object (``is``) that is live and
-    not itself deprecated on the new side; the shortest public one."""
+    not itself deprecated on the new side. The object's own home (the probe's
+    ``same_object_home``, possibly in another package) wins; otherwise the shortest public one."""
     live = []
     for cand in step.get("same_object_as") or []:
         target = new_of(cand)
@@ -887,7 +940,24 @@ def _same_object_successor(step: dict, any_old: dict, leaf: str,
         if _side_deprecation(target.step, _leaf(cand), runtime, ""):
             continue
         live.append(target)
+    home = step.get("same_object_home")
+    for target in live:
+        if home and target.spelling == home:
+            return target
     return min(live, key=lambda t: _public_first(t.spelling)) if live else None
+
+
+_VARIANT_TOKENS = ("lazy", "noop", "async", "sync", "iter", "bytes", "unicode")
+
+
+def _variant_ok(old_leaf: str, new_leaf: str) -> bool:
+    """A spelling and its successor carry the same variant suffix: ``ugettext_lazy`` is
+    ``gettext_lazy``, never ``gettext`` (a lazy proxy impersonates the function it wraps)."""
+    def variant(leaf: str) -> str | None:
+        tail = leaf.rsplit("_", 1)[-1]
+        return tail if "_" in leaf and tail in _VARIANT_TOKENS else None
+
+    return variant(old_leaf) == variant(new_leaf)
 
 
 def _public_first(name: str) -> tuple:
@@ -1098,7 +1168,7 @@ class _Run:
                     if old_env.is_static:
                         reports[name].facts = _static_facts(facts, runs["old"].results)
             self._transient_notes(reports, runs, root_to_package, touched)
-            self._online_hints(reports)
+            self._online_hints(reports, resolve_new)
             for name, report in reports.items():
                 if usable.get(name) and not report.facts:
                     report.notes.append(f"the touched symbols include nothing from {name}")
@@ -1240,7 +1310,36 @@ class _Run:
                     if reports[pkg].quality == "complete":
                         reports[pkg].quality = "partial"
 
-    def _online_hints(self, reports: dict[str, DeltaReport]) -> None:
+    @staticmethod
+    def _verify_successor(fact: DeltaFact,
+                          check: Callable[[list[str]], Mapping[str, dict]] | None) -> None:
+        """A successor read from release prose must exist in the new interpreter; the spelling
+        it resolves to and whether its signature matches the old object's are recorded, so
+        only a compatible rename is ever auto-applied (``provider._pattern``)."""
+        if check is None or not fact.successor:
+            return
+        cands = _successor_candidates(fact.successor, fact.old or fact.symbol,
+                                      [fact.symbol, *fact.aliases])
+        try:
+            found = spellings(check(cands))
+        except Exception:  # noqa: BLE001 — verification is an upgrade, never a crash
+            return
+        for cand in cands:
+            sp = found.get(cand)
+            if sp is not None and sp.exists:
+                old_shape = fact.detail.get("old_shape")
+                fact.successor = cand
+                fact.detail.update(
+                    successor_importable=sp.index == 0,
+                    successor_same_signature=bool(
+                        old_shape is not None and sp.step.get("shape") == old_shape),
+                    successor_exists=True,
+                )
+                return
+        fact.detail["successor_exists"] = False
+
+    def _online_hints(self, reports: dict[str, DeltaReport],
+                      check: Callable[[list[str]], Mapping[str, dict]] | None = None) -> None:
         """Source 4: intermediate releases (online only; cached results are reused offline)."""
         cache_path = self.root / CACHE_DIR / "hints.json"
         try:
@@ -1281,6 +1380,7 @@ class _Run:
                         source = "fetched"
                     if result.get("hint"):
                         fact.successor = result["hint"]
+                        self._verify_successor(fact, check)
                         fact.evidence.append(
                             f"successor:intermediate:{result.get('last_version_with_symbol')} "
                             f"({source})")

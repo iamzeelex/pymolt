@@ -617,9 +617,11 @@ def resolve(path):
             return out
         step["exists"] = True
         real_next = _describe(step, nxt, not inspect.ismodule(real))
-        same = _same_object_as(real_next, spelling)
+        same, home = _same_object_as(real_next, spelling)
         if same:
             step["same_object_as"] = same
+            if home:
+                step["same_object_home"] = home
         out["steps"].append(step)
         cur = nxt
     out["exists"] = True
@@ -713,23 +715,91 @@ def _identity_index(root):
     return index
 
 
+def _resolve_spelling(spelling):
+    """The object a dotted ``spelling`` names (longest importable prefix, then getattr), or None."""
+    parts = spelling.split(".")
+    obj, k = None, len(parts)
+    while k > 0 and obj is None:
+        head = ".".join(parts[:k])
+        obj = sys.modules.get(head)
+        if obj is None:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    obj = importlib.import_module(head)
+            except _Timeout:
+                raise
+            except BaseException:
+                obj = None
+                k -= 1
+    if obj is None:
+        return None
+    for attr in parts[k:]:
+        try:
+            obj = getattr(obj, attr)
+        except _Timeout:
+            raise
+        except BaseException:
+            return None
+    return obj
+
+
+def _home_spellings(obj):
+    """Where the object itself lives, even in another package: ``__module__`` + ``__qualname__``,
+    then the top-level package's export of the same name. Only spellings that resolve back to
+    the very object (``is``) count; a ``_private`` path is returned last (it is internal)."""
+    mod = getattr(obj, "__module__", None)
+    qual = getattr(obj, "__qualname__", None)
+    if not isinstance(mod, str) or not isinstance(qual, str) or "<" in qual:
+        return []
+    cands = [mod + "." + qual]
+    top = mod.split(".")[0]
+    leaf = qual.split(".")[-1]
+    if "." in mod or "." in qual:
+        cands.append(top + "." + leaf)
+    out = []
+    for cand in cands:
+        if cand in out:
+            continue
+        try:
+            found = _resolve_spelling(cand)
+        except _Timeout:
+            break
+        if found is obj:
+            out.append(cand)
+    return out
+
+
+def _rank(spelling, homes):
+    """0: the public home, 1: a public re-export, 2: internal (a ``_private`` path)."""
+    if not _public_name(spelling):
+        return 2
+    return 0 if spelling in homes else 1
+
+
 def _same_object_as(obj, spelling):
-    """Public spellings, in this interpreter, naming the very object ``spelling`` resolved to
-    (``pandas.util.testing.assert_frame_equal is pandas.testing.assert_frame_equal``)."""
+    """``(spellings, home)``: public spellings, in this interpreter, naming the very object
+    ``spelling`` resolved to (``pandas.util.testing.assert_frame_equal is
+    pandas.testing.assert_frame_equal``). The object's own home comes first, wherever it lives
+    (``jinja2.escape`` is ``markupsafe.escape``, not an incidental ``jinja2.compiler.escape``),
+    then public re-exports by depth, internal ones last. ``home`` is the public home or None."""
     root = spelling.split(".")[0]
     if not _shareable(obj) or not (_ANY_ROOT[0] or root in _DEP_ROOTS):
-        return []
+        return [], None
     try:
         entry = _identity_index(root).get(id(obj))
+        homes = [h for h in _home_spellings(obj) if h != spelling]
     except _Timeout:
-        return []
+        return [], None
     except BaseException:
-        return []
-    if entry is None or entry[0] is not obj:
-        return []
-    found = sorted(set(c for c in entry[1] if c != spelling),
-                   key=lambda c: (not _public_name(c), c.count("."), c))
-    return found[:_ID_MAX_RESULTS]
+        return [], None
+    found = set(c for c in (entry[1] if entry is not None and entry[0] is obj else [])
+                if c != spelling)
+    found.update(homes)
+    ranked = sorted(found, key=lambda c: (_rank(c, homes), c.count("."), c))
+    ranked = ranked[:_ID_MAX_RESULTS]
+    home = next((c for c in ranked if _rank(c, homes) == 0), None)
+    return ranked, home
 
 
 # ── distributions ─────────────────────────────────────────────────────────────────────
