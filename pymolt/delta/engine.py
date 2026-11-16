@@ -50,10 +50,12 @@ from pymolt.delta.models import (
     TouchedSymbol,
 )
 from pymolt.delta.probe import MARK, PROBE_VERSION
+from pymolt.delta.static_side import UNEVALUATED, static_probe
 
 log = logging.getLogger(__name__)
 
 CACHE_DIR = Path(".pymolt") / "cache" / "delta"
+STATIC_VERSION = 3
 PROBE_TIMEOUT = 300.0
 PER_PATH_TIMEOUT = 15.0
 _MSG = 300
@@ -399,7 +401,7 @@ def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
         if nkind != kind:
             out.append(ParamChange("SIGNATURE", name, kind, nkind,
                                    f"param {name} kind {kind}->{nkind}"))
-        if _default(default) != _default(ndefault):
+        if default != UNEVALUATED and _default(default) != _default(ndefault):
             out.append(ParamChange("DEFAULT", name, default, ndefault,
                                    f"param {name} default {default}->{ndefault}"))
     added = set(renamed.values())
@@ -412,6 +414,8 @@ def param_changes(old: list | None, new: list | None) -> list[ParamChange]:
 
 def bases_change(old: dict, new: dict) -> ParamChange | None:
     if old.get("kind") != "class" or new.get("kind") != "class":
+        return None
+    if old.get("bases") is None or new.get("bases") is None:  # a static side that cannot name them
         return None
     lo = [b.rsplit(".", 1)[-1] for b in old.get("bases") or []]
     ln = [b.rsplit(".", 1)[-1] for b in new.get("bases") or []]
@@ -893,7 +897,7 @@ def _public_first(name: str) -> tuple:
 
 
 def _compatible(old: dict, new: dict, leaf: str) -> bool:
-    ok = old.get("kind") == new.get("kind")
+    ok = old.get("kind") == new.get("kind") or old.get("kind") is None  # None: a static old side
     return ok or {old.get("kind"), new.get("kind")} <= {"callable", "class"}
 
 
@@ -915,6 +919,31 @@ def _unique(items: list[str]) -> list[str]:
         if i not in seen:
             seen.add(i)
             out.append(i)
+    return out
+
+
+def _static_facts(facts: list[DeltaFact], old_results: Mapping[str, dict]) -> list[DeltaFact]:
+    """Stamp facts computed against a statically read old side.
+
+    ``basis`` says so; an UNCHANGED fact is dropped when the old signature could not be read
+    (a decorated or generated callable) or its kind is unknown: "nothing changed" would claim a
+    comparison that never happened.
+    """
+    unreadable: set[str] = set()
+    for res in old_results.values():
+        for st in res.get("steps") or []:
+            if not st.get("dep") or not st.get("exists"):
+                continue
+            kind = st.get("kind")
+            if kind is None or (kind in ("class", "callable") and st.get("shape") is None):
+                unreadable.add(st.get("canonical") or "")
+    out = []
+    for fact in facts:
+        if fact.kind == "UNCHANGED" and (fact.symbol in unreadable
+                                         or any(s in unreadable for s in fact.aliases)):
+            continue
+        fact.basis = {"old": "static", "new": "probe"}
+        out.append(fact)
     return out
 
 
@@ -1005,6 +1034,8 @@ class _Run:
                                   **({"runner": env.runner} if env.runner is not None else {}))
                 for side, env in (("old", old_env), ("new", new_env)) if env.available
             }
+            if old_env.is_static:
+                futures["old"] = pool.submit(self._static_run, old_env, request["paths"])
             for side, fut in futures.items():
                 runs[side] = fut.result()
         self.stats["probe_s"] = round(time.perf_counter() - t_probe, 3)
@@ -1030,6 +1061,9 @@ class _Run:
                 & self._side_ok(report, "new", new_env, runs["new"], m.to_version)
             if not usable[m.name]:
                 report.quality = "inconclusive"
+            elif old_env.is_static:
+                report.quality = "partial"  # an old side read from source is never complete
+                report.sides["old"] = f"static:{old_env.static[m.name].source}"
 
         if runs["old"] is not None and runs["old"].ok and runs["new"] is not None \
                 and runs["new"].ok and any(usable.values()):
@@ -1061,6 +1095,8 @@ class _Run:
             for name, facts in by_pkg.items():
                 if usable.get(name):
                     reports[name].facts = facts
+                    if old_env.is_static:
+                        reports[name].facts = _static_facts(facts, runs["old"].results)
             self._transient_notes(reports, runs, root_to_package, touched)
             self._online_hints(reports)
             for name, report in reports.items():
@@ -1100,9 +1136,58 @@ class _Run:
                 return m
         return Migration(dist, "", "")
 
+    def _static_run(self, env: Interpreter, paths: list[str]) -> ProbeRun:
+        """The old side read from the old releases' source (never raises)."""
+        t0 = time.perf_counter()
+        key = hashlib.sha256(json.dumps({
+            "v": STATIC_VERSION, "paths": sorted(paths),
+            "src": sorted((n, a.version, a.source) for n, a in env.static.items()),
+        }, sort_keys=True).encode()).hexdigest()[:20]
+        cache = self.root / CACHE_DIR / f"static-{key}.json"
+        if self.use_cache:
+            try:
+                payload = json.loads(cache.read_text(encoding="utf-8"))
+                return ProbeRun(meta=payload["meta"], results=payload["results"],
+                                seconds=round(time.perf_counter() - t0, 3), from_cache=True)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        run = ProbeRun()
+        try:
+            run.meta, run.results = static_probe(env.static, paths)
+        except Exception as exc:  # noqa: BLE001 — a reader failure is a reason, not a crash
+            run.failure = f"static reader failed: {type(exc).__name__}: {exc}"
+            return run
+        run.seconds = round(time.perf_counter() - t0, 3)
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"meta": run.meta, "results": run.results}),
+                             encoding="utf-8")
+        except OSError as exc:
+            log.debug("delta static cache not written: %s", exc)
+        return run
+
     def _side_ok(self, report: DeltaReport, side: str, env: Interpreter,
                  run: ProbeRun | None, expected: str) -> bool:
         label = "old" if side == "old" else "new"
+        if side == "old" and env.is_static:
+            acquired = env.static.get(report.package)
+            if acquired is None:
+                report.notes.append(f"no old interpreter: {env.reason}; the static old side has "
+                                    f"no source for {report.package}: "
+                                    f"{env.static_errors.get(report.package)}")
+                return False
+            if run is None or not run.ok:
+                report.notes.append(f"static old side failed: {run.failure if run else 'not run'}")
+                return False
+            report.notes.append(f"old side read statically from {acquired.source}"
+                                f" ({acquired.origin}); no old interpreter: {env.reason}")
+            unknown = [p for p, res in run.results.items()
+                       if res.get("unknown") and p.split(".")[0] in acquired.roots]
+            if unknown:
+                report.notes.append(
+                    f"{len(unknown)} touched path(s) could not be read statically and are not "
+                    f"compared (e.g. {unknown[0]})")
+            return True
         if not env.available:
             report.notes.append(f"no {label} interpreter: {env.reason}")
             return False

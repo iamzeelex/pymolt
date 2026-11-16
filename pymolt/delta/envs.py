@@ -374,7 +374,37 @@ def resolve_old(root: Path, wants: Sequence[Want], online: bool = False) -> Inte
         tried.append(interp.reason or "")
     else:
         tried.append(reason or "")
-    return _best(candidates, wants, tried, "old")
+    best = _best(candidates, wants, tried, "old")
+    if best.executable is not None:
+        return best
+    return _static_old(root, wants, best.reason, online) or best
+
+
+def _static_old(root: Path, wants: Sequence[Want], why: str | None,
+                online: bool) -> Interpreter | None:
+    """Last resort: no old interpreter is reachable, so read the old releases' source.
+
+    Each package's wheel or sdist comes from uv's cache (``online``: else PyPI);
+    ``delta/static_side.py`` then answers the probe's questions from it. None when not a
+    single release could be acquired (the side stays unavailable, and says why).
+    """
+    from pymolt.delta.acquire import AcquireError, acquire
+
+    sources: dict[str, object] = {}
+    errors: dict[str, str] = {}
+    for w in wants:
+        try:
+            sources[w.name] = acquire(root, w.name, w.version, online=online)
+        except AcquireError as exc:
+            errors[w.name] = str(exc)
+    if not sources:
+        return None
+    files = "; ".join(sorted(f"{a.source}" for a in sources.values()))  # type: ignore[attr-defined]
+    return Interpreter(
+        source="static", reason=why, static=sources, static_errors=errors,
+        versions={w.name: w.version for w in wants if w.name in sources},
+        note=f"old side read statically from {files}",
+    )
 
 
 def target_manifest(root: Path) -> Path | None:
