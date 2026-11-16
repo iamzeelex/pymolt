@@ -670,3 +670,22 @@ def test_merging_keeps_dependency_risks_and_adds_python_ones_even_with_no_baseli
 
 def test_dependency_risks_default_to_the_dependency_scope():
     assert PredictionReport().guarded == [] and PredictionReport().pre_existing == []
+
+
+def test_a_module_import_the_plan_drops_counts_as_fixed():
+    # ``import imp`` becomes unused once ``imp.reload`` -> ``importlib.reload``; the plan's
+    # remove-imports pass deletes it, so the site is fixed, not "manual".
+    from pymolt.verify.predict import RiskSite, _import_removed, planned_rewrites
+
+    old = "import imp\nimport os\n\n\ndef f(m):\n    return imp.reload(m)\n"
+    new = "import os\nimport importlib\n\n\ndef f(m):\n    return importlib.reload(m)\n"
+    rewrites = planned_rewrites([{"path": "t.py", "old_source": old, "new_source": new,
+                                  "recipes": ["libcst:replace-attr-path:imp.reload"]}])
+    assert _import_removed(RiskSite(file="t.py", func="", line=1), "imp", rewrites) is not None
+    # A kept import is not fixed, and a dotted spelling is never a module-import site.
+    kept = planned_rewrites([{"path": "t.py", "old_source": old,
+                              "new_source": old.replace("imp.reload", "imp.reload "),
+                              "recipes": []}])
+    assert _import_removed(RiskSite(file="t.py", func="", line=1), "imp", kept) is None
+    assert _import_removed(RiskSite(file="t.py", func="", line=1), "imp.reload",
+                           rewrites) is None

@@ -43,7 +43,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 2
+PROBE_VERSION = 3
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -51,6 +51,14 @@ _HAS_CONSTANT = sys.version_info >= (3, 8)  # ast.Str is deprecated (and warns) 
 
 _DEP_ROOTS = set()
 _ANY_ROOT = [False]
+
+# same-object search: bounds and state (see _identity_index)
+_ID_MAX_SUBMODULES = 120
+_ID_BUDGET_S = 6.0
+_ID_MAX_RESULTS = 4
+_ID_SKIP_SUBMODULES = ("tests", "test", "conftest", "setup", "_version")
+_ID_HINTS = []
+_ID_INDEX = {}
 
 
 class _Timeout(BaseException):
@@ -566,7 +574,9 @@ def resolve(path):
         out["module_file"] = rel
     cur = module
     caught = []
+    spelling = module.__name__
     for attr in parts[i:]:
+        spelling += "." + attr
         real = _unproxy(cur)
         owner, owner_mod = _owner_path(real, attr)
         if not _is_dep(owner_mod):
@@ -606,13 +616,120 @@ def resolve(path):
             out["runtime_warnings"] = [_w(w) for w in caught]
             return out
         step["exists"] = True
-        _describe(step, nxt, not inspect.ismodule(real))
+        real_next = _describe(step, nxt, not inspect.ismodule(real))
+        same = _same_object_as(real_next, spelling)
+        if same:
+            step["same_object_as"] = same
         out["steps"].append(step)
         cur = nxt
     out["exists"] = True
     if caught:
         out["runtime_warnings"] = [_w(w) for w in caught]
     return out
+
+
+# ── same-object search ────────────────────────────────────────────────────────────────
+
+
+def _shareable(obj):
+    """Only classes and functions are identity evidence: a module, ``None``, a bool, a
+    builtin or a small shared value is the same object everywhere without being a move."""
+    if inspect.ismodule(obj) or obj is None or obj is object or obj is type:
+        return False
+    if not (inspect.isclass(obj) or inspect.isroutine(obj)):
+        return False
+    return getattr(obj, "__module__", None) != "builtins"
+
+
+def _public_name(spelling):
+    return not any(part.startswith("_") for part in spelling.split("."))
+
+
+def _scan_namespace(index, ns, prefix, deadline):
+    try:
+        items = list(vars(ns).items())
+    except Exception:
+        return
+    for name, val in items:
+        if name.startswith("_") or time.time() > deadline:
+            continue
+        if _shareable(val):
+            index.setdefault(id(val), (val, []))[1].append(prefix + "." + name)
+
+
+def _identity_index(root):
+    """``id -> (object, [spellings])`` for ``root``'s top-level exports, its public
+    submodules one level down (imported lazily, bounded by count and time) and the request's
+    hint spellings. Built once per root; whatever the budget allows."""
+    if root in _ID_INDEX:
+        return _ID_INDEX[root]
+    index = {}
+    _ID_INDEX[root] = index
+    deadline = time.time() + _ID_BUDGET_S
+    try:
+        pkg = sys.modules.get(root) or importlib.import_module(root)
+        _scan_namespace(index, pkg, root, deadline)
+        paths = getattr(pkg, "__path__", None)
+        if paths is not None:
+            import pkgutil
+
+            names = sorted(n for _, n, _ in pkgutil.iter_modules(list(paths))
+                           if not n.startswith("_") and n not in _ID_SKIP_SUBMODULES)
+            for n in names[:_ID_MAX_SUBMODULES]:
+                if time.time() > deadline:
+                    break
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        sub = importlib.import_module(root + "." + n)
+                except _Timeout:
+                    break
+                except BaseException:
+                    continue
+                _scan_namespace(index, sub, root + "." + n, deadline)
+    except _Timeout:
+        pass
+    except BaseException:
+        pass
+    for hint in _ID_HINTS:
+        if hint.split(".")[0] != root:
+            continue
+        try:
+            parts = hint.split(".")
+            obj, k = None, len(parts)
+            while k > 0 and obj is None:
+                try:
+                    obj = importlib.import_module(".".join(parts[:k]))
+                except Exception:
+                    k -= 1
+            for attr in parts[k:]:
+                obj = getattr(obj, attr)
+            if obj is not None and _shareable(obj):
+                index.setdefault(id(obj), (obj, []))[1].append(hint)
+        except _Timeout:
+            break
+        except BaseException:
+            continue
+    return index
+
+
+def _same_object_as(obj, spelling):
+    """Public spellings, in this interpreter, naming the very object ``spelling`` resolved to
+    (``pandas.util.testing.assert_frame_equal is pandas.testing.assert_frame_equal``)."""
+    root = spelling.split(".")[0]
+    if not _shareable(obj) or not (_ANY_ROOT[0] or root in _DEP_ROOTS):
+        return []
+    try:
+        entry = _identity_index(root).get(id(obj))
+    except _Timeout:
+        return []
+    except BaseException:
+        return []
+    if entry is None or entry[0] is not obj:
+        return []
+    found = sorted(set(c for c in entry[1] if c != spelling),
+                   key=lambda c: (not _public_name(c), c.count("."), c))
+    return found[:_ID_MAX_RESULTS]
 
 
 # ── distributions ─────────────────────────────────────────────────────────────────────
@@ -717,6 +834,7 @@ def main():
         roots.update(info.get("roots") or [])
     _DEP_ROOTS.update(roots)
     _ANY_ROOT[0] = bool(request.get("any_root"))
+    _ID_HINTS[:] = [h for h in request.get("identity_hints") or [] if isinstance(h, str)]
     site_dirs = []
     for entry in sys.path:
         if entry and os.path.basename(entry.rstrip(os.sep)) in ("site-packages", "dist-packages"):

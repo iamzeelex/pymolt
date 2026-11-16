@@ -647,7 +647,7 @@ def plan(
 
 def _render_python(plan) -> None:
     """The python move's risks: one summary line, the sites, and what is listed unrated."""
-    from pymolt.interfaces.views import python_summary_line
+    from pymolt.interfaces.views import _manual_hint, python_summary_line
 
     line = python_summary_line(plan)
     if line is None:
@@ -660,8 +660,11 @@ def _render_python(plan) -> None:
         for risk in risks:
             style = _TIER_STYLE.get(risk.tier.value, "")
             table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
-                          risk.symbol, risk.reason + (" (manual)" if risk.fix == "advisory"
-                                                      else ""))
+                          risk.symbol, risk.reason + (
+                              " (fixed by the plan)" if risk.fixed_by_plan
+                              else f" (manual: {_manual_hint(risk)})" if risk.fix == "advisory"
+                              and _manual_hint(risk) else " (manual)" if risk.fix == "advisory"
+                              else ""))
         console.print(table)
     console.print(f"\n[bold]{line}[/bold]")
     for listed in (plan.risks.guarded if plan.risks else []):
