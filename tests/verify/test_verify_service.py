@@ -800,3 +800,136 @@ class TestMissingSideReason:
     def test_no_captures(self, tmp_path):
         report = self._reasons(tmp_path, None, [])
         assert "no captures" in report.verdict_reasons
+
+
+class TestStdlibTracing:
+    """PYMOLT_TRACE_STDLIB: stdlib modules traced as dependencies during a Python move."""
+
+    def _project(self, tmp_path, base="3.8", target="3.12"):
+        (tmp_path / ".pymolt").mkdir()
+        (tmp_path / ".pymolt" / "env_config.json").write_text(json.dumps(
+            {"base_python": base, "target_python": target}))
+        (tmp_path / "app.py").write_text(
+            "import click\nimport imp\nfrom collections import Iterable\n\n"
+            "def size():\n    return click.get_terminal_size()\n")
+        return tmp_path
+
+    def test_trace_env_sets_the_variable_and_the_user_wins(self, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_STDLIB", raising=False)
+        env = service.trace_env("m", "auto", "", "", False, trace_stdlib=["collections", "imp"])
+        assert env["PYMOLT_TRACE_STDLIB"] == "collections,imp"
+        assert "PYMOLT_TRACE_STDLIB" not in service.trace_env("m", "auto", "", "", False)
+        monkeypatch.setenv("PYMOLT_TRACE_STDLIB", "shutil")
+        env = service.trace_env("m", "auto", "", "", False, trace_stdlib=["collections"])
+        assert env["PYMOLT_TRACE_STDLIB"] == "shutil"
+        monkeypatch.setenv("PYMOLT_TRACE_STDLIB", "none")
+        env = service.trace_env("m", "auto", "", "", False, trace_stdlib=["collections"])
+        assert "PYMOLT_TRACE_STDLIB" not in env
+
+    def test_baseline_traces_the_stdlib_sites_only_for_a_python_move(self, tmp_path):
+        project = self._project(tmp_path)
+        assert service.stdlib_trace_modules(project, "baseline") == ["collections", "imp"]
+        (project / ".pymolt" / "env_config.json").write_text(json.dumps(
+            {"base_python": "3.12.1", "target_python": "3.12"}))
+        assert service.stdlib_trace_modules(project, "baseline") == []
+
+    def test_edited_lines_add_the_stdlib_modules_they_now_use(self, tmp_path, monkeypatch):
+        project = self._project(tmp_path)
+        trace = project / ".pymolt" / "contract_traces" / "baseline.jsonl"
+        trace.parent.mkdir(parents=True)
+        trace.write_text("")
+        state = ContractState(baseline=service.ContractSlot(
+            trace_path=str(trace), captured_at="t", mode=CaptureMode.TEST_SUITE))
+        state.save(service._state_path(project))
+        from pymolt.verify.facts import store_site_text
+        store_site_text(trace, {"app.py:6": "return click.get_terminal_size()"})
+        assert service.stdlib_trace_modules(project, "post_migration") == ["collections", "imp"]
+        (project / "app.py").write_text(
+            "import shutil\nimport imp\nfrom collections import Iterable\n\n"
+            "def size():\n    return shutil.get_terminal_size()\n")
+        assert service.stdlib_trace_modules(project, "post_migration") == [
+            "collections", "imp", "shutil"]
+
+    def test_plan_old_source_marks_the_changed_lines(self, tmp_path):
+        old = "import click\n\nx = click.get_terminal_size()\n"
+        new = "import click\nimport shutil\n\nx = shutil.get_terminal_size()\n"
+        changed = service._changed_lines(old, new)
+        assert changed == {2, 4}
+        assert service._stdlib_modules_on_lines(new, changed) == {"shutil"}
+        assert service._stdlib_modules_on_lines(new, {1}) == set()
+
+    def test_capture_passes_the_list_and_records_it_on_the_slot(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_STDLIB", raising=False)
+        project = self._project(tmp_path)
+        calls = []
+
+        def fake_capture(target, command, out_path, backend, **kwargs):
+            calls.append(kwargs)
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_text('{"q": "m.f"}\n')
+            return service.TraceCaptureResult(
+                out_path=str(out_path), events=1, processes=1, where="local",
+                trace_stdlib=kwargs.get("trace_stdlib", []))
+
+        monkeypatch.setattr(service, "capture_trace", fake_capture)
+        slot = service.capture_named_trace(project, "baseline", CaptureMode.TEST_SUITE,
+                                           command=["pytest"])
+        assert calls[0]["trace_stdlib"] == ["collections", "imp"]
+        assert slot.traced_stdlib == ["collections", "imp"]
+        service.capture_named_trace(project, "baseline", CaptureMode.TEST_SUITE,
+                                    command=["pytest"], stdlib="none")
+        assert "trace_stdlib" not in calls[1]
+
+    def test_the_variable_reaches_the_traced_process(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_STDLIB", raising=False)
+        seen = tmp_path / "seen.txt"
+        script = _write_script(tmp_path, (
+            f"import os\nopen({str(seen)!r}, 'w').write("
+            "os.environ.get('PYMOLT_TRACE_STDLIB', '-'))\n"))
+        service.capture_trace("json", [sys.executable, str(script)], tmp_path / "t.jsonl",
+                              "auto", trace_stdlib=["shutil", "imp"])
+        assert seen.read_text() == "shutil,imp"
+
+    def test_site_text_fallback_follows_a_shifted_line(self, tmp_path):
+        project = self._project(tmp_path)
+        trace = project / ".pymolt" / "contract_traces" / "baseline.jsonl"
+        trace.parent.mkdir(parents=True)
+        trace.write_text("")
+        ContractState(baseline=service.ContractSlot(
+            trace_path=str(trace), captured_at="t", mode=CaptureMode.TEST_SUITE,
+        )).save(service._state_path(project))
+        from pymolt.verify.facts import store_site_text
+        store_site_text(trace, {"app.py:6": "return click.get_terminal_size()"})
+        # An inserted import line shifts the edited call down by two.
+        (project / "app.py").write_text(
+            "import shutil\nimport imp\nfrom collections import Iterable\n\n\n\n"
+            "def size():\n    return shutil.get_terminal_size()\n")
+        assert "shutil" in service.stdlib_trace_modules(project, "post_migration")
+
+    def test_an_explicit_target_gets_no_automatic_stdlib(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYMOLT_TRACE_STDLIB", raising=False)
+        project = self._project(tmp_path)
+        calls = []
+
+        def fake_capture(target, command, out_path, backend, **kwargs):
+            calls.append(kwargs)
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_text('{"q": "m.f"}\n')
+            return service.TraceCaptureResult(out_path=str(out_path), events=1, processes=1,
+                                              where="local")
+
+        monkeypatch.setattr(service, "capture_trace", fake_capture)
+        service.capture_named_trace(project, "baseline", CaptureMode.TEST_SUITE,
+                                    command=["pytest"], target="flask")
+        service.capture_named_trace(project, "baseline", CaptureMode.TEST_SUITE,
+                                    command=["pytest"], target="flask", stdlib="imp")
+        assert "trace_stdlib" not in calls[0]
+        assert calls[1]["trace_stdlib"] == ["imp"]
+
+    def test_every_imported_stdlib_module_is_traced_less_the_noise(self, tmp_path):
+        project = self._project(tmp_path)
+        (project / "more.py").write_text(
+            "from __future__ import annotations\nimport asyncio, typing, abc\n"
+            "import os.path as p  # comment\nfrom xml.etree import ElementTree\nimport click\n")
+        assert service.stdlib_trace_modules(project, "baseline") == [
+            "asyncio", "collections", "imp", "os", "xml"]

@@ -8,6 +8,7 @@ from pymolt.verify._sinks import FactSink, JsonlSink, write_snapshot_file
 from pymolt.verify.facts import (
     Comparison,
     ComparisonLevel,
+    DiffContext,
     FactCategory,
     Outcome,
     collect_site_text,
@@ -161,7 +162,7 @@ def test_rewritten_site_with_equal_outcome_passes(tmp_path):
     assert entry.new_symbol == "pandas.core.reshape.concat.concat"
     assert entry.old_site.text == "s3 = s1.append(s2)"
     assert entry.new_site.text == "s3 = pd.concat([s1, s2])"
-    assert "positional" in entry.notes
+    assert "anchored" in entry.notes
     assert d.is_clean() and d.verdict is VerificationVerdict.PASS
 
 
@@ -429,8 +430,8 @@ def test_missing_site_text_on_one_side_falls_back_to_lines(tmp_path):
 def test_shape_profile_matches_inputs_by_type(tmp_path):
     old = [ev("lib.open", {"path": "/venv311/x"}, result="a", sym="lib.open")]
     new = [ev("lib.open", {"path": "/venv312/x"}, result="b", sym="lib.open")]
-    exact = run_diff(tmp_path, old, new)
-    assert exact.counts()["disappeared"] == 1 and exact.counts()["appeared"] == 1
+    exact = run_diff(tmp_path, old, new)  # same symbol and site, input differs: paired
+    assert only(exact, FactCategory.CHANGED).notes[0] == "matched-modulo-input"
     shape = run_diff(tmp_path, old, new, profile="shape")
     assert only(shape, FactCategory.EQUAL).input == {"bound": {"path": "str"}}
 
@@ -1026,3 +1027,694 @@ def test_site_text_is_collected_from_the_host_file_through_the_runner(tmp_path):
     assert record_site_text(trace, root, spec) == 1
     fs = load_facts(trace, root=root)
     assert fs.facts[0].text == "result = dep.call(x)"
+
+
+# ── Wave G (V): pairing at a site, binding raises, relocation, object markers ─────────────
+
+SITE = text_at(10, "return Retry(")
+
+
+def rv(q, inputs, *, result=None, sym=None, line=10, **extra):
+    e = {"t": "return", "q": q, "in": inputs, "result": result, "v": 2, "ts": 0.0,
+         "sym": sym or q, "where": {"file": APP, "line": line, "func": "main"}}
+    e.update(extra)
+    return e
+
+
+def diff_sites(tmp_path, old, new):
+    return run_diff(tmp_path, old, new, old_text=SITE, new_text=SITE)
+
+
+def test_same_site_same_symbol_other_input_pairs_and_compares(tmp_path):
+    old = [rv("lib.Retry", {"bound": {"method_whitelist": 1}})]
+    new = [rv("lib.Retry", {"bound": {"allowed_methods": 1}})]
+    d = diff_sites(tmp_path, old, new)
+    e = only(d, FactCategory.EQUAL)
+    assert "matched-modulo-input" in e.notes and e.new_input == {"bound": {"allowed_methods": 1}}
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_same_site_other_input_other_outcome_is_changed(tmp_path):
+    old = [rv("lib.f", {"bound": {"a": 1}}, result=1)]
+    new = [rv("lib.f", {"bound": {"b": 1}}, result=2)]
+    assert only(diff_sites(tmp_path, old, new), FactCategory.CHANGED)
+
+
+def test_ambiguous_same_site_group_stays_unpaired(tmp_path):
+    old = [rv("lib.f", {"bound": {"a": 1}}), rv("lib.f", {"bound": {"a": 2}})]
+    new = [rv("lib.f", {"bound": {"b": 1}})]
+    d = diff_sites(tmp_path, old, new)
+    assert d.counts()["disappeared"] == 2 and d.counts()["appeared"] == 1
+
+
+def test_relocated_symbol_at_same_site_pairs(tmp_path):
+    old = [rv("lib.engine.create_engine", {"bound": {"u": 1}}, result=5)]
+    new = [rv("lib.engine.create.create_engine", {"bound": {"u": 1, "future": True}},
+              result=5)]
+    d = diff_sites(tmp_path, old, new)
+    assert only(d, FactCategory.EQUAL).new_symbol == "lib.engine.create.create_engine"
+
+
+def test_unrelated_symbol_at_same_site_is_not_paired(tmp_path):
+    old = [rv("lib.a", {"bound": {"u": 1}})]
+    new = [rv("lib.b", {"bound": {"x": 1}})]
+    d = diff_sites(tmp_path, old, new)
+    assert d.counts()["disappeared"] == 1 and d.counts()["appeared"] == 1
+
+
+def test_binding_raise_pairs_with_the_normal_call_and_changes(tmp_path):
+    old = [rv("lib.load", {"bound": {"s": "x"}}, result=1)]
+    new = [{**rv("lib.load", {"args": ["x"]}), "t": "raise", "raised": "TypeError",
+            "binding": True}]
+    new[0].pop("result")
+    d = diff_sites(tmp_path, old, new)
+    e = only(d, FactCategory.CHANGED)
+    assert "now raises TypeError while binding its arguments" in e.notes
+    assert d.counts()["disappeared"] == 0 and d.verdict is VerificationVerdict.FAIL
+
+
+def test_binding_raise_pairs_even_when_the_line_text_moved(tmp_path):
+    old = [rv("lib.load", {"bound": {"s": "x"}}, result=1, line=10)]
+    new = [{**rv("lib.load", {"args": ["x"]}, line=12), "t": "raise", "raised": "TypeError",
+            "binding": True}]
+    d = run_diff(tmp_path, old, new, old_text=text_at(10, "a = lib.load(s)"),
+                 new_text=text_at(12, "a = lib.load(s, 1)"))
+    assert d.counts()["disappeared"] == 0
+    assert any("while binding" in n for e in d.entries for n in e.notes)
+
+
+def test_c_call_inputs_match_by_symbol_and_site(tmp_path):
+    old = [rv("lib.c", {"__c_call__": True, "arg0": 1}, result=1)]
+    new = [rv("lib.c", {"__c_call__": True}, result=1)]
+    d = diff_sites(tmp_path, old, new)
+    assert only(d, FactCategory.EQUAL).notes == []
+
+
+def test_relocated_type_is_equal_at_type_level_with_a_note(tmp_path):
+    old = [rv("lib.declarative_base", {"bound": {}},
+              result={"__type__": "lib.ext.declarative.api.Base"})]
+    new = [rv("lib.declarative_base", {"bound": {}},
+              result={"__type__": "lib.orm.decl_api.Base"})]
+    e = only(diff_sites(tmp_path, old, new), FactCategory.EQUAL)
+    assert e.level is ComparisonLevel.TYPE
+    assert any(n.startswith("relocated:") for n in e.notes)
+
+
+def test_other_package_or_name_is_still_changed():
+    for new_name in ("other.orm.Base", "lib.orm.Other"):
+        for key in ("__type__", "__opaque__", "__object__"):
+            a = [Outcome(kind="return", value={key: "lib.ext.Base"})]
+            b = [Outcome(kind="return", value={key: new_name})]
+            assert compare_outcomes(a, b).comparison is Comparison.CHANGED
+
+
+def test_relocated_opaque_and_object_names_are_equal():
+    for key in ("__opaque__", "__object__"):
+        a = [Outcome(kind="return", value={key: "lib.a.Base"})]
+        b = [Outcome(kind="return", value={key: "lib.b.Base"})]
+        c = compare_outcomes(a, b)
+        assert c.comparison is Comparison.EQUAL and c.level is ComparisonLevel.TYPE
+        assert c.notes == ["relocated: lib.a.Base -> lib.b.Base"]
+
+
+def obj(name, **attrs):
+    return {"__object__": name, "attrs": attrs}
+
+
+def cmp_obj(a, b):
+    return compare_outcomes([Outcome(kind="return", value=a)],
+                            [Outcome(kind="return", value=b)])
+
+
+def test_object_attributes_compare_exactly_when_complete():
+    same = cmp_obj(obj("lib.R", exit_code=0), obj("lib.R", exit_code=0))
+    assert same.comparison is Comparison.EQUAL and same.level is ComparisonLevel.EXACT
+    diff = cmp_obj(obj("lib.R", exit_code=0), obj("lib.R", exit_code=2))
+    assert diff.comparison is Comparison.CHANGED
+
+
+def test_truncated_object_compares_by_type():
+    a = {**obj("lib.R", exit_code=0), "__truncated__": True}
+    c = cmp_obj(a, obj("lib.R", exit_code=2))
+    assert c.comparison is Comparison.EQUAL and c.level is ComparisonLevel.TYPE
+
+
+def test_object_attr_on_one_side_only_is_drift():
+    c = cmp_obj(obj("lib.R", exit_code=0), obj("lib.R", exit_code=0, output_bytes=1))
+    assert c.comparison is Comparison.EQUAL and c.drift
+    assert "attribute added: output_bytes" in c.notes
+
+
+def test_none_vs_empty_attr_is_drift_and_other_values_change():
+    for empty in ("", {"__bytes__": ""}, {"__list__": []}, []):
+        c = cmp_obj(obj("lib.R", e=None), obj("lib.R", e=empty))
+        assert c.comparison is Comparison.EQUAL and c.drift, empty
+    assert cmp_obj(obj("lib.R", e=None), obj("lib.R", e="x")).comparison is Comparison.CHANGED
+
+
+def test_nested_objects_compare_by_type_only():
+    a = obj("lib.R", runner=obj("lib.Runner", env=1), exc=[obj("lib.E", a=1)])
+    b = obj("lib.R", runner=obj("lib.Runner", env=2, extra=3), exc=[obj("lib.E", a=9)])
+    c = cmp_obj(a, b)
+    assert c.comparison is Comparison.EQUAL and c.level is ComparisonLevel.TYPE
+    other = obj("lib.R", runner=obj("lib.Other"), exc=[obj("lib.E")])
+    assert cmp_obj(a, other).comparison is Comparison.CHANGED
+
+
+def test_object_drift_makes_a_drift_entry(tmp_path):
+    old = [rv("lib.invoke", {"bound": {}}, result=obj("lib.R", exit_code=0, e=None))]
+    new = [rv("lib.invoke", {"bound": {}}, result=obj("lib.R", exit_code=0, e={"__bytes__": ""},
+                                                      o=1))]
+    d = diff_sites(tmp_path, old, new)
+    assert only(d, FactCategory.DRIFT) and d.verdict is VerificationVerdict.PASS
+
+
+def test_objects_in_inputs_are_keyed_as_opaque(tmp_path):
+    old = [rv("lib.f", {"bound": {"x": obj("lib.R", a=1)}}, result=1)]
+    new = [rv("lib.f", {"bound": {"x": obj("lib.R", a=2)}}, result=1)]
+    d = diff_sites(tmp_path, old, new)
+    e = only(d, FactCategory.EQUAL)
+    assert e.input == {"bound": {"x": {"__opaque__": "lib.R"}}} and e.notes == []
+
+
+# ── Wave G round 2 (V): handles, sentinels, unobservable edits, getattr, closures ─────────
+
+
+def gobj(**attrs):
+    return {"__object__": "lib.G", "attrs": attrs}
+
+
+def test_object_that_is_the_receiver_of_an_operation_is_a_handle(tmp_path):
+    old = [rv("lib.mk", {"bound": {}}, result=gobj(k=1)),
+           rv("lib.G.get", {"bound": {"self": {"__opaque__": "lib.G"}, "key": "v"}}, line=11)]
+    new = [rv("lib.mk", {"bound": {}}, result=gobj(k=2)),
+           rv("lib.G.get", {"bound": {"self": {"__opaque__": "lib.G"}, "key": "v"}}, line=11)]
+    d = run_diff(tmp_path, old, new, old_text={**text_at(10, "g = lib.mk()"),
+                                               **text_at(11, "g.get('v')")},
+                 new_text={**text_at(10, "g = lib.mk()"), **text_at(11, "g.get('v')")})
+    e = [x for x in d.entries if x.symbol == "lib.mk"][0]
+    assert e.category is FactCategory.DRIFT and "state of a handle differs" in e.notes[0]
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_property_read_does_not_make_a_handle(tmp_path):
+    old = [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=0)),
+           rv("lib.G.output", {"bound": {"self": {"__opaque__": "lib.G"}}}, line=11)]
+    new = [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=2)),
+           rv("lib.G.output", {"bound": {"self": {"__opaque__": "lib.G"}}}, line=11)]
+    d = run_diff(tmp_path, old, new)
+    assert [x.symbol for x in d.by_category(FactCategory.CHANGED)] == ["lib.mk"]
+
+
+def test_value_object_keeps_exact_attribute_comparison(tmp_path):
+    d = run_diff(tmp_path, [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=0))],
+                 [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=2))])
+    assert only(d, FactCategory.CHANGED)
+
+
+def test_sentinel_attribute_resolved_is_drift():
+    nd = {"__enum__": "lib._NoDefault.no_default"}
+    c = cmp_obj(obj("lib.R", group_keys=nd), obj("lib.R", group_keys=True))
+    assert c.comparison is Comparison.EQUAL and c.drift
+    assert "sentinel resolved: group_keys" in c.notes
+    assert cmp_obj(obj("lib.R", k="a"), obj("lib.R", k=True)).comparison is Comparison.CHANGED
+    for name in ("lib._MISSING_TYPE", "lib.NOTSET", "lib.Unset"):
+        c = cmp_obj(obj("lib.R", k={"__enum__": name + ".v"}), obj("lib.R", k=1))
+        assert c.drift and c.comparison is Comparison.EQUAL, name
+
+
+def test_edited_line_without_a_recorded_replacement_is_unobservable(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    src = root / "app.py"
+    src.write_text("x = 1\nreturn r.headers.get('a')\n")
+    file = str(src)
+    old = [rv("lib.getheader", {"bound": {}}, result="a",
+              **{"where": {"file": file, "line": 2, "func": "main"}})]
+    o = write_trace(tmp_path, "o.jsonl", old,
+                    {f"{file}:2": "return r.getheader('a')"})
+    other = rv("lib.other", {"bound": {}}, line=1,
+               **{"where": {"file": file, "line": 1, "func": "other"}})
+    n = write_trace(tmp_path, "n.jsonl", [other], {f"{file}:1": "x = 1"})
+    d = diff_traces(o, n, root=root)
+    e = only(d, FactCategory.REWRITTEN)
+    assert "the replacement on this line was not observable" in e.notes
+    assert e.inconclusive and not e.fails
+
+
+def test_vanished_call_on_an_unedited_line_is_still_disappeared(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    src = root / "app.py"
+    src.write_text("x = 1\nreturn r.getheader('a')\n")
+    file = str(src)
+    o = write_trace(tmp_path, "o.jsonl", [rv("lib.getheader", {"bound": {}}, result="a",
+                    **{"where": {"file": file, "line": 2, "func": "main"}})],
+                    {f"{file}:2": "return r.getheader('a')"})
+    n = write_trace(tmp_path, "n.jsonl", [rv("lib.other", {"bound": {}},
+                    **{"where": {"file": file, "line": 1, "func": "other"}})],
+                    {f"{file}:1": "x = 1"})
+    assert only(diff_traces(o, n, root=root), FactCategory.DISAPPEARED)
+
+
+def test_module_getattr_is_an_attribute_access_never_a_failure(tmp_path):
+    ga = rv("click.__getattr__", {"bound": {"name": "Mapping"}}, result=1,
+            warnings=[{"category": "DeprecationWarning", "message": "m", "count": 1}])
+    d = diff_sites(tmp_path, [], [ga])
+    e = only(d, FactCategory.DRIFT)
+    assert e.symbol == "click.Mapping" and "via click.__getattr__" in e.notes
+    assert e.new_warnings and d.verdict is VerificationVerdict.PASS
+    d = diff_sites(tmp_path, [ga], [])
+    assert only(d, FactCategory.DRIFT).symbol == "click.Mapping"
+    # a class's __getattr__ (has a receiver) is an ordinary call
+    cls = rv("lib.C.__getattr__", {"bound": {"self": {"__opaque__": "lib.C"}, "name": "x"}})
+    assert only(diff_sites(tmp_path, [cls], []), FactCategory.DISAPPEARED)
+
+
+def test_closure_with_a_different_enclosing_function_is_equal_at_type_level():
+    a = [Outcome(kind="return", value={"__callable__": "lib.version_option.<locals>.decorator"})]
+    b = [Outcome(kind="return", value={"__callable__": "lib.option.<locals>.decorator"})]
+    c = compare_outcomes(a, b)
+    assert c.comparison is Comparison.EQUAL and c.level is ComparisonLevel.TYPE
+    assert c.notes == ["closure: lib.version_option.<locals>.decorator -> "
+                       "lib.option.<locals>.decorator"]
+    other = [Outcome(kind="return", value={"__callable__": "lib.option.<locals>.other"})]
+    assert compare_outcomes(a, other).comparison is Comparison.CHANGED
+
+
+def test_unobserved_c_return_is_compared_by_kind_only():
+    un = [Outcome(kind="return", value={"__opaque__": "unobserved:c-return"})]
+    real = [Outcome(kind="return", value={"__list__": [1]})]
+    c = compare_outcomes(un, real)
+    assert c.comparison is Comparison.EQUAL and c.level is ComparisonLevel.TYPE
+    assert "c-return unobserved" in c.notes
+    assert compare_outcomes(un, un).comparison is Comparison.EQUAL
+    boom = [Outcome(kind="raise", value="ValueError")]
+    assert compare_outcomes(un, boom).comparison is Comparison.CHANGED
+    unk = [Outcome(kind="raise", value="<unknown>")]
+    assert compare_outcomes(unk, boom).comparison is Comparison.EQUAL
+
+
+def test_wrapped_compiled_call_pairs_with_a_c_call_event(tmp_path):
+    old = [rv("lib.c", {"bound": {"a": 1}}, result=[1], line=10),
+           rv("lib.c", {"bound": {"a": 2}}, result=[2], line=10)]
+    new = [rv("lib.c", {"__c_call__": True}, result={"__opaque__": "unobserved:c-return"})]
+    d = diff_sites(tmp_path, old, new)
+    assert d.counts()["equal"] == 1 and d.counts()["disappeared"] == 1
+
+
+def test_comprehension_scope_is_normalized_to_the_enclosing_function(tmp_path):
+    text = {APP + ":10": "return [lib.f(x) for x in xs]"}
+    old = [rv("lib.f", {"bound": {"x": 1}}, result=1, line=10) | {
+               "where": {"file": APP, "line": 10, "func": "<listcomp>"}},
+           rv("lib.g", {"bound": {}}, result=1, line=10)]
+    new = [rv("lib.f", {"bound": {"x": 1}}, result=1, line=10),
+           rv("lib.g", {"bound": {}}, result=1, line=10)]
+    d = run_diff(tmp_path, old, new, old_text=text, new_text=text)
+    assert d.counts()["equal"] == 2 and d.verdict is VerificationVerdict.PASS
+
+
+def test_qualified_comprehension_scope_strips_to_the_function(tmp_path):
+    text = {APP + ":10": "return {k: lib.f(k) for k in ks}"}
+    old = [rv("lib.f", {"bound": {"x": 1}}, result=1) | {
+        "where": {"file": APP, "line": 10, "func": "main.<locals>.<dictcomp>"}}]
+    new = [rv("lib.f", {"bound": {"x": 1}}, result=1)]
+    d = run_diff(tmp_path, old, new, old_text=text, new_text=text)
+    assert d.counts()["equal"] == 1
+
+
+def test_func_mismatch_at_identical_line_text_pairs_with_a_changed_input(tmp_path):
+    text = {APP + ":10": "x = lib.f(a=1)"}
+    old = [rv("lib.f", {"bound": {"a": 1}}, result=1) | {
+        "where": {"file": APP, "line": 10, "func": "outer"}}]
+    new = [rv("lib.f", {"bound": {"b": 1}}, result=1) | {
+        "where": {"file": APP, "line": 10, "func": "inner"}}]
+    d = run_diff(tmp_path, old, new, old_text=text, new_text=text)
+    e = only(d, FactCategory.EQUAL)
+    assert "site-moved" in e.notes and "matched-modulo-input" in e.notes
+
+
+# ── Round 3 (V): edit provenance ─────────────────────────────────────────────────────────
+
+OLD_SRC = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
+NEW_SRC = "def main():\n    a = lib.f(1)\n    return lib.h(a)\n"
+
+
+def prov_diff(tmp_path, old, new, *, old_src=OLD_SRC, new_src=NEW_SRC, edits=(),
+              texts=None, **ctx):
+    old_t = texts or {}
+    context = DiffContext(old_sources={"app.py": old_src}, new_sources={"app.py": new_src},
+                          edits=list(edits), **ctx)
+    o = write_trace(tmp_path, "old.jsonl", old, old_t.get("old", {
+        APP + ":2": "a = lib.f(1)", APP + ":3": "return lib.g(a)"}))
+    n = write_trace(tmp_path, "new.jsonl", new, old_t.get("new", {
+        APP + ":2": "a = lib.f(1)", APP + ":3": "return lib.h(a)"}))
+    return diff_traces(o, n, root=ROOT, context=context)
+
+
+def call(q, line, result, bound=None, **kw):
+    return rv(q, {"bound": bound or {}}, result=result, line=line, **kw)
+
+
+def test_unedited_line_difference_is_a_strict_failure(tmp_path):
+    d = prov_diff(tmp_path, [call("lib.f", 2, 1)], [call("lib.f", 2, 2)])
+    assert only(d, FactCategory.CHANGED).fails and d.verdict is VerificationVerdict.FAIL
+
+
+def test_hand_edit_equal_value_across_symbols_is_anchored_and_equal(tmp_path):
+    d = prov_diff(tmp_path, [call("lib.g", 3, 5, {"x": 1})], [call("lib.h", 3, 5, {"y": 1})])
+    e = only(d, FactCategory.REWRITTEN)
+    assert e.comparison is Comparison.EQUAL and e.provenance == "hand" and "anchored" in e.notes
+    assert d.verdict is VerificationVerdict.PASS
+    assert d.edited_summary() == ("1 edited sites: 1 equal, 0 representation-only, "
+                                  "0 need review, 0 unverified")
+
+
+def test_hand_edit_value_difference_is_a_review_item(tmp_path):
+    d = prov_diff(tmp_path, [call("lib.g", 3, 5)], [call("lib.h", 3, 6)])
+    e = only(d, FactCategory.REWRITTEN)
+    assert e.review and e.inconclusive and not e.fails
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE and not d.failures()
+    assert "1 need review" in d.edited_summary()
+
+
+def test_hand_edit_representation_only_is_drift(tmp_path):
+    old = [call("lib.g", 3, {"__list__": [1, 2]})]
+    new = [call("lib.h", 3, {"__tuple__": [1, 2]})]
+    d = prov_diff(tmp_path, old, new)
+    e = only(d, FactCategory.DRIFT)
+    assert "representation changed" in e.notes and d.verdict is VerificationVerdict.PASS
+    assert "1 representation-only" in d.edited_summary()
+
+
+def test_representation_only_needs_both_sides_rendered(tmp_path):
+    old = [call("lib.g", 3, {"__list__": [1, 2]})]
+    new = [call("lib.h", 3, {"__opaque__": "lib.View"})]
+    assert only(prov_diff(tmp_path, old, new), FactCategory.REWRITTEN).review
+
+
+def test_matrix_vs_ndarray_with_equal_values_is_representation_only(tmp_path):
+    mk = lambda name: {"__structure__": name, "shape": [1], "values": {"__list__": [[1]]}}  # noqa: E731
+    d = prov_diff(tmp_path, [call("lib.g", 3, mk("numpy.matrix"))],
+                  [call("lib.h", 3, mk("numpy.ndarray"))])
+    assert only(d, FactCategory.DRIFT)
+
+
+def test_namedtuple_object_vs_tuple_is_representation_only(tmp_path):
+    nt = {"__object__": "lib.Pt", "attrs": {"x": 1, "y": 2}}
+    d = prov_diff(tmp_path, [call("lib.g", 3, {"__tuple__": [1, 2]})], [call("lib.h", 3, nt)])
+    assert only(d, FactCategory.DRIFT)
+
+
+def test_hand_edit_new_raise_fails(tmp_path):
+    new = [rv("lib.h", {"bound": {}}, line=3) | {"t": "raise", "raised": "TypeError"}]
+    new[0].pop("result")
+    d = prov_diff(tmp_path, [call("lib.g", 3, 5)], new)
+    assert d.failures() and d.verdict is VerificationVerdict.FAIL
+
+
+def test_ledger_edit_with_a_strict_claim_fails_on_a_difference(tmp_path):
+    edit = {"file": "app.py", "old_lines": [3, 3], "new_lines": [3, 3], "claim": "same-object",
+            "old_symbol": "lib.g", "new_symbol": "lib.h"}
+    d = prov_diff(tmp_path, [call("lib.g", 3, 5)], [call("lib.h", 3, 6)], edits=[edit])
+    e = only(d, FactCategory.REWRITTEN)
+    assert e.provenance == "ledger" and e.fails
+
+
+def test_ledger_edit_with_a_null_claim_is_judged_like_a_hand_edit(tmp_path):
+    edit = {"file": "app.py", "old_lines": [3, 3], "new_lines": [3, 3], "claim": None,
+            "old_symbol": "lib.g", "new_symbol": "lib.h"}
+    d = prov_diff(tmp_path, [call("lib.g", 3, 5)], [call("lib.h", 3, 6)], edits=[edit])
+    assert only(d, FactCategory.REWRITTEN).review
+
+
+def test_no_positional_pairing_across_unrelated_symbols(tmp_path):
+    src_old = "def main():\n    a = lib.f(1)\n    lib.g(a)\n"
+    src_new = "def main():\n    a = lib.f(1)\n    lib.h(a)\n"
+    d = prov_diff(tmp_path, [call("lib.g", 3, 5)], [call("lib.h", 3, 6)],
+                  old_src=src_old, new_src=src_new)
+    assert d.counts()["rewritten"] == 2 and not d.failures()
+    assert all(e.unverified for e in d.entries) and d.verdict is VerificationVerdict.PASS
+    assert "2 unverified" in d.edited_summary()
+
+
+def test_scalar_values_choose_among_anchored_candidates(tmp_path):
+    src_old = "def main():\n    return q.get(1)\n"
+    src_new = "def main():\n    return session.get(Book, 1)\n"
+    old = [call("lib.Query.get", 2, "a", {"ident": 1}), call("lib.Query.get", 2, "b", {"ident": 2})]
+    new = [call("lib.Session.get", 2, "b", {"entity": {"__opaque__": "Book"}, "ident": 2}),
+           call("lib.Session.get", 2, "a", {"entity": {"__opaque__": "Book"}, "ident": 1})]
+    texts = {"old": {APP + ":2": "return q.get(1)"},
+             "new": {APP + ":2": "return session.get(Book, 1)"}}
+    d = prov_diff(tmp_path, old, new, old_src=src_old, new_src=src_new, texts=texts)
+    assert d.counts()["rewritten"] == 2 and not d.failures()
+    assert all(e.comparison is Comparison.EQUAL for e in d.entries)
+
+
+def test_vanished_call_on_an_unedited_line_fails_unless_the_project_redefined_the_name(
+        tmp_path):
+    old = [call("lib.f", 2, 1), call("lib.g", 3, 5, {"x": 1})]
+    new = [call("lib.f", 2, 1)]
+    src = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=src)
+    assert only(d, FactCategory.DISAPPEARED).fails
+    # The contact map alone never downgrades: a removed dependency symbol is the break itself.
+    gone = {"app.py": {3: set()}}
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=src,
+                  old_contacts={"app.py": {3: {"lib.g"}}}, new_contacts=gone)
+    assert only(d, FactCategory.DISAPPEARED).fails
+    # ... but a name the project now defines itself is no longer a dependency call.
+    local = src + "\n\nclass lib:\n    def g(a):\n        return a\n"
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=local)
+    e = only(d, FactCategory.REWRITTEN)
+    assert e.review == "no longer a dependency call here" and not d.failures()
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+
+
+def test_a_relative_import_counts_as_project_code_and_a_dependency_import_does_not(tmp_path):
+    old = [call("lib.f", 2, 1), call("lib.g", 3, 5, {"x": 1})]
+    new = [call("lib.f", 2, 1)]
+    src = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
+    mine = src + "\n\nfrom . import lib\n"
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=mine)
+    assert only(d, FactCategory.REWRITTEN).review and not d.failures()
+    theirs = src + "\n\nimport lib\n"
+    assert prov_diff(tmp_path, old, new, old_src=src, new_src=theirs).failures()
+
+
+def test_vanished_call_in_a_function_that_never_ran_is_not_reached(tmp_path):
+    old = [call("lib.g", 3, 5, {"x": 1})]
+    new = [rv("lib.z", {"bound": {}}, line=9) | {
+        "where": {"file": APP, "line": 9, "func": "other"}}]
+    src = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=src)
+    assert any(e.review and "not reached" in e.review for e in d.entries)
+
+
+def test_noise_is_dropped_or_never_a_verdict_driver(tmp_path):
+    src = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
+    new = [call("lib.C.__del__", 2, None), call("importlib._bootstrap._find_and_load", 2, 1),
+           call("lib.M.__init_subclass__", 2, None)]
+    d = prov_diff(tmp_path, [], new, old_src=src, new_src=src)
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE or d.verdict is VerificationVerdict.PASS
+    assert not d.failures()
+    assert not any(e.symbol.endswith("__del__") for e in d.entries)
+    assert d.counts()["drift"] == 2
+
+
+def test_type_relocations_apply_to_raises_and_markers(tmp_path):
+    a = [Outcome(kind="raise", value="pydantic.ValidationError")]
+    b = [Outcome(kind="raise", value="pydantic_core.ValidationError")]
+    assert compare_outcomes(a, b).comparison is Comparison.CHANGED
+    old = [call("lib.f", 2, {"__opaque__": "pydantic.Model"})]
+    new = [call("lib.f", 2, {"__opaque__": "pydantic_core.Model"})]
+    d = prov_diff(tmp_path, old, new, type_relocations={"pydantic.Model": "pydantic_core.Model"})
+    assert d.counts()["equal"] == 1 and not d.failures()
+
+
+def test_downstream_of_an_edit_is_judged_as_a_hand_edit(tmp_path):
+    src_old = "def main():\n    m = lib.make()\n    return m.sum()\n"
+    src_new = "def main():\n    m = lib.make2()\n    return m.sum()\n"
+    old = [call("lib.make", 2, {"__opaque__": "lib.Mat"}),
+           rv("lib.Mat.sum", {"bound": {"self": {"__opaque__": "lib.Mat"}}}, result=3, line=3)]
+    new = [call("lib.make2", 2, {"__opaque__": "lib.Arr"}),
+           rv("lib.Arr.sum", {"bound": {"self": {"__opaque__": "lib.Arr"}}}, result=4, line=3)]
+    texts = {"old": {APP + ":2": "m = lib.make()", APP + ":3": "return m.sum()"},
+             "new": {APP + ":2": "m = lib.make2()", APP + ":3": "return m.sum()"}}
+    d = prov_diff(tmp_path, old, new, old_src=src_old, new_src=src_new, texts=texts)
+    assert not d.failures()
+
+
+def test_without_a_context_values_on_rewritten_lines_still_fail(tmp_path):
+    d = _rewrite_case(tmp_path, S13)
+    assert d.verdict is VerificationVerdict.FAIL
+
+
+# ── Round 3b ─────────────────────────────────────────────────────────────────────────────
+
+SAME_SRC = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
+
+
+def test_non_dunder_call_not_named_on_its_line_stays_strict(tmp_path):
+    src = "def main():\n    f = lib.func\n    return f()\n"
+    texts = {"old": {APP + ":3": "return f()"}, "new": {APP + ":3": "return f()"}}
+    other = rv("lib.other", {"bound": {}}, line=2)
+    d = prov_diff(tmp_path, [call("lib.func", 3, 1)], [other], old_src=src, new_src=src,
+                  texts={**texts, "new": {**texts["new"], APP + ":2": "f = lib.func"}})
+    assert only(d, FactCategory.DISAPPEARED).fails
+
+
+def test_dunder_call_not_named_on_its_line_is_drift(tmp_path):
+    src = "def main():\n    with lib.ctx():\n        pass\n"
+    texts = {"old": {APP + ":2": "with lib.ctx():"}, "new": {APP + ":2": "with lib.ctx():"}}
+    other = rv("lib.other", {"bound": {}}, line=3)
+    other_old = rv("lib.other", {"bound": {}}, line=3)
+    d = prov_diff(tmp_path, [call("lib.C.__enter__", 2, 1), other_old], [other], old_src=src,
+                  new_src=src, texts={"old": {**texts["old"], APP + ":3": "pass"},
+                                      "new": {**texts["new"], APP + ":3": "pass"}})
+    assert only(d, FactCategory.DRIFT) and not d.failures()
+
+
+def test_no_ledger_judges_edits_as_hand_edits(tmp_path):
+    ctx = DiffContext(old_sources={"app.py": OLD_SRC}, new_sources={"app.py": NEW_SRC})
+    o = write_trace(tmp_path, "o.jsonl", [call("lib.g", 3, 5)], {APP + ":3": "return lib.g(a)"})
+    n = write_trace(tmp_path, "n.jsonl", [call("lib.h", 3, 6)], {APP + ":3": "return lib.h(a)"})
+    d = diff_traces(o, n, root=ROOT, context=ctx)
+    assert only(d, FactCategory.REWRITTEN).review and d.verdict is VerificationVerdict.INCONCLUSIVE
+    assert "no apply ledger: edits judged as hand edits" in d.edited_summary()
+
+
+def test_chained_statement_pairs_across_line_attribution(tmp_path):
+    src = "def main():\n    return (select(a)\n        .where(b)\n        .order_by(c))\n"
+    old = [call("lib.select", 2, 1), call("lib.where", 2, 2), call("lib.order_by", 2, 3)]
+    new = [call("lib.select", 2, 1), call("lib.where", 3, 2), call("lib.order_by", 4, 3)]
+    texts = {"old": {APP + ":2": "return (select(a)"},
+             "new": {APP + ":2": "return (select(a)", APP + ":3": ".where(b)",
+                     APP + ":4": ".order_by(c))"}}
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=src, texts=texts)
+    assert d.counts()["disappeared"] == 0 and d.counts()["appeared"] == 0 and not d.failures()
+
+
+def test_decorator_wrapper_naming_pairs_one_to_one_at_an_unedited_statement(tmp_path):
+    src = "def main():\n    return nx.pagerank(G)\n"
+    texts = {"old": {APP + ":2": "return nx.pagerank(G)"},
+             "new": {APP + ":2": "return nx.pagerank(G)"}}
+    d = prov_diff(tmp_path, [call("decorator.fun", 2, {"__dict__": [["a", 1]]}, {"x": 1})],
+                  [call("nx.argmap.__call__.<locals>.func", 2, {"__dict__": [["a", 2]]},
+                        {"y": 1})],
+                  old_src=src, new_src=src, texts=texts)
+    e = only(d, FactCategory.EQUAL)
+    assert "wrapper-naming" in e.notes
+    two = prov_diff(tmp_path, [call("decorator.fun", 2, 1), call("lib.x", 2, 1)],
+                    [call("nx.argmap.__call__.<locals>.func", 2, 1), call("lib.y", 2, 1)],
+                    old_src=src, new_src=src, texts=texts)
+    assert not any("wrapper-naming" in e.notes for e in two.entries)
+
+
+def test_wrapper_internals_and_instrumented_constructors_are_noise(tmp_path):
+    src = "def main():\n    G = nx.Graph(name=1)\n    return G\n"
+    line = {APP + ":2": "G = nx.Graph(name=1)"}
+    texts = {"old": line, "new": line}
+    new = [call("nx.argmap.__call__.<locals>.func", 2, 1), call("nx.argmap___new___1", 2, 1),
+           call("sa.orm.instrumentation.__init__", 2, None)]
+    d = prov_diff(tmp_path, [], new, old_src=src, new_src=src, texts=texts)
+    assert d.counts()["drift"] == 3 and not d.failures()
+
+
+def test_a_call_result_from_project_code_is_a_runtime_value_not_project_code(tmp_path):
+    old = [call("lib.f", 2, 1), call("lib.keys", 3, 5)]
+    new = [call("lib.f", 2, 1)]
+    src = "def main():\n    row = make()\n    return row.keys()\n"
+    mine = src + "\n\ndef make():\n    return lib.row()\n"
+    texts = {"old": {APP + ":2": "row = make()", APP + ":3": "return row.keys()"},
+             "new": {APP + ":2": "row = make()", APP + ":3": "return row.keys()"}}
+    d = prov_diff(tmp_path, [call("lib.f", 2, 1), call("lib.keys", 3, 5)], new, old_src=src,
+                  new_src=mine, texts=texts)
+    assert only(d, FactCategory.DISAPPEARED).fails
+    assert old
+
+
+# ── Round 3d ─────────────────────────────────────────────────────────────────────────────
+
+def self_call(q, line, result, self_type="lib.G"):
+    return rv(q, {"bound": {"self": {"__opaque__": self_type}}}, result=result, line=line)
+
+
+def test_vanished_getter_whose_value_was_a_receiver_is_an_attribute_read(tmp_path):
+    src = "def main(G):\n    return sorted(G.nodes())\n"
+    texts = {"old": {APP + ":2": "return sorted(G.nodes())"},
+             "new": {APP + ":2": "return sorted(G.nodes())"}}
+    old = [self_call("lib.G.nodes", 2, {"__opaque__": "lib.NodeView"}),
+           self_call("lib.NodeView.__call__", 2, [1], "lib.NodeView")]
+    new = [self_call("lib.NodeView.__call__", 2, [1], "lib.NodeView")]
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=src, texts=texts)
+    e = only(d, FactCategory.DRIFT)
+    assert "attribute read no longer goes through a traced getter" in e.notes
+    assert not d.failures()
+
+
+def test_vanished_getter_called_with_arguments_it_did_not_bind_is_an_attribute_read(tmp_path):
+    src = "def main(G):\n    return list(G.edges(data=True))\n"
+    texts = {"old": {APP + ":2": "return list(G.edges(data=True))"},
+             "new": {APP + ":2": "return list(G.edges(data=True))"}}
+    d = prov_diff(tmp_path, [self_call("lib.G.edges", 2, 1)],
+                  [rv("lib.other", {"bound": {}}, line=2)], old_src=src, new_src=src,
+                  texts=texts)
+    assert only(d, FactCategory.DRIFT)
+    assert not [e for e in d.failures() if e.symbol.endswith("edges")]
+
+
+def test_vanished_no_argument_call_nobody_uses_as_a_receiver_stays_strict(tmp_path):
+    src = "def main(row):\n    return list(row.keys())\n"
+    texts = {"old": {APP + ":2": "return list(row.keys())"},
+             "new": {APP + ":2": "return list(row.keys())"}}
+    d = prov_diff(tmp_path, [self_call("lib.Row.keys", 2, {"__list__": ["a"]}, "lib.Row")],
+                  [rv("lib.other", {"bound": {}}, line=2)], old_src=src, new_src=src,
+                  texts=texts)
+    assert only(d, FactCategory.DISAPPEARED).fails
+
+
+def test_fact_lands_on_the_consumer_of_a_generator_but_belongs_to_the_naming_statement(
+        tmp_path):
+    old_src = "def main(G):\n    parts = nx.subgraphs(G)\n    return max(parts)\n"
+    new_src = "def main(G):\n    parts = (g for g in nx.components(G))\n    return max(parts)\n"
+    texts = {"old": {APP + ":3": "return max(parts)"}, "new": {APP + ":3": "return max(parts)"}}
+    call_ = rv("nx.subgraphs", {"bound": {"G": {"__opaque__": "nx.G"}}}, result=1, line=3)
+    d = prov_diff(tmp_path, [call_], [rv("lib.o", {"bound": {}}, line=3)], old_src=old_src,
+                  new_src=new_src, texts=texts)
+    gone = [e for e in d.entries if e.symbol == "nx.subgraphs"][0]
+    assert gone.unverified and not gone.fails
+    # an alias whose naming statement was NOT edited stays strict
+    same = old_src
+    d = prov_diff(tmp_path, [call_], [rv("lib.o", {"bound": {}}, line=3)], old_src=old_src,
+                  new_src=same, texts=texts)
+    assert [e for e in d.entries if e.symbol == "nx.subgraphs"][0].fails
+
+
+# ── Round 3e ─────────────────────────────────────────────────────────────────────────────
+
+def test_opaque_attribute_does_not_hide_a_known_attribute_difference():
+    exc = {"__opaque__": "SystemExit"}
+    a = obj("lib.Result", exit_code=0, exception=exc, exc_info={"__tuple__": [exc]})
+    b = obj("lib.Result", exit_code=2, exception=exc, exc_info={"__tuple__": [exc]})
+    assert cmp_obj(a, b).comparison is Comparison.CHANGED
+    same = cmp_obj(a, a)
+    assert same.comparison is Comparison.EQUAL and same.level is ComparisonLevel.TYPE
+
+
+def test_opaque_attributes_compare_by_type_and_a_truncated_object_is_type_only():
+    a = obj("lib.R", exit_code=0, exception={"__opaque__": "lib.a.Err"})
+    b = obj("lib.R", exit_code=0, exception={"__opaque__": "lib.b.Err"})
+    assert cmp_obj(a, b).comparison is Comparison.EQUAL
+    c = obj("lib.R", exit_code=0, exception={"__opaque__": "lib.Other"})
+    assert cmp_obj(a, c).comparison is Comparison.CHANGED
+    cut = {**obj("lib.R", exit_code=0), "__truncated__": True}
+    assert cmp_obj(cut, obj("lib.R", exit_code=2)).comparison is Comparison.EQUAL
+
+
+def test_type_level_object_comparison_ignores_one_sided_attributes():
+    a = [Outcome(kind="return", value=obj("lib.S", a=1)),
+         Outcome(kind="return", value=obj("lib.S", a=2))]
+    b = [Outcome(kind="return", value=obj("lib.S", a=1, extra=3)),
+         Outcome(kind="return", value=obj("lib.S", a=2, extra=4))]
+    assert compare_outcomes(a, b).comparison is Comparison.EQUAL

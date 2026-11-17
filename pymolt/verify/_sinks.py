@@ -60,6 +60,8 @@ DEFAULT_SAMPLE_FIRST = 32      # calls per key always admitted when sample_rate 
 DEFAULT_SAMPLE_KEYS = 65536    # keys the novelty table remembers; past it: the rate alone
 
 
+
+
 class NoveltySampler(object):
     """Novelty-first sampling: per key (the backends pass ``(sym or qualname, site_file,
     site_line)``), the first ``PYMOLT_TRACE_SAMPLE_FIRST`` calls are admitted, later ones at
@@ -381,13 +383,15 @@ class JsonlSink(object):
         self._write(ev)
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
-                 symq=None, own=None, dur=None, tid=None, warnings=None):
+                 symq=None, own=None, dur=None, tid=None, warnings=None, binding=False):
         if not admitted and not self.admit(force=True):
             self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
                        warnings=warnings)
             return
         ev = {"v": EVENT_VERSION, "t": "raise", "q": qualname, "in": inputs,
               "raised": exc_typename, "ts": time.time()}
+        if binding:
+            ev["binding"] = True    # failed while binding its arguments: the callee never ran
         _identity_fields(ev, sym, symq, own)
         _timing_fields(ev, dur, tid)
         if site is not None:
@@ -500,9 +504,15 @@ class MemorySink(object):
                     raised=None, site=site, sym=sym, symq=symq, own=own, warnings=warnings)
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
-                 symq=None, own=None, dur=None, tid=None, warnings=None):
+                 symq=None, own=None, dur=None, tid=None, warnings=None, binding=False):
         self._store(qualname, inputs, result=None, raised=exc_typename, site=site,
                     sym=sym, symq=symq, own=own, warnings=warnings)
+        if binding:
+            with self._lock:
+                for rec in self.records.values():
+                    if rec["qualname"] == qualname and rec["raised"] == exc_typename \
+                            and rec["inputs"] == inputs:
+                        rec["binding"] = True
 
     def tally(self, qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         """MemorySink admits every call, so a tally can only come from a foreign backend:
@@ -546,6 +556,7 @@ DEFAULT_FACTS_PER_SITE = 32
 DEFAULT_MAX_FACTS = 50000
 DEFAULT_MAX_TALLIES = 100000
 DEFAULT_MAX_FACT_BYTES = 128 * 1024 * 1024  # canonical JSON held by the fact table
+HEAVY_RESULT_BYTES = 4096                    # a symbol's object results past this go type-level
 DEFAULT_VALUE_BYTES = 65536                  # one input / result rendering
 MAX_OUTCOMES = 8          # distinct outcomes per fact; the rest fold into "other"
 MAX_OTHER_TYPES = 8       # distinct types kept inside "other"
@@ -750,6 +761,7 @@ class _Fact(object):
                 outs.append('{"t":"return","result":' + payload + ',"count":' + str(n) + "}")
             else:
                 outs.append('{"t":"raise","raised":' + _canon(payload)
+                            + (',"binding":true' if kind == "b" else "")
                             + ',"count":' + str(n) + "}")
         if self.other:
             types = []
@@ -757,7 +769,8 @@ class _Fact(object):
                 if kind == "r":
                     types.append({"t": "return", "type": label, "count": n})
                 else:
-                    types.append({"t": "raise", "raised": label, "count": n})
+                    types.append({"t": "raise", "raised": label, "count": n,
+                                  **({"binding": True} if kind == "b" else {})})
             outs.append(_canon({"t": "other", "count": self.other, "types": types,
                                 "lost": self.other_lost}))
         head = {"q": self.q, "sym": self.sym, "symq": self.symq, "own": self.own,
@@ -891,6 +904,7 @@ class FactSink(object):
         self._sampler = NoveltySampler()
         self._sample_rate = self._sampler.rate
         self._privacy = _privacy()
+        self._heavy = set()     # symbols whose object results were too large to keep rendering
         if flush_seconds is None:
             flush_seconds = _env_number("PYMOLT_TRACE_FLUSH_SECONDS", DEFAULT_FLUSH_SECONDS,
                                         float, 0.0)
@@ -1034,8 +1048,15 @@ class FactSink(object):
             self.tally(qualname, sym, site, "return", dur=dur, warnings=warnings)
             return
         try:
-            result = normalize(result_obj, _privacy=self._privacy)
+            key = sym or qualname
+            heavy = key in self._heavy
+            result = normalize(result_obj, _privacy=self._privacy, _objects=not heavy)
             payload = _canon(result)
+            if not heavy and len(payload) > HEAVY_RESULT_BYTES:
+                # A result this large is rendered per call, and grows the snapshot, for no
+                # extra evidence: from now on this symbol's generic objects stay type-level.
+                if len(self._heavy) < 4096:
+                    self._heavy.add(key)
             if len(payload) > self._value_bytes:
                 next(self._n_oversize)
                 result = {"__opaque__": type_label(result), "__digest__": _digest(payload)}
@@ -1049,7 +1070,7 @@ class FactSink(object):
                     time.time(), warnings or None))
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
-                 symq=None, own=None, dur=None, tid=None, warnings=None):
+                 symq=None, own=None, dur=None, tid=None, warnings=None, binding=False):
         if not admitted and not self.admit(force=True):
             self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
                        warnings=warnings)
@@ -1061,8 +1082,8 @@ class FactSink(object):
             self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
                        warnings=warnings)
             return
-        self._push(("x", qualname, sym, symq, own, site, in_json, str(exc_typename), None,
-                    dur, time.time(), warnings or None))
+        self._push(("b" if binding else "x", qualname, sym, symq, own, site, in_json,
+                    str(exc_typename), None, dur, time.time(), warnings or None))
 
     def tally(self, qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         """A completed call whose values were not sampled: counted at its (symbol, site),

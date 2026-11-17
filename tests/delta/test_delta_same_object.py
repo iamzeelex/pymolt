@@ -118,7 +118,9 @@ def test_probe_finds_public_spellings_of_the_same_object(tmp_path):
     step_f = out["pkg.sub.f"]["steps"][0]
     assert step_f["same_object_as"] == ["pkg.f", "pkg.api.f"]  # public-first, shortest first
     assert "same_object_as" not in out["pkg.sub.SHARED"]["steps"][0]  # a singleton (None)
-    assert out["pkg.f"]["steps"][0]["same_object_as"] == ["pkg.api.f", "pkg.sub.f"]  # own excluded
+    # own excluded; the object's own home (pkg.sub.f) first, then the public re-export
+    assert out["pkg.f"]["steps"][0]["same_object_as"] == ["pkg.sub.f", "pkg.api.f"]
+    assert out["pkg.f"]["steps"][0]["same_object_home"] == "pkg.sub.f"
 
 
 def test_probe_uses_identity_hints(tmp_path):

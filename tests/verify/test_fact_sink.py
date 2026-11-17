@@ -376,3 +376,23 @@ def test_sinks_admit_by_key(tmp_path, monkeypatch, make):
     sink.close()
     assert sink.metrics["events_seen"] == 6
     assert _sinks.MemorySink().admit(key=key) is True
+
+
+def test_a_symbol_with_huge_object_results_goes_type_level(tmp_path):
+    class Big:
+        pass
+
+    def make():
+        b = Big()
+        for i in range(400):
+            setattr(b, f"attr{i:03d}", "x" * 20)
+        return b
+
+    sink = _sink(tmp_path)
+    first = make()
+    sink.on_return("m.f", {}, first, SITE, sym="m.f")
+    sink.on_return("m.f", {}, make(), SITE, sym="m.f")
+    sink.close()
+    outcomes = [o["result"] for f in _facts(sink, "m.f") for o in f["outcomes"]]
+    assert any("__object__" in r for r in outcomes)       # the witness that proved it heavy
+    assert any("__opaque__" in r for r in outcomes)       # type-level from then on

@@ -773,6 +773,9 @@ def _collect_capture(run_dir: Path, svc_dir: Path, record: dict) -> dict:
     slot = state.get("baseline") or {}
     meta: dict = {}
     trace_path = slot.get("trace_path")
+    if trace_path and not os.path.isabs(trace_path):
+        # contract_state.json stores project-relative paths (since Wave G)
+        trace_path = str(svc_dir / trace_path)
     if trace_path:
         try:
             meta = json.loads(Path(trace_path + ".meta.json").read_text())

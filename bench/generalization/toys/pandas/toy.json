@@ -1,0 +1,98 @@
+{
+  "name": "pandas",
+  "ecosystem": "dataframes (reference)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "pandas==1.5.3",
+      "numpy<2",
+      "requests",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "pandas==2.2.3",
+      "requests",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "pandas",
+    "requests"
+  ],
+  "target_manifest": [
+    "pandas==2.2.3",
+    "requests"
+  ],
+  "files": {
+    "toyapp/__init__.py": "",
+    "toyapp/core.py": "import pandas as pd\nimport requests\n\n\ndef build_url(q):\n    req = requests.Request(\"GET\", \"http://x.test/a\", params={\"q\": q})\n    return req.prepare().url\n\n\ndef combine(a, b):\n    s1 = pd.Series(a)\n    s2 = pd.Series(b)\n    return s1.append(s2, ignore_index=True)\n\n\ndef summarize(rows):\n    df = pd.DataFrame(rows)\n    return df.groupby(\"k\")[\"v\"].sum().to_dict()\n",
+    "tests/test_core.py": "from toyapp.core import build_url, combine, summarize\n\n\ndef test_build_url():\n    assert build_url(\"hi there\") == \"http://x.test/a?q=hi+there\"\n\n\ndef test_combine():\n    assert list(combine([1, 2], [3])) == [1, 2, 3]\n\n\ndef test_summarize():\n    assert summarize([{\"k\": \"a\", \"v\": 1}, {\"k\": \"a\", \"v\": 2}]) == {\"a\": 3}\n"
+  },
+  "manual_migration": [],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "toyapp/core.py",
+          "append": "\n\ndef average(rows):\n    df = pd.DataFrame(rows)\n    try:\n        return df.mean().to_dict()\n    except TypeError:\n        return None\n"
+        },
+        {
+          "file": "tests/test_core.py",
+          "old": "from toyapp.core import build_url, combine, summarize",
+          "new": "from toyapp.core import average, build_url, combine, summarize"
+        },
+        {
+          "file": "tests/test_core.py",
+          "append": "\n\ndef test_average_runs():\n    # A weak test, as real suites often are: it only checks the call does not crash.\n    average([{\"name\": \"x\", \"v\": 1}, {\"name\": \"y\", \"v\": 3}])\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "pandas.core.frame.DataFrame.mean"
+      ]
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "pandas.core.series.Series.append",
+      "kind": "REMOVED",
+      "site": "toyapp/core.py:13",
+      "breaks": "AttributeError: 'Series' object has no attribute 'append'",
+      "successor": "pandas.concat",
+      "fixable": "plan",
+      "source": "pandas 2.0 whatsnew; bench/e2e_pandas/run.py",
+      "verified": "old 1.5.3: Series.append exists (FutureWarning); new 2.2.3: hasattr(Series, 'append') is False"
+    },
+    {
+      "symbol": "pandas.core.frame.DataFrame.mean",
+      "kind": "DEFAULT",
+      "param": "numeric_only",
+      "site": "toyapp/core.py:24",
+      "breaks": "TypeError on mixed-dtype frames in 2.x (1.5.3 silently drops non-numeric columns with a FutureWarning)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "pandas 2.0 whatsnew; bench/e2e_pandas/run.py",
+      "verified": "old 1.5.3: DataFrame([{name:x,v:1},{name:y,v:3}]).mean() -> {'v': 2.0} (FutureWarning); new 2.2.3: TypeError Could not convert ['xy'] to numeric"
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "pandas.core.series.Series.append",
+      "category": "FutureWarning",
+      "from_c": false
+    },
+    {
+      "symbol": "pandas.core.frame.DataFrame.mean",
+      "category": "FutureWarning",
+      "from_c": false
+    }
+  ],
+  "notes": "Reference row, ported from bench/e2e_pandas (pandas 1.5.3 on 3.11 -> 2.2.3 on 3.12). The tests are deliberately weak: test_average_runs only checks that the call does not crash."
+}

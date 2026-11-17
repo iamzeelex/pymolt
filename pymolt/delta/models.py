@@ -139,13 +139,17 @@ class DeltaReport(BaseModel):
     # Modules that raised on import on a side (never reported as REMOVED):
     # [{"module", "side", "error", "origin", "cause"}].
     import_errors: list[dict[str, Any]] = Field(default_factory=list)
+    # Baseline types whose public spelling now names another class, same-object evidence from
+    # both interpreters: [{"old": "pydantic.error_wrappers.ValidationError",
+    # "new": "pydantic_core._pydantic_core.ValidationError", "via": "pydantic.ValidationError"}].
+    type_relocations: list[dict[str, str]] = Field(default_factory=list)
 
     @model_serializer(mode="wrap")
     def _omit_default_additions(self, handler: Any) -> dict[str, Any]:
         data = handler(self)  # same rule as DeltaFact: absent additions dump as before
         if data.get("subject") == "dependency":
             data.pop("subject", None)
-        for key in ("sides", "import_errors"):
+        for key in ("sides", "import_errors", "type_relocations"):
             if not data.get(key):
                 data.pop(key, None)
         return data
@@ -178,6 +182,9 @@ class Interpreter(BaseModel):
     versions: dict[str, str | None] = Field(default_factory=dict)
     # Set when the interpreter lives in a container: ``executable`` is then a path inside it.
     runner: RunnerSpec | None = None
+    # Old side only: wanted packages the baseline interpreter does not have at all. They are
+    # absent in the old version (their symbols are new), not a reason to build another env.
+    absent: list[str] = Field(default_factory=list)
 
     # source "static": no interpreter was reachable, so the old side is read from the release's
     # wheel or sdist (``delta/static_side.py``). ``static`` maps each package name to its

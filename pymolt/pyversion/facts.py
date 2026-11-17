@@ -112,8 +112,15 @@ def python_delta(
     target_executable: str | Path | None = None,
     base_executable: str | Path | None = None,
     base_runner: Any = None,
+    runtime_symbols: Iterable[str] = (),
 ) -> DeltaReport:
-    """The python pseudo-migration's delta report for the stdlib spellings in ``sites``."""
+    """The python pseudo-migration's delta report for the stdlib spellings in ``sites``.
+
+    ``runtime_symbols``: stdlib symbols the baseline capture observed at runtime
+    (``asyncio.tasks.sleep``, ``unittest.case.TestCase.assertEquals``). They are checked like
+    a site's spelling (presence on both sides, from the probes), their presence on the base
+    rests on the observation, and when both sides are probed a changed signature becomes a
+    SIGNATURE fact (a removed or renamed parameter, a new required one)."""
     root = Path(project_dir).resolve()
     data = _stdlib()
     base = _minor(base_python) or base_python
@@ -126,7 +133,9 @@ def python_delta(
     stamp = _call(data, "data_stamp") or "knowledge:stdlib_lifetimes"
     report.sides = {"old": stamp, "new": stamp}
 
-    spellings = sorted({s for s in (getattr(site, "spelling", None) for site in sites or ()) if s})
+    static = {s for s in (getattr(site, "spelling", None) for site in sites or ()) if s}
+    observed = {s for s in runtime_symbols or () if s} - static
+    spellings = sorted(static | observed)
     if not spellings:
         report.quality = "complete"
         report.sides = {}
@@ -181,9 +190,15 @@ def python_delta(
 
     for sp in spellings:
         fact = _fact_for(data, sp, states[sp], base, target, base_probe, new_probe if
-                         target_probed else None, candidates[sp], origins, report)
+                         target_probed else None, candidates[sp], origins, report,
+                         observed=sp in observed)
         if fact is not None:
             report.facts.append(fact)
+    if target_probed and base_probe is not None:
+        have = {f.symbol for f in report.facts if f.kind != "UNCHANGED"}
+        for sp in spellings:
+            if sp not in have and states[sp]["state"] == "present":
+                report.facts.extend(_signature_facts(sp, base_probe, new_probe))
 
     problems = []
     if not target_probed:
@@ -195,6 +210,31 @@ def python_delta(
     if problems:
         report.notes.append("; ".join(problems))
     return report
+
+
+def _final_shape(probe, spelling: str) -> list | None:
+    """The parameter shape of what a probe resolved ``spelling`` to (None: not a callable)."""
+    result = probe.results.get(spelling) or {}
+    steps = result.get("steps") or []
+    if not result.get("exists") or not steps:
+        return None
+    return steps[-1].get("shape")
+
+
+def _signature_facts(spelling: str, base_probe, new_probe) -> list[DeltaFact]:
+    """SIGNATURE facts for a stdlib callable present on both probed sides, reusing the delta
+    engine's parameter comparison. Default changes are not reported here."""
+    from pymolt.delta.engine import param_changes
+
+    old, new = _final_shape(base_probe, spelling), _final_shape(new_probe, spelling)
+    if not old or not new:
+        return []
+    return [
+        DeltaFact(symbol=spelling, kind="SIGNATURE", param=ch.param, old=ch.old, new=ch.new,
+                  evidence=["signature", ch.note, "signature probed on both interpreters"],
+                  basis={"old": "probe", "new": "probe"})
+        for ch in param_changes(old, new) if ch.kind == "SIGNATURE" and ch.param
+    ]
 
 
 def _probe(exe: str, root: Path, paths: list[str], roots: list[str], *, runner: Any = None):
@@ -329,7 +369,7 @@ def _maybe_shimmed(data, spelling: str, target: str | None) -> bool:
 
 def _fact_for(data, spelling: str, state: dict, base: str | None, target: str | None,
               base_probe, new_probe, candidates: list[str], origins: dict[str, str | None],
-              report: DeltaReport) -> DeltaFact | None:
+              report: DeltaReport, observed: bool = False) -> DeltaFact | None:
     change = _best_change(data, spelling)
     module = _module_prefix(data, spelling)
     old_basis = "knowledge"
@@ -338,7 +378,9 @@ def _fact_for(data, spelling: str, state: dict, base: str | None, target: str | 
         old_basis = "probe"
     else:
         base_present = _base_presence(data, spelling, module, base, change)
-        if base_present is None:
+        if base_present is None and observed:
+            base_present, old_basis = True, "baseline-trace"  # the baseline ran it
+        elif base_present is None:
             old_basis = "import-statement"
     new_basis = state["how"] if state["state"] != "unknown" else None
     evidence: list[str] = []

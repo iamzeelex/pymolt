@@ -60,6 +60,10 @@ from pymolt.verify.predict import Calibration, calibrate, predict_risks
 logger = logging.getLogger(__name__)
 
 TRUST_BASIS = "behavioural contacts in executed files"
+# Packages the injected runtime never treats as a boundary unless a target names them (it
+# keeps its own copy in ``_backend.TEST_RUNNER_PACKAGES``; a test keeps the two equal).
+TEST_RUNNER_PACKAGES = frozenset((
+    "_pytest", "pytest", "pluggy", "py", "iniconfig", "_hypothesis_pytestplugin", "xdist"))
 
 
 class SymbolStatus(BaseModel):
@@ -179,6 +183,9 @@ class ContractReport(BaseModel):
     # ``all_fact_diff`` is always the whole surface.
     fact_diff: dict[str, Any] | None = None
     all_fact_diff: dict[str, Any] | None = None
+    # Failing entries of the whole surface that the impact filter hid from ``fact_diff``:
+    # behaviour changes outside the plan's predicted impacts (they still decide the verdict).
+    unpredicted_changes: list[dict[str, Any]] = Field(default_factory=list)
     # Runtime symbols every one of whose facts compared equal on both sides (equal, DRIFT,
     # or REWRITTEN with an equal outcome) in the scoped fact diff. A dynamic-only symbol
     # in this set was observed AND verified, so it does not block PASS.
@@ -463,8 +470,12 @@ def build_contract_report(
     custom_comparator: TraceComparator | str | None = None,
     resolve_identities: bool = True,
     predictions: Mapping[str, Any] | None = None,
+    diff_context: Any = None,
 ) -> ContractReport:
     """Build the unified report.
+
+    ``diff_context`` (a ``facts.DiffContext``): the snapshots, apply ledger, contact maps and
+    successors that let the fact diff judge an edited site by who edited it.
 
     ``predictions`` (``{"risks", "source", "plan_id", "notes"}``) are the predicted risks to
     calibrate against the fact diff (``calibration``); only a fact diff can score them.
@@ -617,6 +628,12 @@ def build_contract_report(
             ):
                 unobservable = None
             klass = unobservable or klass
+        if (klass == "behavioural" and s["dep"].split(".")[0] in TEST_RUNNER_PACKAGES
+                and not hits and not observed_tops & TEST_RUNNER_PACKAGES):
+            # the capture does not trace the test runner (unless a target names one of the
+            # family, which lifts the exclusion for all of it), so its contacts can never be
+            # confirmed; counting them would lower trust for nothing
+            klass = "test-runner"
         names = [target]
         if identity is not None and identity.resolved:
             names.append(identity.sym)
@@ -733,6 +750,7 @@ def build_contract_report(
                            "statically unnameable, so neither BLIND nor confirmable"),
         ("absent-dependency", "target a package that is not installed in the capture's "
                               "interpreter, so no trace there can exercise them"),
+        ("test-runner", "belong to the test runner, which captures do not trace"),
     ):
         excluded = [s.target for s in scope if s.contact_class == klass]
         if excluded:
@@ -830,6 +848,7 @@ def build_contract_report(
                     old_facts, load_facts(trace, root=root),
                     profile=DiffProfile.SHAPE if profile is ComparatorProfile.SHAPE
                     else DiffProfile.EXACT,
+                    context=diff_context,
                 )
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
@@ -913,6 +932,10 @@ def _attach_fact_diff(
         "entries": [e for e in fdiff.entries if impacted(e.symbol) or impacted(e.new_symbol)],
     })
     report.fact_diff = scoped.to_json_dict()
+    kept = {id(e) for e in scoped.entries}
+    report.unpredicted_changes = [
+        e.model_dump(mode="json", exclude_none=True)
+        for e in fdiff.entries if id(e) not in kept and e.fails]
     report.fact_equal_symbols = _compared_equal_symbols(scoped)
     bdiff = scoped.to_boundary_diff()
     report.diff = bdiff.counts()
