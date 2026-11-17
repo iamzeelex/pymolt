@@ -34,7 +34,12 @@ DEFAULT_PLAN_PATH = Path(".pymolt/migration_plan.json")
 
 
 class MigrationPlanError(RuntimeError):
-    """The saved plan cannot be safely applied or rolled back."""
+    """The saved plan cannot be safely applied or rolled back. ``hint``: what to do instead,
+    when the error knows better than the interface's default."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.hint = hint
 
 
 class MigrationConflictError(MigrationPlanError):
@@ -592,6 +597,8 @@ def _apply_migration_plan_unlocked(
                 f"interrupted run {plan.plan_id[:8]} does not match this plan"
             )
         _recover_interrupted_apply(root, frozen)
+    if existing and existing.status == "applied":
+        return _already_applied(root, plan, existing)
 
     inspection = inspect_migration_plan(root, plan)
     if not inspection.valid:
@@ -641,10 +648,8 @@ def _apply_migration_plan_unlocked(
                 "the baseline trace content changed after planning"
             )
 
-    if existing and existing.status in {"applied", "rolled_back"}:
-        raise MigrationConflictError(
-            f"plan {plan.plan_id[:8]} is already {existing.status.replace('_', ' ')}"
-        )
+    if existing and existing.status == "rolled_back":
+        raise MigrationConflictError(f"plan {plan.plan_id[:8]} is already rolled back")
     run_dir.mkdir(parents=True, exist_ok=True)
     frozen_plan_path = plan.save(root, run_dir / "plan.json")
     state = MigrationRunState(
@@ -723,6 +728,39 @@ def _apply_migration_plan_unlocked(
         except OSError:
             pass
         raise
+    return receipt
+
+
+def _already_applied(root: Path, plan: MigrationPlan, state: MigrationRunState):
+    """Apply run again on an applied plan: a no-op while every planned file still holds the
+    plan's new source (the receipt says so); a conflict, with nothing written, otherwise."""
+    from pymolt.migration_state import MigrationReceipt
+
+    inspection = inspect_migration_plan(root, plan, expected="new", check_environment=False)
+    if not inspection.valid:
+        raise MigrationConflictError(
+            f"plan {plan.plan_id[:8]} is already applied (run {state.run_id[:8]}), and "
+            "files changed since: " + "; ".join(inspection.reasons),
+            hint="Nothing was written. `pymolt rollback .` restores the files the apply "
+                 "changed (`--force` also discards the later edits). A plan made now would "
+                 "stack a second migration on the applied one.",
+        )
+    receipt = MigrationReceipt.load(root)
+    if receipt is None or receipt.run_id != state.run_id:
+        # A later run's receipt is the saved one: describe this run from its frozen plan.
+        receipt = MigrationReceipt(
+            run_id=state.run_id, applied_at=state.applied_at or state.prepared_at,
+            target_python=plan.target_python, source_manifest=plan.source_manifest,
+            target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
+                                  if plan.target_manifest_path else None),
+            baseline_trace_path=plan.baseline_trace_path,
+            baseline_captured_at=plan.baseline_captured_at,
+            files_changed=[str(_project_file(root, item.path)) for item in plan.changes],
+            patterns_applied=sum(item.sites for item in plan.changes),
+            no_codemods_required=not plan.changes,
+            plan_path=str(_run_dir(root, state.run_id) / "plan.json"),
+        )
+    receipt.mark_outcome("already_applied")
     return receipt
 
 

@@ -418,3 +418,36 @@ def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
         "rewrite-import", "rewrite-import:flask.helpers.safe_join→werkzeug.utils.safe_join",
         "flask.helpers.safe_join", "werkzeug.utils.safe_join")
     assert entry["claim"] is None          # a bare pattern makes no claim
+
+
+def test_apply_again_on_an_applied_plan_is_a_no_op_that_says_so(tmp_path):
+    plan = _plan(tmp_path, files=2)
+    first = apply_migration_plan(tmp_path, plan)
+    ledger = tmp_path / ".pymolt" / "apply_ledger.json"
+    ledger_before = ledger.read_text(encoding="utf-8")
+    sources = [(tmp_path / f"app{i}.py").read_text(encoding="utf-8") for i in range(2)]
+
+    again = apply_migration_plan(tmp_path, plan)
+
+    assert first.outcome == "applied"
+    assert again.outcome == "already_applied"
+    assert again.run_id == first.run_id and again.applied_at == first.applied_at
+    assert [(tmp_path / f"app{i}.py").read_text(encoding="utf-8") for i in range(2)] == sources
+    assert ledger.read_text(encoding="utf-8") == ledger_before    # no second ledger
+    assert not (tmp_path / ".pymolt" / "archive").exists()
+    assert MigrationReceipt.load(tmp_path) == first
+
+
+def test_apply_again_after_a_later_edit_refuses_and_points_at_rollback(tmp_path):
+    """The old message called the plan stale and its hint led to a second, stacked plan."""
+    plan = _plan(tmp_path)
+    apply_migration_plan(tmp_path, plan)
+    path = tmp_path / "app0.py"
+    path.write_text(path.read_text(encoding="utf-8") + "# later edit\n", encoding="utf-8")
+
+    with pytest.raises(MigrationConflictError, match="already applied") as caught:
+        apply_migration_plan(tmp_path, plan)
+
+    assert "stale" not in str(caught.value)
+    assert "rollback" in caught.value.hint and "stack" in caught.value.hint
+    assert path.read_text(encoding="utf-8").endswith("# later edit\n")
