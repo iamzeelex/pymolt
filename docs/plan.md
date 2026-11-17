@@ -69,6 +69,17 @@ A codemod is a match/rewrite template applied with LibCST, for example
 - **All or nothing.** `apply` prepares and parses every changed file before the first write, and a
   failed apply restores them all. `pymolt rollback` undoes a successful one.
 
+## When to bump the manifest
+
+`apply` writes source only. Moving the project's manifest to the target versions is yours to do:
+- **After `plan`.** The plan compares the project's manifest with the target manifest. With the
+  pins already bumped, a package the baseline did not record shows no move.
+- **Before the post-migration capture.** That capture must match the project as it is then; a bump
+  after it makes it stale.
+- **Before or after `apply`.** A change to the *contents* of the same manifest makes neither the
+  plan nor the baseline stale. Another manifest file, base Python, toolset or container does, and
+  so does a change to the target manifest.
+
 ## Predicted risks
 
 The plan rates each affected call site into a dependency:

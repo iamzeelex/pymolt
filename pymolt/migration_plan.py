@@ -212,6 +212,10 @@ class MigrationPlan(BaseModel):
     target_manifest_path: str | None = None
     target_manifest_sha256: str | None = None
     environment_fingerprint: str | None = None
+    # The setup part of it (manifest file, base Python, toolset, container), which is what
+    # apply checks: bumping pins in the same manifest does not make the plan stale. None in
+    # plans made before it was recorded; apply then checks the full fingerprint.
+    environment_setup_fingerprint: str | None = None
     baseline_trace_path: str | None = None
     baseline_captured_at: str | None = None
     baseline_trace_sha256: str | None = None
@@ -294,7 +298,11 @@ def create_migration_plan(
     With a baseline capture (and ``predict``), the plan also stores its predicted risks:
     the baseline's facts joined with ``delta_reports`` (the migrations' ``pymolt.delta/1``
     reports; computed offline with ``pymolt.delta.compute_deltas`` when not given)."""
-    from pymolt.verify.service import environment_fingerprint, load_contract_state
+    from pymolt.verify.service import (
+        environment_fingerprint,
+        environment_setup_fingerprint,
+        load_contract_state,
+    )
 
     root = Path(project_dir).resolve()
     contract = load_contract_state(root)
@@ -372,6 +380,7 @@ def create_migration_plan(
         target_manifest_path=target_relative,
         target_manifest_sha256=target_hash,
         environment_fingerprint=environment_fingerprint(root),
+        environment_setup_fingerprint=environment_setup_fingerprint(root),
         baseline_trace_path=baseline.trace_path if baseline else None,
         baseline_captured_at=baseline.captured_at if baseline else None,
         baseline_trace_sha256=baseline_hash,
@@ -463,8 +472,13 @@ def inspect_migration_plan(
     expected: Literal["old", "new"] = "old",
     check_environment: bool = True,
 ) -> PlanInspection:
-    """Check that a plan still describes the current files and environment."""
-    from pymolt.verify.service import environment_fingerprint
+    """Check that a plan still describes the current files and environment.
+
+    The environment is the setup (manifest file, base Python, toolset, container) and the
+    target manifest's contents. The source manifest's contents may move: bumping its pins is
+    the migration (the rule verify applies to a baseline, ``environment_setup_fingerprint``).
+    A plan that predates the setup fingerprint is checked against the full fingerprint."""
+    from pymolt.verify.service import environment_fingerprint, environment_setup_fingerprint
 
     root = Path(project_dir).resolve()
     reasons: list[str] = []
@@ -473,8 +487,11 @@ def inspect_migration_plan(
             f"unsupported plan schema {plan.schema_version}; expected {PLAN_SCHEMA_VERSION}"
         )
     if check_environment:
-        current_fingerprint = environment_fingerprint(root)
-        if plan.environment_fingerprint != current_fingerprint:
+        if plan.environment_setup_fingerprint is not None:
+            if plan.environment_setup_fingerprint != environment_setup_fingerprint(root):
+                reasons.append("configured environment changed after planning (manifest "
+                               "file, base Python, toolset or container)")
+        elif plan.environment_fingerprint != environment_fingerprint(root):
             reasons.append("configured environment or source manifest changed after planning")
 
     if plan.target_manifest_path:
@@ -599,7 +616,9 @@ def _apply_migration_plan_unlocked(
     from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.models import CaptureValidity
     from pymolt.verify.service import (
+        baseline_setup_unchanged,
         environment_fingerprint,
+        environment_setup_fingerprint,
         inspect_trace_artifact,
         load_contract_state,
     )
@@ -634,6 +653,7 @@ def _apply_migration_plan_unlocked(
     # receipt keeps it so the baseline can later be judged against it rather
     # than against whatever manifest the migration moved the project to.
     starting_fingerprint = environment_fingerprint(root)
+    starting_setup = environment_setup_fingerprint(root)
     baseline = load_contract_state(root).baseline
     if not allow_no_baseline:
         if baseline is None:
@@ -641,10 +661,15 @@ def _apply_migration_plan_unlocked(
                 "a valid baseline capture is required before apply"
             )
         quality = inspect_trace_artifact(baseline.trace_path)
+        # Same world, or the same setup with only the manifest's pins moved since the
+        # baseline: that move is part of the migration, not a different starting point.
+        same_world = baseline.env_fingerprint == starting_fingerprint or (
+            baseline.env_fingerprint is not None
+            and baseline_setup_unchanged(baseline, starting_setup))
         if (
             baseline.validity is not CaptureValidity.VALID
             or quality.validity is not CaptureValidity.VALID
-            or baseline.env_fingerprint != starting_fingerprint
+            or not same_world
         ):
             raise MigrationEvidenceError("the baseline capture is invalid or stale")
         if not plan.baseline_trace_path or not plan.baseline_captured_at:
@@ -718,6 +743,7 @@ def _apply_migration_plan_unlocked(
         baseline_trace_path=baseline.trace_path if baseline else None,
         baseline_captured_at=baseline.captured_at if baseline else None,
         environment_fingerprint=starting_fingerprint,
+        environment_setup_fingerprint=starting_setup,
         allow_no_baseline=allow_no_baseline,
         files_changed=[str(_project_file(root, item.path)) for item in plan.changes],
         patterns_applied=sum(item.sites for item in plan.changes),

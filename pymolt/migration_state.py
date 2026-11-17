@@ -46,6 +46,10 @@ class MigrationReceipt(BaseModel):
     # as it is now: a migration that upgrades the manifest moves "now" away from
     # the baseline by design.
     environment_fingerprint: str | None = None
+    # Its setup part (manifest file, base Python, toolset, container). A baseline with the
+    # same setup is the migration's starting point even when the manifest's pins moved
+    # between the capture and the apply. None in receipts from before it was recorded.
+    environment_setup_fingerprint: str | None = None
     allow_no_baseline: bool = False
     files_changed: list[str] = Field(default_factory=list)
     patterns_applied: int = 0
@@ -77,8 +81,8 @@ class MigrationReceipt(BaseModel):
         """The environment fingerprint this migration started from; None if unrecorded.
 
         Receipts written before the field existed fall back to the frozen plan:
-        apply refuses a plan whose fingerprint differs from the project's at
-        apply time, so for an applied run the two are the same value.
+        apply then refused a plan whose fingerprint differed from the project's at
+        apply time, so for such a run the two are the same value.
         """
         if self.environment_fingerprint is not None:
             return self.environment_fingerprint

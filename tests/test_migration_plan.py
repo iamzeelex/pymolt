@@ -532,3 +532,84 @@ def test_an_interrupted_re_apply_is_recovered_under_its_own_run(tmp_path):
     assert receipt.run_id == run_id
     for index, change in enumerate(plan.changes):
         assert (tmp_path / f"app{index}.py").read_text(encoding="utf-8") == change.new_source
+
+
+def _post_capture_and_report(tmp_path):
+    _post_capture(tmp_path)
+    return service.build_contract_report_from_state(tmp_path)
+
+
+def test_pins_bumped_before_apply_leave_the_plan_and_baseline_valid(tmp_path):
+    """Bumping the source manifest's pins is the migration: before apply it makes neither the
+    plan nor the baseline stale, and verify takes the baseline as the starting point."""
+    from pymolt.status import build_status
+
+    plan = _plan(tmp_path)
+    (tmp_path / "requirements.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+
+    assert inspect_migration_plan(tmp_path, plan).valid
+    receipt = apply_migration_plan(tmp_path, plan)
+
+    assert receipt.environment_setup_fingerprint == plan.environment_setup_fingerprint
+    assert receipt.environment_fingerprint != plan.environment_fingerprint
+    report = _post_capture_and_report(tmp_path)
+    assert report.baseline_stale is False
+    assert not any("STALE EVIDENCE" in note for note in report.notes)
+    assert any("contents of the same manifest" in note for note in report.notes)
+    status = build_status(tmp_path)
+    assert status.phase("baseline").state == "done"
+    assert "manifest's contents changed" in status.phase("baseline").detail
+
+
+def test_a_setup_change_after_planning_still_makes_the_plan_stale(tmp_path):
+    plan = _plan(tmp_path)
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.10", target_python="3.12",
+    ).save(tmp_path / ".pymolt" / "env_config.json")
+
+    with pytest.raises(MigrationConflictError, match="configured environment changed"):
+        apply_migration_plan(tmp_path, plan)
+
+
+def test_a_target_manifest_change_after_planning_still_makes_the_plan_stale(tmp_path):
+    plan = _plan(tmp_path)
+    (tmp_path / "requirements-target.txt").write_text("flask==3.1.0\n", encoding="utf-8")
+
+    with pytest.raises(MigrationConflictError, match="target manifest changed"):
+        apply_migration_plan(tmp_path, plan)
+
+
+def test_a_plan_without_a_setup_fingerprint_is_checked_on_the_full_one(tmp_path):
+    plan = _plan(tmp_path).model_copy(update={"environment_setup_fingerprint": None})
+    (tmp_path / "requirements.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+
+    reasons = inspect_migration_plan(tmp_path, plan).reasons
+
+    assert reasons == ["configured environment or source manifest changed after planning"]
+
+
+def test_a_baseline_from_another_setup_is_still_refused(tmp_path):
+    """Only a move of the same manifest's contents is forgiven: a baseline taken under another
+    setup is not this migration's starting point, even when the plan was made after it."""
+    from pymolt.migration_plan import MigrationEvidenceError
+
+    _project(tmp_path)
+    EnvConfig(
+        selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+        base_python="3.10", target_python="3.12",
+    ).save(tmp_path / ".pymolt" / "env_config.json")
+    (tmp_path / "app0.py").write_text("from flask.helpers import safe_join\n", encoding="utf-8")
+    plan = create_migration_plan(
+        tmp_path,
+        [FilePreview(path=str(tmp_path / "app0.py"),
+                     old_source="from flask.helpers import safe_join\n",
+                     new_source="from werkzeug.utils import safe_join\n", sites=1)],
+        [DependencyMigration("flask", "2.0.3", "3.0.0")],
+        target_python="3.12", source_manifest="requirements.txt",
+        target_manifest_path=tmp_path / "requirements-target.txt", files_scanned=1,
+        predict=False,
+    )
+
+    with pytest.raises(MigrationEvidenceError, match="invalid or stale"):
+        apply_migration_plan(tmp_path, plan)
