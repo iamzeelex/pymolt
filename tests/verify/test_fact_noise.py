@@ -3,6 +3,9 @@
 Every rule has two kinds of tests: the noise case it explains and the regression it must not hide.
 Facts are built directly (no trace files): ``fact`` is one dependency call from one site.
 """
+import json
+from pathlib import Path
+
 from pymolt.verify.facts import (
     Comparison,
     ComparisonLevel,
@@ -219,18 +222,29 @@ def test_clock_readings_inside_each_run_window_are_masked():
 
 def test_a_timezone_shift_is_outside_the_window_and_still_differs():
     # UTC -> local time (UTC-6): the new value is six hours away from the new run's window.
-    old = env_fs(fact("lib.stamp", {}, (("return", "2026-11-16T10:26:04"),)), window=WIN_OLD)
-    new = env_fs(fact("lib.stamp", {}, (("return", "2026-11-16T04:31:41"),)), window=WIN_NEW)
+    old = env_fs(fact("lib.stamp", {"fmt": "iso"}, (("return", "2026-11-16T10:26:04"),)),
+                 window=WIN_OLD)
+    new = env_fs(fact("lib.stamp", {"fmt": "iso"}, (("return", "2026-11-16T04:31:41"),)),
+                 window=WIN_NEW)
     assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+    # A call that binds nothing (its value comes from state the trace never saw), in a
+    # workload with clock readings: a review item, never a pass.
+    old = env_fs(fact("lib.now", {}, (("return", "2026-11-16T10:26:04"),)), window=WIN_OLD)
+    new = env_fs(fact("lib.now", {}, (("return", "2026-11-16T04:31:41"),)), window=WIN_NEW)
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert e.category is FactCategory.CHANGED and e.review.startswith("unmeasured noise")
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
 
 
 def test_a_clock_format_change_still_differs():
     # Seconds precision lost (a float epoch became an int), and an offset appeared.
-    old = env_fs(fact("lib.ts", {}, (("return", 1_794_824_765.006),)), window=WIN_OLD)
-    new = env_fs(fact("lib.ts", {}, (("return", 1_794_825_101),)), window=WIN_NEW)
+    old = env_fs(fact("lib.ts", {"x": 1}, (("return", 1_794_824_765.006),)), window=WIN_OLD)
+    new = env_fs(fact("lib.ts", {"x": 1}, (("return", 1_794_825_101),)), window=WIN_NEW)
     assert failing(diff_facts(old, new))
-    old = env_fs(fact("lib.iso", {}, (("return", "2026-11-16T10:26:04"),)), window=WIN_OLD)
-    new = env_fs(fact("lib.iso", {}, (("return", "2026-11-16T10:31:41+00:00"),)),
+    old = env_fs(fact("lib.iso", {"x": 1}, (("return", "2026-11-16T10:26:04"),)),
+                 window=WIN_OLD)
+    new = env_fs(fact("lib.iso", {"x": 1}, (("return", "2026-11-16T10:31:41+00:00"),)),
                  window=WIN_NEW)
     assert failing(diff_facts(old, new))
 
@@ -518,3 +532,129 @@ def test_the_tracer_observing_itself_is_not_compared():
                file="/tmp/pymolt-trace-x/bundle/pymolt_trace/_rawthreads.py")
     d = diff_facts(fs(), fs(own))
     assert not d.entries and any(w.startswith("tracer-self:1:") for w in d.warnings)
+
+
+# ── step 5: the unmeasured-noise gate ─────────────────────────────────────────────────────
+
+RENDER = "jinja2.environment.Template.render"
+TEMPLATE = {"self": {"__opaque__": "jinja2.environment.Template"}, "t": "www.example.org"}
+
+
+def noisy(*facts, **kw):
+    """A side whose workload shows run variation: a volatile site (fresh input every call;
+    three calls on the old side, two on the new, so no pass can pair them one to one)."""
+    tag = kw.pop("tag", "a")
+    n = 3 if tag == "a" else 2
+    return fs(*facts, *packs([f"{tag}{i}" for i in range(n)], first=100), **kw)
+
+
+def test_a_hidden_input_value_change_in_a_noisy_workload_is_a_review_item():
+    old = noisy(fact(RENDER, TEMPLATE, (("return", "<td>23.2</td>"),)))
+    new = noisy(fact(RENDER, TEMPLATE, (("return", "<td>41.9</td>"),)), tag="b")
+    d = diff_facts(old, new)
+    e = next(e for e in d.entries if e.symbol == RENDER)
+    assert e.category is FactCategory.CHANGED and not e.fails and e.inconclusive
+    assert e.review.startswith("unmeasured noise") and e.explained.startswith("unmeasured")
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    assert any(w.startswith("run-variation: 1 volatile site") for w in d.warnings)
+
+
+def test_the_same_hidden_input_change_fails_when_the_workload_is_quiet():
+    old = fs(fact(RENDER, TEMPLATE, (("return", "<td>23.2</td>"),)))
+    new = fs(fact(RENDER, TEMPLATE, (("return", "<td>41.9</td>"),)))
+    d = diff_facts(old, new)
+    assert [e.symbol for e in failing(d)] == [RENDER] and not d.entries[0].review
+    assert not any(w.startswith("run-variation") for w in d.warnings)
+
+
+def test_a_kind_change_fails_even_in_a_noisy_workload():
+    old = noisy(fact(RENDER, TEMPLATE, (("return", "<a>"),)))
+    new = noisy(fact(RENDER, TEMPLATE, (("raise", "jinja2.exceptions.UndefinedError"),)),
+                tag="b")
+    assert [e.symbol for e in failing(diff_facts(old, new))] == [RENDER]
+
+
+def test_a_fully_observed_same_input_change_fails_even_in_a_noisy_workload():
+    msg = {"o": {"__tuple__": ["stats", {"__dict__": [["name", "/1"], ["method", "GET"]]}]}}
+    old = noisy(fact("msgpack.packb", msg, (("return", {"__bytes__": "93a5aa"}),), line=20))
+    new = noisy(fact("msgpack.packb", msg, (("return", {"__bytes__": "93a5bb"}),), line=20),
+                tag="b")
+    assert [e.symbol for e in failing(diff_facts(old, new))] == ["msgpack.packb"]
+
+
+def test_inputs_equal_only_once_masked_are_not_a_controlled_comparison():
+    # The message carries a timestamp (masked as a clock reading); the packed bytes encode
+    # it in binary, where no mask can follow it.
+    def side(ts, packed, window):
+        return env_fs(fact("msgpack.packb", {"o": {"__tuple__": ["dummy", ts]}},
+                           (("return", {"__bytes__": packed}),)), window=window)
+    d = diff_facts(side(1_794_824_765.0, "cb41dabf", WIN_OLD),
+                   side(1_794_825_101.0, "cb41dac0", WIN_NEW))
+    (e,) = d.entries
+    assert "matched-modulo-masked-input" in e.notes and e.review.startswith("unmeasured")
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+
+
+def test_a_type_change_fails_even_in_a_noisy_workload():
+    old = noisy(fact(RENDER, TEMPLATE, (("return", "<a>"),)))
+    new = noisy(fact(RENDER, TEMPLATE, (("return", {"__bytes__": "3c613e"}),)), tag="b")
+    assert [e.symbol for e in failing(diff_facts(old, new))] == [RENDER]
+
+
+def test_a_changed_document_upstream_is_not_run_variation():
+    # networkx: node_link_data changed its keys, so json.loads gets another document. The
+    # whole-leaf substitution carries digits, but it is not a per-run token.
+    doc_old = '{"directed": false, "links": [{"source": "ann", "weight": 2}]}'
+    doc_new = '{"directed": false, "edges": [{"source": "ann", "weight": 2}]}'
+    old = fs(fact("json.loads", {"s": doc_old}, (("return", {"__dict__": [["links", 1]]}),)))
+    new = fs(fact("json.loads", {"s": doc_new}, (("return", {"__dict__": [["edges", 1]]}),)))
+    d = diff_facts(old, new)
+    assert not any(w.startswith("run-variation") for w in d.warnings)
+    # json.loads itself behaved consistently: its output differs exactly as its input does.
+    (e,) = d.entries
+    assert e.explained.startswith("input-substitution") and not e.review
+
+
+# ── locust run 6, distilled: one or a few facts per mechanism, both sides ─────────────────
+# Built from the real captures (3.8 container, setprofile -> 3.12 host, sys.monitoring, 39%
+# of post events dropped, no code edits, no dependency moves) by the scratchpad script
+# make_fixture.py; host paths and the host name are anonymised.
+
+LOCUST = Path(__file__).parent / "data" / "locust_noise.json"
+
+
+def _locust_side(d):
+    s = FactSet(facts=[Fact(**f) for f in d["facts"]], root=d["root"], backends=d["backends"])
+    s.python_versions = d["python_versions"]
+    s.run_windows = [tuple(w) for w in d["run_windows"]]
+    s.env_roots, s.host_capture = d["env_roots"], d["host_capture"]
+    s.dropped_events = d["dropped_events"]
+    return s
+
+
+def test_locust_run6_fails_only_on_its_true_finding_and_platform():
+    data = json.loads(LOCUST.read_text())
+    d = diff_facts(_locust_side(data["old"]), _locust_side(data["new"]))
+    by_symbol = {}
+    for e in d.entries:
+        by_symbol.setdefault(e.symbol, []).append(e)
+    # the true finding: msgpack packs the same message to other bytes (dict order 3.8 vs 3.12)
+    fails = {e.symbol for e in failing(d)}
+    assert fails == {"msgpack.packb", "resource.setrlimit"}
+    true = [e for e in by_symbol["msgpack.packb"] if e.fails]
+    assert true and all(e.level is ComparisonLevel.EXACT and not e.new_input for e in true)
+    # the setrlimit difference is the platform (raises in the container, returns on macOS)
+    (rl,) = by_symbol["resource.setrlimit"]
+    assert rl.fails and rl.level is ComparisonLevel.TYPE
+    # hidden-state noise in a workload that varies between runs: review, not failure
+    reviews = {e.symbol for e in d.entries if e.review and e.review.startswith("unmeasured")}
+    assert {"gevent.baseserver.BaseServer.server_port",
+            "requests.structures.CaseInsensitiveDict.__getitem__"} <= reviews
+    # the explained mechanisms, each at least once
+    mechs = {(e.explained or "").split(":")[0] for e in d.entries}
+    assert {"volatile-site", "input-substitution", "source", "environment", "clock",
+            "attribution", "backend", "possibly-dropped"} <= mechs
+    (pv,) = by_symbol["platform.python_version"]
+    assert pv.explained.startswith("environment") and not pv.fails
+    assert all(not e.fails for e in by_symbol["re.compile"])
+    assert d.verdict is VerificationVerdict.FAIL
