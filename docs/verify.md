@@ -117,8 +117,8 @@ validity.
   They never replace active evidence.
 - **Freshness:** the post-migration capture must match the environment on disk now. The baseline
   must match the environment the migration started from. `pymolt apply` records that starting
-  point. For a migration done by hand, a baseline still counts as the starting point when only the
-  *contents* of the same manifest changed since (bumped pins).
+  point. A baseline still counts as the starting point when only the *contents* of the same manifest
+  changed between it and the apply, or, for a migration done by hand, since it (bumped pins).
 
 ## Facts and the diff
 

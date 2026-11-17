@@ -3372,11 +3372,13 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
     before = "post-migration" in names or before_side
     run: str | None = None  # the applied migration's short id, when there is one
     start: str | None = None
+    start_setup: str | None = None
     if "baseline" in names and before:
         migration = _applied_migration(project_dir)
         if migration is not None:
             run = migration.run_id[:8]
             start = migration.starting_fingerprint(project_dir)
+            start_setup = migration.environment_setup_fingerprint
 
     current_setup = environment_setup_fingerprint(project_dir)
     stale_now: list[str] = []
@@ -3391,7 +3393,12 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
         elif name == "baseline" and before:
             if start is not None:
                 if fingerprint != start:
-                    stale_start.append(name)
+                    # Pins bumped in the same manifest between the baseline and the apply
+                    # are part of the migration; another setup is another starting point.
+                    if baseline_setup_unchanged(slot, start_setup):
+                        content_moved.append(name)
+                    else:
+                        stale_start.append(name)
             elif fingerprint != current:
                 # Nothing pins where the migration started, and the world has moved
                 # since this baseline. If only the contents of the same manifest

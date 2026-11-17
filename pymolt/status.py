@@ -230,9 +230,12 @@ def _baseline_phase(
     run = receipt.run_id[:8]
     start = receipt.starting_fingerprint(project_path)
     if start is not None:
-        return _capture_phase(
-            "baseline", slot, start, world=f"the one migration run {run} started from",
-        )
+        world = f"the one migration run {run} started from"
+        phase = _capture_phase("baseline", slot, start, world=world)
+        # Pins bumped in the same manifest before the apply are part of the migration.
+        return _content_only_move(
+            phase, slot, getattr(receipt, "environment_setup_fingerprint", None),
+            than=f" than {world}")
     phase = _capture_phase("baseline", slot, None)
     if (
         phase.state == DONE
@@ -263,19 +266,22 @@ _CONTENT_ONLY_NOTE = (
 )
 
 
-def _content_only_move(phase: PhaseState, slot, current_setup: str | None) -> PhaseState:
+def _content_only_move(phase: PhaseState, slot, setup: str | None,
+                       than: str = "") -> PhaseState:
     """A baseline is not stale when only the contents of the same manifest moved.
 
     Bumping pins in the selected manifest is the migration itself; re-capturing the
     baseline then would record the migrated world, not the starting point. Only the
-    fingerprint mismatch is forgiven — empty or invalid captures stay stale.
+    fingerprint mismatch is forgiven — empty or invalid captures stay stale. ``setup`` is the
+    setup fingerprint the baseline must match: the project's now, or a migration's start.
     """
+    suffix = " — taken against a different manifest/environment" + than
     if (
         phase.state == STALE
-        and phase.detail.endswith("taken against a different manifest/environment")
-        and _setup_unchanged(slot, current_setup)
+        and phase.detail.endswith(suffix)
+        and _setup_unchanged(slot, setup)
     ):
-        detail = phase.detail.removesuffix(" — taken against a different manifest/environment")
+        detail = phase.detail.removesuffix(suffix)
         return PhaseState(phase=phase.phase, state=DONE, detail=detail + _CONTENT_ONLY_NOTE)
     return phase
 

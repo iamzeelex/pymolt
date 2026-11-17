@@ -88,6 +88,11 @@ changed file is prepared and parsed before the first write, and a failed apply r
 The original files are kept for `rollback`. Run again on an applied plan whose files still hold its
 changes, it writes nothing and says so.
 
+The plan stays valid while the setup (manifest file, base Python, toolset, container), the target
+manifest and the planned files are unchanged. Bumping the pins in the project's manifest does not
+make it stale. Bump them after `plan` and before the post-migration capture, before or after
+`apply` (see [plan.md](plan.md#when-to-bump-the-manifest)).
+
 | Option | Meaning |
 |---|---|
 | `--plan` | The plan file (default: `.pymolt/migration_plan.json`) |
