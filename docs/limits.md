@@ -38,8 +38,13 @@ now returns) still fails, although it may be noise.
 
 ### What the tracer does not see
 
-- **Exception types on 3.6–3.11 test suites.** A test-suite capture records that a call raised, not
-  what it raised. Long runs record the type once the targeted wrappers take over. 3.12+ always
+- **Some exception types on 3.6–3.11 test suites.** `setprofile` does not pass the exception to the
+  tracer, so pymolt reads it when your code handles it: in an `except`, `finally` or `with` block
+  that makes a call, in `pytest.raises` or `assertRaises`, or in the test runner's own handler. A
+  raise handled without any call (`except ValueError: pass`), or swallowed by C code (`hasattr`,
+  `getattr` with a default, a `for` loop's `StopIteration`), is recorded without its type. On
+  Flask's test suite (3.11), 106 of 203 raises were typed; 83 of the other 97 came from one handler
+  that makes no call. Long runs record the type once the targeted wrappers take over. 3.12+ always
   records it.
 - **Compiled calls.** A C function, a private Cython function, or a method of a Cython extension type
   is recorded without its result, and its arguments are not compared. Past 2,000 calls per call

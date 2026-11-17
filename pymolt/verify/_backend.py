@@ -18,11 +18,13 @@ The backend knows nothing about the on-disk format: it calls ``sink.on_return`` 
 ``sink.on_raise`` for a sampled call and ``sink.tally`` for an unsampled one. That decouples
 *how we observe* from *where we write*.
 
-Raise capture under setprofile, honestly (verified empirically against CPython 3.12):
+Raise capture under setprofile, honestly (verified empirically on CPython 3.6-3.12):
 ``sys.setprofile`` does NOT deliver a Python ``exception`` event. A Python function that
 raises is reported as a ``return`` with ``arg=None``; the frame's last opcode tells the two
-apart (``frame_outcome``), but the exception TYPE is not observable, so a setprofile raise is
-``"<unknown>"``. The monitoring backend reports the type.
+apart (``frame_outcome``). The exception itself is not visible at that event: the backend
+reads its TYPE later, when the caller handles it (``SetProfileBackend``'s deferred typing),
+and a raise handled without any call, or swallowed by C code, stays ``"<unknown>"``. The
+monitoring backend reports the type at the raise.
 
 Compiled (C / Cython) dependency callables called from our code are recorded too, as
 ``in = {"__c_call__": true}`` (+ ``arg0`` under sys.monitoring) with an unobserved result
@@ -702,11 +704,52 @@ OUTCOME_RETURN = 0
 OUTCOME_RAISE = 1
 OUTCOME_AMBIGUOUS = 2
 
-# The exception TYPE is not observable from a profile hook; the raise itself is.
+# A raise whose exception TYPE was not seen (see ``SetProfileBackend``'s deferred typing).
 UNTYPED_RAISE = "<unknown>"
 
 _TALLY_KIND = {OUTCOME_RETURN: "return", OUTCOME_RAISE: "raise",
                OUTCOME_AMBIGUOUS: "ambiguous"}
+
+
+def raised_label(exc):
+    """The exception type as ``module.Qualname`` (builtins bare, like every type label)."""
+    try:
+        return _nz.typename(exc)
+    except Exception:
+        return UNTYPED_RAISE
+
+
+# Bounds for ``raised_through``: a traceback is walked from the frame that handles the
+# exception down to where it was raised (a deep stack or a RecursionError is long), and the
+# exceptions it was raised from / while handling are followed a few links.
+_TB_WALK = 1024
+_CHAIN_WALK = 8
+
+
+def raised_through(exc, frame, lasti=None):
+    """The type label of ``exc``, or of an exception it was raised from or while handling, whose
+    traceback passes through ``frame`` (at instruction ``lasti`` when given: a compiled call
+    made there leaves no frame of its own), or None.
+
+    A frame object is one call. Python <=3.10 recycles a code object's frame only after the
+    frame is freed, and the caller holds the frame while it asks, so ``is`` cannot match a
+    later call."""
+    todo = [exc]
+    links = 0
+    while todo and links < _CHAIN_WALK:
+        e = todo.pop(0)
+        links += 1
+        tb = getattr(e, "__traceback__", None)
+        n = 0
+        while tb is not None and n < _TB_WALK:
+            if tb.tb_frame is frame and (lasti is None or tb.tb_lasti == lasti):
+                return raised_label(e)
+            tb = tb.tb_next
+            n += 1
+        for nxt in (getattr(e, "__cause__", None), getattr(e, "__context__", None)):
+            if nxt is not None:
+                todo.append(nxt)
+    return None
 
 
 def _opcode_sets():
@@ -802,6 +845,7 @@ def first_start(frame):
 # without limit: past the cap the cache is simply rebuilt.
 _CODE_CACHE_MAX = 200000
 _PENDING_MAX = 100000
+_PARKED_MAX = 64            # raises awaiting their type, per thread (see SetProfileBackend)
 
 # The runtime's own modules are never a dependency, whatever the target says (a "all"
 # target with the runtime installed under site-packages would otherwise record its own
@@ -1443,12 +1487,13 @@ class FrameBackend(TraceBackend):
         pending[id(frame)] = (code, ci.q, inputs, site, sym, symq, own, _now(), tid, sampled)
         return True
 
-    def _finish(self, info, outcome, value, warns=None, binding=False):
+    def _finish(self, info, outcome, value, warns=None, binding=False, end=None):
         """Complete a recorded call: ``on_return``/``on_raise`` if sampled, else ``tally``.
         ``value`` is the result (return), the raised type label (raise) or ignored
-        (ambiguous); ``warns`` the warnings attributed to the call while it ran."""
+        (ambiguous); ``warns`` the warnings attributed to the call while it ran; ``end`` the
+        time the call ended, when it is completed later than that."""
         t0 = info[7]
-        dur = (_now() - t0) if t0 is not None else None
+        dur = ((end if end is not None else _now()) - t0) if t0 is not None else None
         if not info[9]:
             tally = self._tally
             if tally is not None:
@@ -1713,6 +1758,23 @@ class SetProfileBackend(FrameBackend):
     started later; ``retire`` (the discover -> watch switch) makes every thread's hook stop
     recording new calls and remove itself at its next event once that thread has no call in
     flight, so no call is lost or recorded twice across the switch.
+
+    Deferred raise typing. A profile hook never sees the exception: CPython fetches it away
+    before an unwinding frame's ``return`` (and a ``c_exception``) event, and ``sys.exc_info()``
+    there shows an outer HANDLED exception, if any, not the propagating one. So a recorded
+    call that raised is parked, holding its frame (a compiled call: the calling frame and its
+    instruction). At the thread's next event the propagating exception is usually being
+    handled: an ``except`` / ``finally`` / ``with`` body that makes any call, ``pytest.raises``,
+    ``assertRaises``, pytest's own handler for a failing test. ``sys.exc_info()`` then shows it,
+    and its traceback (or that of an exception raised from it or while handling it) passes
+    through the parked frame: that is the raised type. An unwinding ``return`` or a
+    ``c_exception`` means the exception is still propagating: the call stays parked. Any other
+    event means it was handled without a call (``except E: pass``) or swallowed by C code
+    (``hasattr``, ``getattr`` with a default, ``next`` with a default, a ``for`` loop's
+    StopIteration): the raise is recorded untyped, as before. On <=3.7 an ambiguous outcome
+    (``return`` inside ``try/finally`` / ``with``) is parked too: a match makes it a typed raise,
+    otherwise it stays ambiguous. The cost is one test per event, plus a traceback walk per
+    raise.
     """
 
     name = "setprofile"
@@ -1729,6 +1791,63 @@ class SetProfileBackend(FrameBackend):
         self._stopped = False
         self._start_tid = None
         self._inflight = {}  # tid -> pending calls of that thread (written by that thread only)
+        # tid -> [(info, frame, lasti | None, outcome, end, warns)]: raises awaiting their type
+        # (written by that thread only; ``stop`` flushes what is left).
+        self._parked = {}
+
+    # ── deferred raise typing ──────────────────────────────────────────────────
+    def _park(self, info, frame, lasti, outcome, warns):
+        tid = _get_ident()
+        parked = self._parked.get(tid)
+        if parked is None:
+            parked = self._parked[tid] = []
+        elif len(parked) >= _PARKED_MAX:
+            self._give_up(parked.pop(0))
+        parked.append((info, frame, lasti, outcome, _now(), warns))
+
+    def _give_up(self, item):
+        """Complete a parked call without a type: an untyped raise, or still ambiguous."""
+        if item[3] == OUTCOME_RAISE:
+            self._finish(item[0], OUTCOME_RAISE, UNTYPED_RAISE, item[5], end=item[4])
+        else:
+            self._finish(item[0], OUTCOME_AMBIGUOUS, None, item[5], end=item[4])
+
+    def _resolve(self, tid, event, frame, arg):
+        """The thread's first event after a parked raise (see the class docstring)."""
+        parked = self._parked.pop(tid, None)
+        if not parked:
+            return
+        try:
+            exc = sys.exc_info()[1]
+        except Exception:
+            exc = None
+        propagating = event == "c_exception" or (
+            event == "return" and frame_outcome(frame, arg) != OUTCOME_RETURN)
+        keep = []
+        for item in parked:
+            label = raised_through(exc, item[1], item[2]) if exc is not None else None
+            if label is not None:
+                self._finish(item[0], OUTCOME_RAISE, label, item[5], end=item[4])
+            elif propagating:
+                keep.append(item)
+            else:
+                self._give_up(item)
+        if keep:
+            self._parked[tid] = keep
+
+    def after_fork_child(self):
+        FrameBackend.after_fork_child(self)
+        # The other threads' parked raises are the parent's calls: the parent records them.
+        mine = self._parked.get(_get_ident())
+        self._parked = {_get_ident(): mine} if mine else {}
+
+    def _flush_parked(self):
+        for tid in list(self._parked):
+            for item in self._parked.pop(tid, None) or ():
+                try:
+                    self._give_up(item)
+                except Exception:
+                    pass
 
     # ── per-code decisions ─────────────────────────────────────────────────────
     def _callee_entry(self, frame):
@@ -1764,6 +1883,10 @@ class SetProfileBackend(FrameBackend):
 
     def _hook(self, frame, event, arg):
         try:
+            if self._parked:
+                tid = _get_ident()
+                if tid in self._parked:
+                    self._resolve(tid, event, frame, arg)
             if event == "call":
                 if self._retired:
                     # Retired (discover -> watch): only an OBSERVED code entered without its
@@ -1835,12 +1958,13 @@ class SetProfileBackend(FrameBackend):
                     if not stack:
                         del self._cstack[key]
             elif event == "c_exception":
-                # A C callable raised. The exception TYPE is not observable from a profile
-                # hook (as for a Python raise), so the raise is untyped.
+                # A C callable raised. The event carries no exception (as for a Python raise):
+                # the call is parked with the calling frame and its instruction, which the
+                # exception's traceback passes through once the caller handles it.
                 key = stack_key()
                 stack = self._cstack.get(key)
                 if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
-                    self._finish(stack.pop()[2], OUTCOME_RAISE, UNTYPED_RAISE)
+                    self._park(stack.pop()[2], frame, frame.f_lasti, OUTCOME_RAISE, None)
                     if not stack:
                         del self._cstack[key]
                     return self._hook
@@ -1868,7 +1992,10 @@ class SetProfileBackend(FrameBackend):
     def _emit_outcome(self, info, frame, arg):
         outcome = frame_outcome(frame, arg)
         warns = self._take_warnings(frame, info[0]) if self._warned else None
-        self._finish(info, outcome, UNTYPED_RAISE if outcome == OUTCOME_RAISE else arg, warns)
+        if outcome == OUTCOME_RETURN:
+            self._finish(info, outcome, arg, warns)
+        else:
+            self._park(info, frame, None, outcome, warns)   # typed at the next event, if seen
 
     @staticmethod
     def _c_qualname(cfunc):
@@ -1929,6 +2056,7 @@ class SetProfileBackend(FrameBackend):
             except Exception:
                 pass
             self._compiled = None
+        self._flush_parked()    # raises whose type never showed: recorded untyped
         self._pending.clear()
         self._inflight.clear()
         self._cstack.clear()

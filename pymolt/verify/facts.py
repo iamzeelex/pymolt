@@ -1956,7 +1956,7 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             "input_order": input_order, "order": order}
 
 
-UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise whose type it cannot see
+UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise handled without a call
 # One shared "fields set" per model for constructed instances (every field is set): pydantic
 # otherwise keeps a fresh set per instance, ~0.7 KB per fact. Assigning an attribute adds
 # an already-present name, so sharing it is safe.
@@ -2514,8 +2514,9 @@ def _compare_outcomes(
     notes = ["nondeterministic"] if nondet else []
     if any(_is_unobserved(o) for o in (*old, *new)):
         notes.append("c-return unobserved")
-    # A raise recorded without its type (setprofile below 3.12) can only be compared as "a
-    # raise": against a typed raise on the other side that is a type-level comparison.
+    # A raise recorded without its type (setprofile below 3.12, see _backend) can only be
+    # compared as "a raise": against a typed raise on the other side that is a type-level
+    # comparison.
     untyped = o_keys != n_keys and any(_is_untyped_raise(o) for o in (*old, *new))
     if untyped:
         notes.append("exception type unknown on one side")

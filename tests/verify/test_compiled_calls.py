@@ -80,10 +80,22 @@ def test_monitoring_types_a_c_raise():
     assert rec["raised"] == "ValueError"
 
 
-def test_setprofile_records_a_c_raise_untyped():
+def test_setprofile_types_a_c_raise_its_caller_handles():
     def body():
         with pytest.raises(ValueError):
             math.sqrt(-1)
+
+    sink = _run(SetProfileBackend, ["math"], body)
+    (rec,) = _by_name(sink)["math.sqrt"]
+    assert rec["raised"] == "ValueError"
+
+
+def test_setprofile_records_a_c_raise_handled_without_a_call_untyped():
+    def body():
+        try:
+            math.sqrt(-1)
+        except ValueError:
+            pass
 
     sink = _run(SetProfileBackend, ["math"], body)
     (rec,) = _by_name(sink)["math.sqrt"]
