@@ -46,7 +46,17 @@ now returns) still fails, although it may be noise.
   site, such calls are only counted. The public Cython functions of dependency modules are wrapped
   and recorded in full.
 - **Late dunder contacts in long runs (3.12+).** Watching for dunder, property and generator calls
-  stops 30 s after the last new contact, so one first used after that is missed.
+  turns off 30 s after the last new contact. A line of your code that runs for the first time turns
+  it back on until nothing new happened for 5 s (`PYMOLT_TRACE_INCREMENTAL_REOPEN`; 0 keeps it off).
+  Still missed:
+  - such a call on a line that already ran with other objects (`x[k]` on dicts for an hour, then
+    on a DataFrame);
+  - one made more than 5 s after the last new line or contact (`dep.slow()[k]` when `slow()` takes
+    longer);
+  - code of yours imported after the 30 s through a line that already ran
+    (`importlib.import_module(name)`) and called only by a dependency;
+  - on 3.12, a function of yours over about 8,000 bytecode instructions: watching its lines would
+    make its first run slow there.
 - **Classes made at run time (3.12+).** A dependency class created without an import, whose
   instances reach only a call site that stopped being watched before the class existed, is missed.
 

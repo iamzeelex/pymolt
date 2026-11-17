@@ -98,7 +98,7 @@ Where pymolt cannot help yet:
 - **Differences it cannot judge alone.** These are review items, and the verdict is INCONCLUSIVE: a new value after your hand edit; a value that varies between runs, when the baseline was not captured with `--runs 2`; an environment difference between the two captures.
 - **Exception types on 3.6–3.11 test suites.** A call that raised is recorded without its exception type.
 - **Compiled calls.** A C function is recorded without its result, and its arguments are not compared.
-- **Late contacts in long runs (3.12+).** A dunder, property or generator call first made more than 30 s after the last new contact is missed.
+- **Late contacts in long runs (3.12+).** A dunder, property or generator call first made late in a run is recorded when its line of your code had not run before. It is missed on a line that already ran and only later reaches a dependency this way (`x[k]` on dicts for an hour, then on a DataFrame).
 - **Overhead.** Capture slows a test suite on Python 3.6 by 2.7–11.8×.
 
 The full list, the measured overhead and where pymolt was tried are in [docs/limits.md](docs/limits.md).
