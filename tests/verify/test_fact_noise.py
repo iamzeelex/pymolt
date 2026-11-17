@@ -1228,7 +1228,7 @@ def test_a_ttl_spread_over_six_calls_compares_by_value():
                    calls_returning("auth.expiry", six_calls(T_NEW, lambda t: int(t) + 40)))
     (e,) = d.entries
     assert e.fails and e.level is not ComparisonLevel.TYPE
-    assert e.old[0].value.endswith("@+120s⟩") and e.new[0].value.endswith("@+40s⟩")
+    assert e.old[0].value.endswith("@[+119,+120]s⟩") and e.new[0].value.endswith("@[+39,+40]s⟩")
 
 
 def test_six_readings_of_the_clock_stay_equal():
@@ -1236,7 +1236,7 @@ def test_six_readings_of_the_clock_stay_equal():
                    calls_returning("time_api.now", six_calls(T_NEW, lambda t: t)))
     (e,) = d.entries
     assert not e.fails and e.category is FactCategory.EQUAL
-    assert len(e.old) == 1 and e.old[0].value.endswith("@+0s⟩")
+    assert len(e.old) == 1 and e.old[0].value.endswith("@[-1,+1]s⟩")
 
 
 def test_a_constant_past_date_is_no_clock_value():
@@ -1304,3 +1304,340 @@ def test_without_sources_a_definition_span_is_not_known_and_says_so():
     new = fs(metaclass_new([["model_config", {"__dict__": [["str_strip_whitespace", True]]}]]))
     d = diff_facts(old, new, context=DiffContext())
     assert any(w.startswith("definition-spans-unknown") for w in d.warnings)
+
+
+# ── round 4: header edits lift a definition's calls; a class namespace lifts its own ──────
+
+DECO_OLD = "import lib\n\n@lib.deco\ndef view():\n    return 1\n"
+
+
+def decorated(result, *, body="1", deco="@lib.deco"):
+    src = f"import lib\n\n{deco}\ndef view():\n    return {body}\n"
+    return src, fact("lib.deco", {"f": {"__callable__": "app.view"}}, (("return", result),),
+                     func="<module>", line=3, text=deco)
+
+
+def test_a_decorator_regression_fails_although_the_decorated_body_was_edited():
+    # The decorator receives the same function whatever its body: a body edit does not make
+    # the decorator's call an edited site.
+    _, of = decorated("wrapped-v1")
+    src, nf = decorated("wrapped-v2", body="2")
+    ctx = DiffContext(old_sources={"app.py": DECO_OLD}, new_sources={"app.py": src}, edits=[])
+    assert [e.symbol for e in failing(diff_facts(fs(of), fs(nf), context=ctx))] == ["lib.deco"]
+
+
+def test_an_edited_decorator_line_makes_its_call_an_edited_site():
+    _, of = decorated("wrapped-v1")
+    src, nf = decorated("wrapped-v2", deco="@lib.deco  # strict")
+    ctx = DiffContext(old_sources={"app.py": DECO_OLD}, new_sources={"app.py": src}, edits=[])
+    (e,) = diff_facts(fs(of), fs(nf), context=ctx).entries
+    assert e.provenance == "hand" and not e.fails
+
+
+CLS_OLD = "import lib\n\nclass M(lib.Base):\n    x = 1\n\n    def a(self):\n        return 1\n"
+CLS_NEW = "import lib\n\nclass M(lib.Base):\n    x = 1\n\n    def a(self):\n        return 2\n"
+
+
+def class_call(symbol, bound, result):
+    return fact(symbol, bound, (("return", result),), func="<module>", line=3,
+                text="class M(lib.Base):")
+
+
+def test_class_creation_regressions_fail_although_a_method_body_was_edited():
+    # Editing one method's body binds no name in the class namespace: the metaclass,
+    # ``__init_subclass__`` and ``__set_name__`` calls on the class line stay strict.
+    ctx = DiffContext(old_sources={"app.py": CLS_OLD}, new_sources={"app.py": CLS_NEW}, edits=[])
+    for symbol, bound in (("lib.Meta.__new__", {"name": "M"}),
+                          ("lib.Base.__init_subclass__", {"cls": {"__type__": "app.M"}}),
+                          ("lib.Field.__set_name__", {"owner": {"__type__": "app.M"},
+                                                      "name": "x"})):
+        d = diff_facts(fs(class_call(symbol, bound, "fields=3")),
+                       fs(class_call(symbol, bound, "fields=2")), context=ctx)
+        assert [e.symbol for e in failing(d)] == [symbol], symbol
+
+
+def test_a_namespace_difference_under_an_unedited_name_is_no_edited_site():
+    # ``x = 1`` is unedited: a namespace that differs at ``x`` was not changed by the edit.
+    ctx = DiffContext(old_sources={"app.py": CLS_OLD}, new_sources={"app.py": CLS_NEW}, edits=[])
+    old = fs(class_call("lib.Meta.__new__", {"name": "M", "ns": {"__dict__": [["x", 1]]}}, "a"))
+    new = fs(class_call("lib.Meta.__new__", {"name": "M", "ns": {"__dict__": [["x", 2]]}}, "b"))
+    (e,) = diff_facts(old, new, context=ctx).entries
+    assert e.provenance is None and e.review and e.review.startswith("input changed")
+
+
+def test_a_namespace_carrying_only_edited_names_is_an_edited_site():
+    # Pydantic: ``class Config:`` became ``model_config = ...`` and a validator's decorator
+    # line was edited; the parameter ``name`` became ``cls_name`` and the metaclass's type
+    # name moved (binding and drift, not namespace differences).
+    src_old = ("from pydantic import BaseModel, validator\n\n\nclass User(BaseModel):\n"
+               "    name: str\n\n    @validator('name')\n    def name_not_blank(cls, v):\n"
+               "        return v\n\n    class Config:\n        anystr_strip_whitespace = True\n")
+    src_new = ("from pydantic import BaseModel, ConfigDict, field_validator\n\n\n"
+               "class User(BaseModel):\n    name: str\n\n    @field_validator('name')\n"
+               "    def name_not_blank(cls, v):\n        return v\n\n"
+               "    model_config = ConfigDict(str_strip_whitespace=True)\n")
+    ctx = DiffContext(old_sources={"app.py": src_old}, new_sources={"app.py": src_new})
+    old = fs(fact("pydantic.main.ModelMetaclass.__new__", {
+        "mcs": {"__type__": "pydantic.main.ModelMetaclass"}, "name": "User",
+        "namespace": {"__dict__": [["name_not_blank", {"__opaque__": "classmethod"}],
+                                   ["Config", {"__type__": "app.User.Config"}]]}},
+        (("return", {"__type__": "app.User"}),), func="<module>", line=4,
+        text="class User(BaseModel):"))
+    new = fs(fact("pydantic._internal._model_construction.ModelMetaclass.__new__", {
+        "mcs": {"__type__": "pydantic._internal._model_construction.ModelMetaclass"},
+        "cls_name": "User",
+        "namespace": {"__dict__": [
+            ["name_not_blank", {"__object__": "pydantic._internal._decorators.Proxy",
+                                "attrs": {"wrapped": "name_not_blank"}}],
+            ["model_config", {"__dict__": [["str_strip_whitespace", True]]}]]}},
+        (("return", {"__type__": "app.User2"}),), func="<module>", line=4,
+        text="class User(BaseModel):"))
+    (e,) = diff_facts(old, new, context=ctx).entries
+    assert e.provenance == "hand" and not e.fails
+
+
+# ── round 4: raw first, clock values as intervals ─────────────────────────────────────────
+
+def timed(symbol, value, t0, dur=0.01, bound=None):
+    f = fact(symbol, bound or {"p": "/data/big.bin"}, (("return", value),))
+    f.ts_min, f.ts_max = t0, t0 + dur
+    for o in f.outcomes:
+        o.ts_min, o.ts_max = t0, t0 + dur
+    return f
+
+
+def test_an_equal_epoch_range_number_on_both_sides_is_no_clock_value():
+    # A 1.79 GB file size, equal on both runs, from calls 336 s apart: equal as recorded.
+    d = diff_facts(env_fs(timed("os.path.getsize", 1794824000, T_OLD)),
+                   env_fs(timed("os.path.getsize", 1794824000, T_NEW)))
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.EXACT
+    assert e.old[0].value == 1794824000 and not e.explained
+
+
+def test_an_equal_timestamp_text_on_both_sides_stays_as_recorded():
+    # A fixed timestamp an hour before both runs (a fixture, a file's mtime), in an input and
+    # in the result: no clock reading, compared exactly.
+    stamp = "2026-11-16 09:30:00"
+    d = diff_facts(env_fs(timed("lib.parse", f"at {stamp}", T_OLD, bound={"s": stamp})),
+                   env_fs(timed("lib.parse", f"at {stamp}", T_NEW, bound={"s": stamp})))
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and e.old[0].value == f"at {stamp}"
+    assert e.input == {"bound": {"s": stamp}}
+
+
+def test_equal_recorded_outcomes_are_equal_whatever_a_mask_did():
+    # The old side ran Python 3.12.11, the new one 3.13.1: a configuration constant naming
+    # 3.12.11 is masked on the old side only, yet it was recorded equal on both.
+    old = env_fs(fact("cfg.target_python", {"k": "py"}, (("return", "3.12.11"),)),
+                 python="3.12.11")
+    new = env_fs(fact("cfg.target_python", {"k": "py"}, (("return", "3.12.11"),)),
+                 python="3.13.1")
+    (e,) = diff_facts(old, new).entries
+    assert e.category is FactCategory.EQUAL and not e.fails
+
+
+def test_an_equal_ttl_from_calls_of_different_lengths_is_equal():
+    """now + 120 from an 8 s call and from a 0.5 s call: as intervals of offsets from the
+    call, [+112,+120] and [+119,+120] overlap. Residual: a change smaller than the call's own
+    duration is not visible (now + 125 from a 10 s call is [+115,+125], which overlaps
+    [+119,+120])."""
+    old = env_fs(timed("auth.expiry", int(T_OLD) + 120, T_OLD, dur=8.0, bound={"u": 1}))
+    new = env_fs(timed("auth.expiry", int(T_NEW) + 120, T_NEW, dur=0.5, bound={"u": 1}))
+    (e,) = diff_facts(old, new).entries
+    assert not e.fails and e.old[0].value.endswith("@[+112,+120]s⟩")
+    residual = env_fs(timed("auth.expiry", int(T_NEW) + 125, T_NEW, dur=10.0, bound={"u": 1}))
+    old = env_fs(timed("auth.expiry", int(T_OLD) + 120, T_OLD, dur=0.5, bound={"u": 1}))
+    assert not failing(diff_facts(old, residual))
+
+
+def test_a_ttl_change_larger_than_the_call_still_fails():
+    old = env_fs(timed("auth.expiry", int(T_OLD) + 120, T_OLD, dur=0.5, bound={"u": 1}))
+    new = env_fs(timed("auth.expiry", int(T_NEW) + 125, T_NEW, dur=0.5, bound={"u": 1}))
+    (e,) = diff_facts(old, new).entries
+    assert e.fails and e.new[0].value.endswith("@[+124,+125]s⟩")
+
+
+def test_clock_outcomes_of_one_fact_merge_into_the_hull_of_their_intervals():
+    def calls(t0, ttl):
+        return calls_returning("auth.expiry", [(int(t0) + 40 * k + ttl, t0 + 40 * k,
+                                                t0 + 40 * k + (0.2 if k % 2 else 3.0))
+                                               for k in range(4)])
+
+    d = diff_facts(calls(T_OLD, 120), calls(T_NEW, 120))
+    (e,) = d.entries
+    assert len(e.old) == 1 and e.old[0].count == 4 and e.old[0].value.endswith("@[+117,+120]s⟩")
+    assert not e.fails
+    assert failing(diff_facts(calls(T_OLD, 120), calls(T_NEW, 40)))
+
+
+def test_several_clock_outcomes_compare_by_overlap():
+    def side(t0, ttl):
+        f = fact("auth.expiry", {"u": "u"}, line=3, text="e = auth.expiry(u)")
+        f.outcomes = [Outcome(kind="return", value=int(t0) + ttl, count=1, ts_min=t0,
+                              ts_max=t0 + 0.1),
+                      Outcome(kind="return", value="never", count=1, ts_min=t0 + 1,
+                              ts_max=t0 + 1.1)]
+        f.ts_min, f.ts_max = t0, t0 + 1.1
+        return env_fs(f)
+
+    (e,) = diff_facts(side(T_OLD, 120), side(T_NEW, 120)).entries
+    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.EXACT
+    (e,) = diff_facts(side(T_OLD, 120), side(T_NEW, 40)).entries
+    assert e.level is ComparisonLevel.TYPE  # differing sets of several outcomes: types only
+
+
+# ── round 4: parameters named on both sides compare by name ───────────────────────────────
+
+def call_with(symbol, result, **bound):
+    return fs(fact(symbol, None, (("return", result),), inp={"bound": bound}))
+
+
+def test_swapped_arguments_are_an_input_change():
+    for old, new in (({"timeout": 5, "retries": 3}, {"timeout": 3, "retries": 5}),
+                     ({"verify": True, "strict": False}, {"verify": False, "strict": True})):
+        (e,) = diff_facts(call_with("http.get", 200, **old), call_with("http.get", 200, **new)
+                          ).entries
+        assert e.review and e.review.startswith("input changed"), old
+        assert not (e.explained or "").startswith("binding")
+
+
+def test_a_parameter_bound_or_passed_by_keyword_compares_by_its_name():
+    old = fs(fact("lib.f", None, (("return", 1),), inp={"bound": {"timeout": 5, "x": 1}}))
+    new = fs(fact("lib.f", None, (("return", 1),), inp={
+        "bound": {"x": 1}, "kwargs": {"__dict__": [["timeout", 5]]}}))
+    (e,) = diff_facts(old, new).entries
+    assert not e.review and (e.explained or "").startswith("binding")
+
+
+def test_a_dropped_and_an_added_parameter_with_equal_values_read_as_a_rename():
+    # Residual: f(a=1, b=1, c=2) -> f(a=1, c=2, d=1) is a renamed parameter as far as the
+    # values show.
+    (e,) = diff_facts(call_with("lib.f", None, a=1, b=1, c=2),
+                      call_with("lib.f", None, a=1, c=2, d=1)).entries
+    assert not e.review and (e.explained or "").startswith("binding")
+
+
+# ── round 4: a differing package's version string is environment ──────────────────────────
+
+def ua_side(version, versions):
+    s = fs(fact("lib.send", None, (("return", "ok"),),
+                inp={"bound": {"ua": f"python-requests/{version}"}}))
+    s.package_versions = versions
+    return s
+
+
+def test_a_package_version_in_an_argument_is_environment():
+    old = ua_side("2.28.1", {"requests": "2.28.1", "idna": "3.4"})
+    new = ua_side("2.31.0", {"requests": "2.31.0", "idna": "3.4"})
+    (e,) = diff_facts(old, new).entries
+    assert e.category is FactCategory.EQUAL and not e.review
+    assert e.input == {"bound": {"ua": "python-requests/⟨ver:requests⟩"}}
+    assert "environment" in (e.explained or "")
+
+
+def test_without_recorded_versions_the_argument_is_compared():
+    (e,) = diff_facts(ua_side("2.28.1", {}), ua_side("2.31.0", {})).entries
+    assert e.review and e.review.startswith("input changed")
+
+
+def test_only_a_whole_version_token_of_a_package_that_changed_is_masked():
+    from pymolt.verify.facts import version_masks
+
+    old = ua_side("2.28.10", {"requests": "2.28.1", "six": "1.0", "a": "4.5.6", "b": "4.5.6"})
+    new = ua_side("2.28.10", {"requests": "2.31.0", "six": "1.1", "a": "4.5.7", "b": "4.5.8"})
+    masks = version_masks(old, new)
+    assert masks[0] == {"2.28.1": "⟨ver:requests⟩"}  # "1.0" too short, 4.5.6 names two
+    (e,) = diff_facts(old, new).entries  # 2.28.10 is no 2.28.1
+    assert e.category is FactCategory.EQUAL
+    assert e.input == {"bound": {"ua": "python-requests/2.28.10"}}
+
+
+def test_capture_metadata_records_package_versions():
+    from pymolt.verify.facts import annotate_capture_meta
+
+    s = annotate_capture_meta(fs(), {"processes": [
+        {"distributions": {"Requests": "2.31.0", "PyYAML": "6.0.1"}},
+        {"distributions": {"requests": "2.31.0", "pyyaml": "5.4"}}]})
+    assert s.package_versions == {"requests": "2.31.0"}  # pyyaml: two versions, left out
+
+
+# ── round 4: bytes, fuzzed renderings ─────────────────────────────────────────────────────
+
+def test_a_token_inside_bytes_is_masked_at_byte_boundaries_only():
+    tok = "a1b2c3d4e5f60718"
+    hexed = tok.encode().hex()
+    old = env_fs(fact("secrets.token_hex", {"n": 8}, (("return", tok),), line=1),
+                 fact("lib.pack", {"x": 1}, (("return", {"__bytes__": "0" + hexed + "0"}),),
+                      line=2),
+                 fact("lib.pack", {"x": 2}, (("return", {"__bytes__": "00" + hexed}),), line=3))
+    from pymolt.verify.facts import _masker_for
+
+    m = _masker_for(old, old.facts)
+    assert m.bytes_hex("0" + hexed + "0") == "0" + hexed + "0"  # odd offset: not a byte
+    assert m.bytes_hex("00" + hexed).startswith("00⟨src:hex:")
+    assert m.bytes_hex("ff" + hexed[:8] + "00" + hexed) == "ff" + hexed[:8] + "00" + \
+        m.tokens[tok].replace("⟨src:", "⟨src:hex:")
+
+
+FUZZ_LEAVES = [1, 2.5, None, True, "abc", "tok12345678", "3.12.11", "/proj/x", 10**30, -5,
+               1794824765, "2026-11-16 10:26:04", {"__opaque__": "x.Y"},
+               {"__object__": "a.B", "attrs": {"p": 1}}, {"__object__": "a.B", "attrs": "bad"},
+               {"__dict__": [["k", 1], ["j", 2]]}, {"__dict__": [["k"]]}, {"__dict__": "x"},
+               {"__tuple__": [1, 2]}, {"__bytes__": "00ff00ff00ff00ff"}, {"__bytes__": 123},
+               {"__uuid__": "12345678-1234-1234-1234-123456789abc"}, {"__structure__": "r.R"},
+               {"__type__": "t.T"}, [1, [2]], {"a": {"b": [1, {"c": 2}]}}]
+
+
+def fuzz_side(rng):
+    facts = []
+    for i in range(rng.randint(1, 5)):
+        sym = rng.choice(["uuid.uuid4", "lib.a", "lib.b", "time.time"])
+        r = rng.random()
+        if r < .1:
+            inp = rng.choice([None, 5, "x", [1, 2]])
+        else:
+            inp = {"bound": {f"p{j}": rng.choice(FUZZ_LEAVES) for j in range(rng.randint(0, 3))}}
+            if rng.random() < .3:
+                inp["varargs"] = {"__tuple__": [rng.choice(FUZZ_LEAVES)
+                                                for _ in range(rng.randint(0, 2))]}
+            if rng.random() < .3:
+                inp["kwargs"] = {"__dict__": [[f"k{j}", rng.choice(FUZZ_LEAVES)]
+                                              for j in range(2)]}
+        result = {"__uuid__": "12345678-1234-1234-1234-123456789abc"} if sym == "uuid.uuid4" \
+            else rng.choice(FUZZ_LEAVES)
+        f = fact(sym, None, (("return", result),) if rng.random() > .2 else
+                 (("raise", "ValueError"),), line=rng.randint(1, 3),
+                 text=f"x{rng.randint(1, 2)}", inp=inp, first=i, count=rng.randint(1, 3))
+        f.ts_min, f.ts_max = T_OLD, T_OLD + 1.0
+        facts.append(f)
+    return fs(*facts, run_windows=[(T_OLD - 65, T_OLD + 235)],
+              dropped_events=rng.choice([None, 0, 3]), env_roots=["/proj"],
+              python_versions=["3.12.11"])
+
+
+def fuzz_digest(n):
+    import random
+
+    h = hashlib.sha1()
+    for i in range(n):
+        rng = random.Random(i)
+        d = diff_facts(fuzz_side(rng), fuzz_side(rng), context=DiffContext() if i % 2 else None)
+        h.update(json.dumps(d.to_json_dict(include_equal=True), sort_keys=True,
+                            default=str).encode())
+    return h.hexdigest()
+
+
+def test_fuzzed_renderings_neither_crash_nor_depend_on_the_hash_seed():
+    import os
+    import subprocess
+    import sys
+
+    assert fuzz_digest(150) == fuzz_digest(150)
+    here = str(Path(__file__).parent)
+    code = (f"import sys; sys.path.insert(0, {here!r}); import test_fact_noise as t; "
+            "print(t.fuzz_digest(60))")
+    digests = {subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                              env={**os.environ, "PYTHONHASHSEED": seed}, check=True
+                              ).stdout.strip() for seed in ("1", "4242")}
+    assert len(digests) == 1
