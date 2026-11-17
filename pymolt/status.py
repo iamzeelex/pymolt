@@ -280,7 +280,8 @@ def _content_only_move(phase: PhaseState, slot, current_setup: str | None) -> Ph
     return phase
 
 
-def _migration_phase(receipt, baseline: PhaseState, baseline_slot) -> PhaseState:
+def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
+                     project_path: Path | None = None) -> PhaseState:
     """Project the explicit mutation receipt; never infer an apply from captures."""
     if receipt is None:
         if baseline.state == DONE:
@@ -315,8 +316,11 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot) -> PhaseState
             phase="migration", state=STALE,
             detail=f"{detail} — its authorising baseline is missing",
         )
+    from pymolt.verify.service import same_slot_path
+
     if (
-        receipt.baseline_trace_path != baseline_slot.trace_path
+        not same_slot_path(project_path or Path("."), receipt.baseline_trace_path,
+                           baseline_slot.trace_path)
         or receipt.baseline_captured_at != baseline_slot.captured_at
     ):
         return PhaseState(
@@ -397,6 +401,8 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
         environment_fingerprint,
         environment_setup_fingerprint,
         load_contract_state,
+        sources_changed,
+        usable_replicate,
     )
 
     project_path = Path(project_dir)
@@ -462,7 +468,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     assess_phase = status.phase("assess")
     assert assess_phase is not None
     plan = _plan_phase(project_path, assess_phase, receipt)
-    migration = _migration_phase(receipt, baseline, baseline_slot)
+    migration = _migration_phase(receipt, baseline, baseline_slot, project_path)
     post = _capture_phase("post_migration", post_slot, fingerprint)
     if post_slot is not None and receipt is None:
         post = PhaseState(
@@ -520,8 +526,15 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     _decide_next(
         status, config, baseline, plan, migration, post, report,
         receipt, verification, workload,
+        has_replicate=usable_replicate(project_path, contract)[0] is not None,
+        can_replicate=lambda: baseline_slot is not None and fingerprint is not None
+        and fingerprint == baseline_slot.env_fingerprint
+        and sources_changed(project_path, baseline_slot.sources_path) == [],
     )
     return status
+
+
+_REPLICATE_REASON = "a baseline replicate would tell"  # service._fact_diff_reasons
 
 
 def _decide_next(
@@ -535,6 +548,9 @@ def _decide_next(
     receipt,
     verification,
     workload: list[str],
+    *,
+    has_replicate: bool = False,
+    can_replicate=lambda: False,
 ) -> None:
     """The single next command. One, not a menu: the point is to remove the choice."""
     scan = status.phase("scan")
@@ -599,6 +615,23 @@ def _decide_next(
     if verification is not None and verification.verdict.value == "fail":
         status.next_command = "pymolt rollback ."
         status.next_reason = "The verdict is FAIL. Rollback restores the files apply changed."
+        return
+    if (verification is not None and verification.verdict.value == "inconclusive"
+            and not has_replicate and baseline.state == DONE
+            and any(_REPLICATE_REASON in r for r in verification.reasons)):
+        if can_replicate():
+            status.next_command = "pymolt capture baseline --replicate"
+            status.next_reason = (
+                "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. Run "
+                "the baseline's command again (same code, same environment) so verify can "
+                "measure that noise, then verify again.")
+        else:
+            status.next_command = "pymolt rollback ."
+            status.next_reason = (
+                "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. A "
+                "baseline replicate measures it but must run the baseline's code in its "
+                "environment: roll back, `pymolt capture baseline --replicate`, apply again, "
+                "verify. (`pymolt capture baseline --runs 2` records both before migrating.)")
         return
     status.next_command = None
     status.next_reason = (

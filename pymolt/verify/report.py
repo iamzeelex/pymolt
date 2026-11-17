@@ -471,8 +471,12 @@ def build_contract_report(
     resolve_identities: bool = True,
     predictions: Mapping[str, Any] | None = None,
     diff_context: Any = None,
+    noise_profile: tuple[Mapping[str, Any], str] | None = None,
 ) -> ContractReport:
     """Build the unified report.
+
+    ``noise_profile`` (``(profile, label)``, from a baseline replicate): the run-to-run noise
+    the fact diff is judged with (``replicate.apply_noise_profile``).
 
     ``diff_context`` (a ``facts.DiffContext``): the snapshots, apply ledger, contact maps and
     successors that let the fact diff judge an edited site by who edited it.
@@ -850,6 +854,10 @@ def build_contract_report(
                     else DiffProfile.EXACT,
                     context=diff_context,
                 )
+                if noise_profile is not None:
+                    from pymolt.verify.replicate import apply_noise_profile
+
+                    apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1])
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
                     report.calibration = _calibration(predictions, old_facts, fdiff, root)
@@ -933,8 +941,10 @@ def _attach_fact_diff(
     })
     report.fact_diff = scoped.to_json_dict()
     kept = {id(e) for e in scoped.entries}
+    from pymolt.verify.fact_report import cap_entry
+
     report.unpredicted_changes = [
-        e.model_dump(mode="json", exclude_none=True)
+        cap_entry(e.model_dump(mode="json", exclude_none=True))
         for e in fdiff.entries if id(e) not in kept and e.fails]
     report.fact_equal_symbols = _compared_equal_symbols(scoped)
     bdiff = scoped.to_boundary_diff()
