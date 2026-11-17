@@ -27,6 +27,9 @@ class MigrationReceipt(BaseModel):
 
     schema_version: int = MIGRATION_STATE_SCHEMA_VERSION
     run_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    # The plan the run applied. A plan applied again after a rollback is a new run with its
+    # own id; None in receipts from before this was recorded, when the two ids were equal.
+    plan_id: str | None = None
     status: Literal["applied", "rolled_back"] = "applied"
     # Capture timestamps are second-granularity; use the same clock precision so
     # a post capture taken immediately after apply is not misclassified as older.

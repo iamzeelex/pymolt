@@ -131,9 +131,10 @@ def test_apply_uses_exact_plan_and_rollback_restores_it(tmp_path):
     frozen = tmp_path / ".pymolt" / "migrations" / plan.plan_id / "plan.json"
     assert frozen.is_file()
 
-    rolled_plan, rolled_at = rollback_migration(tmp_path)
+    rolled_plan, rolled_at, rolled_run = rollback_migration(tmp_path)
 
     assert rolled_plan.plan_id == plan.plan_id
+    assert rolled_run == plan.plan_id      # a plan's first run carries the plan's id
     assert rolled_at
     assert "flask.helpers" in (tmp_path / "app0.py").read_text(encoding="utf-8")
     restored_receipt = MigrationReceipt.load(tmp_path)
@@ -451,3 +452,83 @@ def test_apply_again_after_a_later_edit_refuses_and_points_at_rollback(tmp_path)
     assert "stale" not in str(caught.value)
     assert "rollback" in caught.value.hint and "stack" in caught.value.hint
     assert path.read_text(encoding="utf-8").endswith("# later edit\n")
+
+
+def test_a_rolled_back_plan_applies_again_as_a_new_run(tmp_path):
+    import json
+
+    plan = _plan(tmp_path, files=2)
+    first = apply_migration_plan(tmp_path, plan)
+    rollback_migration(tmp_path)
+
+    again = apply_migration_plan(tmp_path, plan)
+
+    assert again.outcome == "applied" and again.status == "applied"
+    assert again.run_id != first.run_id and again.plan_id == plan.plan_id
+    for index, change in enumerate(plan.changes):
+        assert (tmp_path / f"app{index}.py").read_text(encoding="utf-8") == change.new_source
+    run_dir = tmp_path / ".pymolt" / "migrations" / again.run_id
+    state = json.loads((run_dir / "state.json").read_text())
+    assert (state["status"], state["plan_id"], state["attempt"]) == ("applied", plan.plan_id, 2)
+    assert MigrationPlan.load(tmp_path, run_dir / "plan.json") == plan
+    ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
+    assert ledger["run_id"] == again.run_id
+    # The first run stays rolled back; the default rollback undoes the run in effect.
+    with pytest.raises(MigrationConflictError, match="not rollback-ready"):
+        rollback_migration(tmp_path, run_id=first.run_id)
+    _plan_again, _at, rolled = rollback_migration(tmp_path)
+    assert rolled == again.run_id
+    assert (tmp_path / "app0.py").read_text(encoding="utf-8") == plan.changes[0].old_source
+    third = apply_migration_plan(tmp_path, plan)
+    assert third.run_id not in (first.run_id, again.run_id)
+    assert apply_migration_plan(tmp_path, plan).outcome == "already_applied"
+
+
+def test_re_apply_after_rollback_refuses_a_file_changed_since(tmp_path):
+    plan = _plan(tmp_path)
+    apply_migration_plan(tmp_path, plan)
+    rollback_migration(tmp_path)
+    path = tmp_path / "app0.py"
+    path.write_text("# user edit\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(MigrationConflictError, match="source changed after planning"):
+        apply_migration_plan(tmp_path, plan)
+
+    assert path.read_text(encoding="utf-8").startswith("# user edit")
+
+
+def test_re_apply_after_rollback_still_needs_the_plan_s_baseline(tmp_path):
+    plan = _plan(tmp_path)
+    apply_migration_plan(tmp_path, plan)
+    rollback_migration(tmp_path)
+    script = tmp_path / "baseline.py"
+    service.capture_named_trace(
+        tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
+        command=[sys.executable, str(script)], target="json",
+    )
+
+    with pytest.raises(MigrationPlanError, match="baseline"):
+        apply_migration_plan(tmp_path, plan)
+
+    assert (tmp_path / "app0.py").read_text(encoding="utf-8") == plan.changes[0].old_source
+
+
+def test_an_interrupted_re_apply_is_recovered_under_its_own_run(tmp_path):
+    plan = _plan(tmp_path, files=2)
+    apply_migration_plan(tmp_path, plan)
+    rollback_migration(tmp_path)
+    run_id = "ab" * 16
+    run_dir = tmp_path / ".pymolt" / "migrations" / run_id
+    run_dir.mkdir(parents=True)
+    plan.save(tmp_path, run_dir / "plan.json")
+    _save_run_state(run_dir, MigrationRunState(
+        run_id=run_id, status="prepared", prepared_at="2026-01-01T00:00:00+00:00",
+        plan_id=plan.plan_id, attempt=2,
+    ))
+    (tmp_path / "app0.py").write_text(plan.changes[0].new_source, encoding="utf-8")
+
+    receipt = apply_migration_plan(tmp_path, plan)
+
+    assert receipt.run_id == run_id
+    for index, change in enumerate(plan.changes):
+        assert (tmp_path / f"app{index}.py").read_text(encoding="utf-8") == change.new_source

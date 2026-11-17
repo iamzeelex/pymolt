@@ -339,14 +339,6 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
             phase="plan", state=DONE,
             detail=f"consumed by migration run {receipt.run_id[:8]}",
         )
-    if receipt is not None and getattr(receipt, "status", "applied") == "rolled_back":
-        return PhaseState(
-            phase="plan", state=STALE,
-            detail=(
-                f"plan {receipt.run_id[:8]} was already applied and rolled back; "
-                "create a fresh review plan"
-            ),
-        )
     if assess.state != DONE:
         return PhaseState(
             phase="plan", state=BLOCKED,
@@ -365,11 +357,16 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
             phase="plan", state=STALE,
             detail=f"plan {plan.plan_id[:8]} is stale: {inspection.reasons[0]}",
         )
+    # A rolled-back plan whose files are back at their planned originals applies again as is.
+    again = (receipt is not None and receipt.status == "rolled_back"
+             and (receipt.plan_id or receipt.run_id) == plan.plan_id)
     return PhaseState(
         phase="plan", state=DONE,
         detail=(
             f"plan {plan.plan_id[:8]} · {len(plan.changes)} file(s) · "
             f"{sum(change.sites for change in plan.changes)} rewrite(s)"
+            + (f" · rolled back in run {receipt.run_id[:8]}; apply runs it again"
+               if again else "")
         ),
     )
 
