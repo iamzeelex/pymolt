@@ -913,17 +913,34 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
+    from pymolt.verify.service import load_contract_state, set_aside_capture
+
+    # What became of the post-migration capture: kept while the code it recorded is still on
+    # disk (the run had changed no file), set aside (kept among the diagnostics) otherwise.
+    contract = load_contract_state(project_path)
+    aside = set_aside_capture(contract)
+    post, post_trace = None, None
+    if contract.post_migration is not None:
+        post, post_trace = "kept", contract.post_migration.trace_path
+    elif aside is not None and aside.set_aside_by == migration_plan.plan_id:
+        post, post_trace = "set_aside", aside.trace_path
     payload = {
         "run_id": migration_plan.plan_id,
         "rolled_back_at": rolled_back_at,
         "files_restored": len(migration_plan.changes),
+        "post_migration_capture": post,
+        "post_migration_trace": post_trace,
     }
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
+    post_line = {
+        "kept": "\nPost-migration capture: kept (the run had changed no file)",
+        "set_aside": f"\nPost-migration capture: set aside, kept at {post_trace}",
+    }.get(post or "", "")
     console.print(Panel(
         f"Rolled back run [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]\n"
-        f"Files restored: [bold]{len(migration_plan.changes)}[/bold]",
+        f"Files restored: [bold]{len(migration_plan.changes)}[/bold]{escape(post_line)}",
         title="Migration rolled back", border_style="yellow", expand=False,
     ))
     next_step(project_path)

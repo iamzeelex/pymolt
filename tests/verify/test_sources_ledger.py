@@ -196,7 +196,7 @@ def test_the_plans_type_relocations_list_reaches_the_context_as_a_map(tmp_path, 
          "new": "pydantic_core._pydantic_core.ValidationError", "via": "pydantic.ValidationError"},
         {"old": "incomplete.Entry"},
     ])
-    receipt = SimpleNamespace(status="applied", plan_path="plan.json")
+    receipt = SimpleNamespace(status="applied", in_effect=True, plan_path="plan.json")
     monkeypatch.setattr(migration_state.MigrationReceipt, "load",
                         staticmethod(lambda root: receipt))
     monkeypatch.setattr(migration_plan.MigrationPlan, "load",
