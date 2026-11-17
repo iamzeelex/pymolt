@@ -802,10 +802,12 @@ _PENDING_MAX = 100000
 
 # The runtime's own modules are never a dependency, whatever the target says (a "all"
 # target with the runtime installed under site-packages would otherwise record its own
-# writer / controller threads).
+# writer / controller threads), and never the project's code: the bundle lives in a temp
+# directory, outside site-packages, so the near-side test alone would take it for the project
+# (sys.monitoring then recorded the JSONL writer's ``deque.popleft`` in ``_rawthreads``).
 _SELF_PKG = __name__.rsplit(".", 1)[0]
 _SELF_MODULES = frozenset(_SELF_PKG + "." + n for n in (
-    "_backend", "_monitoring", "_wrap", "_sinks", "_normalize", "_identity",
+    "_backend", "_monitoring", "_wrap", "_sinks", "_normalize", "_identity", "_rawthreads",
     "boundary_tracer", "sitecustomize", "_install_hook"))
 
 
