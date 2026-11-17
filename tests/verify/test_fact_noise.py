@@ -156,3 +156,187 @@ def test_a_changed_input_signature_is_not_absorbed_into_a_group():
     new = fs(fact("lib.f", {"b": 9}))
     d = diff_facts(old, new)
     assert d.counts()["disappeared"] == 2 and d.counts()["appeared"] == 1
+
+
+# ── step 3: environment, clock, entropy sources, input substitution ───────────────────────
+
+WIN_OLD = (1_794_824_533.0, 1_794_824_831.0)   # 2026-11-16 10:22:13 .. 10:27:11 UTC
+WIN_NEW = (1_794_824_897.0, 1_794_825_149.0)   # 2026-11-16 10:28:17 .. 10:32:29 UTC
+
+
+def env_fs(*facts, roots=(), python=None, window=None, **kw):
+    s = fs(*facts, **kw)
+    s.env_roots = list(roots)
+    s.python_versions = [python] if python else []
+    s.run_windows = [window] if window else []
+    s.host_capture = False
+    return s
+
+
+def test_project_root_as_each_process_saw_it_is_environment():
+    tb_old = '  File "/work/locust/test/test_web.py", line 198, in test_exceptions\n'
+    tb_new = ('  File "/Users/me/src/locust/locust/test/test_web.py", line 198, in '
+              'test_exceptions\n')
+    old = env_fs(fact("html.escape", {"s": tb_old}, (("return", tb_old),)), roots=["/work"])
+    new = env_fs(fact("html.escape", {"s": tb_new}, (("return", tb_new),)),
+                 roots=["/Users/me/src/locust"])
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert not failing(d) and e.category is FactCategory.EQUAL
+    assert e.level is ComparisonLevel.MASKED and e.explained.startswith("environment")
+
+
+def test_a_path_that_lost_its_root_still_differs():
+    old = env_fs(fact("lib.where", {}, (("return", "/work/locust/data.csv"),)), roots=["/work"])
+    new = env_fs(fact("lib.where", {}, (("return", "locust/data.csv"),)),
+                 roots=["/Users/me/src/locust"])
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+def test_the_python_version_is_environment_and_stays_visible():
+    old = env_fs(fact("platform.python_version", {}, (("return", "3.8.20"),)), python="3.8.20")
+    new = env_fs(fact("platform.python_version", {}, (("return", "3.12.11"),)),
+                 python="3.12.11")
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert not failing(d) and e.explained.startswith("environment")
+    assert e.old[0].value == "⟨python⟩" and "3.8.20" in e.explained
+
+
+def test_clock_readings_inside_each_run_window_are_masked():
+    old = env_fs(fact("lib.render", {"t": "x"},
+                      (("return", "During: 2026-11-16 10:26:04 - report_1794824765.0062904"),)),
+                 window=WIN_OLD)
+    new = env_fs(fact("lib.render", {"t": "x"},
+                      (("return", "During: 2026-11-16 10:31:41 - report_1794825101.045572"),)),
+                 window=WIN_NEW)
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert not failing(d) and e.explained.startswith("clock")
+    assert e.level is ComparisonLevel.MASKED
+
+
+def test_a_timezone_shift_is_outside_the_window_and_still_differs():
+    # UTC -> local time (UTC-6): the new value is six hours away from the new run's window.
+    old = env_fs(fact("lib.stamp", {}, (("return", "2026-11-16T10:26:04"),)), window=WIN_OLD)
+    new = env_fs(fact("lib.stamp", {}, (("return", "2026-11-16T04:31:41"),)), window=WIN_NEW)
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+def test_a_clock_format_change_still_differs():
+    # Seconds precision lost (a float epoch became an int), and an offset appeared.
+    old = env_fs(fact("lib.ts", {}, (("return", 1_794_824_765.006),)), window=WIN_OLD)
+    new = env_fs(fact("lib.ts", {}, (("return", 1_794_825_101),)), window=WIN_NEW)
+    assert failing(diff_facts(old, new))
+    old = env_fs(fact("lib.iso", {}, (("return", "2026-11-16T10:26:04"),)), window=WIN_OLD)
+    new = env_fs(fact("lib.iso", {}, (("return", "2026-11-16T10:31:41+00:00"),)),
+                 window=WIN_NEW)
+    assert failing(diff_facts(old, new))
+
+
+UUID_A = "03c09253-4e55-4474-913d-3ac4c0d94453"
+UUID_B = "d2b0d279-25f4-4c89-b5f0-02153bbccd83"
+
+
+def uuid_side(u, rendered, line_out="node"):
+    return [fact("uuid.uuid4", {}, (("return", {"__uuid__": u}),), line=5, text="uuid4()"),
+            fact("lib.register", {"name": "w"}, (("return", f"{line_out}_{rendered}"),),
+                 line=6, first=1)]
+
+
+def test_values_from_an_entropy_source_are_masked_everywhere_on_that_side():
+    old = fs(*uuid_side(UUID_A, UUID_A.replace("-", "")))
+    new = fs(*uuid_side(UUID_B, UUID_B.replace("-", "")))
+    d = diff_facts(old, new)
+    assert not failing(d), [(e.symbol, e.old, e.new) for e in failing(d)]
+    reg = next(e for e in d.entries if e.symbol == "lib.register")
+    assert reg.explained.startswith("source") and reg.level is ComparisonLevel.MASKED
+
+
+def test_a_uuid_format_change_still_differs():
+    # The dependency used to render the id with hyphens; now it renders the hex form.
+    old = fs(*uuid_side(UUID_A, UUID_A))
+    new = fs(*uuid_side(UUID_B, UUID_B.replace("-", "")))
+    d = diff_facts(old, new)
+    assert [e.symbol for e in failing(d)] == ["lib.register"]
+
+
+def test_a_random_pick_is_compared_by_structure():
+    choice = "random.Random.choice"
+    seq = {"self": {"__opaque__": "random.Random"}, "seq": {"__list__": [0.5, 1, 1.5]}}
+    d = diff_facts(fs(fact(choice, seq, (("return", 1),))),
+                   fs(fact(choice, seq, (("return", 1.5),))))
+    (e,) = d.entries
+    assert not failing(d) and e.explained.startswith("source")
+    # ... unless the program seeded its generator: then the values are deterministic.
+    seed = fact("random.seed", {"a": 42}, line=3, text="random.seed(42)")
+    d = diff_facts(fs(seed, fact(choice, seq, (("return", 1),))),
+                   fs(seed, fact(choice, seq, (("return", 1.5),))))
+    assert [e.symbol for e in failing(d)] == [choice]
+
+
+def test_a_new_raise_from_an_entropy_source_still_fails():
+    old = fs(fact("random.Random.choice", {"seq": {"__list__": []}}, (("return", 1),)))
+    new = fs(fact("random.Random.choice", {"seq": {"__list__": []}}, (("raise", "IndexError"),)))
+    assert failing(diff_facts(old, new))
+
+
+def url_pair(port_old, port_new, *, scheme_new="http"):
+    old = fact("urllib.parse.urlparse", {"url": f"http://127.0.0.1:{port_old}/x"},
+               (("return", {"__object__": "urllib.parse.ParseResult", "attrs": {
+                   "netloc": f"127.0.0.1:{port_old}", "scheme": "http", "path": "/x"}}),))
+    new = fact("urllib.parse.urlparse", {"url": f"http://127.0.0.1:{port_new}/x"},
+               (("return", {"__object__": "urllib.parse.ParseResult", "attrs": {
+                   "netloc": f"127.0.0.1:{port_new}", "scheme": scheme_new, "path": "/x"}}),))
+    return fs(old), fs(new)
+
+
+def test_output_that_differs_only_as_the_input_does_is_masked():
+    d = diff_facts(*url_pair(32925, 57864))
+    (e,) = d.entries
+    assert not failing(d) and e.level is ComparisonLevel.MASKED
+    assert e.explained.startswith("input-substitution") and "32925 -> 57864" in e.explained
+
+
+def test_a_residual_difference_beyond_the_input_still_fails():
+    # The port changed run to run, AND the scheme now differs: the second is not explained.
+    d = diff_facts(*url_pair(32925, 57864, scheme_new="https"))
+    assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
+
+
+def test_an_input_structure_change_is_not_substituted():
+    old = fs(fact("lib.f", {"url": "a:1111"}, (("return", "a:1111"),)))
+    new = fs(fact("lib.f", {"uri": "a:2222"}, (("return", "a:2222"),)))
+    d = diff_facts(old, new)
+    assert not any((e.explained or "").startswith("input-substitution") for e in d.entries)
+    assert failing(d)
+
+
+def test_a_short_token_only_masks_whole_words():
+    # 9095 -> 9096 is the run's port; the output also holds a constant containing 9095.
+    old = fs(fact("lib.page", {"port": 9095}, (("return", "port 9095, e=2.5949095"),)))
+    new = fs(fact("lib.page", {"port": 9096}, (("return", "port 9096, e=2.5949096"),)))
+    d = diff_facts(old, new)
+    assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
+    new = fs(fact("lib.page", {"port": 9096}, (("return", "port 9096, e=2.5949095"),)))
+    assert not failing(diff_facts(old, new))
+
+
+def test_same_complete_input_value_change_fails():
+    # msgpack: the same message packs to different bytes (dict insertion order changed).
+    msg = {"o": {"__tuple__": ["stats", {"__dict__": [["name", "/1"], ["method", "GET"]]}]}}
+    old = fs(fact("msgpack.packb", msg, (("return", {"__bytes__": "93a5aa"}),)))
+    new = fs(fact("msgpack.packb", msg, (("return", {"__bytes__": "93a5bb"}),)))
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+def test_opaque_receiver_value_change_fails_in_a_quiet_workload():
+    # jinja2: the same template and context now render https instead of http.
+    inp = {"self": {"__opaque__": "jinja2.environment.Template"}, "t": "www.example.org"}
+    old = fs(fact("jinja2.environment.Template.render", inp,
+                  (("return", '<a href="http://www.example.org">'),)))
+    new = fs(fact("jinja2.environment.Template.render", inp,
+                  (("return", '<a href="https://www.example.org">'),)))
+    d = diff_facts(old, new)
+    assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
+    assert d.verdict is VerificationVerdict.FAIL
