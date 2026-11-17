@@ -490,6 +490,13 @@ class Controller(object):
         from ._wrap import WrapBackend
         symbols, prefixes = _partition(self.impact_targets)
         observed = sorted(s for s in list(d.observed_syms) if s)
+        # A stdlib function wrapped in place is visible to the program (logging's findCaller
+        # reports the wrapper as the call site, a traceback runs through it, ``inspect.stack``
+        # lists it): stdlib targets stay observed by the profile hook, narrowed to them.
+        stdlib = stdlib_targets(os.environ.get(ENV_STDLIB, ""))
+        in_stdlib = [s for s in observed if s.split(".", 1)[0] in stdlib]
+        stdlib_set = set(in_stdlib)
+        observed = [s for s in observed if s not in stdlib_set]
         wrappable = [s for s in observed if "<" not in s]
         seen = set(wrappable)
         wrap = WrapBackend(wrappable + [s for s in symbols if s not in seen], self.sink,
@@ -500,8 +507,9 @@ class Controller(object):
                 wrap._mark_skip(s, "unaddressable")
         d.skip_wrapped = True       # a still-hooked thread skips what a wrapper records
         wrap.start()                # watch in place first ...
-        if prefixes:
-            d.narrow(prefixes)      # ... then discover narrows to the module.* targets
+        keep = list(prefixes) + sorted({s.split(".", 1)[0] for s in in_stdlib})
+        if keep:
+            d.narrow(keep)          # ... then discover narrows to the module.* / stdlib targets
         else:
             d.retire()              # ... or stops taking new calls (in-flight ones complete)
         return wrap
