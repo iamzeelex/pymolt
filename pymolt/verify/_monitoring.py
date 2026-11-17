@@ -78,6 +78,7 @@ import time
 import types
 
 from ._backend import (
+    _C_SITE_MAX,
     _CODE_CACHE_MAX,
     _HEAPTYPE,
     C_RETURN_UNOBSERVED,
@@ -961,6 +962,12 @@ class MonitoringBackend(FrameBackend):
             frame = _frame_of(code)
             if frame is None:
                 return True
+        n = self._ccount.get(key, 0)
+        if n >= _C_SITE_MAX:
+            return False        # a hot loop is witnessed, not replayed: this site stops here
+        if n == 0 and len(self._ccount) >= _CODE_CACHE_MAX:
+            self._ccount.clear()
+        self._ccount[key] = n + 1
         info = self._c_start(frame, csym or ent[2],
                              NO_ARG if arg0 is self._mon.MISSING else arg0)
         stack = self._cstack.get(tid)

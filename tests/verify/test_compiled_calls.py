@@ -362,3 +362,27 @@ def test_static_c_types_render_opaque_not_structurally():
     assert normalize(g) == {"__opaque__": "generator"}
     assert normalize(g.gi_code) == {"__opaque__": "code"}
     assert normalize(sys._getframe()) == {"__opaque__": "frame"}
+
+
+@pytest.mark.parametrize("cls", BACKENDS)
+def test_a_hot_loop_of_compiled_calls_is_witnessed_not_replayed(cls):
+    import collections
+
+    d = collections.deque(range(5))
+
+    def body():
+        for _ in range(3000):
+            d.append(d.popleft())
+
+    sink = _run(cls, ["collections"], body)
+    recs = _by_name(sink)["collections.deque.popleft"]
+    assert sum(r["count"] for r in recs) == 2000        # _C_SITE_MAX at that line
+
+
+def test_bound_builtin_methods_are_decided_once_per_owner_class():
+    import collections
+
+    be = SetProfileBackend(PrefixMatcher(["collections"]), MemorySink(), source=__name__)
+    a, b = collections.deque(), collections.deque()
+    assert be._c_sym(a.append) == be._c_sym(b.append) == "collections.deque.append"
+    assert len(be._ccache) == 0 and len(be._cmeth) == 1     # no entry per bound object
