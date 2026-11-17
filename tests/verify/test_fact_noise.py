@@ -6,6 +6,7 @@ Facts are built directly (no trace files): ``fact`` is one dependency call from 
 from pymolt.verify.facts import (
     Comparison,
     ComparisonLevel,
+    DiffContext,
     Fact,
     FactCategory,
     FactSet,
@@ -340,3 +341,180 @@ def test_opaque_receiver_value_change_fails_in_a_quiet_workload():
     d = diff_facts(old, new)
     assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
     assert d.verdict is VerificationVerdict.FAIL
+
+
+# ── step 4: attribution and evidence asymmetries ──────────────────────────────────────────
+
+DECORATED = ('import flask\napp = flask.Flask("x")\n\n\n@app.route("/fast")\n'
+             'def fast():\n    return "ok"\n')
+
+
+def ctx_for(src):
+    return DiffContext(old_sources={"app.py": src}, new_sources={"app.py": src})
+
+
+def decorator_call(symbol, line, text, fn="app.fast", result=None):
+    return fact(symbol, {"f": {"__callable__": fn}},
+                (("return", result or {"__callable__": fn}),), func="<module>", line=line,
+                text=text)
+
+
+def test_a_decorator_named_and_placed_differently_by_the_interpreter_pairs():
+    # 3.8: co_name only, call attributed to the def line; 3.12: co_qualname, the @ line.
+    old = fs(decorator_call("flask.sansio.scaffold.decorator", 6, "def fast():"),
+             backends=("setprofile",))
+    new = fs(decorator_call("flask.sansio.scaffold.Scaffold.route.<locals>.decorator", 5,
+                            '@app.route("/fast")'))
+    d = diff_facts(old, new, context=ctx_for(DECORATED))
+    assert not failing(d), [(e.category, e.symbol) for e in d.entries]
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and e.explained.startswith("attribution")
+
+
+def test_qualname_pairing_needs_the_same_leaf_and_input():
+    old = fs(decorator_call("flask.sansio.scaffold.decorator", 6, "def fast():"),
+             backends=("setprofile",))
+    new = fs(decorator_call("flask.sansio.scaffold.Scaffold.route.<locals>.wrapper", 5,
+                            '@app.route("/fast")'))
+    d = diff_facts(old, new, context=ctx_for(DECORATED))
+    assert not any((e.explained or "").startswith("attribution") for e in d.entries)
+    new = fs(decorator_call("flask.sansio.scaffold.Scaffold.route.<locals>.decorator", 5,
+                            '@app.route("/fast")', fn="app.slow"))
+    d = diff_facts(old, new, context=ctx_for(DECORATED))
+    assert not any((e.explained or "").startswith("attribution") for e in d.entries)
+
+
+WITH_SRC = "def main(s):\n    with s.get('/') as r:\n        r.read()\n"
+
+
+def test_a_with_exit_attributed_to_another_unedited_line_is_not_a_rewrite():
+    old = fs(fact("lib.Response.__exit__", {"self": {"__opaque__": "lib.Response"}},
+                  line=3, text="r.read()"), backends=("setprofile",))
+    new = fs(fact("lib.Response.__exit__", {"self": {"__opaque__": "lib.Response"}},
+                  line=2, text="with s.get('/') as r:"))
+    d = diff_facts(old, new, context=ctx_for(WITH_SRC))
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and "attribution-moved" in e.notes
+
+
+def test_a_call_moved_by_an_edit_is_still_a_rewrite():
+    new_src = "def main(s):\n    with s.get('/', timeout=1) as r:\n        r.read()\n"
+    ctx = DiffContext(old_sources={"app.py": WITH_SRC}, new_sources={"app.py": new_src})
+    old = fs(fact("lib.Session.get", {"self": {"__opaque__": "lib.Session"}}, line=2,
+                  text="with s.get('/') as r:"))
+    new = fs(fact("lib.Session.get", {"self": {"__opaque__": "lib.Session"}}, line=2,
+                  text="with s.get('/', timeout=1) as r:"))
+    d = diff_facts(old, new, context=ctx)
+    assert not any("attribution-moved" in e.notes for e in d.entries)
+
+
+def c_call(symbol, line=10, outcomes=(("return", {"__opaque__": "unobserved:c-return"}),)):
+    return fact(symbol, outcomes=outcomes, inp={"__c_call__": True}, line=line)
+
+
+def test_a_compiled_call_only_the_wider_backend_sees_is_not_an_appearance():
+    old = fs(backends=("setprofile",))
+    new = fs(c_call("gevent._gevent_cgreenlet.Greenlet.join"))
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert e.category is FactCategory.DRIFT and e.explained.startswith("backend")
+    assert d.verdict is VerificationVerdict.PASS
+    assert any(w.startswith("backend-only:1:") for w in d.warnings)
+
+
+def test_a_compiled_call_the_wider_backend_lost_still_disappears():
+    old = fs(c_call("collections.defaultdict.items"), backends=("setprofile",))
+    new = fs(backends=("monitoring",))
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.DISAPPEARED]
+
+
+def test_compiled_calls_compare_strictly_under_one_backend_family():
+    old = fs(backends=("monitoring",))
+    new = fs(c_call("gevent._gevent_cgreenlet.Greenlet.join"))
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.APPEARED]
+
+
+def test_a_fact_missing_on_a_side_that_dropped_events_is_not_comparable():
+    old = fs(fact("json.dumps", {"obj": {"__dict__": [["a", 1]]}}, (("return", '{"a": 1}'),)))
+    new = fs(dropped_events=1053468)
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert e.category is FactCategory.UNCOMPARABLE and "possibly-dropped:new" in e.notes
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE and not failing(d)
+
+
+def test_drops_on_one_side_do_not_excuse_an_appearance_on_the_other():
+    old = fs()
+    new = fs(fact("lib.new_call", {"x": 1}), dropped_events=10)
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.APPEARED]
+
+
+def test_a_volatile_group_missing_a_kind_on_the_dropping_side_is_not_comparable():
+    old = fs(*packs(["a1", "a2", "a3"], raise_at="TimeoutError"))
+    new = fs(*packs(["b1", "b2"]), dropped_events=5)
+    (e,) = diff_facts(old, new).entries
+    assert e.category is FactCategory.UNCOMPARABLE and "possibly-dropped:new" in e.notes
+
+
+def test_a_new_raise_type_on_the_dropping_side_still_fails():
+    old = fs(*packs(["a1", "a2", "a3"]))
+    new = fs(*packs(["b1", "b2"], raise_at="TypeError"), dropped_events=5)
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+REQ_SRC = "def test(port):\n    response = requests.get(url)\n    return response\n"
+
+
+def test_a_property_read_not_named_on_its_line_is_implicit():
+    # io finalizers read HTTPResponse.closed; the call lands on the project's nearest line.
+    closed = fact("urllib3.response.HTTPResponse.closed",
+                  {"self": {"__opaque__": "urllib3.response.HTTPResponse"}},
+                  (("return", True),), func="test", line=2,
+                  text="response = requests.get(url)")
+    other = fact("requests.api.get", {"url": "u"}, func="test", line=2,
+                 text="response = requests.get(url)")
+    d = diff_facts(fs(other), fs(other, closed), context=ctx_for(REQ_SRC))
+    e = next(e for e in d.entries if e.symbol.endswith("closed"))
+    assert e.category is FactCategory.DRIFT and e.explained.startswith("implicit")
+    assert not failing(d)
+
+
+def test_a_vanished_call_named_on_its_line_stays_strict():
+    src = "def cols(row):\n    return list(row.keys())\n"
+    keys = fact("sqlalchemy.engine.result.RowProxy.keys",
+                {"self": {"__opaque__": "sqlalchemy.engine.result.RowProxy"}},
+                (("return", {"__list__": ["id", "name"]}),), func="cols", line=2,
+                text="return list(row.keys())")
+    other = fact("lib.other", {"x": 1}, func="cols", line=2, text="return list(row.keys())")
+    d = diff_facts(fs(keys, other), fs(other), context=ctx_for(src))
+    assert [e.category for e in failing(d)] == [FactCategory.DISAPPEARED]
+
+
+PATH_SRC = "import pathlib\n\nBASE = pathlib.Path(__file__)\n"
+
+
+def path_ctor(symbol, outcomes=(("return", None),)):
+    return fact(symbol, {"cls": {"__type__": "pathlib.Path"}}, outcomes, func="<module>",
+                line=3, text="BASE = pathlib.Path(__file__)")
+
+
+def test_the_other_half_of_a_paired_constructor_is_the_constructor_protocol():
+    new_ = path_ctor("pathlib.Path.__new__", (("return", {"__opaque__": "pathlib.PosixPath"}),))
+    init = path_ctor("pathlib.Path.__init__")
+    d = diff_facts(fs(new_), fs(new_, init), context=ctx_for(PATH_SRC))
+    e = next(e for e in d.entries if e.symbol.endswith("__init__"))
+    assert e.category is FactCategory.DRIFT and "constructor protocol" in e.explained
+
+
+def test_a_constructor_half_that_raises_still_fails():
+    new_ = path_ctor("pathlib.Path.__new__", (("return", {"__opaque__": "pathlib.PosixPath"}),))
+    init = path_ctor("pathlib.Path.__init__", (("raise", "TypeError"),))
+    d = diff_facts(fs(new_), fs(new_, init), context=ctx_for(PATH_SRC))
+    assert [e.symbol for e in failing(d)] == ["pathlib.Path.__init__"]
+
+
+def test_the_tracer_observing_itself_is_not_compared():
+    own = fact("collections.deque.popleft", outcomes=(("return", 1),),
+               file="/tmp/pymolt-trace-x/bundle/pymolt_trace/_rawthreads.py")
+    d = diff_facts(fs(), fs(own))
+    assert not d.entries and any(w.startswith("tracer-self:1:") for w in d.warnings)
