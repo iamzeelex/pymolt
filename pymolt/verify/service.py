@@ -60,6 +60,7 @@ from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
+    UNMEASURED_NOISE,
     find_facts_snapshot,
     iter_snapshot,
     iter_trace_records,
@@ -2779,6 +2780,14 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
     entries = [e for e in entries if not e.get("unverified")]
     reviews = [e for e in entries if e.get("review")]
+    noisy = [e for e in reviews if str(e.get("review")).startswith(UNMEASURED_NOISE)]
+    reviews = [e for e in reviews if e not in noisy]
+    if noisy:
+        names = ", ".join(sorted({str(e.get("symbol")) for e in noisy})[:5])
+        reasons.append(
+            f"{len(noisy)} value difference(s) may be run-to-run noise: their input is not "
+            f"fully observed and the workload varies between runs ({names}); a second baseline "
+            "capture measuring the noise would decide")
     if reviews:
         names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
         reasons.append(f"{len(reviews)} edited call(s) need review: {names}")
@@ -2795,8 +2804,17 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         1 for e in entries
         if any(str(n).startswith("possibly-evicted") for n in e.get("notes") or ())
     )
+    dropped_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith("possibly-dropped") for n in e.get("notes") or ())
+    )
     uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries
+        - evicted_entries - dropped_entries
+    if dropped_entries:
+        reasons.append(
+            f"{dropped_entries} call fact(s) are missing on a side that dropped events and "
+            "cannot be compared"
+        )
     if evicted_entries:
         reasons.append(
             f"{evicted_entries} call fact(s) are missing on a side that evicted facts and "

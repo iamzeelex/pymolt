@@ -39,8 +39,23 @@ zipped in first-seen order):
 6. REWRITTEN by position: within a ``(file, func)`` whose line texts changed on both sides,
    leftover calls at the changed lines pair in first-seen order; outcomes compared, symbol and
    input ignored
+5q. same file, function and input, a qualname-equivalent symbol (``pkg.mod.decorator`` before
+   3.11, ``pkg.mod.C.m.<locals>.decorator`` after; the interpreter also moves a decorator's call
+   from the ``def`` line to the ``@`` line): ``attribution-moved``
 7. leftovers: at a changed line -> REWRITTEN without a partner (unverifiable, inconclusive);
+   one unedited ``(symbol, site)`` with leftovers on both sides that no pass paired one-to-one
+   (every call a fresh input) -> one ``volatile-site`` group compared by type and outcome kind;
    otherwise DISAPPEARED / APPEARED
+
+Before keying, each side's volatile positions are masked (see "noise canonicalisation"): its
+environment identity (project root as the process saw it, Python version), readings of its
+own clock, and values a curated stdlib entropy source returned (uuid4, random, datetime.now,
+tempfile names). A pair whose inputs differ is EQUAL at ``masked`` level when its output differs
+only as its input does. After pairing: a compiled call only the wider backend can see, a fact
+missing on a side that dropped events, an implicit attribute read and the other half of a paired
+constructor are not failures; and, when no replicate measured run-to-run noise in a workload
+whose values vary between runs, a value difference at a call whose input is not fully observed
+is a review item (``unmeasured noise``), never a pass.
 
 A pair's outcomes are compared at ``exact`` level when both sides are single, fully rendered
 values; at ``type`` level (``outcome_type``) when either side carries a type-only marker
@@ -3377,8 +3392,11 @@ def _substitute(value: Any, tokens: list[tuple[int, str]]) -> Any:
 
 
 def _run_like(token: str) -> bool:
-    """A token that looks like a per-run value: 4+ characters with a digit (a port, an id)."""
-    return len(token) >= 4 and any(c.isdigit() for c in token)
+    """A single word that looks like a per-run value: 4+ characters with a digit (a port, an
+    id, a temp name). A whole changed leaf (a JSON document, a URL) is not one: a toy whose
+    input changed because its upstream call changed must not read as a noisy workload."""
+    return len(token) >= 4 and _WORD.fullmatch(token) is not None \
+        and any(c.isdigit() for c in token)
 
 
 @dataclass
@@ -3630,12 +3648,19 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
+    variation = _run_variation(volatile_sites)
+    gated = _gate_unmeasured(entries, variation) if variation else 0
     entries.sort(key=_entry_sort_key)
     warnings = _warnings(old, new)
     if unsampled:
         warnings.append(
             f"unsampled:{unsampled}: value facts seen on one side only, at call sites both "
             "sides' tallies show were called but not fully sampled; not compared")
+    if variation:
+        warnings.append(
+            f"run-variation: {variation}; no replicate measured run-to-run noise, so "
+            f"{gated} value difference(s) at calls whose input is not fully observed are "
+            "review items, not failures")
     if tracer_self:
         warnings.append(
             f"tracer-self:{tracer_self}: facts whose call site is inside pymolt's own injected "
@@ -4059,6 +4084,89 @@ def _group_volatile(
             [v for v in new_left if id(v) not in grouped])
 
 
+UNMEASURED_NOISE = "unmeasured noise"
+_HIDDEN_KEYS = ("__opaque__", "__cycle__", "__shape__", "__nondeterministic__")
+
+
+def _run_variation(volatile_sites: int) -> str:
+    """What this diff saw of values that change from run to run (empty when nothing): the
+    trigger of the unmeasured-noise gate."""
+    noise = _NOISE.get()
+    clock = sum(m.counts["clock"] for m in (noise.old, noise.new) if m is not None)
+    source = sum(m.counts["source"] for m in (noise.old, noise.new) if m is not None)
+    parts = [f"{n} {label}" for n, label in (
+        (volatile_sites, "volatile site(s)"),
+        (noise.run_like_substitutions, "run-like input substitution(s)"),
+        (clock, "clock reading(s)"), (source, "entropy-source value(s)")) if n]
+    return ", ".join(parts)
+
+
+def _hidden(v: Any) -> bool:
+    if isinstance(v, dict):
+        if any(k in v for k in _HIDDEN_KEYS) or v.get("__truncated__") \
+                or v.get("__c_call__") is True:
+            return True
+        if "__structure__" in v and "values" not in v:
+            return True
+        return any(_hidden(x) for x in v.values())
+    if isinstance(v, list):
+        return any(_hidden(x) for x in v)
+    return False
+
+
+def input_hidden(inputs: Any) -> bool:
+    """The call's input is not fully observed: part of it is rendered by type only (an opaque
+    receiver, a value-less structure, a compiled call's missing arguments), or it binds nothing
+    beyond its receiver (its result depends on state the trace never saw)."""
+    if not isinstance(inputs, dict):
+        return False
+    if _hidden(inputs):
+        return True
+    bound = inputs.get("bound")
+    data = [k for k in bound if k not in ("self", "cls")] if isinstance(bound, dict) else []
+    extra = any(inputs.get(k) not in (None, [], {}, {"__tuple__": []}, {"__dict__": []})
+                for k in ("args", "varargs", "kwargs"))
+    return not data and not extra
+
+
+def _kinds(outcomes: list[Outcome] | None) -> set[str]:
+    return {"return" if o.kind == "return" else f"raise:{_raise_name(o.value)}"
+            for o in outcomes or ()}
+
+
+def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
+    """No replicate measured run-to-run noise, and this workload varies between runs: a value
+    difference at an unedited pair whose input is not fully observed is not a controlled
+    comparison, so it is a review item (INCONCLUSIVE), not a failure. Not fully observed: part
+    of the input is rendered by type only, it binds nothing beyond its receiver, or its inputs
+    were equal only once volatile values (clock readings, entropy-source values) were masked:
+    those positions are, by definition, values the comparison does not know. Still failing:
+    outcome-kind and type changes, volatile groups, and any difference with a fully observed
+    input (a residual beyond an input substitution included)."""
+    count = 0
+    for e in entries:
+        if (e.category is not FactCategory.CHANGED or e.comparison is not Comparison.CHANGED
+                or e.review or e.noise or e.unverified or e.provenance not in (None, "unedited")
+                or e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED)
+                or (e.explained or "").startswith("volatile-site")
+                or _kinds(e.old) != _kinds(e.new)
+                or not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
+                              _outcome_types_match)):
+            continue  # kind or structure changed: strict whatever the noise
+        masked = "matched-modulo-masked-input" in e.notes
+        if not (masked or input_hidden(e.input)):
+            continue
+        why = ("its input matched only once volatile values were masked" if masked
+               else "its input is not fully observed")
+        e.review = (f"{UNMEASURED_NOISE}: the value differs and {why}, in a workload whose "
+                    f"values vary between runs ({variation}); a second baseline capture "
+                    "measuring run-to-run noise would decide")
+        e.notes.append("unmeasured-noise")
+        e.explained = f"unmeasured-noise: {why}"
+        count += 1
+    return count
+
+
 _TRACER_SITE = "/pymolt_trace/"
 
 
@@ -4294,6 +4402,10 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
             notes.append("matched-modulo-input")
         elif o.input_key != n.input_key:
             notes.append("matched-modulo-defaults")
+        elif (_masks_of(of) or _masks_of(nf)) and \
+                _canon(_raw_of(of).input) != _canon(_raw_of(nf).input):
+            # equal inputs only once volatile values were masked: not the same input
+            notes.append("matched-modulo-masked-input")
         if of.symbol != nf.symbol:
             notes.append("identity-changed")
     if (of.file, of.func) != (nf.file, nf.func):
