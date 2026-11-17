@@ -728,12 +728,16 @@ def capture_trace_in_container(
     sample_first: int | None = None,
     widen_targets: bool = False,
     trace_stdlib: list[str] | None = None,
+    log_path: Path | None = None,
 ) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
     No `docker run` from scratch and no new volume mounts: the standalone bundle is copied in,
     the command runs under it with PYMOLT_TRACE_* env, and the JSONL is copied back out. The
     target container and the app inside it are never modified (the bundle is temp + removed).
+
+    The command's output (stdout, then stderr) is written to ``log_path`` when given, as the
+    local path does: without it a failed run says nothing about which test failed.
     """
     tag = uuid.uuid4().hex[:8]
     bundle_in = f"/tmp/pymolt_bundle_{tag}"
@@ -756,12 +760,29 @@ def capture_trace_in_container(
         exec_args += ["-w", workdir]
     exec_args += [container, *command]
     command_result = _docker(exec_args, check=False)
+    if log_path is not None:
+        _write_command_log(log_path, command_result.stdout, command_result.stderr)
 
     pull = work / "pull"
     _docker(["cp", f"{container}:{trace_in}", str(pull)])
     # best-effort cleanup so the container is left exactly as found
     _docker(["exec", container, "rm", "-rf", bundle_in, trace_in], check=False)
     return _process_traces(pull, recursive=True), command_result.returncode
+
+
+def _write_command_log(log_path: Path, stdout: str | None, stderr: str | None) -> None:
+    """A finished command's captured output as its command log: stdout, then stderr (the
+    two streams were captured apart, so their interleaving is lost). Never fails the capture."""
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8", errors="replace") as log:
+            log.write(stdout or "")
+            if stderr:
+                if stdout and not stdout.endswith("\n"):
+                    log.write("\n")
+                log.write(stderr)
+    except OSError as exc:
+        logger.warning("could not write the command log %s: %s", log_path, exc)
 
 
 def _docker(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -1144,9 +1165,10 @@ def capture_trace(
 
     ``cwd`` runs a local command in the target project rather than pymolt's own
     working directory (so e.g. ``pytest tests/`` collects the right tests). The
-    local command's merged stdout+stderr land in ``command.log`` next to the
-    trace artifacts (surfaced via ``command_log`` / ``returncode``), never on the
-    parent tty.
+    command's output lands in ``<trace stem>.command.log`` next to the trace
+    artifacts (surfaced via ``command_log`` / ``returncode``), never on the parent
+    tty: merged as it runs for a local command, stdout then stderr for one run in a
+    ``container``.
     """
     started = time.monotonic()
     impact_targets = _normalize_impact_targets(impact_targets)
@@ -1159,9 +1181,12 @@ def capture_trace(
     try:
         bundle = export_watcher(work / "bundle")
 
-        command_log: str | None = None
         returncode: int | None = None
         interrupted = threading.Event()
+        # Keep the log next to the durable trace artifact (out_path), not the
+        # ephemeral work tempdir, so the path stored on the slot stays valid.
+        out_p = Path(out_path)
+        log_path = out_p.parent / f"{out_p.stem}.command.log"
         if container:
             produced, returncode = capture_trace_in_container(
                 target, command, backend, bundle, work,
@@ -1169,12 +1194,9 @@ def capture_trace(
                 privacy, sample_rate, impact_targets,
                 deployment_id, request_id, correlation_id,
                 **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
+                log_path=log_path,
             )
         else:
-            # Keep the log next to the durable trace artifact (out_path), not the
-            # ephemeral work tempdir, so the path stored on the slot stays valid.
-            out_p = Path(out_path)
-            log_path = out_p.parent / f"{out_p.stem}.command.log"
             produced, returncode = capture_trace_local(
                 target, command, backend, bundle, work,
                 exclude, source, include_internal, cancel_event=cancel_event,
@@ -1184,7 +1206,7 @@ def capture_trace(
                 interrupted=interrupted,
                 **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
             )
-            command_log = str(log_path) if log_path.exists() else None
+        command_log = str(log_path) if log_path.exists() else None
 
         events = _merge_traces(produced, Path(out_path))
         facts = _merge_process_snapshots(produced, Path(out_path))
@@ -1517,6 +1539,23 @@ def parse_failed_count(command_log: str | Path | None) -> tuple[int | None, str]
         if match:
             return int(match.group(1)), line.strip(" =")
     return None, ""
+
+
+_FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+)")
+
+
+def failed_tests(command_log: str | Path | None, limit: int = 3) -> tuple[list[str], int]:
+    """``(first ``limit`` test ids, how many)`` from pytest's short summary (``FAILED
+    tests/x.py::test_y - ...`` and ``ERROR ...`` lines) in a command log; ``([], 0)`` when the
+    log is missing or has none."""
+    if not command_log:
+        return [], 0
+    try:
+        lines = Path(command_log).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return [], 0
+    found = [m.group(1) for m in map(_FAILED_TEST.match, lines) if m]
+    return found[:limit], len(found)
 
 
 def static_contact_count(project_dir: str | Path) -> int | None:
