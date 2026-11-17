@@ -60,17 +60,20 @@ def fail(
     hint: str | None = None,
     code: int = EXIT_USAGE,
     json_output: bool = False,
+    extra: dict | None = None,
 ) -> NoReturn:
     """Report a failure on the right stream, in the right shape, and exit.
 
     Under ``--json`` the failure envelope goes to *stdout* — it is the
     machine-readable answer, and keeping stdout parseable in both directions is
-    the whole point. In human mode it goes to stderr.
+    the whole point. In human mode it goes to stderr. ``extra``: more keys for the
+    JSON envelope.
     """
     if json_output:
         payload: dict[str, object] = {"ok": False, "error": message}
         if hint:
             payload["hint"] = hint
+        payload.update(extra or {})
         typer.echo(json.dumps(payload, indent=2))
     else:
         err.print(f"[bold red]Error:[/bold red] {message}")

@@ -88,6 +88,10 @@ plan and shows the diff. It writes no source file. Details are in [plan.md](plan
 ### `pymolt apply [dir]`
 Writes exactly the saved plan. It refuses if a planned file changed since the plan was made. Every
 changed file is prepared and parsed before the first write, and a failed apply restores them all.
+Before the first write it compiles each changed file's new source on the target Python, and on the
+base Python where the change claims to run there; it refuses a file that compiled before the
+rewrite and does not after. A file that already failed is recorded, not refused. The receipt and
+`status` show the result, and "not checked" with the reason when no interpreter was found.
 The original files are kept for `rollback`. Run again on an applied plan whose files still hold its
 changes, it writes nothing and says so. Its summary and `--json` list what the plan leaves to you:
 the advisories (a site not rewritten, a rewrite with a caveat to check) and the manual items, each
@@ -102,6 +106,7 @@ make it stale. Bump them after `plan` and before the post-migration capture, bef
 |---|---|
 | `--plan` | The plan file (default: `.pymolt/migration_plan.json`) |
 | `--allow-no-baseline` | Apply without a baseline capture; `verify` will then be INCONCLUSIVE |
+| `--smoke` | Also import the changed modules in the target environment setup names, before and after the write. A module that imported before and fails after undoes the write. Without a target environment it is skipped, with the reason. It runs your code's import-time code |
 
 ### `pymolt verify [dir]`
 Compares the baseline and post-migration captures and prints `PASS`, `FAIL` or `INCONCLUSIVE` with

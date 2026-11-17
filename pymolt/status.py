@@ -312,6 +312,9 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
         f"run {receipt.run_id[:8]} · {len(receipt.files_changed)} file(s) · "
         f"{receipt.patterns_applied} rewrite(s)"
     )
+    check = getattr(receipt, "self_check", None)
+    detail += f" · self-check: {check.summary()}" if check is not None else \
+        " · self-check: not recorded (applied before it existed)"
     if receipt.allow_no_baseline:
         return PhaseState(
             phase="migration", state=DONE,

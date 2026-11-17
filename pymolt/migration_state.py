@@ -19,6 +19,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_core import ValidationError
 
+from pymolt.apply_check import SelfCheck
+
 MIGRATION_STATE_SCHEMA_VERSION = 1
 
 
@@ -59,6 +61,9 @@ class MigrationReceipt(BaseModel):
     # The project files the rollback rewrote ([] = it restored no file: the run had changed
     # none). None = not rolled back, or rolled back before this was recorded.
     files_restored: list[str] | None = None
+    # What apply checked about its own write: the compile on the target (and the base), and
+    # the smoke import when requested. None in receipts from before the self-check existed.
+    self_check: SelfCheck | None = None
     # What the apply call that returned this receipt did; not saved. ``already_applied``: the
     # plan was applied before and its files still hold its changes, so nothing was written.
     _outcome: Literal["applied", "already_applied"] = PrivateAttr(default="applied")
