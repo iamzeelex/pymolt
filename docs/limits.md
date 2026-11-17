@@ -9,7 +9,8 @@
   built against numpy 2, Theano), there is no post-migration capture and nothing to compare. All six
   legacy projects stop here today ([below](#where-it-was-tried)).
 - **Code no run exercises.** Only calls the tests or the app make are compared. A dependency symbol
-  no run reaches is BLIND, and the verdict stays INCONCLUSIVE.
+  no run reaches is BLIND, and the verdict stays INCONCLUSIVE. This holds after `apply` too, whether
+  or not the plan changed that symbol ([verify.md](verify.md#scope-after-apply)).
 - **Python 2.7** is not supported: a capture reports that the tracer failed to start.
 
 ### Fixing what it finds
@@ -49,12 +50,6 @@ now returns) still fails, although it may be noise.
   stops 30 s after the last new contact, so one first used after that is missed.
 - **Classes made at run time (3.12+).** A dependency class created without an import, whose
   instances reach only a call site that stopped being watched before the class existed, is missed.
-
-### Coverage after `apply`
-
-When the post-migration code came from `pymolt apply`, BLIND, dynamic-only and trust count only the
-API paths the plan found changed, so a symbol outside them that no run exercised does not block
-PASS. A behaviour change in any recorded call still fails ([verify.md](verify.md#scope-after-apply)).
 
 ### PyMolt itself
 

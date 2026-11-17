@@ -202,7 +202,7 @@ when facts changed. Sampled captures must also have complete call counts.
 
 - **FAIL**: a compared fact failed anywhere in the recording, or a sandbox replay, golden snapshot
   or canary gate failed.
-- **PASS** requires all of the following:
+- **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
   - no static symbol is BLIND, of any contact kind (attribute reads and constants included);
   - every dynamic-only symbol had all its facts compared equal.
@@ -213,14 +213,17 @@ when facts changed. Sampled captures must also have complete call counts.
 
 ### Scope after `apply`
 
-When the post-migration code came from `pymolt apply`, coverage is narrowed to the API paths the
-plan found changed. The report prints this as *Impact focus* with the full surface next to it.
-- **Narrowed:** the static symbols, confirmed, BLIND, dynamic-only and trust. A symbol outside the
-  plan's paths that no run exercised does not block PASS.
-- **Not narrowed:** FAIL. A behaviour change in any recorded call fails the verdict. The report
-  lists the ones outside the plan's paths as changes outside the plan's predicted impacts.
+When the post-migration code came from `pymolt apply`, the verdict is the one the same captures get
+without a plan. The static symbols, confirmed, BLIND, dynamic-only and trust count the whole
+recorded surface, and a behaviour change in any recorded call fails.
 
-Without an applied plan, coverage counts every static symbol.
+The API paths the plan found changed only focus the report:
+- *Impact focus* gives the number of those paths and the static symbols on them: confirmed, BLIND
+  and dynamic-only.
+- The BLIND and dynamic-only tables list the symbols on the plan's paths first. The INCONCLUSIVE
+  reasons name the BLIND symbols inside the plan's predicted impacts apart from those outside them.
+- The version diff's counts and listed changes cover the plan's paths. Behaviour changes outside
+  them are listed as changes outside the plan's predicted impacts.
 
 ### Predicted risks
 
