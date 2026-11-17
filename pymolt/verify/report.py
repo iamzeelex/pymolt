@@ -50,6 +50,7 @@ from pymolt.verify.facts import (
     FactCategory,
     FactDiff,
     FactSet,
+    OrderCause,
     diff_facts,
     load_facts,
 )
@@ -848,11 +849,13 @@ def build_contract_report(
                 )
             else:
                 old_facts = load_facts(against, root=root)
+                new_facts = load_facts(trace, root=root)
                 fdiff = diff_facts(
-                    old_facts, load_facts(trace, root=root),
+                    old_facts, new_facts,
                     profile=DiffProfile.SHAPE if profile is ComparatorProfile.SHAPE
                     else DiffProfile.EXACT,
                     context=diff_context,
+                    order_causes=_order_causes(root, old_facts, new_facts, report.notes),
                 )
                 if noise_profile is not None:
                     from pymolt.verify.replicate import apply_noise_profile
@@ -865,6 +868,31 @@ def build_contract_report(
             report.notes.append(f"version diff failed: {e}")
 
     return report
+
+
+def _capture_python(fs: FactSet) -> str | None:
+    """The one Python X.Y a capture's processes ran (None: unknown or mixed)."""
+    minors = {".".join(v.split(".")[:2]) for v in fs.python_versions if v}
+    return minors.pop() if len(minors) == 1 else None
+
+
+def _order_causes(root: Path, old_facts: FactSet, new_facts: FactSet,
+                  notes: list[str]) -> list[OrderCause]:
+    """Known causes of dict key order changes between the Pythons the two captures ACTUALLY
+    ran (not what setup intended): the project's TypedDicts whose annotation order 3.9
+    changed and that it iterates. An order finding is cited only on an exact match."""
+    base, target = _capture_python(old_facts), _capture_python(new_facts)
+    if not (base and target):
+        return []
+    try:
+        from pymolt.pyversion.behavior import predicted_order_causes
+
+        found = predicted_order_causes(root, base, target)
+    except Exception as e:  # a detector failure must not cost the diff; say so
+        notes.append(f"dict order causes not computed: {e}")
+        return []
+    return [OrderCause(keys=frozenset(c["keys"]), old=tuple(c["old"]), new=tuple(c["new"]),
+                       cause=c["cause"], detail=c["detail"]) for c in found]
 
 
 def _calibration(predictions: Mapping[str, Any], old_facts: FactSet, fdiff: FactDiff,
