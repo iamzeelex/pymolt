@@ -129,6 +129,10 @@ class TraceCaptureResult(BaseModel):
     backpressure_dropped: int | None = None
     write_failures: int | None = None
     sink_failures: int | None = None
+    # Seconds the traced program waited, summed over its threads and processes, for a JSONL
+    # trace writer that fell behind (``backpressure_wait_ms``): the price of keeping every
+    # event. None when no process reported it (an older runtime, a facts sink).
+    backpressure_wait_seconds: float | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
     # Interpreters where tracing was requested but the watcher could not load (each wrote
     # ``<trace>.activation-error.json``): those processes ran UNTRACED.
@@ -259,6 +263,8 @@ LONG_RUN_SINK, LONG_RUN_TRACE_MODE = "facts", "auto"
 LONG_RUN_SAMPLE_RATE, LONG_RUN_SAMPLE_FIRST = 0.1, 32
 _FORWARDED_TUNABLES = (
     "PYMOLT_TRACE_SAMPLE_KEYS",
+    "PYMOLT_TRACE_QUEUE_SIZE", "PYMOLT_TRACE_CLOSE_TIMEOUT", "PYMOLT_TRACE_BACKPRESSURE",
+    "PYMOLT_TRACE_STALL_SECONDS",
     "PYMOLT_TRACE_FLUSH_SECONDS", "PYMOLT_TRACE_FACTS_PER_SITE", "PYMOLT_TRACE_MAX_FACTS",
     "PYMOLT_TRACE_MAX_TALLIES", "PYMOLT_TRACE_MAX_FACT_BYTES", "PYMOLT_TRACE_FACT_VALUE_BYTES",
     "PYMOLT_TRACE_DISCOVER_QUIET", "PYMOLT_TRACE_DISCOVER_MAX",
@@ -1013,6 +1019,9 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
         "sink_failures": 0,
         "shutdown_dropped": 0,
     }
+    # What a full JSONL queue cost (runtimes that report it): producer waits, their total
+    # time, and writer stalls. Informational, never part of the loss accounting.
+    backpressure = {"waits": 0, "wait_ms": 0, "writer_stalls": 0, "reported": False}
     processes: list[dict] = []
     backends: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -1043,17 +1052,31 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
             value = raw_counters.get(name)
             if isinstance(value, int) and value >= 0:
                 counters[name] += value
+        for name, key in (("backpressure_waits", "waits"), ("backpressure_wait_ms", "wait_ms"),
+                          ("writer_stalls", "writer_stalls")):
+            value = raw_counters.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                backpressure[key] += value
+                backpressure["reported"] = True
         metadata_complete = metadata_complete and process_counters_complete
     if len(processes) != len(produced):
         metadata_complete = False
     counters["dropped_events"] = sum(counters[name] for name in _DROP_COUNTERS)
     return {
         "counters": counters,
+        "backpressure": backpressure,
         "metadata_complete": metadata_complete,
         "process_metadata": processes,
         "backends": backends,
         "instrumentation_skipped": skipped,
     }
+
+
+def _backpressure_wait_seconds(backpressure: dict) -> float | None:
+    """The producers' total wait for a JSONL writer, in seconds (None: nobody reported)."""
+    if not backpressure.get("reported"):
+        return None
+    return round(backpressure["wait_ms"] / 1000.0, 3)
 
 
 def _write_trace_metadata(trace_path: str | Path, payload: dict) -> str | None:
@@ -1223,6 +1246,7 @@ def capture_trace(
             ),
             write_failures=(counters["write_failures"] if metadata_complete else None),
             sink_failures=(counters["sink_failures"] if metadata_complete else None),
+            backpressure_wait_seconds=_backpressure_wait_seconds(runtime["backpressure"]),
             instrumentation_skipped=runtime["instrumentation_skipped"],
             activation_failures=activation_failures,
             facts_path=facts["path"] if facts else None,
@@ -1249,6 +1273,9 @@ def capture_trace(
             "activation_failures": activation_failures,
             "processes": runtime["process_metadata"],
         }
+        if runtime["backpressure"]["reported"]:
+            metadata["backpressure"] = {k: v for k, v in runtime["backpressure"].items()
+                                        if k != "reported"}
         if facts:
             metadata["facts_path"] = facts["path"]
             metadata["facts"] = facts
@@ -1856,6 +1883,7 @@ def capture_named_trace(
         backpressure_dropped=result.backpressure_dropped,
         write_failures=result.write_failures,
         sink_failures=result.sink_failures,
+        backpressure_wait_seconds=getattr(result, "backpressure_wait_seconds", None),
         instrumentation_skipped=result.instrumentation_skipped,
         activation_failures=getattr(result, "activation_failures", []),
         red=_red_stamp(result) if validity is CaptureValidity.VALID else None,

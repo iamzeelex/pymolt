@@ -56,6 +56,13 @@ Watcher environment:
   PYMOLT_TRACE_DISCOVER_MAX    seconds after which discover -> watch switches anyway (default 60)
   PYMOLT_TRACE_SINK     jsonl | facts (default jsonl). facts: the aggregating FactSink, writing
                         PYMOLT_TRACE_OUT with its ``.jsonl`` suffix replaced by ``.facts.json``
+  PYMOLT_TRACE_QUEUE_SIZE  jsonl: events queued for the writer thread (default 65536)
+  PYMOLT_TRACE_BACKPRESSURE  jsonl, queue full: block (default; the caller waits for the writer,
+                        counted as ``backpressure_wait_ms``) | drop (``backpressure_dropped``)
+  PYMOLT_TRACE_STALL_SECONDS  jsonl: a writer that processes nothing this long is given up on
+                        until it moves again (default 10; its losses are counted)
+  PYMOLT_TRACE_CLOSE_TIMEOUT  jsonl: at exit, seconds without writer progress before the rest
+                        of the queue is counted as ``shutdown_dropped`` (default 2)
   PYMOLT_TRACE_PRIVACY  values | shape (default values)
   PYMOLT_TRACE_WARNINGS "0" to leave ``warnings.warn`` alone (default on: Deprecation/
                         PendingDeprecation/FutureWarning issued during a recorded call are

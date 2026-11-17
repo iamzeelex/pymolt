@@ -52,6 +52,10 @@ ANSWER_BUDGET_CHARS = 6000
 #: Where the complete payload behind a view is written, relative to the project.
 AGENT_REPORT_DIR = Path(".pymolt") / "agent"
 
+#: A capture whose program waited at least this long (seconds, in total) for the trace
+#: writer says so: every event was kept, but the traced run was slower than an untraced one.
+BACKPRESSURE_WARN_SECONDS = 1.0
+
 
 class AgentInputError(ValueError):
     """An input the caller can fix. Rendered as the failure envelope."""
@@ -641,6 +645,11 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
                          ("sink failure(s)", slot.sink_failures)):
         if value:
             warnings.append(f"{value} {label}: the recording is incomplete.")
+    waited = getattr(slot, "backpressure_wait_seconds", None)
+    if waited is not None and waited >= BACKPRESSURE_WARN_SECONDS:
+        warnings.append(f"the program waited {waited:.1f} s in total for the trace writer to "
+                        "catch up: no event was lost to it, but timing-sensitive code ran "
+                        "that much slower than it would untraced.")
     if slot.instrumentation_skipped:
         warnings.append(f"{len(slot.instrumentation_skipped)} instrumentation target(s) skipped.")
 

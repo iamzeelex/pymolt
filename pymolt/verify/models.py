@@ -244,6 +244,9 @@ class ContractSlot(BaseModel):
     backpressure_dropped: int | None = None
     write_failures: int | None = None
     sink_failures: int | None = None
+    # Seconds the traced program waited for a JSONL trace writer that fell behind (summed over
+    # threads and processes): every event was kept, at that cost in timing. None = unknown.
+    backpressure_wait_seconds: float | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
     # Processes where tracing was requested but the watcher could not load (untraced).
     activation_failures: list[dict] = Field(default_factory=list)
