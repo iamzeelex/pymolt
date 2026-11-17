@@ -108,3 +108,13 @@ def test_lifetimes_file_is_valid_and_stamped():
         from pymolt import knowledge
 
         knowledge._load_raw("does_not_exist")
+
+
+def test_typeshed_only_stub_packages_are_not_stdlib():
+    """typeshed's stdlib/VERSIONS lists stubs for typing_extensions (a PyPI package) and
+    _typeshed (stub-only); neither is in any interpreter's standard library."""
+    from pymolt.core import stdlib
+
+    assert not stdlib.is_stdlib("typing_extensions")
+    assert not stdlib.is_stdlib("_typeshed")
+    assert stdlib.is_stdlib("typing") and stdlib.is_stdlib("asyncio")

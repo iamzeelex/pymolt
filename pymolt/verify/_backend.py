@@ -76,12 +76,13 @@ from ._identity import (
     wrapper_call,
 )
 from ._normalize import AMBIGUOUS_OUTCOME, OutcomeMarker
+from ._rawthreads import allocate_lock, get_ident, stack_key
 from ._sinks import add_warning, warning_list
 
 # Monotonic, high resolution (``time.monotonic`` is ~15 ms on older Windows builds).
 _now = time.perf_counter
 _monotonic = time.monotonic
-_get_ident = threading.get_ident
+_get_ident = get_ident   # the OS thread, captured before the program can monkeypatch it
 
 HAS_MONITORING = sys.version_info >= (3, 12) and hasattr(sys, "monitoring")
 
@@ -583,6 +584,7 @@ _C_CALL_TYPES = tuple(getattr(types, n) for n in (
     "MethodWrapperType", "ClassMethodDescriptorType") if hasattr(types, n))
 _C_TYPE_NAMES = frozenset(("cython_function_or_method", "fused_cython_function"))
 _HEAPTYPE = 1 << 9
+_MODULE_TYPE = types.ModuleType
 
 
 def is_compiled_callable(obj):
@@ -828,10 +830,11 @@ WARN_UNRELATED = tuple(c for c in (ResourceWarning, ImportWarning, BytesWarning,
                                    getattr(builtins, "EncodingWarning", None)) if c)
 ENV_WARNINGS = "PYMOLT_TRACE_WARNINGS"   # "0" / "off": do not wrap ``warnings.warn``
 _WARN_DEPTH = 256           # frames walked from the warn() caller to the call in flight
+_C_SITE_MAX = 2000          # compiled calls recorded per call site (a hot loop is witnessed)
 _C_STACK_MAX = 256          # compiled calls in flight per thread (a lost completion never grows it)
 _WARNED_MAX = 10000         # per backend: accumulators awaiting their call's completion
 
-_warn_lock = threading.Lock()
+_warn_lock = allocate_lock()
 _warn_owners = [()]         # [tuple of backends capturing], read lock-free by the hook
 _warn_saved = [None, None]  # [the original warnings.warn, our wrapper] while installed
 _warn_refronted = {}       # name -> (original, wrapper) of simplefilter & co. while installed
@@ -1216,7 +1219,7 @@ class FrameBackend(TraceBackend):
         self._warned = {}   # id(frame) -> (code, {(category, message): count}) of calls in flight
         self._normalize = privacy_normalizer()
         self._identity = IdentityResolver(self._in_target)
-        self._obs_lock = threading.Lock()
+        self._obs_lock = allocate_lock()
         self.observed = {}          # id(code) -> code
         self.observed_syms = set()
         self.first_seen_at = None   # monotonic
@@ -1228,6 +1231,8 @@ class FrameBackend(TraceBackend):
         self._dedupe_until = 0.0
         self._last_start = {}       # tid -> frame of the last recorded start
         self._ccache = {}           # id(callable) -> (callable, sym | None): compiled decisions
+        self._cmeth = {}            # (id(owner class), name) -> (owner, sym | None): bound builtins
+        self._ccount = {}           # (sym, id(code), line) -> compiled calls recorded there
         self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
         self._bind_kw = sink_binding(sink)
         self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
@@ -1515,24 +1520,54 @@ class FrameBackend(TraceBackend):
     def _c_sym(self, obj):
         """The ``module.qualname`` a compiled callable is recorded under, or None when it is
         not a dependency's (builtins, the stdlib and anything the matcher rejects). Decided
-        once per callable object (the entry holds it, so its id cannot be recycled)."""
+        once per callable object (the entry holds it, so its id cannot be recycled). A builtin
+        method bound to an instance (``deque.popleft`` of one deque) is a new object on every
+        profile event, so it is decided once per (owner class, name) instead."""
         ent = self._ccache.get(id(obj))
         if ent is not None and ent[0] is obj:
             return ent[1]
-        sym = None
+        owner = getattr(obj, "__self__", None)
+        if owner is not None and not isinstance(owner, _MODULE_TYPE):
+            if not isinstance(owner, type):
+                owner = type(owner)
+            key = (id(owner), getattr(obj, "__name__", None))
+            ment = self._cmeth.get(key)
+            if ment is not None and ment[0] is owner:
+                return ment[1]
+            sym = self._c_decide(obj)
+            if len(self._cmeth) >= _CODE_CACHE_MAX:
+                self._cmeth.clear()
+            self._cmeth[key] = (owner, sym)
+            return sym
+        sym = self._c_decide(obj)
+        if len(self._ccache) >= _CODE_CACHE_MAX:
+            self._ccache.clear()
+        self._ccache[id(obj)] = (obj, sym)
+        return sym
+
+    def _c_muted(self, frame, sym):
+        """True once ``sym`` has been called ``_C_SITE_MAX`` times from this line: the facts of
+        a hot loop (a deque's ``popleft`` a million times) are in the first ones."""
+        key = (sym, id(frame.f_code), frame.f_lineno)
+        n = self._ccount.get(key, 0)
+        if n >= _C_SITE_MAX:
+            return True
+        if n == 0 and len(self._ccount) >= _CODE_CACHE_MAX:
+            self._ccount.clear()
+        self._ccount[key] = n + 1
+        return False
+
+    def _c_decide(self, obj):
         try:
             ident = c_identity(obj)
             if ident is not None:
                 module = ident[0]
                 if (module != "builtins" and not never_target(module)
                         and self._in_target(module)):
-                    sym = module + "." + ident[1]
+                    return module + "." + ident[1]
         except Exception:
-            sym = None
-        if len(self._ccache) >= _CODE_CACHE_MAX:
-            self._ccache.clear()
-        self._ccache[id(obj)] = (obj, sym)
-        return sym
+            pass
+        return None
 
     def _c_start(self, frame, sym, arg0=NO_ARG):
         """Begin one compiled call made from ``frame`` (the near-side check passed): the
@@ -1604,7 +1639,7 @@ class SetProfileBackend(FrameBackend):
     def __init__(self, target, sink, exclude=(), source=None, include_internal=False):
         FrameBackend.__init__(self, target, sink, exclude, source, include_internal)
         self._prev = None
-        self._lock = threading.Lock()
+        self._lock = allocate_lock()
         self.c_event_count = 0  # classified internal C traffic, intentionally not persisted
         self.skip_wrapped = False  # hybrid: skip calls a WrapBackend wrapper already records
         self.compiled_wrap = True  # wrap the Cython functions of dependency modules (see start)
@@ -1700,8 +1735,9 @@ class SetProfileBackend(FrameBackend):
                 if self._c_caller_ok(frame):
                     self.c_event_count += 1
                     sym = self._c_sym(arg)
-                    if sym is not None and not (self.skip_wrapped and self._from_wrapper(frame)):
-                        tid = _get_ident()
+                    if sym is not None and not self._c_muted(frame, sym) and not (
+                            self.skip_wrapped and self._from_wrapper(frame)):
+                        tid = stack_key()
                         stack = self._cstack.get(tid)
                         if stack is None:
                             stack = self._cstack[tid] = []
@@ -1709,15 +1745,23 @@ class SetProfileBackend(FrameBackend):
                             del stack[:]
                         stack.append((arg, frame, self._c_start(frame, sym)))
             elif event == "c_return":
-                stack = self._cstack.get(_get_ident())
+                if not self._cstack:
+                    return self._hook       # nothing recorded in flight: most C returns
+                key = stack_key()
+                stack = self._cstack.get(key)
                 if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
                     self._finish(stack.pop()[2], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
+                    if not stack:
+                        del self._cstack[key]
             elif event == "c_exception":
                 # A C callable raised. The exception TYPE is not observable from a profile
                 # hook (as for a Python raise), so the raise is untyped.
-                stack = self._cstack.get(_get_ident())
+                key = stack_key()
+                stack = self._cstack.get(key)
                 if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
                     self._finish(stack.pop()[2], OUTCOME_RAISE, UNTYPED_RAISE)
+                    if not stack:
+                        del self._cstack[key]
                     return self._hook
                 # No matching c_call (the hook started mid-call): the legacy raise-only fact.
                 # The CALLEE has to be the traced dependency: gating only on the caller recorded
@@ -1790,6 +1834,7 @@ class SetProfileBackend(FrameBackend):
         self.matcher = PrefixMatcher(list(prefixes), self._exclude)
         self._callee = {}
         self._ccache = {}
+        self._cmeth = {}
 
     def stop(self):
         self._retired = self._stopped = True  # hooks in other threads remove themselves

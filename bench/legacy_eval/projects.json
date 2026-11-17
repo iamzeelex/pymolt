@@ -290,6 +290,67 @@
     "--confcutdir=."
    ],
    "import_module": "zipline"
+  },
+  "locust": {
+   "default": false,
+   "_note": "Noisy pilot #1 (gevent/greenlets, ZeroMQ). Base = locust a7832cb5, the commit before PR #2411 (explicit 3.12 support, CI/config only). Both sides pin dependencies as of 2023-10-04, the migration date: the container install and the target manifest use --exclude-newer, which also keeps old gevent buildable (today's Cython cannot compile it). Step 0 (no pymolt): 4 runs, identical per-test outcomes, 349 passed, test_cpu_warning fails everywhere (host CPU) and is deselected. test_stop_timeout_with_interrupt_no_reschedule is timing-sensitive: it failed once in 5 uncaptured runs (passed in all 4 step-0 runs), so it is deselected too. test_distribute_users (a hard 7.0 s budget) and test_distributed_shape_with_fixed_users pass uncaptured but go over their wall-clock budgets under a capture that traces the stdlib (about 1.3x), so they are deselected: the pilot measures what pymolt reports, not whether a timing budget survives a tracer. test_command_line_arguments_override_config_file fails on 3.8 without pymolt when it runs after the other files (ReferenceError on a weakref, order-dependent), so it is deselected. Both sides take --confcutdir=. --rootdir=. (verify compares the two commands, so they must match): locust's pyproject has no pytest section, so pytest takes the outer repository as rootdir and the --deselect node ids silently match nothing.",
+   "image": "python:3.8",
+   "platform": "linux/arm64",
+   "base_python": "3.8",
+   "manifests": {
+    "requirements-pymolt-eval.txt": "gevent>=20.12.1\nflask>=2.0.0\nWerkzeug>=2.0.0\nrequests>=2.23.0\nmsgpack>=0.6.2\npyzmq>=22.2.1,!=23.0.0\ngeventhttpclient>=2.0.2\nConfigArgParse>=1.0\npsutil>=5.6.7\nFlask-BasicAuth>=0.2.0\nFlask-Cors>=3.0.10\nroundrobin>=0.0.2\ntyping-extensions>=3.7.4.3\n",
+    "requirements-target-2023.txt": "blinker==1.6.2\nbrotli==1.1.0\ncertifi==2023.7.22\ncharset-normalizer==3.3.0\nclick==8.1.7\nconfigargparse==1.5.3\nflask==3.0.0\nflask-basicauth==0.2.0\nflask-cors==4.0.0\ngevent==23.9.1\ngeventhttpclient==2.0.11\ngreenlet==3.0.0\nidna==3.4\nitsdangerous==2.1.2\njinja2==3.1.2\nmarkupsafe==2.1.3\nmsgpack==1.0.7\npsutil==5.9.5\npyzmq==25.1.1\nrequests==2.31.0\nroundrobin==0.0.4\nsetuptools==68.2.2\nsix==1.16.0\ntyping-extensions==4.8.0\nurllib3==2.0.6\nwerkzeug==3.0.0\nzope-event==5.0\nzope-interface==6.0\n"
+   },
+   "container_install": [
+    "pip install -q uv",
+    "uv pip install --system --exclude-newer 2023-10-04 -r requirements-pymolt-eval.txt pytest mock retry pyquery cryptography",
+    "SETUPTOOLS_SCM_PRETEND_VERSION=2.17.0 uv pip install --system --no-deps -e ."
+   ],
+   "ready_probe": "python -c 'import locust, gevent, zmq, pytest'",
+   "setup": {
+    "manifest": "requirements-pymolt-eval.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider",
+    "-o",
+    "addopts=",
+    "--confcutdir=.",
+    "--rootdir=.",
+    "--deselect",
+    "locust/test/test_runners.py::TestLocustRunner::test_cpu_warning",
+    "--deselect",
+    "locust/test/test_runners.py::TestStopTimeout::test_stop_timeout_with_interrupt_no_reschedule",
+    "--deselect",
+    "locust/test/test_dispatch.py::TestLargeScale::test_distribute_users",
+    "--deselect",
+    "locust/test/test_runners.py::TestMasterWorkerRunners::test_distributed_shape_with_fixed_users",
+    "--deselect",
+    "locust/test/test_load_locustfile.py::TestLoadLocustfile::test_command_line_arguments_override_config_file"
+   ],
+   "test_args": [
+    "locust/test/test_runners.py",
+    "locust/test/test_zmqrpc.py",
+    "locust/test/test_stats.py",
+    "locust/test/test_fasthttp.py",
+    "locust/test/test_http.py",
+    "locust/test/test_web.py",
+    "locust/test/test_dispatch.py",
+    "locust/test/test_load_locustfile.py"
+   ],
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    "uv pip install --python .venv-target/bin/python --exclude-newer 2023-10-04 -r requirements-target-2023.txt pytest mock retry pyquery cryptography",
+    "SETUPTOOLS_SCM_PRETEND_VERSION=2.17.0 uv pip install --python .venv-target/bin/python --no-deps -e ."
+   ],
+   "artifact": "tests/artifacts/locust",
+   "host_prep": [],
+   "env": {},
+   "post_env": {},
+   "target_pytest_flags": [],
+   "import_module": "locust",
+   "target_manifest": "requirements-target-2023.txt",
+   "phase_timeout_min": 60
   }
  }
 }

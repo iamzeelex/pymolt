@@ -73,7 +73,6 @@ import atexit
 import json
 import os
 import sys
-import threading
 import time
 
 from . import _sinks
@@ -88,6 +87,7 @@ from ._backend import (
     select_backend,
     stdlib_targets,
 )
+from ._rawthreads import RawEvent, allocate_lock, get_ident, spawn
 from ._sinks import JsonlSink, MemorySink
 
 ENV_TARGET = "PYMOLT_TRACE_TARGET"
@@ -249,8 +249,8 @@ class Controller(object):
         self.switch_reason = None
         self._switched = False
         self._stopped = False
-        self._lock = threading.Lock()
-        self._wake = threading.Event()
+        self._lock = allocate_lock()
+        self._wake = RawEvent()
         self._thread = None
         self._t0 = None
 
@@ -394,10 +394,7 @@ class Controller(object):
                           PrefixMatcher(tops, self.exclude))
 
     def _start_thread(self):
-        t = threading.Thread(target=self._run, name="pymolt-trace-controller")
-        t.daemon = True
-        self._thread = t
-        t.start()
+        self._thread = spawn(self._run, "pymolt-trace-controller")
 
     def _interval(self):
         return max(0.005, min(1.0, self.quiet / 4.0, self.max_seconds / 4.0))
@@ -453,8 +450,8 @@ class Controller(object):
 
     def after_fork_child(self):
         """Threads do not survive fork: restart the controller in the child if still discovering."""
-        self._lock = threading.Lock()
-        self._wake = threading.Event()
+        self._lock = allocate_lock()
+        self._wake = RawEvent()
         if self._stopped:
             return
         if self.mode == "incremental" or (self.mode == "auto" and not self._switched):
@@ -490,6 +487,13 @@ class Controller(object):
         from ._wrap import WrapBackend
         symbols, prefixes = _partition(self.impact_targets)
         observed = sorted(s for s in list(d.observed_syms) if s)
+        # A stdlib function wrapped in place is visible to the program (logging's findCaller
+        # reports the wrapper as the call site, a traceback runs through it, ``inspect.stack``
+        # lists it): stdlib targets stay observed by the profile hook, narrowed to them.
+        stdlib = stdlib_targets(os.environ.get(ENV_STDLIB, ""))
+        in_stdlib = [s for s in observed if s.split(".", 1)[0] in stdlib]
+        stdlib_set = set(in_stdlib)
+        observed = [s for s in observed if s not in stdlib_set]
         wrappable = [s for s in observed if "<" not in s]
         seen = set(wrappable)
         wrap = WrapBackend(wrappable + [s for s in symbols if s not in seen], self.sink,
@@ -500,8 +504,9 @@ class Controller(object):
                 wrap._mark_skip(s, "unaddressable")
         d.skip_wrapped = True       # a still-hooked thread skips what a wrapper records
         wrap.start()                # watch in place first ...
-        if prefixes:
-            d.narrow(prefixes)      # ... then discover narrows to the module.* targets
+        keep = list(prefixes) + sorted({s.split(".", 1)[0] for s in in_stdlib})
+        if keep:
+            d.narrow(keep)          # ... then discover narrows to the module.* / stdlib targets
         else:
             d.retire()              # ... or stops taking new calls (in-flight ones complete)
         return wrap
@@ -518,7 +523,7 @@ class Controller(object):
             self._stopped = True
         self._wake.set()
         t = self._thread
-        if t is not None and t is not threading.current_thread():
+        if t is not None and t.ident != get_ident():
             t.join(2.0)
         seen = []
         for be in (self.watch, self.discover):

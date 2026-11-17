@@ -930,6 +930,8 @@ class TestStdlibTracing:
         project = self._project(tmp_path)
         (project / "more.py").write_text(
             "from __future__ import annotations\nimport asyncio, typing, abc\n"
-            "import os.path as p  # comment\nfrom xml.etree import ElementTree\nimport click\n")
+            "import os.path as p  # comment\nfrom xml.etree import ElementTree\nimport click\n"
+            "import importlib.machinery, logging\n")
+        # importlib stays traced: its breakage sits on loader objects only the trace can name
         assert service.stdlib_trace_modules(project, "baseline") == [
-            "asyncio", "collections", "imp", "os", "xml"]
+            "asyncio", "collections", "imp", "importlib", "xml"]
