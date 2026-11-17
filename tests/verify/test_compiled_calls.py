@@ -275,6 +275,225 @@ def test_jsonl_sink_carries_the_binding_flag(tmp_path):
     assert ev["binding"] is True
 
 
+def test_a_wrapper_called_from_dependency_code_calls_through_without_recording():
+    mod = _fake_compiled_module()
+    sink = MemorySink()
+    wrap = CompiledWrap(sink, PrefixMatcher(["vfakecw"]), source=__name__)
+    wrap._suffixes = (".so",)
+    wrap.scan(mod)
+    dep = types.ModuleType("vfakecwcaller")
+    exec("def use(f, x):\n    return f(x)\n", dep.__dict__)
+    try:
+        assert dep.use(mod.helper, 0) == 0           # decides the dependency's code once
+        assert [code.co_name for code in wrap._not_near.values()] == ["use"]
+        reached = []
+        wrap._safe_record = lambda *a, **kw: reached.append(a)
+        assert [dep.use(mod.helper, i) for i in range(1, 3)] == [1, 2]
+        assert reached == []                         # later calls skip the record path
+        del wrap._safe_record
+        assert "vfakecw.helper" not in _by_name(sink)
+        assert mod.helper(5) == 5                    # a call from our code is still a contact
+        (rec,) = _by_name(sink)["vfakecw.helper"]
+        assert rec["inputs"]["bound"]["x"] == 5
+        model = mod.Model()
+        assert dep.use(model.load, 4) is model       # a bound wrapped method calls through too
+        assert [r["count"] for r in _by_name(sink)["vfakecw.helper"]] == [1]
+    finally:
+        wrap.stop()
+
+
+MODES = ["discover", "watch", "incremental"]
+
+
+def _registered_compiled_module(name):
+    """A fake compiled dependency module in ``sys.modules``, found by ``CompiledWrap.start``."""
+    import importlib.machinery as machinery
+
+    mod = types.ModuleType(name)
+    mod.__file__ = "/nowhere/" + name + machinery.EXTENSION_SUFFIXES[-1]
+    holder = type("Model", (), {"__module__": name})
+    load = _CyFn()
+    load.__module__ = name
+    load.__qualname__ = "Model.load"
+    holder.load = load
+    mod.Model = holder
+    helper = _CyFn()
+    helper.__module__ = name
+    helper.__qualname__ = "helper"
+    mod.helper = helper
+    sys.modules[name] = mod
+    return mod
+
+
+def _monitored(mod, body, **kw):
+    sink = MemorySink()
+    be = MonitoringBackend(PrefixMatcher([mod.__name__]), sink, source=__name__, **kw)
+    be.start()
+    try:
+        body()
+    finally:
+        be.stop()
+        del sys.modules[mod.__name__]
+    return be, sink
+
+
+def _wrapper_code(code):
+    from pymolt.verify._wrap import _WRAPPER_CODES
+
+    return any(code is c for c in _WRAPPER_CODES)
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", MODES)
+def test_monitoring_wraps_cython_functions_and_records_each_call_once(mode):
+    mod = _registered_compiled_module("vfakecwm")
+    original = mod.helper
+
+    def body():
+        assert mod.helper is not original           # wrapped while the backend runs
+        for i in range(3):
+            mod.helper(i)
+        mod.Model().load(5)
+
+    _be, sink = _monitored(mod, body, mode=mode)
+    assert mod.helper is original                    # restored by stop
+    names = _by_name(sink)
+    helper = names["vfakecwm.helper"]
+    assert sum(r["count"] for r in helper) == 3      # once per call: no __c_call__ twin
+    assert sorted(r["inputs"]["bound"]["x"] for r in helper) == [0, 1, 2]
+    assert sorted(r["result"] for r in helper) == [0, 1, 2]
+    assert not any(r["inputs"].get("__c_call__") for rs in names.values() for r in rs)
+    assert sum(r["count"] for r in names["vfakecwm.Model.load"]) == 1
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", ["discover", "incremental"])
+def test_a_cython_callable_bound_before_the_wrap_stays_a_compiled_call(mode):
+    mod = _registered_compiled_module("vfakecwe")
+    early = mod.helper                               # ``from dep import helper`` before start
+
+    def body():
+        early(9)
+        mod.helper(1)
+
+    _be, sink = _monitored(mod, body, mode=mode)
+    recs = _by_name(sink)["vfakecwe.helper"]
+    shapes = sorted((bool(r["inputs"].get("__c_call__")), r["count"]) for r in recs)
+    assert shapes == [(False, 1), (True, 1)]
+    (compiled,) = [r for r in recs if r["inputs"].get("__c_call__")]
+    assert compiled["inputs"]["arg0"] == 9
+    assert compiled["result"] == {"__opaque__": "unobserved:c-return"}
+
+
+@needs_monitoring
+def test_the_wrapper_code_is_never_armed_by_either_incremental_tool():
+    mod = _registered_compiled_module("vfakecwi")
+
+    def body():
+        for i in range(4):
+            mod.helper(i)
+            mod.Model().load(i)
+
+    be, sink = _monitored(mod, body, mode="incremental")
+    assert sum(r["count"] for r in _by_name(sink)["vfakecwi.helper"]) == 4
+    assert not any(_wrapper_code(code) for code in be._watch_codes.values())
+    assert be.armed == 0                             # tool A armed nothing for the wrapper
+    implicit = [ent for ent in be._implicit.values() if _wrapper_code(ent[0])]
+    assert implicit and not any(ent[1] for ent in implicit)    # tool B: DISABLEd, not owned
+    assert be._local == {}                           # released by stop (nothing left armed)
+
+
+@needs_monitoring
+def test_discover_disables_the_wrapper_code():
+    mod = _registered_compiled_module("vfakecwd")
+    be, sink = _monitored(mod, lambda: [mod.helper(i) for i in range(3)], mode="discover")
+    assert sum(r["count"] for r in _by_name(sink)["vfakecwd.helper"]) == 3
+    ents = [ent for ent in be._callee.values() if _wrapper_code(ent[0])]
+    assert ents and not any(ent[1] for ent in ents)
+    assert all(ent[6] is be._mon.DISABLE for ent in ents)
+    assert not any(_wrapper_code(code) for code in be.observed.values())
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", MODES)
+def test_an_impact_target_that_is_a_wrapped_cython_callable_is_recorded_once(mode):
+    mod = _registered_compiled_module("vfakecwt")
+
+    def body():
+        for i in range(3):
+            mod.helper(i)
+
+    be, sink = _monitored(mod, body, mode=mode, watch_targets=["vfakecwt.helper"])
+    assert sum(r["count"] for r in _by_name(sink)["vfakecwt.helper"]) == 3
+    assert be.skipped == []                          # observed (by its wrapper), not skipped
+    assert not any(_wrapper_code(code) for code in be._impact_codes.values())
+
+
+@needs_monitoring
+def test_include_internal_does_not_record_the_wrapper_calling_what_it_wraps():
+    mod = _registered_compiled_module("vfakecwn")
+
+    _be, sink = _monitored(mod, lambda: [mod.helper(i) for i in range(3)],
+                           include_internal=True)
+    recs = _by_name(sink)["vfakecwn.helper"]
+    assert sum(r["count"] for r in recs) == 3
+    assert not any(r["inputs"].get("__c_call__") for r in recs)
+
+
+@needs_monitoring
+def test_compiled_wrap_can_be_turned_off_under_monitoring():
+    mod = _registered_compiled_module("vfakecwo")
+    sink = MemorySink()
+    be = MonitoringBackend(PrefixMatcher(["vfakecwo"]), sink, source=__name__)
+    be.compiled_wrap = False
+    be.start()
+    try:
+        original = mod.helper
+        mod.helper(2)
+        assert mod.helper is original
+    finally:
+        be.stop()
+        del sys.modules["vfakecwo"]
+    (rec,) = _by_name(sink)["vfakecwo.helper"]
+    assert rec["inputs"] == {"__c_call__": True, "arg0": 2}
+
+
+def _real_cython_function():
+    """``yaml._yaml.get_version``: a real Cython function (PyYAML's libyaml binding)."""
+    _yaml = pytest.importorskip("yaml._yaml")
+    if type(_yaml.get_version).__name__ != "cython_function_or_method":
+        pytest.skip("yaml._yaml is not built with Cython function binding")
+    return _yaml
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", MODES)
+def test_a_real_cython_call_is_recorded_with_its_result_like_setprofile_records_it(mode):
+    _yaml = _real_cython_function()
+    expected = list(_yaml.get_version())
+
+    def body():
+        for _ in range(2):
+            _yaml.get_version()
+
+    recs = {}
+    for cls, kw in ((MonitoringBackend, {"mode": mode}), (SetProfileBackend, {})):
+        sink = MemorySink()
+        be = cls(PrefixMatcher(["yaml"]), sink, source=__name__, **kw)
+        be.start()
+        try:
+            body()
+        finally:
+            be.stop()
+        recs[cls.name] = _by_name(sink)["yaml._yaml.get_version"]
+    (mon,) = recs["monitoring"]
+    (sp,) = recs["setprofile"]
+    assert mon["count"] == 2
+    assert "__c_call__" not in mon["inputs"]
+    assert mon["inputs"] == sp["inputs"]
+    assert mon["result"] == sp["result"] == {"__tuple__": expected}
+
+
 def test_compiled_wrap_ignores_calls_mediated_by_c_not_made_by_a_call():
     sink = MemorySink()
     holder = type("Model", (), {"__module__": "vfakecw"})

@@ -30,8 +30,11 @@ Compiled (C / Cython) dependency callables called from our code are recorded too
 method descriptors through ``c_call`` / ``c_return`` / ``c_exception``, but NOT Cython
 functions (``cython_function_or_method``: not an exact ``PyCFunction``) nor class
 instantiation, and it cannot see a call that fails while BINDING its arguments (no frame, no
-event): both are sys.monitoring-only (``CALL`` + ``C_RETURN`` / ``C_RAISE`` / ``RAISE``), and
-for Cython functions below 3.12 ``SetProfileBackend`` wraps them (see ``_wrap.CompiledWrap``).
+event): both are sys.monitoring-only (``CALL`` + ``C_RETURN`` / ``C_RAISE`` / ``RAISE``). The
+public Cython functions of dependency modules are wrapped by both backends instead (see
+``_wrap.CompiledWrap``), so they are recorded with their inputs and result on every Python. A
+Cython callable reached without the wrapper (bound before the wrap) stays a compiled call
+under sys.monitoring, and setprofile below 3.12 does not see it.
 
 Generators, coroutines and async generators are recorded ONCE per call, by every backend: at
 the generator's first start (when its arguments are still exactly what the caller passed),
