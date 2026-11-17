@@ -20,6 +20,7 @@ from pymolt.interfaces.cli.commands import app as cli
 from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE, EXIT_USAGE
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
+from pymolt.verify.unified import UnifiedVerificationReport
 
 runner = CliRunner()
 
@@ -234,8 +235,45 @@ def test_verify_on_explicit_recordings_renders_and_is_not_saved(tmp_path):
     ])
     assert result.exit_code in (0, 1, EXIT_INCONCLUSIVE)
     assert "Traceback" not in result.output
-    assert "not saved" in result.output
+    assert "Not saved" in result.output
     assert not (tmp_path / ".pymolt" / "verification.json").exists()
+
+
+def test_verify_on_another_post_migration_recording_saves_what_it_compared(tmp_path):
+    """`--post-migration PATH` alone compares PATH with the baseline capture: saved like a
+    plain verify (the legacy harness reads .pymolt/verification.json), naming both sides."""
+    app_py = _write_app(tmp_path, third_party=True)
+    cap = runner.invoke(cli, [
+        "capture", "baseline", "--mode", "tests", "--project-dir", str(tmp_path),
+        "--target", "requests", "--", sys.executable, str(app_py),
+    ])
+    assert cap.exit_code == 0, cap.output
+    baseline = service.load_contract_state(tmp_path).baseline
+    other = tmp_path / "other.jsonl"
+    service.capture_trace("requests", [sys.executable, str(app_py)], other, "auto")
+
+    result = runner.invoke(cli, ["verify", str(tmp_path), "--post-migration", str(other),
+                                 "--agent"])
+
+    view = json.loads(result.output)
+    saved = UnifiedVerificationReport.load(tmp_path)
+    assert saved is not None
+    assert view["data"]["saved_path"] == str(tmp_path / ".pymolt" / "verification.json")
+    compared = saved.contract.compared
+    assert compared.after == str(other) and compared.after_capture is None
+    assert service.same_slot_path(tmp_path, compared.before, baseline.trace_path)
+    assert compared.before_capture == "baseline"
+    assert view["data"]["compared_recordings"]["after"] == str(other)
+    assert "does not count it as the migration's verdict" in view["summary"]
+
+    # The post-migration capture's own file is the capture: nothing to disclaim.
+    post = service.capture_named_trace(
+        tmp_path, "post_migration", CaptureMode.TEST_SUITE,
+        command=[sys.executable, str(app_py)], target="requests")
+    result = runner.invoke(cli, ["verify", str(tmp_path), "--post-migration",
+                                 post.trace_path, "--agent"])
+    assert UnifiedVerificationReport.load(tmp_path).contract.compared.captures
+    assert "does not count" not in json.loads(result.output)["summary"]
 
 
 def test_verify_with_opaque_values_is_inconclusive(tmp_path):

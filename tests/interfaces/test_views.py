@@ -414,7 +414,8 @@ def test_plan_shows_manual_review_and_an_unbound_baseline():
 # ── verify ───────────────────────────────────────────────────────────────────
 
 _VERIFY_KEYS = {
-    "verdict", "reasons", "saved_path", "baseline_stale", "static_targets", "confirmed",
+    "verdict", "reasons", "saved_path", "compared_recordings", "baseline_stale",
+    "static_targets", "confirmed",
     "blind", "dynamic_only", "trust_pct", "compared", "changes", "change_counts",
     "calibration",
 }

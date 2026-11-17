@@ -102,6 +102,25 @@ class TrustTier(BaseModel):
     trust: float = 0.0
 
 
+class ComparedRecordings(BaseModel):
+    """The recordings a report compared, and which capture each one is.
+
+    ``*_capture`` is ``"post-migration"`` or ``"baseline"`` when the recording is that
+    capture's own, None when it is a file named on the command line that is no capture (or
+    there is no recording on that side). Only a verdict whose ``after`` side is the
+    post-migration capture is this migration's verdict."""
+
+    after: str | None = None
+    after_capture: str | None = None
+    before: str | None = None
+    before_capture: str | None = None
+
+    @property
+    def captures(self) -> bool:
+        """Both sides are the two captures."""
+        return self.after_capture == "post-migration" and self.before_capture == "baseline"
+
+
 class ContractReport(BaseModel):
     root: str
     static_targets: int = 0
@@ -148,6 +167,9 @@ class ContractReport(BaseModel):
     verdict: VerificationVerdict = VerificationVerdict.INCONCLUSIVE
     verdict_reasons: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # What was compared (``build_contract_report_from_state``). None on a report built
+    # without the captures' state, or saved before this existed.
+    compared: ComparedRecordings | None = None
 
     # Full-surface totals are always retained, even when the legacy fields above
     # are focused on an Axiom impact set.
