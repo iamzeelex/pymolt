@@ -46,6 +46,20 @@ incremental (3.12+ default for long runs: no discover window)
     caller but not passed as the C call's first argument (``sorted(xs, key=dep.f)``, a class
     in ``map(Dep, xs)``), and a call site that turns polymorphic after it was DISABLEd.
 
+Receiver-dependent call sites (discover and incremental)
+    Under 3.12 ``d.items()`` is a CALL of the unbound ``dict.items`` with ``d`` as its first
+    argument, and ``m.get(k)`` one of the stdlib ``Mapping.get``: the call is a dependency's
+    only for a receiver whose class is a target class inheriting the callee (FU6), so the
+    callee alone cannot settle the site. Such a site keeps firing while a class of a target
+    module inherits the callee (``_rd_open``: a walk of the callee's class and the classes
+    below it, once per callee); it settles when none does, on our own methods, and on a
+    method no class defines under its code's name (a ``functools.wraps`` wrapper). A closed
+    decision is made again when modules were imported since (checked at a call of ours and
+    when a recorded call completes) and when a call elsewhere shows a target receiver: a
+    builtin method then re-arms the settled sites (``restart_events``), a Python method is
+    armed (its PY_START sees every call). Recall limit: a dependency class made at run time
+    without an import, whose instances reach only a site settled before.
+
 Impact targets (``watch_targets``) are armed in EVERY mode: in discover they are recorded on
 top of the discover target (an impact target outside it would otherwise be invisible until
 the switch).
@@ -103,11 +117,23 @@ from ._rawthreads import allocate_lock, stack_key
 from ._wrap import _partition_impact_targets, _WrapFinder
 
 _getframe = sys._getframe
+_modules = sys.modules
 _FUNCTION = types.FunctionType
 _METHOD = types.MethodType
+_CODE = types.CodeType
+_MODULE = types.ModuleType
 _TYPE_DICT = type.__dict__["__dict__"]
 _TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_MODULE = type.__dict__["__module__"]
+_TYPE_SUBCLASSES = type.__dict__["__subclasses__"]
 _MISSING = object()
+# Builtin methods named by a class, called with the receiver as the first argument
+# (``d.items()`` is ``dict.items(d)`` under 3.12), and builtin methods bound to theirs.
+_DESCRIPTORS = (type(str.join), type(object.__init__), type(dict.__dict__["fromkeys"]))
+_BOUND_C = (type(len), type((0).__add__))
+# ``_inherited_call``: no dependency's call with this receiver, but it would be with another
+# one, so the call site must keep firing.
+_KEEP_SITE = object()
 
 TOOL_IDS = (4, 3, 2, 5)
 TOOL_NAME = "pymolt"
@@ -123,6 +149,7 @@ _K_NONE, _K_C, _K_PY = 0, 1, 2     # what a CALL reaches: nothing of ours / comp
 _SITE_STABLE = 2        # same callee this many times at one call site -> DISABLE the site
 _SITES_MAX = 200000
 _SETTLE_GRACE = 1.0     # seconds the start de-duplication stays on after tool B is freed
+_INHERIT_WALK_MAX = 50000   # classes walked to decide a callee is inherited by none of ours
 
 
 def _implicit_name(name):
@@ -180,6 +207,30 @@ def _mro_value(cls, name):
         value = _TYPE_DICT.__get__(owner, type).get(name, _MISSING)
         if value is not _MISSING:
             return value
+    return None
+
+
+def _inherits(cls, name, obj):
+    """True if ``cls`` resolves ``name`` to ``obj``: a builtin method descriptor, or the code
+    of a Python method (also through a static or class method)."""
+    value = _mro_value(cls, name)
+    if value is obj:
+        return True
+    t = type(value)         # never ``isinstance``/``getattr``: a class attribute may be a proxy
+    if issubclass(t, (staticmethod, classmethod)):
+        value = value.__func__
+        t = type(value)
+    return t is _FUNCTION and value.__code__ is obj
+
+
+def _defining_class(recv, name, code):
+    """The class on ``recv``'s MRO (``recv`` itself when it is a class) whose namespace holds
+    ``name`` as ``code``'s function, or None."""
+    t = type(recv)
+    cls = recv if issubclass(t, type) else t
+    for owner in _TYPE_MRO.__get__(cls, type):
+        if _TYPE_DICT.__get__(owner, type).get(name, _MISSING) is not _MISSING:
+            return owner if _inherits(owner, name, code) else None
     return None
 
 
@@ -392,6 +443,12 @@ class MonitoringBackend(FrameBackend):
         self._lastcall = {}         # tid -> (code, offset, func): last traced Python call
         self._craise = {}           # tid -> (info, code, offset): raise awaiting its type
         self._callname = {}         # tid -> (callee code, declared sym): decorator wrappers
+        # Callees whose call is a dependency's for some receivers only (``_inherited_call``):
+        # id(descriptor | code) -> [callee, inherited by a target class, owner class, name]
+        self._rd = {}
+        self._rd_closed = {}        # the entries inherited by none, decided again after imports
+        self._rd_token = len(_modules)  # sys.modules size when they were last decided
+        self._keep = {}             # (id(code), offset) -> (code, callee, receiver class): open
         self._renames = False
         self._b_active = True       # tool B owns implicitly-run codes (until settle)
         self.settled_at = None      # wall time tool B was freed
@@ -687,6 +744,8 @@ class MonitoringBackend(FrameBackend):
                 if info is not None and info[0] is code:
                     self._finish(info, OUTCOME_RETURN, retval,
                                  self._take_warnings(frame, code) if self._warned else None)
+                    if self._rd_closed and len(_modules) != self._rd_token:
+                        self._rd_revalidate()   # before our code sees what an import made
         except Exception:
             pass
         return None     # never DISABLE: armed only on codes we record
@@ -701,6 +760,8 @@ class MonitoringBackend(FrameBackend):
                 if info is not None and info[0] is code:
                     self._finish(info, OUTCOME_RAISE, raised_label(exc),
                                  self._take_warnings(frame, code) if self._warned else None)
+                    if self._rd_closed and len(_modules) != self._rd_token:
+                        self._rd_revalidate()
         except Exception:
             pass
         return None     # PY_UNWIND cannot be disabled
@@ -814,6 +875,12 @@ class MonitoringBackend(FrameBackend):
     def _on_call(self, code, offset, callable_, arg0):
         """Every call made from our code: the arming of incremental mode, then the compiled-call
         and binding-failure observation. A site is DISABLEd only when neither needs it again."""
+        keep = self._keep
+        if keep:
+            keep = keep.get((id(code), offset))
+            if (keep is not None and keep[1] is callable_ and keep[2] is type(arg0)
+                    and keep[0] is code):
+                return None     # the open site's last answer for this callee, receiver class
         disable = None
         if self.mode == INCREMENTAL:
             disable = self._on_call_arm(code, offset, callable_, arg0)
@@ -914,9 +981,9 @@ class MonitoringBackend(FrameBackend):
         return None
 
     def _observe_call(self, code, offset, callable_, arg0):
-        """True: this site must keep firing (a compiled dependency callable or a traced Python
-        one); False: it never will matter (not our code, or settled on nothing of ours);
-        None: nothing of ours yet."""
+        """True: this site must keep firing (a compiled dependency callable, a traced Python
+        one, or a callee only some receivers make a dependency's); False: it never will
+        matter (not our code, or settled on nothing of ours); None: nothing of ours yet."""
         near = True
         if self.near is not None:
             near = self._is_near(code)
@@ -929,10 +996,25 @@ class MonitoringBackend(FrameBackend):
         key = (id(code), offset)
         if kind == _K_C and self._ccount.get(key, 0) >= _C_SITE_MAX:
             return self._c_over_cap(key, code, ent[2], None)   # the hot path of a capped site
-        tid = stack_key()
+        if self._rd_closed and len(_modules) != self._rd_token:
+            self._rd_revalidate()
         csym = None
         if kind == _K_NONE:
             csym = self._inherited_call(callable_, arg0)
+            if csym is _KEEP_SITE:
+                # Not a dependency's call with this receiver, but it is with another one: the
+                # site keeps firing whatever callee it saw twice (locust: ``d.items()`` on
+                # plain dicts first, then on ``collections.defaultdict``s). The next call
+                # with the same callee and receiver class gets the same answer at once
+                # (``_on_call``); a bound callable is a new object per call, so it is not kept,
+                # nor a class receiver (``cls``): it is decided by itself, not by its type.
+                t = type(callable_)
+                if (t is _FUNCTION or t in _DESCRIPTORS) and not issubclass(type(arg0), type):
+                    if len(self._keep) >= _SITES_MAX:
+                        self._keep.clear()
+                    self._keep[key] = (code, callable_, type(arg0))
+                return True
+        tid = stack_key()
         if kind != _K_C and csym is None:
             # Nothing compiled to record. A traced Python callable is only watched for a
             # binding failure, so a site that reached the same callee twice settles (DISABLE,
@@ -1015,6 +1097,8 @@ class MonitoringBackend(FrameBackend):
                     if not stack:
                         del self._cstack[key]       # greenlets come and go: no empty leftovers
                     self._finish(top[3], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
+                    if self._rd_closed and len(_modules) != self._rd_token:
+                        self._rd_revalidate()
                     return None
             return None     # C_RETURN / C_RAISE cannot be DISABLEd: they stop with the site's CALL
         except Exception:
@@ -1090,7 +1174,14 @@ class MonitoringBackend(FrameBackend):
         """FU6: a call from our code to stdlib (or other non-target) code whose receiver is an
         instance of a target class. A Python method is armed (its start is recorded, named
         after the receiver's class) and None returned; a builtin method descriptor on a
-        dependency subclass of a builtin returns its symbol, to be recorded like a C call."""
+        dependency subclass of a builtin returns its symbol, to be recorded like a C call.
+
+        Such a callee is a dependency's for some receivers only, so its call site must not
+        settle on the callee: a ``dict.items`` site reached by plain dicts first, then by
+        ``collections.defaultdict``s, would never see the latter. When a target class inherits
+        the callee (``_rd_open``) and this receiver is not one, ``_KEEP_SITE`` is returned. A
+        builtin method bound to a receiver (``f = d.items``) is decided by ``_c_sym`` per
+        receiver class; only whether it is inherited is decided here."""
         t = type(callable_)
         recv = arg0
         if t is _METHOD:
@@ -1099,19 +1190,169 @@ class MonitoringBackend(FrameBackend):
             t = type(func)
         else:
             func = callable_
+        missing = self._mon.MISSING
         if t is _FUNCTION:
             code = func.__code__
-            if (recv is self._mon.MISSING or code.co_argcount < 1
+            if (recv is missing or code.co_argcount < 1
                     or code.co_varnames[0] not in ("self", "cls")
                     or id(code) in self._inh_codes):
+                return None     # an armed method: its PY_START sees every receiver, any site
+            if self._dep_function(func):
                 return None
-            if self._dep_function(func) or self._inherited_sym(code, recv) is None:
+            if self._inherited_sym(code, recv) is not None:
+                self._arm_inherited(code)
                 return None
-            self._arm_inherited(code)
+            return _KEEP_SITE if self._rd_open(code, func, recv) else None
+        if t in _BOUND_C:
+            recv = func.__self__
+            if recv is None or type(recv) is _MODULE:
+                return None
+            rtype = type(recv)
+            desc = _mro_value(recv if issubclass(rtype, type) else rtype, func.__name__)
+            if type(desc) not in _DESCRIPTORS:
+                return None
+            return _KEEP_SITE if self._rd_open(desc) else None
+        if t not in _DESCRIPTORS or recv is missing:
             return None
-        if recv is self._mon.MISSING or not hasattr(func, "__objclass__"):
-            return None
-        return self._inherited_descriptor_sym(func, recv)
+        sym = self._inherited_descriptor_sym(func, recv)
+        if sym is None:
+            return _KEEP_SITE if self._rd_open(func) else None
+        if self._rd_closed:
+            self._rd_inherited(func)
+        return sym
+
+    # ── callees only some receivers make a dependency's ───────────────────────
+    def _rd_open(self, obj, func=None, recv=_MISSING):
+        """True if a class of a target module inherits ``obj`` (a builtin method descriptor, or
+        the code of ``func``, a Python method of no dependency, called on ``recv``): a call
+        through it is then a dependency's for some receiver. Decided once per callee. A closed
+        decision is decided again when modules were imported since (``_rd_revalidate``) or a
+        call shows a target receiver (``_rd_inherited``); it is never made for our own code,
+        which no dependency class inherits.
+
+        A Python method is inherited under its code's name (``_inherited_sym``), so its owner
+        is the class defining that name: found from ``co_qualname``, else on the receiver's
+        class. A code no class there defines under its name (a ``functools.wraps`` wrapper
+        installed as another name) can never be recorded as inherited: closed, not revisited."""
+        ent = self._rd.get(id(obj))
+        if ent is not None and ent[0] is obj:
+            return ent[1]
+        owner = name = None
+        found = track = True    # ``object``, or a walk that cannot tell: inherited
+        try:
+            if func is None:
+                owner, name = obj.__objclass__, obj.__name__
+            elif self.near is not None and self._function_is_near(obj, func):
+                found = track = False
+            else:
+                name = obj.co_name
+                owner = _owner_class(obj, func.__globals__)[0]
+                if owner is None and recv is not _MISSING:
+                    owner = _defining_class(recv, name, obj)
+                if owner is None:
+                    found = track = False
+            if owner is not None and owner is not object:
+                found = self._inherited_by_target(owner, name, obj)
+        except Exception:
+            found, track = True, False
+        if len(self._rd) >= _CODE_CACHE_MAX:
+            self._rd.clear()
+            self._rd_closed.clear()
+        ent = [obj, found, owner, name]
+        self._rd[id(obj)] = ent
+        if not found and track:
+            self._rd_closed[id(obj)] = ent
+        return found
+
+    def _function_is_near(self, code, func):
+        """Is ``func`` our code (decided like a caller's frame, from its code and globals)?"""
+        nent = self._near_codes.get(id(code))
+        if nent is not None and nent[0] is code:
+            return nent[1]
+        return self._code_is_near(types.SimpleNamespace(f_code=code, f_globals=func.__globals__))
+
+    def _inherited_by_target(self, owner, name, obj, classes=None):
+        """True if ``owner`` or a class below it, defined in a target module, resolves
+        ``name`` to ``obj``. ``classes`` caches ``_target_classes`` per owner."""
+        if classes is None:
+            found = self._target_classes(owner)
+        else:
+            found = classes.get(id(owner), _MISSING)
+            if found is _MISSING:
+                found = classes[id(owner)] = self._target_classes(owner)
+        if found is None:
+            return True         # too many classes to tell
+        for cls in found:
+            try:
+                if _inherits(cls, name, obj):
+                    return True
+            except Exception:
+                return True
+        return False
+
+    def _target_classes(self, owner):
+        """The classes of target modules at or below ``owner`` (None past
+        ``_INHERIT_WALK_MAX`` classes walked)."""
+        out = []
+        stack = [owner]
+        seen = set()
+        while stack:
+            cls = stack.pop()
+            try:
+                module = _TYPE_MODULE.__get__(cls, type)
+                if (isinstance(module, str) and module and module != "builtins"
+                        and self._target_module(module, None)):
+                    out.append(cls)
+                subs = _TYPE_SUBCLASSES(cls)
+            except Exception:
+                continue
+            for sub in subs:
+                if id(sub) not in seen:
+                    if len(seen) >= _INHERIT_WALK_MAX:
+                        return None
+                    seen.add(id(sub))
+                    stack.append(sub)
+        return out
+
+    def _rd_inherited(self, desc):
+        """A call just showed a target class inheriting ``desc``: a closed decision on it is
+        stale (the class came later), so its settled call sites fire again."""
+        ent = self._rd_closed.pop(id(desc), None)
+        if ent is not None and ent[0] is desc:
+            ent[1] = True
+            self._restart_events()
+
+    def _rd_revalidate(self):
+        """Modules were imported since the closed decisions were made, and a class one
+        defines may inherit a callee no target class did, at a call site that settled since.
+        Each closed callee is decided again: a builtin method that is inherited now re-arms
+        the settled sites (``restart_events``); a Python method is armed (its PY_START sees
+        every call). Checked at a call of ours and when one completes."""
+        self._rd_token = len(_modules)
+        restart = False
+        classes = {}                # id(owner) -> its target classes, walked once
+        for key, ent in list(self._rd_closed.items()):
+            obj = ent[0]
+            try:
+                if not self._inherited_by_target(ent[2], ent[3], obj, classes):
+                    continue
+            except Exception:
+                pass                # cannot tell: open, like an undecidable first decision
+            ent[1] = True
+            self._rd_closed.pop(key, None)
+            if type(obj) is _CODE:
+                self._arm_inherited(obj)
+            else:
+                restart = True
+        if restart:
+            self._restart_events()
+
+    def _restart_events(self):
+        if self._tool is not None:
+            try:
+                self._mon.restart_events()      # DISABLEd sites fire again, and re-decide
+            except Exception:
+                pass
 
     def _arm_inherited(self, code):
         with self._arm_lock:
