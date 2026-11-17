@@ -67,6 +67,7 @@ widened facts (``"in": {"__widened__": true}``) compare their whole (symbol, sit
 type level on both sides.
 """
 import ast
+import datetime as _dt
 import difflib
 import io
 import json
@@ -77,7 +78,7 @@ import sys
 import tokenize
 import uuid
 import warnings
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -85,9 +86,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
-from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_host
+from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_container, to_host
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -167,6 +168,7 @@ class Comparison(StrEnum):
 
 class ComparisonLevel(StrEnum):
     EXACT = "exact"
+    MASKED = "masked"  # exact once volatile positions (environment, clock, source, input) masked
     TYPE = "type"
     KIND = "kind"   # from tallies: which outcome kinds (return / raise types) occurred
 
@@ -225,6 +227,10 @@ class Fact(BaseModel):
     attr_of: str | None = None       # module ``__getattr__`` (PEP 562): the original symbol
     # Deprecation-family warnings its (sampled) calls issued, merged across occurrences.
     warnings: list[CallWarning] = Field(default_factory=list)
+    # Set by the diff's noise canonicalisation: which masks changed this fact's input or
+    # outcomes ("environment", "clock", "source"), and the fact as recorded.
+    _masks: frozenset = PrivateAttr(default=frozenset())
+    _raw: Any = PrivateAttr(default=None)
 
     @property
     def site(self) -> tuple[str, str, str | int | None]:
@@ -280,6 +286,14 @@ class FactSet(BaseModel):
     paths_mapped: int = 0                # distinct call-site files mapped container -> host
     paths_foreign: int = 0               # distinct absolute call-site files left outside the root
     notes: list[str] = Field(default_factory=list)
+    # The capture's environment identity and loss (``annotate_capture_meta``): the Python
+    # versions its processes ran, their run windows (epoch seconds), the project root as each
+    # process saw it, and the events the runtime dropped (None = not reported).
+    python_versions: list[str] = Field(default_factory=list, exclude=True)
+    run_windows: list[tuple[float, float]] = Field(default_factory=list, exclude=True)
+    env_roots: list[str] = Field(default_factory=list, exclude=True)
+    host_capture: bool = Field(default=True, exclude=True)
+    dropped_events: int | None = None
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -1347,7 +1361,40 @@ def load_facts(
             backends = _backends_of(header)
     fs.backends = backends
     fs.warnings_capture = _warnings_capture_of(meta, header)
+    annotate_capture_meta(fs, meta)
     _add_sidecar_tally_warnings(fs, meta, site_text)
+    return fs
+
+
+def annotate_capture_meta(fs: FactSet, meta: Mapping[str, Any]) -> FactSet:
+    """The capture's environment identity and event loss, from its metadata sidecar: Python
+    versions and run windows per process, the project root as the traced processes saw it (the
+    container path for a container capture, plus the host root), and the dropped events."""
+    procs = [p for p in (meta.get("processes") or ()) if isinstance(p, Mapping)] or [meta]
+    fs.python_versions = sorted({str(p["python"]) for p in procs if p.get("python")})
+    windows = []
+    for p in procs:
+        start, end = p.get("started_at"), p.get("ended_at")
+        if isinstance(start, int | float) and isinstance(end, int | float) and end >= start:
+            windows.append((float(start), float(end)))
+    fs.run_windows = windows
+    roots = [fs.root] if fs.root else []
+    if fs.runner is not None and fs.root:
+        seen = to_container(fs.runner, fs.root)
+        if seen:
+            roots.append(seen)
+    fs.env_roots = sorted({r.rstrip("/") for r in roots if r and r.rstrip("/")},
+                          key=lambda r: -len(r))
+    fs.host_capture = not fs.paths_mapped
+    dropped = None
+    for p in procs:
+        counters = p.get("counters")
+        if isinstance(counters, Mapping) and isinstance(counters.get("dropped_events"), int):
+            dropped = (dropped or 0) + counters["dropped_events"]
+    top = meta.get("counters")
+    if dropped is None and isinstance(top, Mapping) and isinstance(top.get("dropped_events"), int):
+        dropped = top["dropped_events"]
+    fs.dropped_events = dropped
     return fs
 
 
@@ -1666,7 +1713,7 @@ def _merge_facts(facts: list[Fact]) -> Fact:
                 outcomes[k] = [o.kind, o.value, o.count]
         if f.warnings:
             merge_warnings(warns, [w.model_dump() for w in f.warnings])
-    return head.model_copy(update={
+    merged = head.model_copy(update={
         "qualnames": sorted(qualnames),
         "symq": next((f.symq for f in ordered if f.symq), None),
         "lines": sorted(lines),
@@ -1676,6 +1723,29 @@ def _merge_facts(facts: list[Fact]) -> Fact:
         "count": sum(f.count for f in ordered),
         "warnings": _call_warnings(warns),
     })
+    masks = frozenset().union(*(_masks_of(f) for f in ordered))
+    if masks:
+        _set_masks(merged, masks, _raw_of(head))
+    return merged
+
+
+def _masks_of(f: Fact) -> frozenset:
+    """The masks the noise canonicalisation applied (none for a fact built without private
+    state: ``model_construct``, an unpickled older model)."""
+    private = getattr(f, "__pydantic_private__", None)
+    return private.get("_masks", frozenset()) if private else frozenset()
+
+
+def _raw_of(f: Fact) -> Fact:
+    private = getattr(f, "__pydantic_private__", None)
+    return (private.get("_raw") if private else None) or f
+
+
+def _set_masks(f: Fact, masks: frozenset, raw: Fact) -> None:
+    if getattr(f, "__pydantic_private__", None) is None:
+        object.__setattr__(f, "__pydantic_private__", {})
+    f.__pydantic_private__["_masks"] = masks
+    f.__pydantic_private__["_raw"] = raw
 
 
 # ── type reduction ────────────────────────────────────────────────────────────────────────
@@ -2896,6 +2966,432 @@ def _is_noise(symbol: str) -> str | None:
     return None
 
 
+# ── noise canonicalisation: volatile positions masked before comparing ───────────────────
+#
+# Comparison is layered: the outcome kind is always strict; the structure (types, keys,
+# attribute names, input signature, the format of strings) is always compared; values are
+# compared only where they are not volatile. A position is volatile when its value is
+#   * a value a recorded entropy source returned on that side (``source``: uuid4, random,
+#     datetime.now, tempfile names, ...), or a reading of the capture's own clock (``clock``),
+#     or the capture's environment identity (``environment``: project root, Python version):
+#     masked per side, before keying, with placeholders that keep the format;
+#   * explained by the pair's own input difference (``input-substitution``): masked per pair.
+# Placeholders: ``⟨src:<alphabet>:<shape>⟩``, ``⟨clock:<shape>⟩``, ``⟨root⟩``, ``⟨python⟩``
+# are unindexed (stable under concurrency: two runs interleave greenlets differently, so a
+# per-side numbering by first appearance would differ); ``⟨inK⟩`` is indexed locally to one
+# pair. A token shorter than 8 characters only matches as a whole token (``9095`` never masks
+# a piece of ``2.5949095``); shorter than 4 it is never a token.
+
+# Curated stdlib entropy sources (generic data, not per library). kind: "uuid" (its UUIDs),
+# "datetime" (its datetimes), "tempname" (file and directory names), "value" (the returned
+# value itself), "pick" (picks from its input: the fact is volatile, its values are not
+# tokens). ``seedable``: a recorded seed makes it deterministic on that side.
+_SOURCES: dict[str, tuple[str, bool]] = {
+    "uuid.uuid1": ("uuid", False), "uuid.uuid4": ("uuid", False),
+    "os.urandom": ("value", False), "os.getrandom": ("value", False),
+    "datetime.datetime.now": ("datetime", False), "datetime.datetime.utcnow": ("datetime", False),
+    "datetime.datetime.today": ("datetime", False), "datetime.date.today": ("datetime", False),
+    **{f"time.{n}{ns}": ("value", False) for n in (
+        "time", "monotonic", "perf_counter", "process_time", "thread_time") for ns in ("", "_ns")},
+    "tempfile.mkstemp": ("tempname", False), "tempfile.mkdtemp": ("tempname", False),
+    "tempfile.mktemp": ("tempname", False), "tempfile.NamedTemporaryFile": ("tempname", False),
+    "tempfile.TemporaryDirectory": ("tempname", False),
+    "tempfile.TemporaryDirectory.__enter__": ("tempname", False),
+    "tempfile._RandomNameSequence.__next__": ("tempname", False),
+}
+_RANDOM_VALUES = frozenset({
+    "random", "uniform", "gauss", "normalvariate", "lognormvariate", "expovariate",
+    "vonmisesvariate", "gammavariate", "betavariate", "paretovariate", "weibullvariate",
+    "triangular", "getrandbits", "randbytes", "binomialvariate", "randbelow", "randbits"})
+_RANDOM_PICKS = frozenset({"choice", "choices", "sample", "shuffle", "randint", "randrange"})
+_RANDOM_PREFIXES = (("random.SystemRandom.", False), ("random.Random.", True), ("random.", True),
+                    ("secrets.SystemRandom.", False), ("secrets.", False))
+_SEED_CALLS = ("random.seed", "random.Random.seed", "random.Random.__init__")
+_TAG_NAME_KEYS = frozenset({
+    "__opaque__", "__object__", "__type__", "__callable__", "__enum__", "__structure__",
+    "__cycle__", "__shape__", "__dataclass__", "__nondeterministic__", "__widened__",
+    "__c_call__"})
+_WORD = re.compile(r"[A-Za-z0-9_]+")
+_ALNUM = re.compile(r"[A-Za-z0-9]+")  # where a token may start: after any separator, ``_`` too
+_NUMBER_TOKEN = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+_ISO_CLOCK = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?"
+    r"(Z|[+-]\d{2}:?\d{2})?(?!\d)")
+_EPOCH_CLOCK = re.compile(r"(?<![\d.])(\d{10}|\d{13}|\d{16}|\d{19})(\.\d+)?(?!\d)")
+_EPOCH_SCALES = {10: (1.0, "s"), 13: (1e3, "ms"), 16: (1e6, "us"), 19: (1e9, "ns")}
+_CLOCK_SLACK = 5.0  # seconds around a process's run window
+
+
+def source_kind(symbol: str) -> tuple[str, bool] | None:
+    """``(kind, seedable)`` of a curated stdlib entropy source, or None."""
+    if symbol in _SOURCES:
+        return _SOURCES[symbol]
+    for prefix, seedable in _RANDOM_PREFIXES:
+        if symbol.startswith(prefix):
+            name = symbol[len(prefix):]
+            if "." in name:
+                continue
+            if name in _RANDOM_VALUES or name.startswith("token_"):
+                return ("value", seedable)
+            if name in _RANDOM_PICKS:
+                return ("pick", seedable)
+    return None
+
+
+def _seeded(facts: list[Fact]) -> bool:
+    """A seed recorded on this side (``random.seed(42)``, ``Random(42)``) makes its random
+    module deterministic: then its values are compared like any other."""
+    for f in facts:
+        if f.symbol in _SEED_CALLS:
+            bound = f.input.get("bound") if isinstance(f.input, dict) else None
+            if isinstance(bound, dict) and any(
+                    k in bound and bound[k] is not None for k in ("a", "x")):
+                return True
+    return False
+
+
+def _token_placeholder(token: str) -> str:
+    """``⟨src:<alphabet>:<shape>⟩``: letters' case class and the word-run lengths with every
+    separator kept, so a uuid that lost its hyphens or changed case still differs."""
+    if _NUMBER_TOKEN.fullmatch(token):
+        return "⟨src:number⟩"
+    letters = [c for c in token if c.isalpha()]
+    upper, lower = any(c.isupper() for c in letters), any(c.islower() for c in letters)
+    alphabet = "mixed" if upper and lower else ("upper" if upper else "lower")
+    shape = _WORD.sub(lambda m: f"x{len(m.group())}", token)
+    return f"⟨src:{alphabet}:{shape}⟩"
+
+
+def _walk_leaves(value: Any, fn: Callable[[Any], Any]) -> Any:
+    """Rebuild ``value`` with ``fn`` applied to every scalar leaf (str, int, float), leaving
+    type names (``__opaque__``, ``__object__``, ...) and booleans/None untouched."""
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int | float):
+        return fn(value)
+    if isinstance(value, list):
+        return [_walk_leaves(x, fn) for x in value]
+    if isinstance(value, dict):
+        return {k: (v if k in _TAG_NAME_KEYS else _walk_leaves(v, fn)) for k, v in value.items()}
+    return value
+
+
+def _source_values(kind: str, value: Any) -> tuple[list[str], list[float]]:
+    """The tokens one return value of a source contributes: (strings, numbers)."""
+    strings: list[str] = []
+    numbers: list[float] = []
+
+    def visit(v: Any, attr: str | None = None) -> None:
+        if isinstance(v, dict):
+            if kind == "uuid" and isinstance(v.get("__uuid__"), str):
+                strings.extend((v["__uuid__"], v["__uuid__"].replace("-", "")))
+            elif kind == "datetime" and isinstance(v.get("__datetime__"), str):
+                strings.extend((v["__datetime__"], v["__datetime__"].replace("T", " ")))
+            elif kind == "value" and isinstance(v.get("__bytes__"), str):
+                strings.append(v["__bytes__"])
+            for k, x in v.items():
+                if k not in _TAG_NAME_KEYS:
+                    visit(x, k)
+            attrs = v.get("attrs")
+            if kind == "tempname" and isinstance(attrs, dict) \
+                    and isinstance(attrs.get("name"), str):
+                strings.append(attrs["name"])
+        elif isinstance(v, list):
+            for x in v:
+                visit(x, attr)
+        elif kind == "tempname" and isinstance(v, str) and attr in (None, "__tuple__", "name"):
+            strings.append(v)
+            base = v.rsplit("/", 1)[-1]
+            if len(base) >= 8 and base != v:
+                strings.append(base)
+        elif kind == "value":
+            if isinstance(v, str):
+                strings.append(v)
+            elif isinstance(v, int | float) and not isinstance(v, bool):
+                numbers.append(v)
+                strings.append(repr(v))
+
+    visit(value)
+    return [s for s in strings if len(s) >= 4], [
+        n for n in numbers if len(repr(n)) >= 4]
+
+
+@dataclass
+class _Masker:
+    """One side's masks: its environment identity, run windows and entropy-source tokens."""
+
+    roots: list[str]
+    pythons: list[str]
+    windows: list[tuple[float, float]]
+    host_capture: bool
+    tokens: dict[str, str] = field(default_factory=dict)       # token -> placeholder
+    numbers: dict[float, str] = field(default_factory=dict)    # numeric token -> placeholder
+    counts: Counter = field(default_factory=Counter)
+    examples: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._roots = re.compile("|".join(
+            rf"(?<![\w.\-/]){re.escape(r)}(?![\w.\-])" for r in self.roots)) if self.roots else None
+        pys = [re.escape(v) for v in self.pythons]
+        self._python = re.compile(rf"(?<![\d.])(?:{'|'.join(pys)})(?![\d.])") if pys else None
+        self._long: dict[str, list[str]] = defaultdict(list)    # 8-char prefix -> tokens
+        self._short: dict[str, str] = {}
+        for tok in sorted(self.tokens, key=len, reverse=True):
+            if len(tok) >= 8:
+                self._long[tok[:8]].append(tok)
+            else:
+                self._short[tok] = self.tokens[tok]
+
+    def _note(self, mechanism: str, example: str) -> None:
+        self.counts[mechanism] += 1
+        self.examples.setdefault(mechanism, example)
+
+    def leaf(self, v: Any) -> Any:
+        if isinstance(v, str):
+            return self._string(v)
+        if isinstance(v, int | float) and not isinstance(v, bool):
+            if v in self.numbers:
+                self._note("source", repr(v))
+                return self.numbers[v]
+            clock = self._epoch(v, "int" if isinstance(v, int) else "float")
+            if clock is not None:
+                self._note("clock", repr(v))
+                return clock
+        return v
+
+    def _string(self, s: str) -> str:
+        if self.tokens:
+            s = self._mask_tokens(s)
+        if self.windows:
+            s = self._mask_clock(s)
+        if self._roots is not None and self._roots.search(s):
+            self._note("environment", self._roots.search(s).group())
+            s = self._roots.sub("⟨root⟩", s)
+        if self._python is not None and self._python.search(s):
+            self._note("environment", self._python.search(s).group())
+            s = self._python.sub("⟨python⟩", s)
+        return s
+
+    def _mask_tokens(self, s: str) -> str:
+        whole = self.tokens.get(s)
+        if whole is not None:
+            self._note("source", s)
+            return whole
+        out: list[str] = []
+        i = last = 0
+        for m in _ALNUM.finditer(s):
+            i = m.start()
+            if i < last:
+                continue
+            hit = None
+            for tok in self._long.get(s[i:i + 8], ()):
+                if s.startswith(tok, i):
+                    hit = tok
+                    break
+            if hit is None and m.group() in self._short:
+                hit = m.group()
+            if hit is None:
+                continue
+            out.append(s[last:i])
+            out.append(self.tokens[hit])
+            self._note("source", hit)
+            last = i + len(hit)
+        if not out:
+            return s
+        out.append(s[last:])
+        return "".join(out)
+
+    def _in_window(self, t: float) -> bool:
+        return any(lo - _CLOCK_SLACK <= t <= hi + _CLOCK_SLACK for lo, hi in self.windows)
+
+    def _epoch(self, v: float, kind: str) -> str | None:
+        if not self.windows or v <= 0:
+            return None
+        for scale, unit in ((1.0, "s"), (1e3, "ms"), (1e6, "us"), (1e9, "ns")):
+            if self._in_window(v / scale):
+                return f"⟨clock:{kind}:epoch-{unit}⟩"
+        return None
+
+    def _mask_clock(self, s: str) -> str:
+        def iso(m: re.Match) -> str:
+            y, mo, d, h, mi, sec, frac, tz = m.groups()
+            try:
+                micro = int((frac or ".0")[1:].ljust(6, "0")[:6])
+                naive = _dt.datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec), micro)
+            except ValueError:
+                return m.group()
+            if tz:
+                offset = 0 if tz == "Z" else (1 if tz[0] == "+" else -1) * (
+                    int(tz[1:3]) * 3600 + int(tz[-2:]) * 60)
+                instants = [naive.replace(tzinfo=_dt.UTC).timestamp() - offset]
+            else:
+                instants = [naive.replace(tzinfo=_dt.UTC).timestamp()]
+                if self.host_capture:  # naive local time of this host
+                    instants.append(naive.timestamp())
+            if not any(self._in_window(t) for t in instants):
+                return m.group()
+            self._note("clock", m.group())
+            return "⟨clock:" + re.sub(r"\d", "9", m.group()) + "⟩"
+
+        def epoch(m: re.Match) -> str:
+            digits, frac = m.groups()
+            scale, unit = _EPOCH_SCALES[len(digits)]
+            if not self._in_window(int(digits) / scale):
+                return m.group()
+            self._note("clock", m.group())
+            return f"⟨clock:epoch-{unit}{'.f' if frac else ''}⟩"
+
+        if any(c.isdigit() for c in s):
+            s = _ISO_CLOCK.sub(iso, s)
+            s = _EPOCH_CLOCK.sub(epoch, s)
+        return s
+
+
+def _masker_for(fs: FactSet, facts: list[Fact]) -> _Masker:
+    seeded = _seeded(facts)
+    tokens: dict[str, str] = {}
+    numbers: dict[float, str] = {}
+    for f in facts:
+        src = source_kind(f.symbol)
+        if src is None or src[0] == "pick" or (src[1] and seeded):
+            continue
+        for o in f.outcomes:
+            if o.kind != "return":
+                continue
+            strings, nums = _source_values(src[0], o.value)
+            for tok in strings:
+                tokens.setdefault(tok, _token_placeholder(tok))
+            for n in nums:
+                numbers.setdefault(n, "⟨src:number⟩")
+    return _Masker(roots=list(fs.env_roots), pythons=list(fs.python_versions),
+                   windows=list(fs.run_windows), host_capture=fs.host_capture,
+                   tokens=tokens, numbers=numbers)
+
+
+def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
+    """Facts with their volatile positions masked (see the section comment). A fact a mask
+    changed keeps the recorded one in ``_raw`` and the mechanisms in ``_masks``; outcomes that
+    became identical merge (48 uuid4 values are one masked outcome)."""
+    if not (masker.roots or masker.pythons or masker.windows or masker.tokens
+            or masker.numbers):
+        return facts
+    out: list[Fact] = []
+    for f in facts:
+        before = Counter(masker.counts)
+        inp = _walk_leaves(f.input, masker.leaf)
+        merged: dict[str, list] = {}
+        for o in f.outcomes:
+            v = _walk_leaves(o.value, masker.leaf) if o.kind == "return" else o.value
+            k = _canon([o.kind, v])
+            if k in merged:
+                merged[k][2] += o.count
+            else:
+                merged[k] = [o.kind, v, o.count]
+        mechs = frozenset(m for m, n in masker.counts.items() if n > before.get(m, 0))
+        if not mechs:
+            out.append(f)
+            continue
+        c = f.model_copy(update={"input": inp, "outcomes": [
+            Outcome(kind=k, value=v, count=n) for k, v, n in merged.values()]})
+        _set_masks(c, mechs, f)
+        out.append(c)
+    return out
+
+
+_SUB_TOKENS = re.compile(r"[A-Za-z0-9_]+|[^A-Za-z0-9_]")
+_SUB_LEAF_CAP = 4096
+
+
+def _leaf_map(value: Any, path: tuple = (), out: dict | None = None) -> dict[tuple, Any]:
+    out = {} if out is None else out
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _leaf_map(v, (*path, k), out)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _leaf_map(v, (*path, i), out)
+    else:
+        out[path] = value
+    return out
+
+
+def input_substitutions(old_input: Any, new_input: Any) -> list[tuple[str, str]] | None:
+    """What the pair's input difference consists of: ``(old, new)`` text substitutions, from
+    the input leaves that differ at the same path (whole leaves, plus the changed token runs
+    inside strings up to 4 KB). None when the inputs differ in structure (another key set,
+    another arity): that is not a value difference. Kept only when the map is consistent both
+    ways (one old token never stands for two new ones)."""
+    a, b = _leaf_map(old_input), _leaf_map(new_input)
+    if a.keys() != b.keys():
+        return None
+    pairs: list[tuple[str, str]] = []
+    for path, x in a.items():
+        y = b[path]
+        if _canon(x) == _canon(y):
+            continue
+        sx, sy = (x if isinstance(x, str) else json.dumps(x)), (y if isinstance(y, str) else
+                                                                 json.dumps(y))
+        pairs.append((sx, sy))
+        if isinstance(x, str) and isinstance(y, str) and max(len(x), len(y)) <= _SUB_LEAF_CAP:
+            ta, tb = _SUB_TOKENS.findall(x), _SUB_TOKENS.findall(y)
+            sm = difflib.SequenceMatcher(None, ta, tb, autojunk=False)
+            for op, i1, i2, j1, j2 in sm.get_opcodes():
+                if op == "replace":
+                    pairs.append(("".join(ta[i1:i2]), "".join(tb[j1:j2])))
+    fwd: dict[str, set[str]] = defaultdict(set)
+    back: dict[str, set[str]] = defaultdict(set)
+    for x, y in pairs:
+        fwd[x].add(y)
+        back[y].add(x)
+    out = [(x, next(iter(ys))) for x, ys in fwd.items()
+           if len(ys) == 1 and len(back[next(iter(ys))]) == 1 and x != next(iter(ys))]
+    return sorted(out, key=lambda p: -len(p[0]))
+
+
+def _substitute(value: Any, tokens: list[tuple[int, str]]) -> Any:
+    """Mask one side's substituted tokens as ``⟨inK⟩``: a whole leaf of any length; a token of
+    8+ characters anywhere; 4-7 characters as a whole word only."""
+    whole = {tok: k for k, tok in tokens}
+    long_ = [(k, tok) for k, tok in tokens if len(tok) >= 8]
+    short = [(k, re.compile(rf"(?<![A-Za-z0-9_.]){re.escape(tok)}(?![A-Za-z0-9_])"))
+             for k, tok in tokens if 4 <= len(tok) < 8]
+
+    def leaf(v: Any) -> Any:
+        if not isinstance(v, str):
+            key = json.dumps(v)
+            return f"⟨in{whole[key]}⟩" if key in whole else v
+        if v in whole:
+            return f"⟨in{whole[v]}⟩"
+        for k, tok in long_:
+            if tok in v:
+                v = v.replace(tok, f"⟨in{k}⟩")
+        for k, rx in short:
+            v = rx.sub(f"⟨in{k}⟩", v)
+        return v
+
+    return _walk_leaves(value, leaf)
+
+
+def _run_like(token: str) -> bool:
+    """A token that looks like a per-run value: 4+ characters with a digit (a port, an id)."""
+    return len(token) >= 4 and any(c.isdigit() for c in token)
+
+
+@dataclass
+class _NoiseState:
+    """What the noise rules saw during one diff (the R10 trigger reads it)."""
+
+    sources: frozenset = frozenset()     # source symbols volatile on both sides
+    run_like_substitutions: int = 0
+    old: _Masker | None = None
+    new: _Masker | None = None
+
+
+_NOISE: ContextVar[_NoiseState] = ContextVar("pymolt_noise", default=_NoiseState())
+
+
 # ── diff ──────────────────────────────────────────────────────────────────────────────────
 
 
@@ -2925,9 +3421,11 @@ def diff_facts(
     """Compare two FactSets (baseline -> post-migration). See the module docstring."""
     token = _HANDLES.set(_handle_types(old.facts, new.facts))
     reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
+    noise = _NOISE.set(_NoiseState())
     try:
         return _diff_facts(old, new, DiffProfile(profile), context)
     finally:
+        _NOISE.reset(noise)
         _TYPE_RELOC.reset(reloc)
         _HANDLES.reset(token)
 
@@ -2938,6 +3436,16 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     # Finalizers run at GC time, not at a call site the project controls.
     old_facts = [f for f in old_facts if not f.symbol.endswith(".__del__")]
     new_facts = [f for f in new_facts if not f.symbol.endswith(".__del__")]
+    # Volatile positions (environment identity, clock readings, entropy-source values) are
+    # masked per side before anything is keyed or compared.
+    noise = _NOISE.get()
+    noise.old, noise.new = _masker_for(old, old_facts), _masker_for(new, new_facts)
+    seeded = _seeded(old_facts) or _seeded(new_facts)
+    noise.sources = frozenset(
+        f.symbol for f in (*old_facts, *new_facts)
+        if (k := source_kind(f.symbol)) is not None and not (k[1] and seeded))
+    old_facts = _canonicalise(old_facts, noise.old)
+    new_facts = _canonicalise(new_facts, noise.new)
     old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
         old_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in old_facts]
@@ -3607,6 +4115,11 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     REWRITTEN pair (outcomes compared, symbol and input free to differ), else None."""
     of, nf = o.fact, n.fact
     cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
+    explained = None
+    if cmp.comparison is Comparison.CHANGED:
+        cmp, explained = _explain_change(o, n, cmp, profile)
+    elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
+        explained = _explain_masked(of, nf, cmp, profile)
     drift = (of.defaulted is not None and nf.defaulted is not None
              and of.defaulted != nf.defaulted) or cmp.drift
     if rewritten:
@@ -3649,7 +4162,63 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         old_count=of.count, new_count=nf.count, notes=all_notes,
         old_where=of.where, new_where=nf.where,
         old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
+        explained=explained,
     )
+
+
+def _explain_masked(of: Fact, nf: Fact, cmp: OutcomeComparison,
+                    profile: DiffProfile) -> str | None:
+    """Equal once masked: say so (level MASKED) when the recorded outcomes did differ."""
+    raw_o, raw_n = _raw_of(of), _raw_of(nf)
+    if compare_outcomes(raw_o.outcomes, raw_n.outcomes, profile).comparison \
+            is Comparison.EQUAL and _canon(raw_o.input) == _canon(raw_n.input):
+        return None
+    if cmp.level is ComparisonLevel.EXACT:
+        cmp.level = ComparisonLevel.MASKED
+    mechs = sorted(_masks_of(of) | _masks_of(nf))
+    noise = _NOISE.get()
+    examples = []
+    for side, masker in (("old", noise.old), ("new", noise.new)):
+        for m in mechs:
+            if masker is not None and m in masker.examples:
+                examples.append(f"{side} {m} e.g. {masker.examples[m][:60]}")
+    return f"{'+'.join(mechs)}: equal once volatile values are masked ({'; '.join(examples)})"
+
+
+def _explain_change(o: _V, n: _V, cmp: OutcomeComparison,
+                    profile: DiffProfile) -> tuple[OutcomeComparison, str | None]:
+    """A value difference a stated rule explains: the callee is an entropy source (its own
+    values are volatile: compared by structure), or the pair's own input difference accounts
+    for every differing position (``input-substitution``, level MASKED). Anything else stays
+    CHANGED."""
+    of, nf = o.fact, n.fact
+    noise = _NOISE.get()
+    if of.symbol in noise.sources and nf.symbol in noise.sources:
+        shape = compare_outcomes(of.outcomes, nf.outcomes, DiffProfile.SHAPE)
+        if shape.comparison is Comparison.EQUAL:
+            return shape, (f"source: {of.symbol} returns a run-dependent value; compared by "
+                           "structure")
+        return cmp, None
+    if o.input_key == n.input_key or o.rewritten_site or n.rewritten_site:
+        return cmp, None
+    subs = input_substitutions(of.input, nf.input)
+    if not subs:
+        return cmp, None
+    noise.run_like_substitutions += sum(1 for a, b in subs if _run_like(a) and _run_like(b))
+    olds = [(k, a) for k, (a, _) in enumerate(subs)]
+    news = [(k, b) for k, (_, b) in enumerate(subs)]
+    mo = [Outcome(kind=x.kind, value=_substitute(x.value, olds) if x.kind == "return"
+                  else x.value, count=x.count) for x in of.outcomes]
+    mn = [Outcome(kind=x.kind, value=_substitute(x.value, news) if x.kind == "return"
+                  else x.value, count=x.count) for x in nf.outcomes]
+    masked = compare_outcomes(mo, mn, profile)
+    if masked.comparison is not Comparison.EQUAL:
+        return cmp, None
+    if masked.level is ComparisonLevel.EXACT:
+        masked.level = ComparisonLevel.MASKED
+    shown = ", ".join(f"{a[:40]} -> {b[:40]}" for a, b in subs[:3])
+    more = f" (+{len(subs) - 3})" if len(subs) > 3 else ""
+    return masked, f"input-substitution: the output differs only as the input does: {shown}{more}"
 
 
 def _binding_raise(f: Fact) -> str:
