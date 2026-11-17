@@ -74,7 +74,6 @@ re-arms other tools' disabled events once; they disable them again).
 """
 import functools
 import sys
-import threading
 import time
 import types
 
@@ -88,7 +87,6 @@ from ._backend import (
     UNTYPED_RAISE,
     FrameBackend,
     PrefixMatcher,
-    _get_ident,
     _monotonic,
     generator_marker,
     install_warning_capture,
@@ -99,6 +97,7 @@ from ._backend import (
 )
 from ._identity import _wrapped_of
 from ._normalize import typename
+from ._rawthreads import allocate_lock, stack_key
 from ._wrap import _partition_impact_targets, _WrapFinder
 
 _getframe = sys._getframe
@@ -367,7 +366,7 @@ class MonitoringBackend(FrameBackend):
         self._impact_codes = {}     # id(code) -> code (resolved from impact targets)
         self._watch_prefix = None   # PrefixMatcher for ``module.*`` impact targets
         self._local = {}            # id(code) -> (code, local event set we armed)
-        self._local_lock = threading.Lock()
+        self._local_lock = allocate_lock()
         self._target_sets = []      # _CodeTargets, one per armed batch of impact targets
         self._finders = []
         self._tool = None
@@ -381,8 +380,8 @@ class MonitoringBackend(FrameBackend):
         self._deps = {}             # id(code) -> (code, is dependency, module) for callees
         self._ctors = {}            # id(class) -> (class, [(code, function)])
         self._kinds = {}            # id(code) -> (code, owned by tool B)
-        self._kind_lock = threading.Lock()
-        self._arm_lock = threading.Lock()
+        self._kind_lock = allocate_lock()
+        self._arm_lock = allocate_lock()
         self._implicit = {}         # tool B's per-code decision entries
         self.armed = 0              # codes armed by call-site resolution
         self.last_armed_at = None   # monotonic: last code armed (A) or first recorded (A or B)
@@ -667,7 +666,7 @@ class MonitoringBackend(FrameBackend):
                 self._record(frame, ent, sym)
                 return None
             if self._renames:
-                cn = self._callname.pop(_get_ident(), None)
+                cn = self._callname.pop(stack_key(), None)
                 if cn is not None and cn[0] is code:
                     self._record(frame, ent, cn[1])
                     return None
@@ -926,7 +925,7 @@ class MonitoringBackend(FrameBackend):
         ent = self._call_kind(callable_)
         kind = ent[1]
         key = (id(code), offset)
-        tid = _get_ident()
+        tid = stack_key()
         csym = None
         if kind == _K_NONE:
             csym = self._inherited_call(callable_, arg0)
@@ -935,8 +934,12 @@ class MonitoringBackend(FrameBackend):
             # binding failure, so a site that reached the same callee twice settles (DISABLE,
             # like incremental mode's arming): a bind failing on a later call is not seen.
             if kind == _K_PY:
+                if len(self._lastcall) > 4096:
+                    self._lastcall.clear()  # one slot per greenlet that ever called
                 self._lastcall[tid] = (code, offset, ent[3])
                 if ent[4] is not None:
+                    if len(self._callname) > 4096:
+                        self._callname.clear()
                     self._callname[tid] = (ent[3].__code__, ent[4])
                     self._renames = True
             site = self._csites.get(key)
@@ -970,11 +973,14 @@ class MonitoringBackend(FrameBackend):
 
     def _on_c_return(self, code, offset, callable_, arg0):
         try:
-            stack = self._cstack.get(_get_ident())
+            key = stack_key()
+            stack = self._cstack.get(key)
             if stack:
                 top = stack[-1]
                 if same_c_callable(top[0], callable_) and top[1] is code and top[2] == offset:
                     stack.pop()
+                    if not stack:
+                        del self._cstack[key]       # greenlets come and go: no empty leftovers
                     self._finish(top[3], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
                     return None
             return None     # C_RETURN / C_RAISE cannot be DISABLEd: they stop with the site's CALL
@@ -983,7 +989,7 @@ class MonitoringBackend(FrameBackend):
 
     def _on_c_raise(self, code, offset, callable_, arg0):
         try:
-            tid = _get_ident()
+            tid = stack_key()
             stale = self._craise.pop(tid, None)
             if stale is not None:           # its RAISE never came (StopIteration): untyped
                 self._finish(stale[0], OUTCOME_RAISE, UNTYPED_RAISE)
@@ -992,6 +998,8 @@ class MonitoringBackend(FrameBackend):
                 top = stack[-1]
                 if same_c_callable(top[0], callable_) and top[1] is code and top[2] == offset:
                     stack.pop()
+                    if not stack:
+                        del self._cstack[tid]
                     self._craise[tid] = (top[3], code, offset)   # RAISE types it
         except Exception:
             pass
@@ -1022,7 +1030,7 @@ class MonitoringBackend(FrameBackend):
                 return None
             if self.near is not None and not self._is_near(code):
                 return None
-            tid = _get_ident()
+            tid = stack_key()
             pending = self._craise.get(tid)
             if pending is not None:
                 del self._craise[tid]

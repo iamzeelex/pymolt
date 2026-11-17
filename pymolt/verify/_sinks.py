@@ -35,13 +35,12 @@ import itertools
 import json
 import math
 import os
-import queue
 import random
-import threading
 import time
 import weakref
 
 from ._normalize import normalize
+from ._rawthreads import Empty, Full, RawEvent, RawQueue, allocate_lock, get_ident, spawn
 
 _NONDET = {"__nondeterministic__": True}
 
@@ -122,7 +121,7 @@ def _timing_fields(ev, dur, tid):
     if dur is not None:
         ev["dur"] = dur  # seconds, call -> return/raise (monotonic clock)
     if tid is not None:
-        ev["tid"] = tid  # threading.get_ident() of the calling thread
+        ev["tid"] = tid  # get_ident() of the calling thread
 
 
 def _identity_fields(ev, sym, symq, own):
@@ -199,12 +198,12 @@ class JsonlSink(object):
     def __init__(self, path_template, metadata=None, queue_size=None, close_timeout=None):
         self.path = path_template.replace("{pid}", str(os.getpid()))
         self.metadata_path = self.path + ".meta.json"
-        self._metrics_lock = threading.Lock()
+        self._metrics_lock = allocate_lock()
         self._metadata = dict(metadata or {})
         self._started_wall = time.time()
         self._started_monotonic = time.monotonic()
         self._closed = False
-        self._closing = threading.Event()
+        self._closing = RawEvent()
         self._privacy = _privacy()
         self._sampler = NoveltySampler()
         self._sample_rate = self._sampler.rate
@@ -224,7 +223,7 @@ class JsonlSink(object):
             except ValueError:
                 close_timeout = DEFAULT_CLOSE_TIMEOUT
         self._close_timeout = max(0.0, close_timeout)
-        self._queue = queue.Queue(maxsize=max(1, queue_size))
+        self._queue = RawQueue(max(1, queue_size))
         self._metrics = {
             "events_seen": 0,
             "events_written": 0,
@@ -238,12 +237,10 @@ class JsonlSink(object):
         # Warnings of unsampled calls: the JSONL keeps no event for them, so their warnings
         # go to the sidecar (``tally_warnings``), per (symbol, site), bounded.
         self._tally_warnings = {}
-        self._writer = threading.Thread(
-            target=self._writer_loop,
-            name="pymolt-trace-writer-{0}".format(os.getpid()),
-        )
-        self._writer.daemon = True
-        self._writer.start()
+        # A raw OS thread on the primitives captured at start: a program that monkeypatches
+        # threading (gevent / eventlet) must not turn the writer into a hub waiter (see
+        # ``_rawthreads``). It imports nothing after it starts.
+        self._writer = spawn(self._writer_loop, "pymolt-trace-writer-{0}".format(os.getpid()))
 
     def set_metadata(self, **values):
         """Add runtime facts discovered after sink construction (for example backend name)."""
@@ -297,7 +294,7 @@ class JsonlSink(object):
             return
         try:
             self._queue.put_nowait(obj)
-        except queue.Full:
+        except Full:
             self.note_failure("backpressure_dropped")
 
     def _write_line(self, fh, obj):
@@ -319,7 +316,7 @@ class JsonlSink(object):
             while not stop:
                 try:
                     item = self._queue.get(timeout=0.05)
-                except queue.Empty:
+                except Empty:
                     if self._closing.is_set():
                         break
                     continue
@@ -327,7 +324,7 @@ class JsonlSink(object):
                 while len(batch) < _WRITE_BATCH:
                     try:
                         batch.append(self._queue.get_nowait())
-                    except queue.Empty:
+                    except Empty:
                         break
                 try:
                     buf = io.StringIO()
@@ -433,7 +430,7 @@ class JsonlSink(object):
         self._closing.set()
         try:
             self._queue.put(self._STOP, timeout=self._close_timeout)
-        except queue.Full:
+        except Full:
             # The writer is slow or stuck.  Do not wait indefinitely at process
             # shutdown; account for the items that are still observably queued.
             pass
@@ -463,7 +460,7 @@ class JsonlSink(object):
                               for head, acc in self._tally_warnings.values()]
         if tally_warnings:
             payload["tally_warnings"] = tally_warnings
-        tmp = self.metadata_path + ".tmp-{0}-{1}".format(os.getpid(), threading.get_ident())
+        tmp = self.metadata_path + ".tmp-{0}-{1}".format(os.getpid(), get_ident())
         try:
             with open(tmp, "w") as fh:
                 json.dump(payload, fh, sort_keys=True)
@@ -483,7 +480,7 @@ class MemorySink(object):
     def __init__(self):
         self.records = {}  # key -> dict
         self.tallied = 0
-        self._lock = threading.Lock()
+        self._lock = allocate_lock()
         self._privacy = _privacy()
 
     @staticmethod
@@ -687,7 +684,7 @@ def write_snapshot_file(path, header, fact_lines, tally_lines):
 
     ``fact_lines`` / ``tally_lines`` are iterables of serialized JSON objects (no newline).
     Returns the number of facts written."""
-    tmp = "{0}.tmp-{1}-{2}".format(path, os.getpid(), threading.get_ident())
+    tmp = "{0}.tmp-{1}-{2}".format(path, os.getpid(), get_ident())
     written = 0
     try:
         with open(tmp, "w") as fh:
@@ -894,13 +891,13 @@ class FactSink(object):
         self.path = facts_path_for(path_template).replace("{pid}", pid)
         self.trace_path = _trace_path_for(path_template).replace("{pid}", pid)
         self.metadata_path = self.trace_path + ".meta.json"
-        self._lock = threading.Lock()        # the tables, counters dict and metadata
-        self._flush_lock = threading.Lock()  # one snapshot writer at a time
+        self._lock = allocate_lock()        # the tables, counters dict and metadata
+        self._flush_lock = allocate_lock()  # one snapshot writer at a time
         self._metadata = dict(metadata or {})
         self._started_wall = time.time()
         self._started_monotonic = time.monotonic()
         self._closed = False
-        self._stop = threading.Event()
+        self._stop = RawEvent()
         self._sampler = NoveltySampler()
         self._sample_rate = self._sampler.rate
         self._privacy = _privacy()
@@ -957,10 +954,8 @@ class FactSink(object):
     def _start_flusher(self):
         self._flusher = None
         if self._flush_seconds > 0:
-            self._flusher = threading.Thread(
-                target=self._flush_loop, name="pymolt-facts-flush-{0}".format(os.getpid()))
-            self._flusher.daemon = True
-            self._flusher.start()
+            self._flusher = spawn(
+                self._flush_loop, "pymolt-facts-flush-{0}".format(os.getpid()))
 
     def after_fork_child(self):
         """Fork (a pre-fork server's workers): the tables, locks and flusher belong to the
@@ -968,9 +963,9 @@ class FactSink(object):
         template without ``{pid}`` gets ``.<pid>`` before ``.facts.json`` so a worker never
         overwrites the parent's file. Run automatically via ``os.register_at_fork``."""
         pid = str(os.getpid())
-        self._lock = threading.Lock()
-        self._flush_lock = threading.Lock()
-        self._stop = threading.Event()
+        self._lock = allocate_lock()
+        self._flush_lock = allocate_lock()
+        self._stop = RawEvent()
         template = self._template
         if "{pid}" not in template:
             base = facts_path_for(template)[:-len(".facts.json")]
@@ -1315,7 +1310,7 @@ class FactSink(object):
                 return
             self._closed = True
         self._stop.set()
-        if self._flusher is not None and self._flusher is not threading.current_thread():
+        if self._flusher is not None and self._flusher.ident != get_ident():
             self._flusher.join(DEFAULT_CLOSE_TIMEOUT)
         if not self.flush():
             self.note_failure("sink_failures")
@@ -1341,7 +1336,7 @@ class FactSink(object):
             payload.update(self._metadata)
         payload["sink"] = "facts"
         payload["facts_path"] = self.path
-        tmp = self.metadata_path + ".tmp-{0}-{1}".format(os.getpid(), threading.get_ident())
+        tmp = self.metadata_path + ".tmp-{0}-{1}".format(os.getpid(), get_ident())
         try:
             with open(tmp, "w") as fh:
                 json.dump(payload, fh, sort_keys=True, default=str)

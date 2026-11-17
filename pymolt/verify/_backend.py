@@ -76,12 +76,13 @@ from ._identity import (
     wrapper_call,
 )
 from ._normalize import AMBIGUOUS_OUTCOME, OutcomeMarker
+from ._rawthreads import allocate_lock, get_ident, stack_key
 from ._sinks import add_warning, warning_list
 
 # Monotonic, high resolution (``time.monotonic`` is ~15 ms on older Windows builds).
 _now = time.perf_counter
 _monotonic = time.monotonic
-_get_ident = threading.get_ident
+_get_ident = get_ident   # the OS thread, captured before the program can monkeypatch it
 
 HAS_MONITORING = sys.version_info >= (3, 12) and hasattr(sys, "monitoring")
 
@@ -831,7 +832,7 @@ _WARN_DEPTH = 256           # frames walked from the warn() caller to the call i
 _C_STACK_MAX = 256          # compiled calls in flight per thread (a lost completion never grows it)
 _WARNED_MAX = 10000         # per backend: accumulators awaiting their call's completion
 
-_warn_lock = threading.Lock()
+_warn_lock = allocate_lock()
 _warn_owners = [()]         # [tuple of backends capturing], read lock-free by the hook
 _warn_saved = [None, None]  # [the original warnings.warn, our wrapper] while installed
 _warn_refronted = {}       # name -> (original, wrapper) of simplefilter & co. while installed
@@ -1216,7 +1217,7 @@ class FrameBackend(TraceBackend):
         self._warned = {}   # id(frame) -> (code, {(category, message): count}) of calls in flight
         self._normalize = privacy_normalizer()
         self._identity = IdentityResolver(self._in_target)
-        self._obs_lock = threading.Lock()
+        self._obs_lock = allocate_lock()
         self.observed = {}          # id(code) -> code
         self.observed_syms = set()
         self.first_seen_at = None   # monotonic
@@ -1604,7 +1605,7 @@ class SetProfileBackend(FrameBackend):
     def __init__(self, target, sink, exclude=(), source=None, include_internal=False):
         FrameBackend.__init__(self, target, sink, exclude, source, include_internal)
         self._prev = None
-        self._lock = threading.Lock()
+        self._lock = allocate_lock()
         self.c_event_count = 0  # classified internal C traffic, intentionally not persisted
         self.skip_wrapped = False  # hybrid: skip calls a WrapBackend wrapper already records
         self.compiled_wrap = True  # wrap the Cython functions of dependency modules (see start)
@@ -1701,7 +1702,7 @@ class SetProfileBackend(FrameBackend):
                     self.c_event_count += 1
                     sym = self._c_sym(arg)
                     if sym is not None and not (self.skip_wrapped and self._from_wrapper(frame)):
-                        tid = _get_ident()
+                        tid = stack_key()
                         stack = self._cstack.get(tid)
                         if stack is None:
                             stack = self._cstack[tid] = []
@@ -1709,15 +1710,21 @@ class SetProfileBackend(FrameBackend):
                             del stack[:]
                         stack.append((arg, frame, self._c_start(frame, sym)))
             elif event == "c_return":
-                stack = self._cstack.get(_get_ident())
+                key = stack_key()
+                stack = self._cstack.get(key)
                 if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
                     self._finish(stack.pop()[2], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
+                    if not stack:
+                        del self._cstack[key]
             elif event == "c_exception":
                 # A C callable raised. The exception TYPE is not observable from a profile
                 # hook (as for a Python raise), so the raise is untyped.
-                stack = self._cstack.get(_get_ident())
+                key = stack_key()
+                stack = self._cstack.get(key)
                 if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
                     self._finish(stack.pop()[2], OUTCOME_RAISE, UNTYPED_RAISE)
+                    if not stack:
+                        del self._cstack[key]
                     return self._hook
                 # No matching c_call (the hook started mid-call): the legacy raise-only fact.
                 # The CALLEE has to be the traced dependency: gating only on the caller recorded
