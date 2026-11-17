@@ -445,7 +445,7 @@ _VERIFY_KEYS = {
     "verdict", "reasons", "saved_path", "compared_recordings", "baseline_stale",
     "static_targets", "confirmed",
     "blind", "dynamic_only", "trust_pct", "compared", "changes", "change_counts",
-    "calibration",
+    "calibration", "impact_focus",
 }
 
 
@@ -468,6 +468,27 @@ def test_verify_pass_with_blind_calls_says_what_it_did_not_cover(tmp_path):
     assert "3 BLIND symbol(s) were never run" in view["summary"]
     assert data["warnings"] == ["trust basis: executed files"]
     assert data["compared"] is True and view["hint"] is None
+
+
+def test_verify_after_apply_counts_the_whole_surface_and_shows_the_plan_focus(tmp_path):
+    from pymolt.verify.models import VerificationVerdict
+
+    reason = ("3 static dependency symbol(s) outside the plan's predicted impacts were not "
+              "exercised: pandas.a, pandas.b, pandas.c")
+    unified = _unified(verdict=VerificationVerdict.INCONCLUSIVE, static_targets=10, confirmed=7,
+                       blind=3, trust=0.7, diff={"result_changed": 0},
+                       impact_filter_active=True, impact_paths=["pandas.x", "pandas.y"],
+                       impacted_static_targets=2, impacted_confirmed=2,
+                       verdict_reasons=[reason])
+    view = views.verify_view(unified, tmp_path, saved_path=None)
+    data = _assert_envelope(view, _VERIFY_KEYS)
+    # the headline is the surface the verdict judges; the plan's paths are a focus beside it
+    assert data["blind"] == 3 and data["reasons"] == [f"contract: {reason}"]
+    assert data["impact_focus"] == {"paths": 2, "static_targets": 2, "confirmed": 2,
+                                    "blind": 0, "dynamic_only": 0}
+    assert "Static 10, confirmed 7, BLIND 3, dynamic-only 0. Contract trust: 70%." in view["summary"]
+    assert ("Impact focus: 2 changed API path(s); on them 2 static, 2 confirmed, 0 BLIND, "
+            "0 dynamic-only (data.impact_focus).") in view["summary"]
 
 
 def test_verify_stale_evidence_and_unsaved_verdict_are_stated(tmp_path):

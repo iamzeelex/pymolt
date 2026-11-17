@@ -128,11 +128,11 @@ class ContractReport(BaseModel):
     confirmed: int = 0
     blind: int = 0
     dynamic_only: int = 0
-    # These legacy fields describe the evaluation scope. With no impact filter
-    # that is the full surface; with one it is only the impacted surface, so the
-    # existing verdict fold can consume focused values unchanged.
+    # These headline fields are the whole recorded surface, the one the verdict judges, with
+    # or without an impact filter: an applied plan's paths focus the report (``impacted_*``),
+    # they do not shrink what PASS must cover.
     # Headline: confirmed / static over ``trust_basis`` (behavioural contacts in
-    # files the trace executed), within the evaluation scope above.
+    # files the trace executed), over the whole surface.
     trust: float = 0.0
     trust_basis: str = TRUST_BASIS
     trust_confirmed: int = 0
@@ -171,8 +171,8 @@ class ContractReport(BaseModel):
     # without the captures' state, or saved before this existed.
     compared: ComparedRecordings | None = None
 
-    # Full-surface totals are always retained, even when the legacy fields above
-    # are focused on an Axiom impact set.
+    # Full-surface totals: the same values as the headline fields above (kept for readers
+    # of saved reports, which may predate the headline being the whole surface).
     all_static_targets: int = 0
     all_observed_targets: int = 0
     all_confirmed: int = 0
@@ -210,7 +210,7 @@ class ContractReport(BaseModel):
     # behaviour changes outside the plan's predicted impacts (they still decide the verdict).
     unpredicted_changes: list[dict[str, Any]] = Field(default_factory=list)
     # Runtime symbols every one of whose facts compared equal on both sides (equal, DRIFT,
-    # or REWRITTEN with an equal outcome) in the scoped fact diff. A dynamic-only symbol
+    # or REWRITTEN with an equal outcome) in the whole fact diff. A dynamic-only symbol
     # in this set was observed AND verified, so it does not block PASS.
     fact_equal_symbols: list[str] = Field(default_factory=list)
     # Predicted vs observed (schema ``pymolt.calibration/1``): each predicted risk is a hit,
@@ -518,8 +518,9 @@ def build_contract_report(
     the trace's metadata records, else pymolt's own — noted as such.
     ``resolve_identities=False`` keeps the exact-string join only.
 
-    ``changed_api_paths`` narrows trust and verdict inputs to Axiom's changed
-    surface while keeping ``all_*`` totals and every symbol visible. Items may
+    ``changed_api_paths`` (an applied plan's impacts) focuses the report on the changed
+    API paths: ``impacted_*``, ``fact_diff`` and ``diff`` hold the focus, while the headline
+    coverage, trust and every verdict input stay the whole surface. Items may
     be dotted strings, serialized changes, or objects with ``path`` and optional
     ``replacement_path`` fields. ``impact_set`` is an equivalent alias useful
     to callers that already use that terminology; values from both are merged.
@@ -743,34 +744,17 @@ def build_contract_report(
     matched_impact = {path for symbol in symbols for path in symbol.matched_impact_paths}
     report.unmatched_impact_paths = [path for path in impact_paths if path not in matched_impact]
 
-    if impact_filter_active:
-        report.confirmed = report.impacted_confirmed
-        report.blind = report.impacted_blind
-        report.dynamic_only = report.impacted_dynamic_only
-        report.static_targets = report.impacted_static_targets
-        report.observed_targets = report.impacted_observed_targets
-        report.by_dep = report.impacted_by_dep
-        if report.impacted_static_targets < report.all_static_targets:
-            pkgs = sorted({sym.dep for sym in report.impacted_symbols if sym.dep})
-            report.notes.append(
-                f"static contacts narrowed to the plan's packages ({', '.join(pkgs) or 'none'}): "
-                f"{report.impacted_static_targets} of {report.all_static_targets} kept; "
-                "trust is computed over the narrowed set"
-            )
-    else:
-        report.confirmed = report.all_confirmed
-        report.blind = report.all_blind
-        report.dynamic_only = report.all_dynamic_only
-        report.static_targets = report.all_static_targets
-        report.observed_targets = report.all_observed_targets
-        report.by_dep = report.all_by_dep
+    # The headline is the whole surface whatever the focus: an applied plan's paths say what
+    # to look at first, not what PASS may leave unexercised.
+    report.confirmed = report.all_confirmed
+    report.blind = report.all_blind
+    report.dynamic_only = report.all_dynamic_only
+    report.static_targets = report.all_static_targets
+    report.observed_targets = report.all_observed_targets
+    report.by_dep = report.all_by_dep
 
-    # ── trust tiers over the evaluation scope ────────────────────────────────
-    scope = [
-        s
-        for s in (report.impacted_symbols if impact_filter_active else symbols)
-        if s.status != "dynamic-only"
-    ]
+    # ── trust tiers over the whole surface ───────────────────────────────────
+    scope = [s for s in symbols if s.status != "dynamic-only"]
     behavioural_scope = [s for s in scope if s.contact_class == "behavioural"]
     for klass, why in (
         ("returned-value", "chain through a function's return value (e.g. typer.prompt().strip): "
@@ -852,12 +836,8 @@ def build_contract_report(
         report.impacted_probe_changed = sum(
             1 for s in report.impacted_symbols if s.probe_status == "changed"
         )
-        if impact_filter_active:
-            report.probed = report.impacted_probed
-            report.probe_changed = report.impacted_probe_changed
-        else:
-            report.probed = report.all_probed
-            report.probe_changed = report.all_probe_changed
+        report.probed = report.all_probed
+        report.probe_changed = report.all_probe_changed
         report.notes.append(f"sandbox-probed reconstructible contacts under {probe_python}")
 
     if trace and against:
@@ -966,14 +946,15 @@ def _attach_fact_diff(
     ``diff``/``all_diff`` keep the BoundaryDiff count shape existing consumers read; the
     fact categories and entries live in ``fact_diff``/``all_fact_diff``. An impact filter
     keeps entries whose symbol is an impacted API — matched by public path or by the
-    canonical symbol the static side resolved it to.
+    canonical symbol the static side resolved it to. ``fact_equal_symbols`` is always the
+    whole diff: every dynamic-only symbol must be compared equal for PASS, in the plan or not.
     """
     report.all_fact_diff = fdiff.to_json_dict()
     report.all_diff = fdiff.to_boundary_diff().counts()
     report.all_diff_clean = fdiff.is_clean()
+    report.fact_equal_symbols = _compared_equal_symbols(fdiff)
     if not impact_filter_active:
         report.fact_diff = report.all_fact_diff
-        report.fact_equal_symbols = _compared_equal_symbols(fdiff)
         report.diff = report.all_diff
         report.diff_clean = report.all_diff_clean
         return
@@ -996,7 +977,6 @@ def _attach_fact_diff(
     report.unpredicted_changes = [
         cap_entry(e.model_dump(mode="json", exclude_none=True))
         for e in fdiff.entries if id(e) not in kept and e.fails]
-    report.fact_equal_symbols = _compared_equal_symbols(scoped)
     bdiff = scoped.to_boundary_diff()
     report.diff = bdiff.counts()
     report.diff_clean = scoped.is_clean()

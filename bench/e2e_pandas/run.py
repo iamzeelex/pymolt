@@ -308,8 +308,9 @@ def example_block(report: dict) -> str:
     ]
     if c.get("impact_filter_active"):
         head.append(f"Impact focus: {len(c.get('impact_paths') or [])} changed API path(s); "
-                    f"full surface: {c.get('all_static_targets')} static / "
-                    f"{c.get('all_blind')} blind")
+                    f"on them {c.get('impacted_static_targets')} static, "
+                    f"{c.get('impacted_confirmed')} confirmed, {c.get('impacted_blind')} BLIND, "
+                    f"{c.get('impacted_dynamic_only')} dynamic-only")
     said = {"fail": "behavior changed", "pass": "no observed change on the covered surface"}
     head.append(f"Version diff: {said.get(verdict, 'inconclusive')}  ({counts})")
     rows = [("Change", "Dependency call", "Call site (your code)", "Before → after")]

@@ -46,6 +46,20 @@ incremental (3.12+ default for long runs: no discover window)
     caller but not passed as the C call's first argument (``sorted(xs, key=dep.f)``, a class
     in ``map(Dep, xs)``), and a call site that turns polymorphic after it was DISABLEd.
 
+Late contacts (incremental)
+    Tool B fires on every call of a dependency dunder, property or generator, internal ones
+    included, so the controller turns it off once nothing new was armed for a while
+    (``settle``); its contacts are handed over to tool A's local events. A contact that
+    passes no CALL instruction of ours and is first made after that is found through our
+    lines: every code object of ours carries local LINE events (from its module body's first
+    run under B, or from a call of ours that reaches it, nested code objects included), each
+    line DISABLEd at its first run, so a line that ran costs nothing. A line of ours that runs
+    for the first time after the settle turns B on again (``_reopen``) until the controller
+    finds nothing new for ``reopen`` seconds and settles again. Recall limits: a line that ran
+    before and only later reaches a dependency this way (its object changed type), a contact
+    made after the window, and code of ours with no LINE events (imported after the settle
+    through a line that ran before, reached only from dependency code).
+
 Receiver-dependent call sites (discover and incremental)
     Under 3.12 ``d.items()`` is a CALL of the unbound ``dict.items`` with ``d`` as its first
     argument, and ``m.get(k)`` one of the stdlib ``Mapping.get``: the call is a dependency's
@@ -116,11 +130,11 @@ from ._backend import (
     install_warning_capture,
     is_compiled_callable,
     never_target,
+    raised_label,
     remove_warning_capture,
     same_c_callable,
 )
 from ._identity import _wrapped_of
-from ._normalize import typename
 from ._rawthreads import allocate_lock, stack_key
 from ._wrap import _WRAP_MARK, _WRAPPER_CODES, _partition_impact_targets, _WrapFinder
 
@@ -156,8 +170,16 @@ _CTOR_NAMES = frozenset(("__init__", "__new__", "__call__"))
 _K_NONE, _K_C, _K_PY = 0, 1, 2     # what a CALL reaches: nothing of ours / compiled / traced Python
 _SITE_STABLE = 2        # same callee this many times at one call site -> DISABLE the site
 _SITES_MAX = 200000
-_SETTLE_GRACE = 1.0     # seconds the start de-duplication stays on after tool B is freed
+_SETTLE_GRACE = 1.0     # seconds the start de-duplication stays on after tool B is off
 _INHERIT_WALK_MAX = 50000   # classes walked to decide a callee is inherited by none of ours
+REOPEN = 5.0            # post-settle: seconds tool B stays on after a new line (the
+                        # controller times it; the backend only reports it)
+_LINED_MAX = 200000     # code objects of ours given LINE events (past it: not armed, noted)
+# 3.12 delivers a LINE event in time proportional to its code object's size (3.13+ does not):
+# the first run of a code object with LINE events is quadratic in its length there (86 us per
+# line at 32,000 lines). Past this much bytecode a code object of ours gets none on 3.12.
+_LINE_SLOW = sys.version_info < (3, 13)
+_LINE_BIG = 16384       # bytes of bytecode (about 8,000 instructions)
 
 
 def _implicit_name(name):
@@ -273,14 +295,6 @@ def _frame_of(code):
             return frame
         frame = frame.f_back
     return None
-
-
-def raised_label(exc):
-    """The exception type as ``module.Qualname`` (builtins bare, like every type label)."""
-    try:
-        return typename(exc)
-    except Exception:
-        return "<unknown>"
 
 
 # ── impact target -> code objects ────────────────────────────────────────────
@@ -440,7 +454,7 @@ class MonitoringBackend(FrameBackend):
     name = "monitoring"
 
     def __init__(self, target, sink, exclude=(), source=None, include_internal=False,
-                 mode=DISCOVER, watch_targets=()):
+                 mode=DISCOVER, watch_targets=(), reopen=REOPEN):
         FrameBackend.__init__(self, target, sink, exclude, source, include_internal)
         self.mode = WATCH if mode == WATCH else DISCOVER
         self._watch_targets = tuple(watch_targets or ())
@@ -480,9 +494,19 @@ class MonitoringBackend(FrameBackend):
         self._keep = {}             # (id(code), offset) -> (code, callee, receiver class): open
         self._renames = False
         self._b_active = True       # tool B owns implicitly-run codes (until settle)
-        self.settled_at = None      # wall time tool B was freed
+        self.settled_at = None      # wall time tool B was first paused (or freed)
         self.settle_reason = None
         self.handed_over = 0        # tool B codes moved to tool A's local events at settle
+        # Late contacts: LINE events on our code, each line DISABLEd at its first run. After
+        # the settle a line's first run re-opens tool B (``_on_line``) until quiet again.
+        self.reopen = float(reopen or 0.0) if mode == INCREMENTAL else 0.0
+        self._lines_on = self.reopen > 0 and self.near is not None
+        self._lined = {}            # id(code) -> [code, set of its lines that ran | None]
+        self.reopened = 0           # times tool B was re-opened after the settle
+        self.reopen_seconds = 0.0   # seconds it was on after the settle
+        self._opened_at = None      # monotonic: when it was last re-opened
+        self._b_reopened = False    # B on again: the codes handed over to A stay A's
+        self.last_fresh_at = None   # monotonic: a line of ours last ran first, post-settle
         self.compiled_wrap = True   # wrap the Cython functions of dependency modules (see start)
         self._compiled = None
 
@@ -523,6 +547,8 @@ class MonitoringBackend(FrameBackend):
             mon.register_callback(tool, ev.RAISE, self._raise_callback())
             if tool2 is not None:
                 mon.register_callback(tool2, ev.PY_START, self._on_implicit)
+                if self._lines_on:
+                    mon.register_callback(tool, ev.LINE, self._on_line)
             self._tool = tool
             self._tool2 = tool2
             _USED_IDS.add(tool)
@@ -579,9 +605,13 @@ class MonitoringBackend(FrameBackend):
             return
         self._tool = self._tool2 = None
         remove_warning_capture(self)
+        if self._opened_at is not None:     # stopped while re-opened: count it
+            self.reopen_seconds += _monotonic() - self._opened_at
+            self._opened_at = None
         if tool2 is not None:
             self._release(tool2, local_events=False)
         self._release(tool)
+        self._lined = {}
         self._pending.clear()
         self._cstack.clear()
         self._lastcall.clear()
@@ -607,7 +637,7 @@ class MonitoringBackend(FrameBackend):
                 pass
         ev = mon.events
         for event in (ev.PY_START, ev.PY_RETURN, ev.PY_UNWIND, ev.CALL, ev.C_RETURN, ev.C_RAISE,
-                      ev.RAISE):
+                      ev.RAISE, ev.LINE):
             try:
                 mon.register_callback(tool, event, None)
             except Exception:
@@ -686,7 +716,11 @@ class MonitoringBackend(FrameBackend):
                 restart = True      # DISABLEd before it was known (outside the target, or
                                     # called by its module body before the import finished)
             self._impact_codes[id(code)] = code
-            self._watch_code(code)
+            if self.mode == INCREMENTAL:
+                with self._arm_lock:    # a code of tool B goes to A only while B is off
+                    self._watch_code(code)
+            else:
+                self._watch_code(code)
         if restart and self._tool is not None:
             try:
                 self._mon.restart_events()  # a disabled location ignores new local events
@@ -726,9 +760,12 @@ class MonitoringBackend(FrameBackend):
             if self.mode == INCREMENTAL:
                 self.last_armed_at = _monotonic()   # a new contact: not settled yet
                 if not self._b_active and self._b_owns(code):
-                    # Recorded by tool B while it was being freed: hand it over itself.
-                    self._watch_code(code)
-                    return
+                    # Recorded by tool B while it was going off: hand it over itself (under
+                    # the arm lock, so it is never armed on A while B is on again).
+                    with self._arm_lock:
+                        if not self._b_active:
+                            self._watch_code(code)
+                            return
             if ent[5] is None:      # discover / incremental: arm the return to complete it
                 self._arm_local(code, self._mon.events.PY_RETURN)
 
@@ -859,23 +896,29 @@ class MonitoringBackend(FrameBackend):
 
     # ── incremental: settle (tool B off) ───────────────────────────────────────
     def settle(self, reason="quiet"):
-        """Free tool B once the watch set stopped growing: its global PY_START keeps firing on
-        dependency dunders/properties/generators that only dependencies call. Every code B
-        recorded (and every impact target it owned) is handed to tool A's local events, as
-        in watch mode, before B is freed; from then on A arms any dependency code a CALL in
+        """Turn tool B off once the watch set stopped growing: its global PY_START keeps
+        firing on dependency dunders/properties/generators that only dependencies call. Every
+        code B recorded (and every impact target it owned) is handed to tool A's local events,
+        as in watch mode, before B goes off; from then on A arms any dependency code a CALL in
         our code reaches, dunders and generators included. Tool A's CALL stays on.
 
-        Recall caveat: a protocol, dunder or property contact FIRST used after the settle is
-        not seen (it passes no CALL instruction in our code). Returns True if this settled.
-        Not done with ``module.*`` impact targets (they need B's global PY_START)."""
+        A contact that passes no CALL instruction of ours (a protocol, dunder, property or
+        generator contact) and is FIRST used after the settle is seen through the lines of
+        our code: B keeps its tool id, and a line of ours that runs for the first time turns
+        it on again (``_on_line``) until the controller finds it quiet and calls this again.
+        With ``reopen`` 0 B is freed for good and such a contact is not seen. Returns True if
+        B went off. Not done with ``module.*`` impact targets (they need B's global
+        PY_START)."""
         mon = self._mon
         with self._arm_lock:
             tool2 = self._tool2
-            if self.mode != INCREMENTAL or tool2 is None or self._tool is None:
+            if (self.mode != INCREMENTAL or tool2 is None or self._tool is None
+                    or not self._b_active):
                 return False
             if self._watch_prefix is not None:
                 self.note = "settle-skipped: module.* impact targets need the second tool"
                 return False
+            self._b_reopened = False            # B records whatever starts until it is off
             self._dedupe_until = float("inf")   # both tools may deliver a start meanwhile
             self._b_active = False              # A now owns every code (arming and CALLs)
             with self._obs_lock:
@@ -890,13 +933,92 @@ class MonitoringBackend(FrameBackend):
                 mon.set_events(tool2, 0)
             except Exception:
                 pass
-            self._tool2 = None
-            self._release(tool2, local_events=False)
-            self._dedupe_until = _monotonic() + _SETTLE_GRACE
+            if not self._lines_on:
+                self._tool2 = None
+                self._release(tool2, local_events=False)
+            now = _monotonic()
+            self._dedupe_until = now + _SETTLE_GRACE
             self.handed_over = handed
-            self.settled_at = time.time()
-            self.settle_reason = reason
+            if self._opened_at is not None:
+                self.reopen_seconds += now - self._opened_at
+                self._opened_at = None
+            if self.settled_at is None:
+                self.settled_at = time.time()
+                self.settle_reason = reason
         return True
+
+    # ── incremental: late contacts (a line of ours that first runs post-settle) ─
+    def _arm_lines(self, code):
+        """LINE events on ``code`` (ours) and every code object nested in it: a function of
+        ours that has not run yet is covered from its module's (or enclosing function's)
+        first run. Each line is DISABLEd at its first run, so the lines that already ran
+        cost nothing. A module body gets none itself (it runs once, at import, and a late
+        import is seen through the line of ours that runs it), nor, on 3.12, a very large
+        code object (``_LINE_BIG``)."""
+        lined = self._lined
+        line = self._mon.events.LINE
+        stack = [code]
+        while stack:
+            c = stack.pop()
+            ent = lined.get(id(c))
+            if ent is not None and ent[0] is c:
+                continue
+            if len(lined) >= _LINED_MAX:
+                self.note = "late-lines-capped: code objects past the cap get no LINE events"
+                return
+            lined[id(c)] = [c, None]    # holds the code: its id cannot be reused
+            if c.co_name == "<module>":
+                pass
+            elif _LINE_SLOW and len(c.co_code) > _LINE_BIG:
+                self.note = "late-lines-skipped: very large code objects get no LINE events (3.12)"
+            else:
+                self._arm_local(c, line)
+            for const in c.co_consts:
+                if type(const) is _CODE:
+                    stack.append(const)
+
+    def _on_line(self, code, line):
+        """A line of ours runs for the first time (LINE of tool A, DISABLEd here at once).
+        After the settle it re-opens tool B: the new path may touch a dependency through a
+        dunder, a property or a generator, which no CALL of ours reaches."""
+        try:
+            ent = self._lined.get(id(code))
+            if ent is None or ent[0] is not code:
+                return self._mon.DISABLE
+            seen = ent[1]
+            if seen is None:
+                seen = ent[1] = set()
+            elif line in seen:
+                return self._mon.DISABLE    # ran before: ``restart_events`` re-armed it
+            seen.add(line)
+            if self.settled_at is not None:
+                self.last_fresh_at = _monotonic()
+                if not self._b_active:
+                    self._reopen()
+        except Exception:
+            pass
+        return self._mon.DISABLE
+
+    def _reopen(self):
+        """Tool B's global PY_START on again (its DISABLEd locations are re-enabled with it:
+        one more callback per code object, then DISABLE). A code handed over to tool A stays
+        A's: B DISABLEs it at its first start (``_on_implicit``). Every hand-over to A runs
+        under the arm lock while B is off, so its local events are in place before B is on:
+        no start is recorded twice or lost."""
+        with self._arm_lock:
+            tool2 = self._tool2
+            if self._b_active or tool2 is None or self._tool is None:
+                return
+            self._opened_at = _monotonic()
+            self._b_reopened = True             # before B's first event
+            self._b_active = True               # B owns implicitly-run codes again
+            try:
+                self._mon.set_events(tool2, self._mon.events.PY_START)
+            except Exception:
+                self._b_active = self._b_reopened = False
+                self._opened_at = None
+                return
+            self.reopened += 1
 
     # ── incremental: tool A's CALL callback ────────────────────────────────────
     def _on_call_arm(self, code, offset, callable_, arg0):
@@ -930,6 +1052,10 @@ class MonitoringBackend(FrameBackend):
                 return None
             if len(self._sites) >= _SITES_MAX:
                 self._sites.clear()
+            if self._lines_on:
+                ent = self._lined.get(id(code))
+                if ent is None or ent[0] is not code:
+                    self._arm_lines(code)   # ours, started before tool B could see it
             self._discover_callable(callable_, arg0)
             self._sites[key] = [code, target, 1, False]
         except Exception:
@@ -1504,6 +1630,8 @@ class MonitoringBackend(FrameBackend):
                 self._deps.clear()
             ent = (code, dep, module)
             self._deps[id(code)] = ent
+            if not dep and self._lines_on and self._function_is_near(code, func):
+                self._arm_lines(code)       # a function of ours our code calls
         if not ent[1] or (self._b_active and self._b_owns(code, func.__globals__, ent[2])):
             return
         with self._arm_lock:            # cold path: once per newly reached dependency code
@@ -1526,6 +1654,10 @@ class MonitoringBackend(FrameBackend):
                 ent = self._decide_implicit(code, frame)
             if not ent[1]:
                 return ent[6]
+            if self._b_reopened:
+                loc = self._local.get(id(code))
+                if loc is not None and loc[0] is code and loc[1] & 1:   # PY_START: A's
+                    return self._mon.DISABLE
             if self.near is not None:
                 back = frame.f_back
                 if back is None:
@@ -1549,6 +1681,8 @@ class MonitoringBackend(FrameBackend):
             hit = (id(code) in self._impact_codes
                    or (prefix is not None and bool(prefix.matches(module, frame)))
                    or self._target_module(module, frame))
+        if not hit and self._lines_on and self._code_is_near(frame):
+            self._arm_lines(code)       # our code (a module body: every function in it)
         if len(self._implicit) >= _CODE_CACHE_MAX:
             self._implicit.clear()
         ent = [code, hit, module, body, None, generator_marker(code),

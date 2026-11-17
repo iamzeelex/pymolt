@@ -42,8 +42,12 @@ For every call from your code into an installed dependency:
 - the **arguments your code passed**: a parameter left at its default is recorded by name only, so
   a library that adds parameters does not change the fact;
 - the **result** or the **raised exception**. The exception type is recorded on 3.12+, and on
-  3.6–3.11 by the targeted wrappers of a long run. Under `setprofile` alone (a test suite on
-  3.6–3.11) a capture records that a call raised, not what it raised;
+  3.6–3.11 by the targeted wrappers of a long run. Under `setprofile` (a test suite on 3.6–3.11)
+  the type is read when the code that handles the exception makes a call (your `except` block,
+  `pytest.raises`, the test runner); a raise handled without any call, or swallowed by C code, is
+  recorded without its type. On 3.6 and 3.7, when a call ends inside a `with` or `try`/`finally`
+  block with no return value, a `return None` cannot be told from a raise: it is recorded as
+  "return or raise", or as a typed raise when the code that handles its exception makes a call;
 - the duration and the thread.
 
 A function written in C or Cython has no Python frame. pymolt wraps the public Cython functions of
@@ -69,14 +73,19 @@ Values are rendered at the most exact level that can be compared:
 - numpy and pandas objects as type, shape and dtypes, with the values only when small;
 - anything else as its type alone.
 
+Recording a value never runs its code, so it cannot change what the program does. A dict, list or set
+subclass is recorded from what it stores, not through its own methods (Flask's session stays
+"not accessed"). A proxy or lazy object (werkzeug's `LocalProxy`, Django's `SimpleLazyObject`) is
+recorded as its own type, without evaluating it.
+
 `--privacy shape` keeps types and structure but drops scalar values.
 
 ### Tracers
 
 | Python | Tracer |
 |---|---|
-| 3.12+ | `sys.monitoring`. Tests: full discovery. Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A startup-only watcher covers properties, `x[k]`, `with`, operators and generators, and turns itself off 30 s after the last new contact. There is no warm-up window. |
-| 3.6–3.11 | `sys.setprofile`. Tests: for the whole run. Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
+| 3.12+ | `sys.monitoring`. Tests: full discovery. Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A second watcher covers properties, `x[k]`, `with`, operators and generators. It turns off 30 s after the last new contact, and back on whenever a line of your code runs for the first time, until nothing new happened for 5 s. While it is on, capture costs as much as before it first turned off. Each line of your code is watched once, then costs nothing. The capture metadata counts the times it came back on (`reopened`) and their total length (`reopen_seconds`). There is no warm-up window. |
+| 3.6–3.11 | `sys.setprofile`. Tests: for the whole run; a raise is typed when the code that handles it makes a call. Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
 | 2.7 | not supported; the capture reports that the tracer failed to start |
 
 ### Sampling and counting
@@ -174,7 +183,7 @@ Each comparison states its level:
 - `kind`: from counts only, return versus raise type, when values were not sampled.
 
 Two captures from different Python versions are compared fairly:
-- an untyped raise (≤3.11) matches any exception type;
+- an untyped raise (3.6–3.11, handled without a call) matches any exception type;
 - C-level raise facts are left out when only one side's tracer records them.
 
 ## Coverage
@@ -202,7 +211,7 @@ when facts changed. Sampled captures must also have complete call counts.
 
 - **FAIL**: a compared fact failed anywhere in the recording, or a sandbox replay, golden snapshot
   or canary gate failed.
-- **PASS** requires all of the following:
+- **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
   - no static symbol is BLIND, of any contact kind (attribute reads and constants included);
   - every dynamic-only symbol had all its facts compared equal.
@@ -213,14 +222,17 @@ when facts changed. Sampled captures must also have complete call counts.
 
 ### Scope after `apply`
 
-When the post-migration code came from `pymolt apply`, coverage is narrowed to the API paths the
-plan found changed. The report prints this as *Impact focus* with the full surface next to it.
-- **Narrowed:** the static symbols, confirmed, BLIND, dynamic-only and trust. A symbol outside the
-  plan's paths that no run exercised does not block PASS.
-- **Not narrowed:** FAIL. A behaviour change in any recorded call fails the verdict. The report
-  lists the ones outside the plan's paths as changes outside the plan's predicted impacts.
+When the post-migration code came from `pymolt apply`, the verdict is the one the same captures get
+without a plan. The static symbols, confirmed, BLIND, dynamic-only and trust count the whole
+recorded surface, and a behaviour change in any recorded call fails.
 
-Without an applied plan, coverage counts every static symbol.
+The API paths the plan found changed only focus the report:
+- *Impact focus* gives the number of those paths and the static symbols on them: confirmed, BLIND
+  and dynamic-only.
+- The BLIND and dynamic-only tables list the symbols on the plan's paths first. The INCONCLUSIVE
+  reasons name the BLIND symbols inside the plan's predicted impacts apart from those outside them.
+- The version diff's counts and listed changes cover the plan's paths. Behaviour changes outside
+  them are listed as changes outside the plan's predicted impacts.
 
 ### Predicted risks
 

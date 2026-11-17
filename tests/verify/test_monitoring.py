@@ -711,10 +711,12 @@ def _syms(sink, name):
 
 
 def test_settle_frees_tool_b_hands_over_its_codes_and_keeps_arming_calls(recall_dep):
+    """``reopen=0``: the settle frees tool B for good (no LINE events on our code), so the
+    hand-over is seen alone, and the recall caveat it leaves."""
     dep = recall_dep
     mon = sys.monitoring
     sink = RecSink()
-    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental")
+    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental", reopen=0)
     be.start()
     tool, tool2 = be._tool, be._tool2
     try:
@@ -746,6 +748,7 @@ def test_settle_frees_tool_b_hands_over_its_codes_and_keeps_arming_calls(recall_
     assert len(_syms(sink, "g")) == 1 and len(_syms(sink, "Result.double")) == 1
     assert _syms(sink, "Base.__len__") == [] and _syms(sink, "_gen") == []
     assert be.settle_reason == "test" and be.handed_over >= 3 and be.settled_at is not None
+    assert be.reopened == 0 and not be._lined
 
 
 def test_settle_neither_loses_nor_doubles_calls_from_threads(recall_dep):
@@ -792,6 +795,140 @@ def test_settle_neither_loses_nor_doubles_calls_from_threads(recall_dep):
     assert gens == expected
 
 
+# ── late contacts: a line of ours that first runs after the settle ──────────
+
+_LATE = ("Base.__len__", "Base.prop", "_gen", "Base.__enter__", "Base.__exit__",
+         "Base.__add__", "Base.__getitem__")
+
+
+def _late_path(dep, b):
+    """A path of ours first run after the settle (an hour in, in a long-running service).
+    Its dependency contacts pass no CALL instruction of ours, except ``__exit__``."""
+    n = len(b)                          # Base.__len__, run by the builtin
+    v = b.prop                          # a property accessor
+    for _row in dep.rows(2):            # _gen: a generator the dependency made, started by us
+        pass
+    with b:                             # Base.__enter__ (no CALL), Base.__exit__
+        pass
+    return n, v, b + b, b[7]            # Base.__add__, Base.__getitem__
+
+
+def test_a_dunder_property_or_generator_first_used_after_the_settle_is_recorded(recall_dep):
+    dep = recall_dep
+    sink = RecSink()
+    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental")
+    be.start()
+    try:
+        b = dep.Base(1)
+        dep.f(1)
+        assert be.settle("test")
+        assert _late_path(dep, b) == (1, 2, 3, 7)
+    finally:
+        be.stop()
+    for name in _LATE:
+        assert len(_syms(sink, name)) == 1, name
+
+
+LATE_USER = "vfakelateuser"
+
+LATE_USER_SRC = '''
+def warm(dep):
+    b = dep.Base(1)
+    dep.f(1)
+    return b
+
+def late(dep, b):
+    n = len(b)
+    v = b.prop
+    for _row in dep.rows(2):
+        pass
+    with b:
+        pass
+    return n, v, b + b, b[7]
+'''
+
+
+def test_a_new_line_reopens_tool_b_until_quiet_and_an_old_line_does_not(recall_dep):
+    """Our code is a module imported under tool B (its functions get LINE events from its
+    module body); the test driving it is not our code, so only its lines count."""
+    dep = recall_dep
+    mon = sys.monitoring
+    sink = RecSink()
+    be = MonitoringBackend(RECALL_MOD, sink, source=LATE_USER, mode="incremental")
+    be.start()
+    try:
+        user = _module(LATE_USER, LATE_USER_SRC)
+        b = user.warm(dep)
+        assert be.settle("test")
+        tool2 = be._tool2
+        assert tool2 is not None and mon.get_events(tool2) == 0 and be.reopened == 0
+        assert user.late(dep, b) == (1, 2, 3, 7)        # its new lines re-open tool B
+        assert be.reopened == 1 and mon.get_events(tool2) == mon.events.PY_START
+        assert be.settle("quiet again")                 # closed: B's new contacts handed over
+        assert mon.get_events(tool2) == 0 and be.settle_reason == "test"
+        assert user.late(dep, b) == (1, 2, 3, 7)        # lines that ran before: B stays off
+        assert be.reopened == 1 and mon.get_events(tool2) == 0
+        mon.restart_events()                            # re-arms every DISABLEd line ...
+        assert user.late(dep, b) == (1, 2, 3, 7)        # ... that still ran before
+        assert be.reopened == 1 and mon.get_events(tool2) == 0
+    finally:
+        be.stop()
+        sys.modules.pop(LATE_USER, None)
+    for name in _LATE:
+        assert len(_syms(sink, name)) == 3, name        # once per run: neither lost nor doubled
+    assert [e["in"]["bound"]["k"] for e in _syms(sink, "Base.__getitem__")] == [7, 7, 7]
+    assert be.reopen_seconds > 0 and mon.get_tool(tool2) is None
+
+
+def test_reopen_and_close_neither_lose_nor_double_calls_from_threads(recall_dep):
+    """While tool B is on again, a code handed over to tool A is seen by both tools: each
+    start is recorded once, across repeated re-open / close cycles under thread switches."""
+    import collections
+    import threading
+    dep = recall_dep
+    sink = RecSink()
+    be = MonitoringBackend(RECALL_MOD, sink, source=__name__, mode="incremental")
+    n, nthreads = 1500, 4
+    b = dep.Base(0)
+
+    def worker(base):
+        for i in range(n):
+            v = base + i
+            b[v]                              # handed over to A at the first settle
+            dep.f(v)                          # A
+            list(dep.gen(v % 3))              # generator: handed over to A
+            len(b)                            # a contact first made while B is on again
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    be.start()
+    try:
+        b[-1], dep.f(-1), list(dep.gen(0))
+        assert be.settle("test")
+        threads = [threading.Thread(target=worker, args=(k * 100000,))
+                   for k in range(nthreads)]
+        for t in threads:
+            t.start()
+        cycles = 0
+        while any(t.is_alive() for t in threads) and cycles < 200:
+            be._reopen()
+            be.settle("again")
+            cycles += 1
+        for t in threads:
+            t.join(60)
+    finally:
+        be.stop()
+        sys.setswitchinterval(old)
+    assert be.reopened >= 2
+    values = [k * 100000 + i for k in range(nthreads) for i in range(n)]
+    assert sorted(e["in"]["bound"]["k"] for e in _syms(sink, "Base.__getitem__")) == \
+        sorted([-1] + values)
+    assert sorted(e["in"]["bound"]["x"] for e in _syms(sink, "f")) == sorted([-1] + values)
+    gens = collections.Counter(e["in"]["bound"]["n"] for e in _syms(sink, "gen"))
+    assert gens == collections.Counter([0] + [v % 3 for v in values])
+    assert len(_syms(sink, "Base.__len__")) <= nthreads * n     # never doubled
+
+
 # ── microbenchmark (opt-in: PYMOLT_BENCH=1) ──────────────────────────────────
 
 BENCH_SRC = '''
@@ -825,9 +962,11 @@ class _TallySink(RecSink):
         self.n += 1
 
 
+# Our code, in a module of its own: the test driving it is not our code, so its lines never
+# turn tool B on again after the settle (a timed line of ours that is new would).
+BENCH_USER_SRC = '''
 def _bench_local(x):
     return x * 2
-
 
 def _bench_workload(api, n):
     acc = 0
@@ -836,6 +975,7 @@ def _bench_workload(api, n):
         for _ in range(20):
             acc += _bench_local(i)
     return acc
+'''
 
 
 @pytest.mark.skipif(not __import__("os").environ.get("PYMOLT_BENCH"),
@@ -844,26 +984,29 @@ def test_microbenchmark_discover_vs_incremental_vs_watch(capsys):
     import statistics
     import time
     dep = _module("vfakebench", BENCH_SRC)
+    user = _module("vfakebench_user", BENCH_USER_SRC)
     n = 60000
     try:
         def make(mode):
             if mode == "none":
                 return None
-            be = MonitoringBackend("vfakebench", _TallySink(), source=__name__,
+            be = MonitoringBackend("vfakebench", _TallySink(), source="vfakebench_user",
                                    mode="discover" if mode in ("discover", "watch")
                                    else "incremental")
-            if mode == "incremental-settled":
+            if mode in ("incremental-settled", "incremental-reopened"):
                 orig_s = be.start
 
                 def start_settled():
                     orig_s()
-                    dep.api(0)                       # arm, then free tool B
+                    user._bench_workload(dep.api, 1)     # arm, then tool B off
                     be.settle("bench")
                     # Steady state: past the de-duplication window after the settle. Busy,
                     # not asleep: an idle second lets the OS park the thread on a slow core.
                     until = time.monotonic() + _monitoring._SETTLE_GRACE + 0.05
                     while time.monotonic() < until:
-                        dep.api(0)
+                        user._bench_workload(dep.api, 1)
+                    if mode == "incremental-reopened":
+                        be._reopen()                     # what a new line of ours does
                     be.sink.n = 0
                 be.start = start_settled
             if mode == "watch":
@@ -871,21 +1014,22 @@ def test_microbenchmark_discover_vs_incremental_vs_watch(capsys):
 
                 def start():
                     orig()
-                    dep.api(0)                       # observe, then watch the observed set
+                    user._bench_workload(dep.api, 1)     # observe, then watch the observed set
                     be.enter_watch()
                     be.sink.n = 0
                 be.start = start
             return be
 
         results = {}
-        for mode in ("none", "discover", "incremental", "incremental-settled", "watch"):
+        for mode in ("none", "discover", "incremental", "incremental-settled",
+                     "incremental-reopened", "watch"):
             times = []
             for _ in range(3):
                 be = make(mode)
                 if be is not None:
                     be.start()
                 t0 = time.perf_counter()
-                _bench_workload(dep.api, n)
+                user._bench_workload(dep.api, n)
                 times.append(time.perf_counter() - t0)
                 if be is not None:
                     be.stop()
@@ -893,6 +1037,7 @@ def test_microbenchmark_discover_vs_incremental_vs_watch(capsys):
             results[mode] = statistics.median(times)
     finally:
         sys.modules.pop("vfakebench", None)
+        sys.modules.pop("vfakebench_user", None)
     base = results["none"]
     with capsys.disabled():
         print(f"\n{n} boundary calls, 22 dependency-internal + 20 local calls each")
@@ -900,3 +1045,4 @@ def test_microbenchmark_discover_vs_incremental_vs_watch(capsys):
             print(f"  {mode:<20} {t:.3f}s  {t / base:.2f}x")
     assert results["incremental"] < results["discover"]
     assert results["incremental-settled"] < results["incremental"]
+    assert results["incremental-settled"] < results["incremental-reopened"]

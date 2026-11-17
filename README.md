@@ -13,9 +13,9 @@ Python 3.11 + pandas 1.5.3 → Python 3.12 + pandas 2.2.3. The tests pass on bot
 <!-- example:verify:start -->
 ```text
 VERDICT: FAIL
-Static symbols: 3   confirmed: 3   BLIND: 0   dynamic-only: 1
-Contract trust: 100%  (3/3 behavioural contacts in executed files)
-Impact focus: 8 changed API path(s); full surface: 4 static / 0 blind
+Static symbols: 4   confirmed: 4   BLIND: 0   dynamic-only: 3
+Contract trust: 100%  (4/4 behavioural contacts in executed files)
+Impact focus: 8 changed API path(s); on them 3 static, 3 confirmed, 0 BLIND, 1 dynamic-only
 Version diff: behavior changed  (changed 1, rewritten 1, disappeared 1, drift 1, equal 7)
 
 Change       Dependency call                      Call site (your code)          Before → after
@@ -94,11 +94,11 @@ The rules are in [docs/verify.md](docs/verify.md).
 Where pymolt cannot help yet:
 - **Targets that do not build or import.** `assess` checks that the target resolves, not that it builds or imports. If it does not import, there is no post-migration capture and nothing to compare. All six legacy projects we tried (Python 3.6 → 3.12) stop here today.
 - **Behaviour changes.** `apply` rewrites moved and renamed APIs and Python-version breakage. A behaviour change, like `DataFrame.mean` above, is reported; fixing it is up to you.
-- **Code no run exercises.** It is not checked: its symbols are BLIND and the verdict stays INCONCLUSIVE. After `apply`, BLIND counts only the APIs the plan found changed, so an unexercised symbol elsewhere does not block PASS.
+- **Code no run exercises.** It is not checked: its symbols are BLIND and the verdict stays INCONCLUSIVE.
 - **Differences it cannot judge alone.** These are review items, and the verdict is INCONCLUSIVE: a new value after your hand edit; a value that varies between runs, when the baseline was not captured with `--runs 2`; an environment difference between the two captures.
-- **Exception types on 3.6–3.11 test suites.** A call that raised is recorded without its exception type.
+- **Some exception types on 3.6–3.11 test suites.** A raise that your code handles without any call (`except ValueError: pass`), or that C code swallows (`hasattr`, a `for` loop's `StopIteration`), is recorded without its type.
 - **Compiled calls.** A C function is recorded without its result, and its arguments are not compared.
-- **Late contacts in long runs (3.12+).** A dunder, property or generator call first made more than 30 s after the last new contact is missed.
+- **Late contacts in long runs (3.12+).** A dunder, property or generator call first made late in a run is recorded when its line of your code had not run before. It is missed on a line that already ran and only later reaches a dependency this way (`x[k]` on dicts for an hour, then on a DataFrame).
 - **Overhead.** Capture slows a test suite on Python 3.6 by 2.7–11.8×.
 
 The full list, the measured overhead and where pymolt was tried are in [docs/limits.md](docs/limits.md).

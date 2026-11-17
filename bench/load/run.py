@@ -627,9 +627,11 @@ def run_one(kind: str, session: Path, *, duration: float, rate: float, threads: 
                     steady_state["live_source"] = meta.get("_source")
                     if info["mode"] == "incremental":
                         # Incremental mode has no discover window (switched_at = start),
-                        # but it settles: its startup-only instrumentation turns off once
-                        # nothing new has been armed for incremental_settle seconds. Steady
-                        # state begins after that, unless settling is disabled (0).
+                        # but it settles: its second watcher turns off once nothing new has
+                        # been armed for incremental_settle seconds. Steady state begins
+                        # after that, unless settling is disabled (0). A line of the service
+                        # that runs for the first time later turns the watcher back on for
+                        # incremental_reopen seconds: that cost is part of the steady state.
                         settle_cfg = _first_key(meta, "incremental_settle")
                         settled = _first_key(meta, "settled_at")
                         if isinstance(settled, (int, float)):

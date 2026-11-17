@@ -583,6 +583,50 @@ def test_activate_auto_is_incremental_end_to_end(tmp_path):
 
 
 @pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
+def test_activate_records_implicit_contacts_first_made_after_the_settle(tmp_path):
+    """A long run: the settle frees the startup instrumentation, then a function of ours that
+    only a dependency calls runs for the first time and touches a dunder and a property."""
+    repo = Path(__file__).resolve().parents[2]
+    pkg = tmp_path / "vfakelate"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        "class Box:\n"
+        "    def __init__(self, v):\n        self.v = v\n"
+        "    def __len__(self):\n        return self.v\n"
+        "    @property\n    def size(self):\n        return self.v * 10\n"
+        "def make(v):\n    return Box(v)\n"
+        "def calls_back(fn, arg):\n    return fn(arg)\n")
+    (tmp_path / "lateuser.py").write_text(
+        "def rare(box):\n    return len(box), box.size\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYMOLT_TRACE")}
+    env.update(PYMOLT_TRACE_TARGET="vfakelate", PYMOLT_TRACE_SOURCE="lateuser,__main__",
+               PYTHONPATH=os.pathsep.join([str(repo), str(tmp_path)]),
+               PYMOLT_TRACE_OUT=str(tmp_path / "t-{pid}.jsonl"), PYMOLT_TRACE_MODE="auto",
+               PYMOLT_TRACE_SINK="jsonl", PYMOLT_TRACE_INCREMENTAL_SETTLE="0.05")
+    code = ("from pymolt.verify import boundary_tracer\n"
+            "boundary_tracer.activate()\n"
+            "import time, vfakelate, lateuser\n"
+            "box = vfakelate.make(3)\n"
+            "be = boundary_tracer._active[0].discover\n"
+            "deadline = time.monotonic() + 10\n"
+            "while be.settled_at is None and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "assert be.settled_at is not None\n"
+            "assert vfakelate.calls_back(lateuser.rare, box) == (3, 30)\n")
+    subprocess.run([sys.executable, "-c", code], env=env, check=True, timeout=60,
+                   cwd=str(tmp_path))
+    (trace,) = list(tmp_path.glob("t-*.jsonl"))
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    assert sorted(e["sym"] for e in events) == [
+        "vfakelate.Box.__len__", "vfakelate.Box.size", "vfakelate.calls_back", "vfakelate.make"]
+    results = {e["sym"]: e["result"] for e in events}
+    assert (results["vfakelate.Box.__len__"], results["vfakelate.Box.size"]) == (3, 30)
+    (meta_path,) = tmp_path.glob("*.meta.json")
+    meta = json.loads(meta_path.read_text())
+    assert meta["settled_at"] is not None and meta["reopened"] >= 1
+
+
+@pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")
 def test_incremental_settles_after_a_quiet_window_and_records_it(dep):
     mod, _ = dep
     sink = RecSink()
@@ -593,7 +637,8 @@ def test_incremental_settles_after_a_quiet_window_and_records_it(dep):
         tool2 = be._tool2
         mod.plain(1)
         assert _wait(lambda: be.settled_at is not None)
-        assert sys.monitoring.get_tool(tool2) is None
+        # kept: this new line of ours (the test is our code) has turned it on again
+        assert sys.monitoring.get_tool(tool2) == "pymolt" and be.reopened == 1
         mod.plain(2)
         mod.other(3)                     # a plain call first made after the settle: found
     finally:
@@ -602,6 +647,8 @@ def test_incremental_settles_after_a_quiet_window_and_records_it(dep):
     meta = sink.metadata
     assert meta["mode"] == "incremental" and meta["settle_reason"] == "quiet"
     assert meta["settled_at"] == be.settled_at and meta["incremental_settle"] == 0.05
+    assert meta["incremental_reopen"] == boundary_tracer.DEFAULT_REOPEN == 5.0
+    assert meta["reopened"] == 1 and meta["reopen_seconds"] > 0
     assert meta["discovered"] == 2
 
 

@@ -9,7 +9,8 @@
   built against numpy 2, Theano), there is no post-migration capture and nothing to compare. All six
   legacy projects stop here today ([below](#where-it-was-tried)).
 - **Code no run exercises.** Only calls the tests or the app make are compared. A dependency symbol
-  no run reaches is BLIND, and the verdict stays INCONCLUSIVE.
+  no run reaches is BLIND, and the verdict stays INCONCLUSIVE. This holds after `apply` too, whether
+  or not the plan changed that symbol ([verify.md](verify.md#scope-after-apply)).
 - **Python 2.7** is not supported: a capture reports that the tracer failed to start.
 
 ### Fixing what it finds
@@ -38,23 +39,37 @@ now returns) still fails, although it may be noise.
 
 ### What the tracer does not see
 
-- **Exception types on 3.6–3.11 test suites.** A test-suite capture records that a call raised, not
-  what it raised. Long runs record the type once the targeted wrappers take over. 3.12+ always
+- **Some exception types on 3.6–3.11 test suites.** `setprofile` does not pass the exception to the
+  tracer, so pymolt reads it when your code handles it: in an `except`, `finally` or `with` block
+  that makes a call, in `pytest.raises` or `assertRaises`, or in the test runner's own handler. A
+  raise handled without any call (`except ValueError: pass`), or swallowed by C code (`hasattr`,
+  `getattr` with a default, a `for` loop's `StopIteration`), is recorded without its type. On
+  Flask's test suite (3.11), 106 of 203 raises were typed; 83 of the other 97 came from one handler
+  that makes no call. Long runs record the type once the targeted wrappers take over. 3.12+ always
   records it.
 - **Compiled calls.** A C function, a private Cython function, or a method of a Cython extension type
   is recorded without its result, and its arguments are not compared. Past 2,000 calls per call
   site, such calls are only counted. The public Cython functions of dependency modules are wrapped
   and recorded in full.
 - **Late dunder contacts in long runs (3.12+).** Watching for dunder, property and generator calls
-  stops 30 s after the last new contact, so one first used after that is missed.
+  turns off 30 s after the last new contact. A line of your code that runs for the first time turns
+  it back on until nothing new happened for 5 s (`PYMOLT_TRACE_INCREMENTAL_REOPEN`; 0 keeps it off).
+  Still missed:
+  - such a call on a line that already ran with other objects (`x[k]` on dicts for an hour, then
+    on a DataFrame);
+  - one made more than 5 s after the last new line or contact (`dep.slow()[k]` when `slow()` takes
+    longer);
+  - code of yours imported after the 30 s through a line that already ran
+    (`importlib.import_module(name)`) and called only by a dependency;
+  - on 3.12, a function of yours over about 8,000 bytecode instructions: watching its lines would
+    make its first run slow there.
+- **Values behind a proxy or a lazy object** (werkzeug's `LocalProxy`, Django's `SimpleLazyObject`)
+  are recorded as the proxy's type: reading through it would evaluate it. A dict or list subclass
+  whose own methods compute what they return (werkzeug's `MultiDict`) is recorded from what it
+  stores (every value list). One that keeps its items elsewhere and defines its own `__len__`
+  (werkzeug's `CombinedMultiDict`) is recorded like any object, from its attributes.
 - **Classes made at run time (3.12+).** A dependency class created without an import, whose
   instances reach only a call site that stopped being watched before the class existed, is missed.
-
-### Coverage after `apply`
-
-When the post-migration code came from `pymolt apply`, BLIND, dynamic-only and trust count only the
-API paths the plan found changed, so a symbol outside them that no run exercised does not block
-PASS. A behaviour change in any recorded call still fails ([verify.md](verify.md#scope-after-apply)).
 
 ### PyMolt itself
 
