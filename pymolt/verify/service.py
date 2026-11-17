@@ -61,7 +61,9 @@ from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
+    INPUT_CHANGED,
     UNMEASURED_NOISE,
+    UNPAIRED_SITE,
     find_facts_snapshot,
     iter_snapshot,
     iter_trace_records,
@@ -2781,14 +2783,21 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
     entries = [e for e in entries if not e.get("unverified")]
     reviews = [e for e in entries if e.get("review")]
-    noisy = [e for e in reviews if str(e.get("review")).startswith(UNMEASURED_NOISE)]
-    reviews = [e for e in reviews if e not in noisy]
-    if noisy:
-        names = ", ".join(sorted({str(e.get("symbol")) for e in noisy})[:5])
-        reasons.append(
-            f"{len(noisy)} value difference(s) may be run-to-run noise: their input is not "
-            f"fully observed and the workload varies between runs ({names}); a second baseline "
-            "capture measuring the noise would decide")
+    classes = (
+        (UNMEASURED_NOISE, "value difference(s) may be run-to-run noise: their input is not "
+                           "fully observed and the workload varies between runs"),
+        ("masked input", "value difference(s) where the inputs matched only once volatile "
+                         "values were masked"),
+        (INPUT_CHANGED, "call(s) whose input changed with no visible cause"),
+        (UNPAIRED_SITE, "call site(s) whose inputs changed with no visible cause"),
+    )
+    for prefix, text in classes:
+        hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
+        reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
+        if hit:
+            names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+            reasons.append(f"{len(hit)} {text} ({names}); a baseline replicate would tell run "
+                           "noise from a real change")
     if reviews:
         names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
         reasons.append(f"{len(reviews)} edited call(s) need review: {names}")

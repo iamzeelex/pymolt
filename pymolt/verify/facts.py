@@ -88,6 +88,7 @@ import difflib
 import io
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -2526,7 +2527,55 @@ class _Provenance:
             for dl in self._decorator_lines(side, file).get(line, ()):
                 if m[side].get(dl, ("gone", None))[0] != "same":
                     return "edited"
+        if st == "same" and self.edited_span_lines(side, file, line):
+            return "edited"  # a definition line whose class body / decorated def was edited
         return st
+
+    def definition_span(self, side: int, file: str, line: int | None) -> tuple[int, int] | None:
+        """(first, last) line of the definition a call on ``line`` belongs to: a ``class``
+        statement (its line and body) or a decorated ``def`` (its decorators, line and body),
+        when ``line`` is that definition's own line or one of its decorators."""
+        if line is None:
+            return None
+        key = (side + 10, file)
+        if key not in self._stmts:
+            spans: dict[int, tuple[int, int]] = {}
+            text = self.sources[side].get(file)
+            tree = None
+            if text is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+            for node in ast.walk(tree) if tree is not None else ():
+                decorated = isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) \
+                    and node.decorator_list
+                if isinstance(node, ast.ClassDef) or decorated:
+                    first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+                    span = (first, node.end_lineno or node.lineno)
+                    for ln in (node.lineno, *(d.lineno for d in node.decorator_list)):
+                        spans.setdefault(ln, span)
+            self._stmts[key] = spans if tree is not None else None  # type: ignore[assignment]
+        table = self._stmts[key]
+        return table.get(line) if table else None  # type: ignore[return-value]
+
+    def edited_span_lines(self, side: int, file: str, line: int | None) -> list[int]:
+        """The edited lines inside the definition span ``line`` belongs to (empty when none, or
+        without source snapshots)."""
+        m = self.maps.get(file)
+        span = self.definition_span(side, file, line) if m is not None else None
+        if span is None:
+            return []
+        return [ln for ln in range(span[0], span[1] + 1)
+                if m[side].get(ln, ("gone", None))[0] != "same"]
+
+    def ledger_covers_site(self, file: str, line: int | None, side: int) -> bool:
+        """The ledger vouches for the call's own line, or for every edited line of the
+        definition span it belongs to."""
+        if self.ledger_covers(file, line, side):
+            return True
+        edited = self.edited_span_lines(side, file, line)
+        return bool(edited) and all(self.ledger_covers(file, ln, side) for ln in edited)
 
     def resolves_to_project(self, file: str, line: int | None, symbol: str) -> bool:
         """On the new side, the callee at ``line`` whose leaf is the symbol's leaf is rooted in a
@@ -3102,8 +3151,9 @@ _ISO_CLOCK = re.compile(
     r"(Z|[+-]\d{2}:?\d{2})?(?!\d)")
 _EPOCH_CLOCK = re.compile(r"(?<![\d.])(\d{10}|\d{13}|\d{16}|\d{19})(\.\d+)?(?!\d)")
 _EPOCH_SCALES = {10: (1.0, "s"), 13: (1e3, "ms"), 16: (1e6, "us"), 19: (1e9, "ns")}
-_CLOCK_SLACK = 5.0  # seconds around a call's own time
-_INPUT_WINDOW_MAX = 10.0  # an input clock value is masked only for a fact whose calls span this
+_CLOCK_EDGE = 0.5  # a reading within this of its call window was taken during the call
+_CLOCK_HORIZON = 30 * 86400.0  # a value farther than this from its call is no clock value
+_INPUT_WINDOW_MAX = 10.0  # a call window wider than this (calls over a suite) masks no clock
 
 
 def source_kind(symbol: str) -> tuple[str, bool] | None:
@@ -3325,9 +3375,22 @@ class _Masker:
         out.append(s[last:])
         return "".join(out)
 
-    def _in_window(self, t: float) -> bool:
+    def _offset(self, t: float) -> int | None:
+        """A clock value as its offset from its own call's time, in whole seconds; None when
+        it is no clock value here: no call time, a call window wider than 10 s (calls spread
+        over a suite), or farther than 30 days from the call. A reading taken during the call
+        (within half a second of its window) is offset 0; any other value is anchored at the
+        window's midpoint and rounded half away from zero, so a call shorter than a second
+        never flips a whole-second offset (``now + 120`` stays ``+120s``)."""
         w = self.window
-        return w is not None and w[0] - _CLOCK_SLACK <= t <= w[1] + _CLOCK_SLACK
+        if w is None or w[1] - w[0] > _INPUT_WINDOW_MAX:
+            return None
+        if not (w[0] - _CLOCK_HORIZON <= t <= w[1] + _CLOCK_HORIZON):
+            return None
+        if w[0] - _CLOCK_EDGE <= t <= w[1] + _CLOCK_EDGE:
+            return 0
+        x = t - (w[0] + w[1]) / 2
+        return int(math.floor(abs(x) + 0.5)) * (1 if x >= 0 else -1)
 
     def _epoch(self, v: float, kind: str) -> str | None:
         if self.window is None:
@@ -3339,8 +3402,10 @@ class _Masker:
         if not t > 0 or t == float("inf"):
             return None
         for scale, unit in ((1.0, "s"), (1e3, "ms"), (1e6, "us"), (1e9, "ns")):
-            if t / scale >= _EPOCH_MIN and self._in_window(t / scale):
-                return f"⟨clock:{kind}:epoch-{unit}⟩"
+            if t / scale >= _EPOCH_MIN:
+                n = self._offset(t / scale)
+                if n is not None:
+                    return f"⟨clock:{kind}:epoch-{unit}@{n:+d}s⟩"
         return None
 
     def _mask_clock(self, s: str) -> str:
@@ -3359,18 +3424,22 @@ class _Masker:
                         instants.append(naive.timestamp())
             except (ValueError, OverflowError, OSError):
                 return m.group()
-            if not any(self._in_window(t) for t in instants):
+            offsets = [n for n in (self._offset(t) for t in instants) if n is not None]
+            if not offsets:
                 return m.group()
             self._note("clock", m.group())
-            return "⟨clock:" + re.sub(r"\d", "9", m.group()) + "⟩"
+            n = min(offsets, key=abs)  # UTC or local: the reading nearer its call
+            return "⟨clock:" + re.sub(r"\d", "9", m.group()) + f"@{n:+d}s⟩"
 
         def epoch(m: re.Match) -> str:
             digits, frac = m.groups()
             scale, unit = _EPOCH_SCALES[len(digits)]
-            if not self._in_window(int(digits) / scale):
+            t = int(digits) / scale
+            n = self._offset(t) if t >= _EPOCH_MIN else None
+            if n is None:
                 return m.group()
             self._note("clock", m.group())
-            return f"⟨clock:epoch-{unit}{'.f' if frac else ''}⟩"
+            return f"⟨clock:epoch-{unit}{'.f' if frac else ''}@{n:+d}s⟩"
 
         if any(c.isdigit() for c in s):
             s = _ISO_CLOCK.sub(iso, s)
@@ -3799,6 +3868,20 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _judge_pairs(pending, old_left, new_left, prov)
     _apply_noise(entries, prov, {f.symbol.split('.')[0] for f in old_facts})
     backend_only = _soften_backend(entries, old, new)
+    if sampled:
+        changed_inputs = 0
+    else:
+        if not (gstats.seeds[0] or gstats.seeds[1]):  # no group ran: seeds from the maskers
+            noise = _noise_state()
+            for side, m in enumerate((noise.old, noise.new)):
+                if m is not None:
+                    gstats.seeds[side] = set(m.replaced)
+                    idx: dict[str, list[str]] = defaultdict(list)
+                    for tok in gstats.seeds[side]:
+                        if len(tok) >= 8:
+                            idx[tok[:8]].append(tok)
+                    gstats.seed_index[side] = idx
+        changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats)
 
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_dropped(entries, old, new)
@@ -3815,15 +3898,20 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     if variation:
         warnings.append(
             f"run-variation: {variation}; no replicate measured run-to-run noise, so "
-            f"{gated} value difference(s) at calls whose input is not fully observed, or at "
-            "unpaired sites, are review items, not failures (capture a baseline replicate to "
-            "settle)")
+            f"{gated} value difference(s) at calls with equal but not fully observed inputs are "
+            "review items, not failures (capture a baseline replicate to settle)")
     for side, masker in (("old", _noise_state().old), ("new", _noise_state().new)):
         if masker is not None and masker.untimed:
             warnings.append(
                 f"clock-unmasked:{side}:{masker.untimed}: facts without a call time (a "
                 "facts-snapshot capture records none), so clock readings in them are not "
                 "masked")
+    if changed_inputs:
+        warnings.append(
+            f"input-changed:{changed_inputs}: calls on unedited lines that paired although "
+            "their input differs where nothing volatile explains it (an untraced upstream "
+            "change, or an ephemeral port, looks the same); review items unless an outcome kind "
+            "or type differs")
     if tracer_self:
         warnings.append(
             f"tracer-self:{tracer_self}: facts whose call site is inside pymolt's own injected "
@@ -3844,6 +3932,10 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     if prov.maps or prov.ledger_known:
         summary = FactDiff(entries=entries, no_ledger=prov.no_ledger).edited_summary()
         warnings.append("edit-provenance: " + summary)
+    if context is not None and not prov.maps:
+        warnings.append(
+            "definition-spans-unknown: no source snapshots, so an edit inside a class body or a "
+            "decorated function does not make the calls on its definition line edited sites")
     return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger,
                     old_summary=old.summary(),
                     new_summary=new.summary(), warnings=warnings, unsampled=unsampled)
@@ -4251,8 +4343,8 @@ def _group_volatile(
         if {_signature(v.fact) for v in olds} != {_signature(v.fact) for v in news}:
             continue  # the input signature changed: structure, not noise; stays strict
         groups.append((olds, news))
-    judged = _group_evidence(groups, old_facts, new_facts)
     stats = _GroupStats()
+    judged = _group_evidence(groups, old_facts, new_facts, stats)
     entries: list[FactEntry] = []
     for (olds, news), j in zip(groups, judged, strict=True):
         entries.extend(_group_entries(olds, news, j, dropped, stats))
@@ -4267,6 +4359,11 @@ class _GroupStats:
     partial: int = 0     # some did
     unpaired: int = 0    # none did
     triggers: list[str] = field(default_factory=list)  # full on source/clock masks, both sides
+    # per side: seeds (replaced run values) with their 8-char index, and whole propagated
+    # values (outputs of fully paired sites' members)
+    seeds: list = field(default_factory=lambda: [set(), set()])
+    seed_index: list = field(default_factory=lambda: [{}, {}])
+    whole: list = field(default_factory=lambda: [set(), set()])
 
 
 @dataclass
@@ -4310,7 +4407,7 @@ def _vmask_key(v: _V, volatile: dict) -> str:
 
 
 def _group_evidence(groups: list[tuple[list[_V], list[_V]]], old_facts: list[Fact],
-                    new_facts: list[Fact]) -> list[_Judged]:
+                    new_facts: list[Fact], stats: "_GroupStats | None" = None) -> list[_Judged]:
     """Each group's masked keys, after propagating volatility to a small fixpoint.
 
     Seeds, per side: the run values a source or clock mask actually replaced (matched inside a
@@ -4353,6 +4450,8 @@ def _group_evidence(groups: list[tuple[list[_V], list[_V]]], old_facts: list[Fac
             grew = True
         if not grew:
             break
+    if stats is not None:
+        stats.seeds, stats.seed_index, stats.whole = seeds, seed_index, whole
     return [j for j in judged if j is not None]
 
 
@@ -4497,6 +4596,11 @@ def _group_entries(olds: list[_V], news: list[_V], j: _Judged, dropped: tuple[bo
                         "whose inputs differ with no visible source of the variation", types,
                         sample=(strict[0][0] if strict[0] else None,
                                 strict[1][0] if strict[1] else None, None, None))
+        # outcome kinds and types agree over the site (a difference failed above): the
+        # inputs reaching it changed, which is evidence of a change, not that the dependency's
+        # behaviour did
+        e.review = (f"{UNPAIRED_SITE}: {len(strict[0])} old / {len(strict[1])} new calls whose "
+                    f"input changed with no visible cause; {_REPLICATE_HINT}")
         out.append(e)
     return out
 
@@ -4504,6 +4608,9 @@ def _group_entries(olds: list[_V], news: list[_V], j: _Judged, dropped: tuple[bo
 _MASKED_INPUT_REVIEW = (
     "masked input: the value differs and the inputs matched only once volatile values were "
     "masked, so the output may derive from them; capture a baseline replicate to settle")
+INPUT_CHANGED = "input changed"
+UNPAIRED_SITE = "unpaired site"
+_REPLICATE_HINT = "capture a baseline replicate to tell run noise from an upstream change"
 
 
 def _site_entry(olds: list[_V], news: list[_V], category: FactCategory,
@@ -4584,29 +4691,21 @@ def _kinds(outcomes: list[Outcome] | None) -> set[str]:
 
 def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
     """No replicate measured run-to-run noise, and this workload varies between runs: a value
-    difference at an unedited pair whose input is not fully observed is not a controlled
-    comparison, so it is a review item (INCONCLUSIVE), not a failure. Not fully observed: part
-    of the input is rendered by type only, it binds nothing beyond its receiver, or its inputs
-    were equal only once volatile values (clock readings, entropy-source values) were masked:
-    those positions are, by definition, values the comparison does not know. Still failing:
-    outcome-kind and type changes, volatile groups, and any difference with a fully observed
-    input (a residual beyond an input substitution included)."""
+    difference at an unedited pair with EQUAL inputs, where the input is not fully observed
+    (a receiver or argument rendered by type only, a compiled call's unrecorded arguments), is
+    not a controlled comparison, so it is a review item (INCONCLUSIVE), not a failure. Pairs
+    whose inputs differ are the input-change and masked-input rules' business; outcome-kind
+    and type changes always fail."""
     count = 0
     for e in entries:
-        if (e.explained or "").startswith("unpaired-site") and "types-equal" in e.notes \
-                and e.category is FactCategory.CHANGED and not (e.review or e.noise):
-            e.review = (f"{UNMEASURED_NOISE}: the calls at this site have inputs that differ "
-                        f"between the runs and no visible source of it, in a workload whose "
-                        f"values vary between runs ({variation}); capture a baseline replicate "
-                        "to settle")
-            e.notes.append("unmeasured-noise")
-            count += 1
-            continue
+        if "matched-modulo-input" in e.notes or "matched-modulo-masked-input" in e.notes:
+            continue  # inputs differ: the input-change and masked-input rules judge those
         if (e.category is not FactCategory.CHANGED or e.comparison is not Comparison.CHANGED
                 or e.review or e.noise or e.unverified or e.provenance not in (None, "unedited")
                 or e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED)
                 or (e.explained or "").startswith(("volatile-site", "unpaired-site"))
-                or _kinds(e.old) != _kinds(e.new)
+                or "input-changed" in e.notes
+                or not _kinds_match(e.old, e.new)
                 or not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
                               _outcome_types_match)):
             continue  # kind or structure changed: strict whatever the noise
@@ -4621,6 +4720,202 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
     return count
 
 
+_NOT_INPUT_CHANGE = ("wrapper-naming", "attribution-moved")
+
+
+def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
+                         new_left: list[_V], stats: "_GroupStats") -> int:
+    """A pair matched modulo input on an unedited line is the same call given another input.
+    When every leaf where the inputs differ is volatile on both sides (masked, a seed, a
+    propagated value) the run explains it. Otherwise the input itself changed for no visible
+    reason, which is what an untraced upstream change looks like (``round()`` feeding
+    ``charge(amount=...)``), and also what an ephemeral port looks like: evidence that
+    something changed, not that the dependency did. Whatever the gate: a review item when the
+    outcome kinds and types agree (the outcome comparison, and any substitution explanation,
+    kept in the entry as evidence), a failure when they do not. Edited lines keep their
+    provenance tiers; an input that carries values produced on edited lines is downstream of
+    the edit and keeps that tier."""
+    fresh_old, fresh_new = _fresh_labels(pending, old_left, new_left)
+    count = 0
+    for o, n, e in pending:
+        if ("matched-modulo-input" not in e.notes or o.rewritten_site or n.rewritten_site
+                or e.provenance not in (None, "unedited") or e.review or e.noise
+                or any(x in e.notes for x in _NOT_INPUT_CHANGE)
+                or any("while binding" in x for x in e.notes)):
+            continue
+        if _is_c_call(o) or _is_c_call(n):
+            continue  # a compiled call's arguments were never recorded: nothing to compare
+        if _input_labels(n.fact.input) & fresh_new or _input_labels(o.fact.input) & fresh_old:
+            continue  # downstream of an edit
+        changed, drift = _unexplained_input_leaves(o, n, stats)
+        if changed is None:
+            # the same argument values: only how the new version binds or names them drifted
+            if drift:
+                e.notes.append("binding-or-type-name-drift")
+            if e.explained is None:
+                e.explained = ("binding: the same argument values, bound or named differently "
+                               "by the new version" + ("; a type name drifted" if drift else ""))
+            continue
+        if not changed:
+            # every differing leaf is volatile: a masked-input pair (equal stays equal; a value
+            # difference is a review; a kind or type difference fails)
+            if "matched-modulo-masked-input" not in e.notes:
+                e.notes.append("matched-modulo-masked-input")
+            continue
+        outcome = e.comparison.value
+        kinds_ok = _kinds_match(e.old, e.new) and _cover(
+            _distinct_types(e.old or []), _distinct_types(e.new or []), _outcome_types_match)
+        e.category, e.comparison = FactCategory.CHANGED, Comparison.CHANGED
+        e.notes.extend(["input-changed", f"outcomes-{outcome}"])
+        shown = ", ".join(changed[:3]) + (f" (+{len(changed) - 3})" if len(changed) > 3 else "")
+        prev = e.explained
+        e.explained = (f"input-changed: the input differs where nothing volatile explains it "
+                       f"({shown}); outcomes {outcome}" + (f"; {prev}" if prev else ""))
+        if kinds_ok:
+            e.review = (f"{INPUT_CHANGED}: the input reaching this call changed with no "
+                        f"visible cause ({shown}); {_REPLICATE_HINT}")
+        count += 1
+    return count
+
+
+_TYPE_ONLY_TAGS = ("__opaque__", "__cycle__", "__shape__", "__type__", "__nondeterministic__")
+
+
+def _argument_values(inputs: Any) -> list[Any]:
+    """A call's argument values whatever their binding: bound values, positional and keyword
+    arguments, in no particular order. Parameter names are dropped, and so are wrapper
+    parameters (a private name carrying a callable or a sentinel, as ``_argmap__wrapper``)."""
+    if not isinstance(inputs, dict):
+        return [inputs]
+    out: list[Any] = []
+    bound = inputs.get("bound")
+    if isinstance(bound, dict):
+        for k, v in bound.items():
+            if str(k).startswith("_") and (
+                    (isinstance(v, dict) and "__callable__" in v) or _is_sentinel(v)):
+                continue
+            out.append(v)
+    varargs = inputs.get("varargs")
+    if isinstance(varargs, dict) and isinstance(varargs.get("__tuple__"), list):
+        out.extend(varargs["__tuple__"])
+    elif isinstance(varargs, list):
+        out.extend(varargs)
+    kwargs = inputs.get("kwargs")
+    if isinstance(kwargs, dict) and isinstance(kwargs.get("__dict__"), list):
+        out.extend(p[1] for p in kwargs["__dict__"] if isinstance(p, list | tuple) and len(p) == 2)
+    for k, v in inputs.items():
+        if k not in ("bound", "varargs", "kwargs", "defaulted", "__c_call__"):
+            out.append(v)
+    return out
+
+
+def _argument_leaves(value: Any, path: tuple = ()) -> Iterator[tuple[tuple, str, Any]]:
+    """(path below the argument, ``value``|``type``, leaf): container contents flattened with
+    their structure kept; a type-only rendering (opaque, a cycle, a value-less structure, a
+    ``__type__``) is one ``type`` leaf, its type name."""
+    if isinstance(value, dict):
+        for tag in _TYPE_ONLY_TAGS:
+            if tag in value:
+                yield path, "type", value[tag]
+                return
+        if "__structure__" in value and "values" not in value:
+            yield path, "type", value["__structure__"]
+            return
+        if "__object__" in value:
+            yield (*path, "__object__"), "type", value["__object__"]
+            if isinstance(value.get("attrs"), dict):
+                for k, x in sorted(value["attrs"].items(), key=lambda kv: str(kv[0])):
+                    yield from _argument_leaves(x, (*path, str(k)))
+            return
+        if "__dict__" in value and isinstance(value["__dict__"], list):
+            for p in value["__dict__"]:
+                if isinstance(p, list | tuple) and len(p) == 2:
+                    yield from _argument_leaves(p[1], (*path, _canon(p[0])))
+            return
+        for k in sorted(value, key=str):
+            yield from _argument_leaves(value[k], (*path, str(k)))
+    elif isinstance(value, list):
+        for i, x in enumerate(value):
+            yield from _argument_leaves(x, (*path, i))
+    else:
+        yield path, "value", value
+
+
+def _unexplained_input_leaves(o: _V, n: _V, stats: "_GroupStats",
+                              ) -> tuple[list[str] | None, bool]:
+    """Whether the pair's input VALUES differ, ignoring how they are bound.
+
+    Each side's input is the multiset of its argument values' leaves (parameter names and the
+    bound/positional/keyword placement ignored, wrapper parameters dropped); type-only leaves
+    compare by type name, and a type-name difference confined to them is drift, never an input
+    change. Returns ``(None, drift)`` when the multisets are equal (only the binding or a type
+    name moved); otherwise the leftover leaves that are not volatile on their side (masked, a
+    seed, a propagated value): empty when the run explains every difference. Residual: two
+    arguments swapped (``f(a=1, b=2)`` -> ``f(a=2, b=1)``) look unchanged."""
+    sides = []
+    for side, v in ((0, o), (1, n)):
+        canon = _argument_values(v.fact.input)
+        raw = _argument_values(_raw_of(v.fact).input)
+        if len(raw) != len(canon):
+            raw = canon
+        items = []
+        for c, r in zip(canon, raw, strict=True):
+            raw_leaves = list(_argument_leaves(r))
+            canon_leaves = list(_argument_leaves(c))
+            if len(raw_leaves) != len(canon_leaves):
+                raw_leaves = canon_leaves
+            items.extend((cp, kind, cl, rl) for (cp, kind, cl), (_rp, _rk, rl)
+                         in zip(canon_leaves, raw_leaves, strict=True))
+        sides.append(items)
+    types = [sorted(_type_key(str(leaf)) or ("", str(leaf)) for _p, kind, leaf, _r in items
+                    if kind == "type") for items in sides]
+    drift = types[0] != types[1] or [str(leaf) for _p, k, leaf, _r in sides[0] if k == "type"] \
+        != [str(leaf) for _p, k, leaf, _r in sides[1] if k == "type"]
+    counts = [Counter((repr(p), _canon(leaf)) for p, kind, leaf, _r in items if kind == "value")
+              for items in sides]
+    if counts[0] == counts[1]:
+        return None, drift or _canon(o.fact.input) != _canon(n.fact.input)
+
+    def volatile(side: int, leaf: Any, raw: Any) -> bool:
+        if _canon(leaf) != _canon(raw):
+            return True
+        if isinstance(raw, str) and (raw in stats.seeds[side] or any(
+                any(raw.startswith(tok, m.start())
+                    for tok in stats.seed_index[side].get(raw[m.start():m.start() + 8], ()))
+                for m in _ALNUM.finditer(raw))):
+            return True
+        return _canon(raw) in stats.whole[side]
+
+    out: list[str] = []
+    for side, label in ((0, "old"), (1, "new")):
+        extra = counts[side] - counts[1 - side]
+        for p, kind, leaf, raw in sides[side]:
+            key = (repr(p), _canon(leaf))
+            if kind != "value" or extra.get(key, 0) <= 0:
+                continue
+            extra[key] -= 1
+            if volatile(side, leaf, raw):
+                continue
+            where = ".".join(str(x) for x in p) or "<argument>"
+            out.append(f"{label} {where}={json.dumps(raw)[:30]}")
+    return out, drift
+
+
+def _kinds_match(a: list[Outcome] | None, b: list[Outcome] | None) -> bool:
+    """The same outcome kinds: returns on both sides or neither, and the same raise types,
+    where an untyped raise (setprofile records C raises as ``<unknown>``) matches any."""
+    ka, kb = _kinds(a), _kinds(b)
+    if ("return" in ka) != ("return" in kb):
+        return False
+    ra = [k[len("raise:"):] for k in ka if k.startswith("raise:")]
+    rb = [k[len("raise:"):] for k in kb if k.startswith("raise:")]
+    if not ra and not rb:
+        return True
+    if not ra or not rb:
+        return False
+    return _cover(ra, rb, _raises_match)
+
+
 def _review_masked_input(entries: list[FactEntry]) -> None:
     """A value difference at an unedited pair whose inputs were equal only once volatile values
     (source, clock) were masked is not a controlled comparison: the output may derive from the
@@ -4630,7 +4925,7 @@ def _review_masked_input(entries: list[FactEntry]) -> None:
         if ("matched-modulo-masked-input" not in e.notes or e.category is not FactCategory.CHANGED
                 or e.comparison is not Comparison.CHANGED or e.review or e.noise
                 or e.unverified or e.provenance not in (None, "unedited")
-                or _kinds(e.old) != _kinds(e.new)
+                or not _kinds_match(e.old, e.new)
                 or not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
                               _outcome_types_match)):
             continue
@@ -5054,12 +5349,10 @@ def _mark_vanished(old_left: list[_V], new_facts: list[Fact], prov: _Provenance,
             v.vanish = "not reached: the enclosing function made no recorded call on the new side"
 
 
-def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
-                 new_left: list[_V], prov: _Provenance) -> None:
-    """Judge each pair by edit provenance (only with a context whose ledger is known; without
-    one a pair is compared strictly, as before)."""
-    if prov.ctx is None:
-        return
+def _fresh_labels(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
+                  new_left: list[_V]) -> tuple[set[str], set[str]]:
+    """Type labels of values produced on edited lines on one side only (old, new): an input
+    carrying one is downstream of an edit."""
     told: set[str] = set()
     tnew: set[str] = set()
     edited = [(o, 0) for o, _, _ in pending if o.rewritten_site]
@@ -5070,13 +5363,22 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
         for out in v.fact.outcomes:
             if out.kind == "return":
                 (told if side == 0 else tnew).update(_value_labels(out.value))
-    fresh_new, fresh_old = tnew - told, told - tnew
+    return told - tnew, tnew - told
+
+
+def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
+                 new_left: list[_V], prov: _Provenance) -> None:
+    """Judge each pair by edit provenance (only with a context whose ledger is known; without
+    one a pair is compared strictly, as before)."""
+    if prov.ctx is None:
+        return
+    fresh_old, fresh_new = _fresh_labels(pending, old_left, new_left)
     for o, n, e in pending:
         old_ed, new_ed = o.rewritten_site, n.rewritten_site
         tier = None
         if old_ed or new_ed:
-            covered = (prov.ledger_covers(o.fact.file, o.fact.line, 0)
-                       or prov.ledger_covers(n.fact.file, n.fact.line, 1))
+            covered = (prov.ledger_covers_site(o.fact.file, o.fact.line, 0)
+                       or prov.ledger_covers_site(n.fact.file, n.fact.line, 1))
             tier = "ledger" if covered else ("hand" if prov.ledger_known else None)
         elif (prov.ledger_known and e.category is FactCategory.CHANGED
               and (_input_labels(n.fact.input) & fresh_new
@@ -5217,7 +5519,7 @@ def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> 
         entry.notes.append(v.vanish)
     elif v.rewritten_site and prov.ledger_known:
         side = 0 if old_side else 1
-        covered = prov.ledger_covers(f.file, f.line, side)
+        covered = prov.ledger_covers_site(f.file, f.line, side)
         entry.category, entry.unverified = FactCategory.REWRITTEN, True
         entry.provenance = "ledger" if covered else "hand"
         entry.notes.append("unverified edited site")

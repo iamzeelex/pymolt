@@ -203,23 +203,32 @@ def tax(amounts, rate):
             for k, a in enumerate(amounts)]
 
 
-def test_a_group_without_a_visible_source_of_variation_stays_strict():
-    # Deterministic project, inputs changed by an untraced upstream: the rate moved 1.2 -> 1.3.
+def test_a_group_without_a_visible_source_of_variation_is_a_review_item():
+    """Deterministic project, inputs changed by an untraced upstream: the rate moved 1.2 ->
+    1.3. The inputs reaching the site changed with no visible cause: evidence that something
+    changed, not that the dependency did, so INCONCLUSIVE (was FAIL), never a PASS."""
     d = diff_facts(fs(*tax([100, 200], 1.2)), fs(*tax([300, 400, 500], 1.3)))
     (e,) = d.entries
-    assert e.fails and e.category is FactCategory.CHANGED
+    assert not e.fails and e.review.startswith("unpaired site")
     assert e.explained.startswith("unpaired-site") and (e.old_count, e.new_count) == (2, 3)
     assert e.input == {"bound": {"amount": 100}} and e.new_input == {"bound": {"amount": 300}}
-    assert d.verdict is VerificationVerdict.FAIL
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
     assert any(w.startswith("volatile-sites: 0 fully") and "1 not at all" in w
                for w in d.warnings)
 
 
-def test_an_unevidenced_group_is_a_review_item_when_another_site_shows_run_variation():
+def test_an_unpaired_site_with_a_type_change_fails():
+    d = diff_facts(fs(*tax([100, 200], 1.2)),
+                   fs(*[fact("tax.compute", {"amount": a}, (("return", str(a)),), first=k)
+                        for k, a in enumerate([300, 400, 500])]))
+    assert [e.symbol for e in failing(d)] == ["tax.compute"]
+
+
+def test_an_unpaired_site_is_a_review_item_whatever_the_gate():
     d = diff_facts(fs(*tax([100, 200], 1.2), *packs(["a1", "a2", "a3"], first=10)),
                    fs(*tax([300, 400, 500], 1.3), *packs(["b1", "b2"], first=10)))
     e = group_of(d, "tax.compute")
-    assert not e.fails and e.review.startswith("unmeasured noise")
+    assert not e.fails and e.review.startswith("unpaired site")
     assert d.verdict is VerificationVerdict.INCONCLUSIVE
 
 
@@ -250,10 +259,11 @@ def test_volatility_propagates_from_a_fully_paired_group_to_the_next_call():
     # msgpack's own outputs differ (they digest the id): a review item, not a failure
     (p,) = [x for x in d.entries if x.symbol == PACK]
     assert p.review and not p.fails and not failing(d)
-    # ... and without the group upstream, the same sends are an unpaired site.
+    # ... and without the group upstream, the same sends are an unpaired site (a review item).
     d = diff_facts(fs(*sends(["a1", "a2", "a3"], 50, packed_bytes)),
                    fs(*sends(["b1", "b2"], 50, packed_bytes)))
-    assert group_of(d, SEND).explained.startswith("unpaired-site") and failing(d)
+    e = group_of(d, SEND)
+    assert e.explained.startswith("unpaired-site") and e.review and not failing(d)
 
 
 # ── step 3: environment, clock, entropy sources, input substitution ───────────────────────
@@ -308,7 +318,7 @@ def test_the_python_version_is_environment_and_stays_visible():
 
 def test_clock_readings_at_the_call_time_are_masked():
     old = env_fs(fact("lib.render", {"t": "x"},
-                      (("return", "During: 2026-11-16 10:26:04 - report_1794824765.0062904"),)),
+                      (("return", "During: 2026-11-16 10:26:05 - report_1794824765.0062904"),)),
                  ts=T_OLD)
     new = env_fs(fact("lib.render", {"t": "x"},
                       (("return", "During: 2026-11-16 10:31:41 - report_1794825101.045572"),)),
@@ -417,35 +427,92 @@ def url_pair(port_old, port_new, *, scheme_new="http"):
     return fs(old), fs(new)
 
 
-def test_output_that_differs_only_as_the_input_does_is_masked():
+def test_output_that_differs_only_as_the_input_does_is_a_review_item_with_its_evidence():
+    # The port is no visible run value (ports are untraced), so the input change is
+    # unexplained: a review item, not the PASS it was; the substitution that explains the
+    # output is kept as evidence.
     d = diff_facts(*url_pair(32925, 57864))
     (e,) = d.entries
-    assert not failing(d) and e.level is ComparisonLevel.MASKED
-    assert e.explained.startswith("input-substitution") and "32925 -> 57864" in e.explained
+    assert not e.fails and e.review.startswith("input changed")
+    assert "input-substitution" in e.explained and "32925 -> 57864" in e.explained
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
 
 
-def test_a_residual_difference_beyond_the_input_still_fails():
-    # The port changed run to run, AND the scheme now differs: the second is not explained.
+def test_an_input_difference_at_volatile_leaves_is_a_masked_input_pair():
+    # The changed leaf holds a uuid4 value the trace recorded: explained by the run.
+    def side(u, out):
+        return fs(fact("uuid.uuid4", {}, (("return", {"__uuid__": u}),), line=1, text="u()"),
+                  fact("lib.tag", {"id": f"job-{u}", "kind": "a"}, (("return", out),), line=2))
+    old, new = side(UUID_A, "ok"), side(UUID_B, "ok")
+    (e,) = [x for x in diff_facts(old, new).entries if x.symbol == "lib.tag"]
+    assert e.category is FactCategory.EQUAL
+    old, new = side(UUID_A, "ok"), side(UUID_B, "no")
+    (e,) = [x for x in diff_facts(old, new).entries if x.symbol == "lib.tag"]
+    assert e.review.startswith("masked input") and not e.fails
+
+
+def test_a_residual_difference_beyond_the_input_is_never_a_pass():
+    # The port changed (no visible cause) AND the scheme now differs: the pair's input changed,
+    # so this is a review item (was FAIL); kinds and types agree, so not a failure either.
     d = diff_facts(*url_pair(32925, 57864, scheme_new="https"))
-    assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
+    (e,) = d.entries
+    assert e.review.startswith("input changed") and d.verdict is VerificationVerdict.INCONCLUSIVE
+    assert "input-substitution" not in e.explained  # the residual is not explained
+
+
+def test_an_input_change_with_a_new_raise_fails():
+    old = fs(fact("billing.charge", {"amount": 100}, (("return", "120"),)))
+    new = fs(fact("billing.charge", {"amount": 999}, (("raise", "ValueError"),)))
+    assert [e.symbol for e in failing(diff_facts(old, new))] == ["billing.charge"]
+
+
+def test_a_changed_amount_with_the_same_output_is_not_a_pass():
+    # n1 "P1 ctrl": amount 100 -> 999, output "ok" both times. The input reaching the call
+    # changed for no visible reason (an untraced round() upstream looks the same).
+    old = fs(fact("billing.charge", {"amount": 100}, (("return", "ok"),)))
+    new = fs(fact("billing.charge", {"amount": 999}, (("return", "ok"),)))
+    d = diff_facts(old, new)
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    assert d.entries[0].review.startswith("input changed")
+
+
+def test_the_same_values_bound_differently_are_binding_drift():
+    """click 8 moved ``prog_name`` from ``**kwargs`` to a parameter: the same values, bound
+    differently. Residual: two arguments swapped (``f(a=1, b=2)`` -> ``f(a=2, b=1)``) look
+    unchanged too."""
+    old = fs(fact("click.version_option", inp={"bound": {"version": "1.2.0"}, "kwargs": {
+        "__dict__": [["prog_name", "deployctl"]]}}, outcomes=(("return", "d"),)))
+    new = fs(fact("click.version_option", inp={"bound": {"prog_name": "deployctl",
+                                                         "version": "1.2.0"}},
+                  outcomes=(("return", "d"),)))
+    (e,) = diff_facts(old, new).entries
+    assert e.category is FactCategory.EQUAL and e.explained.startswith("binding")
+    # ... and the outcome is still compared strictly
+    new = fs(fact("click.version_option", inp={"bound": {"prog_name": "deployctl",
+                                                         "version": "1.2.0"}},
+                  outcomes=(("return", "e"),)))
+    assert failing(diff_facts(old, new))
 
 
 def test_an_input_structure_change_is_not_substituted():
+    # Another key and another value: no substitution; the input value changed, so a review.
     old = fs(fact("lib.f", {"url": "a:1111"}, (("return", "a:1111"),)))
     new = fs(fact("lib.f", {"uri": "a:2222"}, (("return", "a:2222"),)))
     d = diff_facts(old, new)
-    assert not any((e.explained or "").startswith("input-substitution") for e in d.entries)
-    assert failing(d)
+    assert not any("input-substitution" in (e.explained or "") for e in d.entries)
+    assert d.entries[0].review.startswith("input changed")
 
 
 def test_a_short_token_only_masks_whole_words():
     # 9095 -> 9096 is the run's port; the output also holds a constant containing 9095.
     old = fs(fact("lib.page", {"port": 9095}, (("return", "port 9095, e=2.5949095"),)))
     new = fs(fact("lib.page", {"port": 9096}, (("return", "port 9096, e=2.5949096"),)))
-    d = diff_facts(old, new)
-    assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
+    (e,) = diff_facts(old, new).entries
+    # the constant changed: the substitution does not explain the output (no partial mask)
+    assert "input-substitution" not in e.explained and e.review.startswith("input changed")
     new = fs(fact("lib.page", {"port": 9096}, (("return", "port 9096, e=2.5949095"),)))
-    assert not failing(diff_facts(old, new))
+    (e,) = diff_facts(old, new).entries
+    assert "input-substitution" in e.explained
 
 
 def test_same_complete_input_value_change_fails():
@@ -723,9 +790,11 @@ def test_a_changed_document_upstream_is_not_run_variation():
     new = fs(fact("json.loads", {"s": doc_new}, (("return", {"__dict__": [["edges", 1]]}),)))
     d = diff_facts(old, new)
     assert not any(w.startswith("run-variation") for w in d.warnings)
-    # json.loads itself behaved consistently: its output differs exactly as its input does.
+    # json.loads behaved consistently (its output differs exactly as its input does), but its
+    # input changed with no visible cause AND its result's keys (structure) differ: a failure,
+    # with the substitution kept as evidence of why
     (e,) = d.entries
-    assert e.explained.startswith("input-substitution") and not e.review
+    assert "input-substitution" in e.explained and e.fails
 
 
 # ── locust run 6, distilled: one or a few facts per mechanism, both sides ─────────────────
@@ -774,8 +843,11 @@ def test_locust_run6_fails_only_on_its_true_finding_and_platform():
                "zmq.green.core._Socket.send" in w for w in d.warnings)
     # the explained mechanisms, each at least once
     mechs = {(e.explained or "").split(":")[0] for e in d.entries}
-    assert {"volatile-site", "unpaired-site", "masked-input", "input-substitution", "source",
+    assert {"volatile-site", "unpaired-site", "masked-input", "input-changed", "source",
             "environment", "clock", "attribution", "backend", "possibly-dropped"} <= mechs
+    # the ephemeral ports: input changes with no visible cause, review items, never failures
+    ports = [e for e in d.entries if "input-changed" in e.notes]
+    assert ports and all(e.review and not e.fails for e in ports)
     (pv,) = by_symbol["platform.python_version"]
     assert pv.explained.startswith("environment") and not pv.fails
     assert all(not e.fails for e in by_symbol["re.compile"])
@@ -961,7 +1033,8 @@ def test_a_member_whose_producer_may_be_lost_is_not_comparable():
 def test_drops_do_not_evidence_a_group_without_volatile_inputs():
     d = diff_facts(fs(*tax([100, 200], 1.2)), fs(*tax([300, 400, 500], 1.3), dropped_events=9))
     (e,) = d.entries
-    assert e.explained.startswith("unpaired-site") and e.fails
+    assert e.explained.startswith("unpaired-site") and e.review.startswith("unpaired site")
+    assert "possibly-dropped-producer" not in " ".join(e.notes)
 
 
 # ── fix round 2: masked-key pairing inside volatile sites, seeds, call windows, gate ──────
@@ -997,8 +1070,9 @@ def test_a_new_amount_behind_a_derived_session_is_not_explained():
     old = fs(*billing("a", [(1, 100, "120"), (2, 100, "120"), (3, 100, "120")]))
     new = fs(*billing("b", [(1, 100, "120"), (2, 999, "1198")]))
     d = diff_facts(old, new)
-    assert d.verdict is VerificationVerdict.FAIL
-    assert any(e.symbol == "billing.charge" and e.fails for e in d.entries)
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE  # never a PASS
+    (e,) = [e for e in d.entries if e.symbol == "billing.charge"]
+    assert e.explained.startswith("unpaired-site") and e.review
 
 
 def test_a_uuid_keyed_call_with_a_new_amount_fails():
@@ -1041,7 +1115,7 @@ def test_a_constant_in_a_masked_fact_output_never_becomes_volatile():
     # constant a volatile value, every call would read as explained.
     d = diff_facts(fs(*side("a", [1, 2, 3])), fs(*side("b", [1, 9])))
     (e,) = [e for e in d.entries if e.symbol == "lib.post"]
-    assert e.explained.startswith("unpaired-site") and e.fails
+    assert e.explained.startswith("unpaired-site") and e.review.startswith("unpaired site")
 
 
 def test_a_clock_value_away_from_its_own_outcome_time_is_not_masked():
@@ -1128,3 +1202,105 @@ def test_a_call_with_an_implausible_duration_keeps_its_end_time():
 
     assert _call_time({"ts": T_OLD, "dur": T_OLD - 2.0}) == (T_OLD, T_OLD)
     assert _call_time({"ts": T_OLD, "dur": 0.5}) == (T_OLD - 0.5, T_OLD)
+
+
+
+# ── round 3: a clock value is its offset from its own call time ───────────────────────────
+
+def calls_returning(symbol, results_at, *, bound=None):
+    """One fact whose calls (each in its own sub-second window) returned ``value(t)``."""
+    f = fact(symbol, bound or {"user": "u"}, line=3, text="e = auth.expiry(u)")
+    f.outcomes = [Outcome(kind="return", value=v, count=1, ts_min=t0, ts_max=t1)
+                  for v, t0, t1 in results_at]
+    f.ts_min = min(t0 for _, t0, _ in results_at)
+    f.ts_max = max(t1 for _, _, t1 in results_at)
+    return env_fs(f)
+
+
+def six_calls(t0, value):
+    return [(value(t0 + 40.0 * k + 0.01), t0 + 40.0 * k, t0 + 40.0 * k + 0.02) for k in range(6)]
+
+
+def test_a_ttl_spread_over_six_calls_compares_by_value():
+    # Each call returns its own time + TTL; the TTL went 120 -> 40. Masked as offsets, the six
+    # values collapse to ONE outcome per side, compared exactly (no type-level fallback).
+    d = diff_facts(calls_returning("auth.expiry", six_calls(T_OLD, lambda t: int(t) + 120)),
+                   calls_returning("auth.expiry", six_calls(T_NEW, lambda t: int(t) + 40)))
+    (e,) = d.entries
+    assert e.fails and e.level is not ComparisonLevel.TYPE
+    assert e.old[0].value.endswith("@+120s⟩") and e.new[0].value.endswith("@+40s⟩")
+
+
+def test_six_readings_of_the_clock_stay_equal():
+    d = diff_facts(calls_returning("time_api.now", six_calls(T_OLD, lambda t: t)),
+                   calls_returning("time_api.now", six_calls(T_NEW, lambda t: t)))
+    (e,) = d.entries
+    assert not e.fails and e.category is FactCategory.EQUAL
+    assert len(e.old) == 1 and e.old[0].value.endswith("@+0s⟩")
+
+
+def test_a_constant_past_date_is_no_clock_value():
+    past = "2020-01-01T00:00:00"
+    d = diff_facts(calls_returning("cfg.epoch", [(past, T_OLD, T_OLD)]),
+                   calls_returning("cfg.epoch", [(past, T_NEW, T_NEW)]))
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.EXACT
+    assert e.old[0].value == past
+    d = diff_facts(calls_returning("cfg.epoch", [(past, T_OLD, T_OLD)]),
+                   calls_returning("cfg.epoch", [("2020-01-02T00:00:00", T_NEW, T_NEW)]))
+    assert failing(d)
+
+
+def test_sub_second_jitter_does_not_flip_the_offset():
+    # The same now()+120 in calls of different lengths and read at different moments.
+    old = calls_returning("auth.expiry", [(T_OLD + 0.1 + 120, T_OLD, T_OLD + 0.3)])
+    new = calls_returning("auth.expiry", [(T_NEW + 0.7 + 120, T_NEW, T_NEW + 0.8)])
+    assert not failing(diff_facts(old, new))
+
+
+def test_an_outcome_of_calls_spread_over_the_suite_is_no_clock_value():
+    # One outcome produced by calls 40 s apart: its window is too wide to anchor an offset.
+    old = calls_returning("lib.stamp", [(int(T_OLD) + 120, T_OLD, T_OLD + 40.0)])
+    new = calls_returning("lib.stamp", [(int(T_NEW) + 120, T_NEW, T_NEW + 40.0)])
+    (e,) = diff_facts(old, new).entries
+    assert "clock" not in (e.explained or "") and e.fails
+
+
+
+# ── round 3: a definition whose body was edited is an edited site ─────────────────────────
+
+PYD_OLD = ("from pydantic import BaseModel\n\n\nclass User(BaseModel):\n    name: str\n\n"
+           "    class Config:\n        anystr_strip_whitespace = True\n")
+PYD_NEW = ("from pydantic import BaseModel, ConfigDict\n\n\nclass User(BaseModel):\n"
+           "    name: str\n\n    model_config = ConfigDict(str_strip_whitespace=True)\n")
+
+
+def metaclass_new(namespace, outcome=(("return", {"__type__": "app.User"}),)):
+    return fact("pydantic.main.ModelMetaclass.__new__",
+                {"mcs": {"__type__": "pydantic.main.ModelMetaclass"}, "name": "User",
+                 "namespace": {"__dict__": namespace}}, outcome, func="<module>", line=4,
+                text="class User(BaseModel):")
+
+
+def test_a_class_whose_body_was_hand_edited_is_a_hand_edited_site():
+    # The class line is unedited; its body is not: the metaclass call's namespace differs
+    # because of the hand edit. A value difference there is a review item (hand tier).
+    ctx = DiffContext(old_sources={"app.py": PYD_OLD}, new_sources={"app.py": PYD_NEW})
+    old = fs(metaclass_new([["Config", {"__type__": "app.User.Config"}]]))
+    new = fs(metaclass_new([["model_config", {"__dict__": [["str_strip_whitespace", True]]}]],
+                           outcome=(("return", {"__type__": "app.User2"}),)))
+    d = diff_facts(old, new, context=ctx)
+    (e,) = d.entries
+    assert e.provenance == "hand" and e.review and not e.fails
+    # ... and a new raise there still fails
+    new = fs(metaclass_new([["model_config", {"__dict__": [["str_strip_whitespace", True]]}]],
+                           outcome=(("raise", "pydantic.errors.PydanticUserError"),)))
+    assert [x.symbol for x in failing(diff_facts(old, new, context=ctx))] == [
+        "pydantic.main.ModelMetaclass.__new__"]
+
+
+def test_without_sources_a_definition_span_is_not_known_and_says_so():
+    old = fs(metaclass_new([["Config", {"__type__": "app.User.Config"}]]))
+    new = fs(metaclass_new([["model_config", {"__dict__": [["str_strip_whitespace", True]]}]]))
+    d = diff_facts(old, new, context=DiffContext())
+    assert any(w.startswith("definition-spans-unknown") for w in d.warnings)

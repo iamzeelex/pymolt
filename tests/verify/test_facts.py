@@ -1072,7 +1072,11 @@ def test_relocated_symbol_at_same_site_pairs(tmp_path):
     new = [rv("lib.engine.create.create_engine", {"bound": {"u": 1, "future": True}},
               result=5)]
     d = diff_sites(tmp_path, old, new)
-    assert only(d, FactCategory.EQUAL).new_symbol == "lib.engine.create.create_engine"
+    # paired across the relocation; ``future=True`` is an explicit argument (not reported as
+    # defaulted), so the input reaching the call changed: a review item, not a pass
+    (e,) = d.entries
+    assert e.new_symbol == "lib.engine.create.create_engine"
+    assert e.review.startswith("input changed") and not e.fails
 
 
 def test_unrelated_symbol_at_same_site_is_not_paired(tmp_path):
