@@ -106,6 +106,10 @@ def test_the_context_is_built_from_slots_ledger_and_plan_and_reaches_the_diff(
     write_ledger(tmp_path, "r", "2026-01-01T00:00:00",
                  [("m.py", "a.f()\n", "b.g()\n", ["rename-call:a.f→b.g"],
                    {"rename-call:a.f→b.g": "same-object"})])
+    from pymolt.migration_state import MigrationReceipt
+
+    MigrationReceipt(run_id="r", target_python="3.12",
+                     source_manifest="requirements.txt").save(tmp_path)
     ctx = service.build_diff_context(tmp_path, new, old)
     assert ctx.old_sources == ctx.new_sources == {"m.py": "import requests\nrequests.get('u')\n"}
     assert ctx.old_contacts == {"m.py": {2: {"requests.get"}}}
@@ -204,3 +208,54 @@ def test_the_plans_type_relocations_list_reaches_the_context_as_a_map(tmp_path, 
     ctx = service.build_diff_context(tmp_path, new, old)
     assert ctx.type_relocations == {
         "pydantic.error_wrappers.ValidationError": "pydantic_core._pydantic_core.ValidationError"}
+
+
+def test_the_ledger_counts_only_while_its_run_is_in_effect(tmp_path):
+    """A rollback that restored files leaves the ledger behind; a hand edit made after it on
+    one of those lines must not be judged by the claim pymolt made for the rolled-back run."""
+    from pymolt.apply_ledger import ledger_in_effect
+    from pymolt.migration_state import MigrationReceipt
+
+    write_ledger(tmp_path, "r1", "2026-01-01T00:00:00",
+                 [("m.py", "a.f()\n", "b.g()\n", ["rename-call:a.f→b.g"],
+                   {"rename-call:a.f→b.g": "same-object"})])
+    applied = MigrationReceipt(run_id="r1", target_python="3.12",
+                               source_manifest="requirements.txt")
+
+    entries, note = ledger_in_effect(tmp_path, applied)
+    assert [e["run_id"] for e in entries] == ["r1"] and note is None
+    restored = applied.model_copy(update={"status": "rolled_back", "files_restored": ["m.py"]})
+    assert ledger_in_effect(tmp_path, restored) == (
+        None, "the apply ledger of run r1 is not used (no apply run is in effect): edits are "
+              "judged as hand edits")
+    noop = applied.model_copy(update={"status": "rolled_back", "files_restored": []})
+    assert ledger_in_effect(tmp_path, noop)[0] == entries    # it restored nothing: in effect
+    other = applied.model_copy(update={"run_id": "r2"})
+    assert ledger_in_effect(tmp_path, other)[0] is None
+    assert "run r2 is the one in effect" in ledger_in_effect(tmp_path, other)[1]
+    assert ledger_in_effect(tmp_path, None)[0] is None
+
+
+def test_verify_says_when_it_left_the_ledger_out(tmp_path):
+    from pymolt.migration_state import MigrationReceipt
+
+    traces = tmp_path / ".pymolt" / "contract_traces"
+    traces.mkdir(parents=True)
+    old, new = traces / "baseline.jsonl", traces / "post_migration.jsonl"
+    (tmp_path / "m.py").write_text("import requests\nrequests.get('u')\n")
+    for t in (old, new):
+        _trace(t, "m.py")
+        service.record_sources(t, tmp_path)
+    write_ledger(tmp_path, "r1", "2026-01-01T00:00:00",
+                 [("m.py", "a.f()\n", "b.g()\n", ["rename-call:a.f→b.g"], {})])
+    MigrationReceipt(run_id="r1", target_python="3.12", source_manifest="requirements.txt",
+                     status="rolled_back", files_restored=["m.py"]).save(tmp_path)
+    ContractState(
+        baseline=ContractSlot(trace_path=str(old), captured_at="t1", mode=CaptureMode.TEST_SUITE),
+        post_migration=ContractSlot(trace_path=str(new), captured_at="t2",
+                                    mode=CaptureMode.TEST_SUITE),
+    ).save(service._state_path(tmp_path))
+
+    assert service.build_diff_context(tmp_path, new, old).edits is None
+    report = service.build_contract_report_from_state(tmp_path)
+    assert any("apply ledger of run r1 is not used" in n for n in report.notes)

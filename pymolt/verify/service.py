@@ -2778,6 +2778,8 @@ def build_contract_report_from_state(
             predictions = {"risks": [], "source": "baseline", "plan_id": None,
                            "notes": [f"predicted risks unavailable: {exc}"]}
 
+    diff_context = build_diff_context(project_dir, trace, against) if trace and against \
+        else None
     report = build_contract_report(
         project_dir,
         trace=trace,
@@ -2787,12 +2789,12 @@ def build_contract_report_from_state(
         comparator_profile=comparator_profile,
         custom_comparator=custom_comparator,
         predictions=predictions,
-        diff_context=build_diff_context(project_dir, trace, against) if trace and against
-        else None,
+        diff_context=diff_context,
         noise_profile=noise_profile,
     )
     if replicate_note:
         report.notes.append(replicate_note)
+    report.notes.extend(diff_context.notes if diff_context is not None else ())
     if (receipt is not None and receipt.status == "rolled_back" and receipt.in_effect
             and any(name == "post-migration" for name, _ in used_slots)):
         report.notes.append(
@@ -2827,12 +2829,14 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
-    diff then falls back to line-text rules); the apply ledger from ``.pymolt/apply_ledger.json``;
+    diff then falls back to line-text rules); the apply ledger from ``.pymolt/apply_ledger.json``
+    while the run it records is the one in effect (``apply_ledger.ledger_in_effect``);
     the static contact maps are built from the snapshots; ``successors`` (old -> new symbol)
     from the applied plan's impacts, its risks' delta facts and the ledger; and
     ``type_relocations`` from the plan when it carries them. Never raises: a part that
     cannot be built is left None."""
-    from pymolt.apply_ledger import ledger_path, load_ledger
+    from pymolt.apply_ledger import ledger_in_effect
+    from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.contact_map import contacts_by_line
     from pymolt.verify.facts import DiffContext
 
@@ -2840,8 +2844,10 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     ctx = DiffContext()
     ctx.old_sources = load_sources(sources_path(against))
     ctx.new_sources = load_sources(sources_path(trace))
-    if ledger_path(root).is_file():
-        ctx.edits = load_ledger(root)
+    receipt = MigrationReceipt.load(root)
+    ctx.edits, ledger_note = ledger_in_effect(root, receipt)
+    if ledger_note:
+        ctx.notes.append(ledger_note)
     for side, sources in (("old", ctx.old_sources), ("new", ctx.new_sources)):
         if sources:
             try:
@@ -2854,9 +2860,7 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
             successors.setdefault(entry["old_symbol"], entry["new_symbol"])
     try:
         from pymolt.migration_plan import MigrationPlan
-        from pymolt.migration_state import MigrationReceipt
 
-        receipt = MigrationReceipt.load(root)
         plan = (MigrationPlan.load(root, receipt.plan_path)
                 if receipt is not None and receipt.in_effect and receipt.plan_path
                 else None)

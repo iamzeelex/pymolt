@@ -10,11 +10,15 @@ Format::
     {"schema": "pymolt.apply_ledger/1", "run_id": ..., "applied_at": ..., "entries": [
       {"file": "app/x.py", "old_lines": [a, b], "new_lines": [c, d], "kind": "rename-call",
        "rule": "rename-call:pkg.old→pkg.new", "claim": "same-signature",
-       "old_symbol": "pkg.old", "new_symbol": "pkg.new"}]}
+       "old_symbol": "pkg.old", "new_symbol": "pkg.new", "run_id": ...}]}
 
 A pure insertion (an added import line) has ``old_lines`` null, a pure deletion ``new_lines``
 null. ``claim`` is ``same-object``, ``same-signature``,
 ``verified-rule`` or ``python-fixer``; null when the producing recipe made none (heuristic).
+Each entry also names the run that wrote it (``run_id``, as the file does).
+
+Verify reads the ledger only while the run it records is the one in effect
+(``ledger_in_effect``): after a rollback that restored files, its lines are no longer pymolt's.
 """
 
 from __future__ import annotations
@@ -116,7 +120,8 @@ def write_ledger(project_dir: str | Path, run_id: str, applied_at: str,
         os.replace(path, target)
     entries: list[dict[str, Any]] = []
     for rel, before, after, recipes, claims in files:
-        entries += build_entries(rel, before, after, recipes, claims)
+        entries += [{**entry, "run_id": run_id}
+                    for entry in build_entries(rel, before, after, recipes, claims)]
     payload = {"schema": LEDGER_SCHEMA, "run_id": run_id, "applied_at": applied_at,
                "entries": entries}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,9 +133,39 @@ def write_ledger(project_dir: str | Path, run_id: str, applied_at: str,
 
 def load_ledger(project_dir: str | Path) -> list[dict[str, Any]]:
     """The ledger's entries ([] when there is none or it is unreadable)."""
+    found = load_ledger_run(project_dir)
+    return found[1] if found is not None else []
+
+
+def load_ledger_run(project_dir: str | Path) -> tuple[str | None, list[dict[str, Any]]] | None:
+    """``(run_id, entries)`` of the ledger; None when there is none or it is unreadable."""
     try:
         data = json.loads(ledger_path(project_dir).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    entries = data.get("entries") if isinstance(data, dict) else None
-    return [e for e in entries or () if isinstance(e, dict)]
+        return None
+    if not isinstance(data, dict):
+        return None
+    run = data.get("run_id")
+    entries = [e for e in data.get("entries") or () if isinstance(e, dict)]
+    return (run if isinstance(run, str) else None), entries
+
+
+def ledger_in_effect(project_dir: str | Path, receipt: Any) -> tuple[list[dict[str, Any]] | None,
+                                                                    str | None]:
+    """The ledger's entries when the run it records is the one in effect (``receipt``: the
+    project's ``MigrationReceipt``, or None), else None; and, when a ledger exists but is not
+    used, a note that says why. A rollback that restored files leaves the ledger behind: its
+    lines are no longer pymolt's, so a later edit there is judged as a hand edit."""
+    found = load_ledger_run(project_dir)
+    if found is None:
+        return None, None
+    run, entries = found
+    if receipt is not None and getattr(receipt, "in_effect", False) and run is not None \
+            and run == getattr(receipt, "run_id", None):
+        return entries, None
+    if receipt is None or not getattr(receipt, "in_effect", False):
+        why = "no apply run is in effect"
+    else:
+        why = f"run {str(receipt.run_id)[:8]} is the one in effect"
+    return None, (f"the apply ledger of run {(run or 'unknown')[:8]} is not used ({why}): "
+                  "edits are judged as hand edits")
