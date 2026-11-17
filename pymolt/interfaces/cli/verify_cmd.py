@@ -119,6 +119,14 @@ def capture_cmd(
         None, "--request-id", help="Request id to store with the capture"),
     correlation_id: str | None = typer.Option(
         None, "--correlation-id", help="Correlation id to store with the capture"),
+    replicate: bool = typer.Option(
+        False, "--replicate",
+        help="baseline only: run the baseline's own command again, on the same code in the "
+             "same environment (no command needed). What differs between the two runs is "
+             "run-to-run noise, which verify then tells apart from the migration"),
+    runs: int = typer.Option(
+        1, "--runs", min=1, max=2,
+        help="baseline only: 2 records the baseline and then its replicate (--replicate)"),
     json_output: bool = typer.Option(
         False, "--json", help="Print the capture as JSON (asks nothing)"),
     agent: bool = typer.Option(
@@ -132,6 +140,8 @@ def capture_cmd(
     recorded). --mode attach prints a command to run yourself, for example in a
     container or on a server; finish it with --mode attach --collect.
     With --json or --agent it never asks: an existing capture needs --force.
+    `baseline --replicate` runs the baseline's command a second time (`--runs 2` records
+    both in one go): verify then measures run-to-run noise instead of guessing at it.
     """
     machine = json_output or agent
     require_project_dir(project_dir, json_output=machine)
@@ -142,6 +152,22 @@ def capture_cmd(
     when_key = _CAPTURE_WHEN.get(when)
     if when_key is None:
         fail(f"capture what: 'baseline' or 'post-migration' (got {when!r})", json_output=machine)
+    if (replicate or runs > 1) and when_key != "baseline":
+        fail("a replicate measures the baseline's run-to-run noise: use "
+             "`pymolt capture baseline --replicate` (or `--runs 2`)", json_output=machine)
+    if runs > 1 and mode == "attach":
+        fail("--runs 2 runs the command twice; pymolt does not run an attach capture",
+             json_output=machine)
+    if runs > 1 and machine:
+        fail("--json/--agent print one capture: run `pymolt capture baseline ... --json`, then "
+             "`pymolt capture baseline --replicate --json`", json_output=True)
+    if replicate and runs > 1:
+        fail("--replicate re-runs an existing baseline; --runs 2 records a new baseline and "
+             "its replicate: pass one of them", json_output=machine)
+    if replicate:
+        _capture_replicate(project_dir, command, force=force, accept_failing=accept_failing,
+                           machine=machine, agent=agent)
+        return
     capture_mode = _CAPTURE_MODE.get(mode)
     if capture_mode is None:
         fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})",
@@ -293,6 +319,46 @@ def capture_cmd(
         )
     if slot.archived_previous:
         err.print(f"[dim]previous {when} recording kept at {slot.archived_previous}[/dim]")
+    if runs > 1:
+        _capture_replicate(project_dir, None, force=True, accept_failing=accept_failing,
+                           machine=False, agent=False)
+        return
+    next_step(project_dir)
+
+
+def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bool,
+                       accept_failing: bool, machine: bool, agent: bool) -> None:
+    """``pymolt capture baseline --replicate``: the baseline's command again, into its own
+    slot (see ``service.capture_baseline_replicate`` for what is refused)."""
+    existing = service.load_contract_state(project_dir).baseline_replicate
+    if existing is not None and not force:
+        if machine:
+            fail(f"the baseline already has a replicate from {existing.captured_at}",
+                 hint="Pass --force to replace it (the old one is archived, not deleted).",
+                 json_output=True)
+        if not typer.confirm(f"the baseline already has a replicate from "
+                             f"{existing.captured_at}. Replace it?"):
+            raise typer.Exit(code=EXIT_FINDING)
+    err.print("[dim]capturing[/dim] a replicate of the baseline (its own command, code and "
+              "environment)")
+    try:
+        slot = service.capture_baseline_replicate(
+            project_dir, accept_failing=accept_failing, command=command or None)
+    except ValueError as exc:
+        fail(f"cannot replicate the baseline: {exc}", json_output=machine)
+    if machine:
+        _emit_capture(slot, "baseline-replicate", project_dir, agent=agent,
+                      invalid_code=EXIT_INCONCLUSIVE)
+        return
+    if slot.validity is not CaptureValidity.VALID:
+        err.print(f"[bold yellow]replicate not accepted[/bold yellow]: "
+                  f"{slot.validity_reason or slot.validity.value}\n"
+                  f"diagnostic artifact: {slot.trace_path}")
+        raise typer.Exit(code=EXIT_INCONCLUSIVE)
+    err.print(f"[green]captured[/green] baseline replicate: {slot.events} events -> "
+              f"{slot.trace_path}")
+    if slot.archived_previous:
+        err.print(f"[dim]previous replicate kept at {slot.archived_previous}[/dim]")
     next_step(project_dir)
 
 
@@ -339,18 +405,43 @@ def _fmt_site(site: dict | None) -> str:
     return f"{where} {site.get('func')}()" if site.get("func") else where
 
 
+_MAX_ENTRY_ROWS = 50  # raw entry lines a table prints at most (the JSON has them all)
+
+
+def _render_fact_summary(fact_diff: dict | None, *, verbose: bool = False) -> None:
+    """Findings, not entries: the verdict with its reasons, failing findings, review items by
+    reason with the action that settles each; ``verbose`` adds what was explained away. An
+    older report without a summary falls back to the entry table."""
+    if not fact_diff:
+        return
+    summary = fact_diff.get("summary")
+    if not summary:
+        _render_fact_changes(fact_diff)
+        return
+    from pymolt.verify.fact_report import render_text
+
+    for line in render_text(summary, explained=verbose, max_lines=_MAX_ENTRY_ROWS):
+        style = ("bold red" if line.lstrip().startswith("✗") else
+                 "yellow" if line.startswith("Review") else
+                 "dim" if line.startswith(("Quality", "      ")) else None)
+        console.print(f"[{style}]{escape(line)}[/{style}]" if style else escape(line))
+
+
 def _render_fact_changes(fact_diff: dict | None,
                          title: str = "Behaviour diff — call facts that are not equal") -> None:
-    """Every non-equal call fact: what was called, where, and old -> new outcome."""
+    """Non-equal call facts (at most 50 rows): what was called, where, and old -> new."""
     if not fact_diff:
         return
     entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
     if not entries:
         return
+    total = len(entries)
     order = list(_FACT_LABEL)
     entries.sort(key=lambda e: (not e.get("fails"), order.index(e.get("category", "equal"))
                                 if e.get("category") in order else len(order)))
-    t = Table(title=f"{title} ({len(entries)})", header_style="bold")
+    entries = entries[:_MAX_ENTRY_ROWS]
+    shown = f"{len(entries)} of {total}" if total > len(entries) else str(total)
+    t = Table(title=f"{title} ({shown})", header_style="bold")
     t.add_column("Change", no_wrap=True)
     t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
     t.add_column("Call site (your code)", overflow="fold", ratio=2)
@@ -424,7 +515,7 @@ def _render_calibration(cal) -> None:
 
 
 
-def _render_contract_report(rep) -> None:
+def _render_contract_report(rep, *, verbose: bool = False) -> None:
     trust_pct = round(rep.trust * 100)
     border = {
         VerificationVerdict.PASS: "green",
@@ -491,7 +582,7 @@ def _render_contract_report(rep) -> None:
     if rep.verdict_reasons:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
-    _render_fact_changes(rep.fact_diff)
+    _render_fact_summary(rep.all_fact_diff or rep.fact_diff, verbose=verbose)
     if rep.unpredicted_changes:
         _render_fact_changes(
             {"entries": rep.unpredicted_changes},

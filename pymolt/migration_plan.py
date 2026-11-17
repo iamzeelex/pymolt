@@ -620,8 +620,10 @@ def _apply_migration_plan_unlocked(
             raise MigrationEvidenceError(
                 "the plan is not bound to its authorizing baseline"
             )
+        from pymolt.verify.service import same_slot_path
+
         if (
-            plan.baseline_trace_path != baseline.trace_path
+            not same_slot_path(root, plan.baseline_trace_path, baseline.trace_path)
             or plan.baseline_captured_at != baseline.captured_at
         ):
             raise MigrationEvidenceError(
