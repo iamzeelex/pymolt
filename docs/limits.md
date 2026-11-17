@@ -91,9 +91,24 @@ Details: [scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md),
 
 **locust** (gevent, 3.8 → 3.12, no code change) is the noisy real-project pilot:
 - without noise handling, the diff reported 14,065 failing entries;
-- with masks and a replicate, 2 findings remained: msgpack bytes reordered because Python 3.9
-  changed a TypedDict's key order (a real change), and a rare gevent outcome (1 raise in 76 calls);
-- the post side of that run lost 43% of its events. Since the event-loss and recall fixes, a
-  re-captured post side loses none, and not-comparable entries fell from 3,309 to 2. The msgpack
-  calls now compare by value and land in review, because each message carries a per-run node id.
-  A full re-capture with every fix in place has not been run yet.
+- the first run with masks and a replicate left 2 findings, but its post side lost 43% of its
+  events.
+- A full re-capture with every event-loss and recall fix in place (2026-11-17) lost no events on
+  any of its three runs. The post side waited 1.4 s in total for its trace writer.
+- That re-capture's verdict is FAIL, with 4 failing findings:
+  - msgpack bytes reordered because Python 3.9 changed a TypedDict's key order. This is a real
+    change.
+  - Two `@app.route` decorators on one function. 3.8 attributes both calls to the `def` line,
+    3.12 each to its own `@` line, and `verify` does not pair them. This is a `verify` bug.
+  - Two values from one timing-sensitive test, which shift with the tracer's overhead. Both
+    baseline runs agreed on them, so `verify` called them deterministic.
+- 3 review items and 2 not-comparable entries remain:
+  - two timing-dependent test values;
+  - `typing_extensions.final`, which is the stdlib's `typing.final` on 3.12, so it is not traced;
+  - a compiled gevent method whose raise only `sys.monitoring` sees.
+- The replicate explains the per-run msgpack differences (node ids) and 409 differences in
+  all. The rare gevent outcome raised on both sides this time.
+- 121 of 175 static symbols are BLIND under this test subset (trust 65%).
+
+Details: [scorecard](../bench/legacy_eval/results/pilot-locust-recapture/scorecard.md),
+[findings](../bench/legacy_eval/locust.md).
