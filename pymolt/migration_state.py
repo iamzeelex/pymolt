@@ -49,6 +49,16 @@ class MigrationReceipt(BaseModel):
     no_codemods_required: bool = False
     plan_path: str | None = None
     rolled_back_at: str | None = None
+    # The project files the rollback rewrote ([] = it restored no file: the run had changed
+    # none). None = not rolled back, or rolled back before this was recorded.
+    files_restored: list[str] | None = None
+
+    @property
+    def in_effect(self) -> bool:
+        """Whether the code on disk is the code this run left: it is applied, or its rollback
+        restored no file. Verify reads such a run's plan; a rollback that restored files
+        took the migration's code away, and with it the plan's say over verify."""
+        return self.status == "applied" or self.files_restored == []
 
     def starting_fingerprint(self, project_dir: str | Path) -> str | None:
         """The environment fingerprint this migration started from; None if unrecorded.

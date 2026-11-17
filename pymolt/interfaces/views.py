@@ -597,15 +597,21 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 
 
 def capture_refusal_hint(slot, static_contacts: int | None) -> str:
-    """The hint for a capture that was not accepted, by what went wrong."""
-    from pymolt.verify.service import parse_failed_count
+    """The hint for a capture that was not accepted, by what went wrong. A failed run names
+    the failing tests the command log shows, and the log itself."""
+    from pymolt.verify.service import failed_tests, parse_failed_count
 
     rc = slot.returncode
     log = f" (see {slot.command_log})" if slot.command_log else ""
     if rc not in (None, 0) and slot.events > 0:
         failed, _ = parse_failed_count(slot.command_log)
-        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}). "
-                "Fix or deselect them, or keep a red baseline with --accept-failing.")
+        names, total = failed_tests(slot.command_log)
+        which = ""
+        if names:
+            more = f" and {total - len(names)} more" if total > len(names) else ""
+            which = f": {', '.join(names)}{more}"
+        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}){which}"
+                f"{log}. Fix or deselect them, or keep a red baseline with --accept-failing.")
     if rc not in (None, 0):
         return (f"The command failed (exit {rc}) and recorded no dependency call"
                 f"{log}. Fix the command and capture again; the slot is unchanged.")
@@ -1000,11 +1006,26 @@ def _findings_data(summary: dict) -> dict:
     }
 
 
+def saved_verdict_note(compared, saved_path) -> str | None:
+    """What saving a verdict meant, when it is not the usual verdict on the two captures.
+
+    ``compared`` is the report's ``ComparedRecordings``; ``saved_path`` None means it was not
+    saved (its baseline side was another recording)."""
+    if saved_path is None:
+        return "Not saved: the baseline side is a recording other than the baseline capture."
+    if compared is not None and compared.after is not None and compared.after_capture is None:
+        return (f"Saved, but `pymolt status` does not count it as the migration's verdict: the "
+                f"post-migration side is {compared.after}, not the post-migration capture.")
+    return None
+
+
 def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | None) -> dict:
     """``UnifiedVerificationReport`` -> view.
 
-    ``saved_path`` is where the verdict was saved (None: compared recordings other
-    than the captures, so nothing was saved and the full report is written instead).
+    ``saved_path`` is where the verdict was saved (None: its baseline side was a recording
+    other than the baseline capture, so nothing was saved and the full report is written
+    instead). ``data.compared_recordings`` names the two recordings and which capture each
+    one is (``data.compared`` says whether anything was compared at all).
     """
     rep = unified.contract
     full_path = (str(saved_path) if saved_path is not None
@@ -1016,6 +1037,8 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "verdict": verdict,
         "reasons": list(unified.reasons),
         "saved_path": str(saved_path) if saved_path is not None else None,
+        "compared_recordings": (rep.compared.model_dump(mode="json")
+                                if getattr(rep, "compared", None) is not None else None),
         "baseline_stale": rep.baseline_stale,
         "static_targets": rep.static_targets,
         "confirmed": rep.confirmed,
@@ -1088,8 +1111,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
                      f"{cal['miss']} miss, {cal['not_exercised']} not exercised; "
                      f"{cal['unpredicted_total']} change(s) nobody predicted "
                      "(data.calibration).")
-    if saved_path is None:
-        lines.append("Not saved: compared recordings other than the captures.")
+    note = saved_verdict_note(getattr(rep, "compared", None), saved_path)
+    if note:
+        lines.append(note)
 
     if not data["compared"]:
         hint = ("Only one side is recorded, so nothing was compared: change the code, then "

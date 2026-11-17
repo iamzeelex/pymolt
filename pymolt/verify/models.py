@@ -256,6 +256,10 @@ class ContractSlot(BaseModel):
     # same code in the same environment (None for every other slot). A replicate whose
     # baseline was replaced is stale and ignored.
     replicate_of: str | None = None
+    # A post-migration capture set aside by ``pymolt rollback``: the run id of the migration
+    # whose rollback restored the code it recorded (None for every other slot). Kept among the
+    # diagnostic captures, its recording moved to the archive so no later capture overwrites it.
+    set_aside_by: str | None = None
 
 
 class ContractState(BaseModel):

@@ -178,6 +178,33 @@ class TestProgression:
         assert status.next_command is None
         assert "PASS" in status.next_reason
 
+    def test_a_verdict_on_another_post_migration_recording_is_not_the_migrations(self,
+                                                                                 tmp_path):
+        """`verify --post-migration OTHER` saves its verdict, naming what it compared; status
+        counts only a verdict whose post-migration side is the post-migration capture."""
+        from pymolt.verify.report import ComparedRecordings
+
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(tmp_path, "baseline")
+        receipt = _receipt(tmp_path, baseline)
+        post = _capture(tmp_path, "post_migration")
+
+        def save(after: str, after_capture: str | None) -> None:
+            build_unified_verification(
+                ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS,
+                               compared=ComparedRecordings(
+                                   after=after, after_capture=after_capture,
+                                   before=baseline.trace_path, before_capture="baseline")),
+                run_id=receipt.run_id,
+            ).save(tmp_path)
+
+        save(str(tmp_path / "elsewhere.jsonl"), None)
+        assert _state(build_status(tmp_path), "report") == "todo"
+        save(post.trace_path, "post-migration")
+        assert _state(build_status(tmp_path), "report") == "done"
+
     def test_post_capture_without_receipt_is_stale(self, tmp_path):
         _manifest(tmp_path)
         _configure(tmp_path)
