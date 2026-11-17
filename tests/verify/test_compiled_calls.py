@@ -460,3 +460,11 @@ def test_bound_builtin_methods_are_decided_once_per_owner_class():
     a, b = collections.deque(), collections.deque()
     assert be._c_sym(a.append) == be._c_sym(b.append) == "collections.deque.append"
     assert len(be._ccache) == 0 and len(be._cmeth) == 1     # no entry per bound object
+
+
+def test_the_runtime_writer_module_is_never_the_project_nor_a_dependency():
+    from pymolt.verify import _rawthreads
+    from pymolt.verify._backend import AppMatcher, never_target
+
+    assert never_target(_rawthreads.__name__)
+    assert not AppMatcher().matches(_rawthreads.__name__, sys._getframe())
