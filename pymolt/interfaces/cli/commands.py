@@ -783,7 +783,8 @@ def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=())
             for adv in preview.advisories:
                 tag = "caveat" if adv.severity == "precondition" else "not applied"
                 console.print(
-                    f"  [yellow]{preview.path}:{adv.line}[/yellow] — [{tag}] {adv.reason}"
+                    f"  [yellow]{escape(preview.path)}:{adv.line}[/yellow] — \\[{tag}] "
+                    f"{escape(adv.reason)}"
                 )
         for item in manual:
             where = (f"{item.path}:{','.join(map(str, item.lines))}" if item.path and item.lines
@@ -868,9 +869,11 @@ def apply_plan_cmd(
             json_output=json_output,
         )
 
+    advisories = [item.model_dump(mode="json") for item in migration_plan.advisories]
+    manual = [item.model_dump(mode="json") for item in migration_plan.manual]
     if json_output:
-        typer.echo(json.dumps({**receipt.model_dump(mode="json"), "outcome": receipt.outcome},
-                              indent=2))
+        typer.echo(json.dumps({**receipt.model_dump(mode="json"), "outcome": receipt.outcome,
+                               "advisories": advisories, "manual": manual}, indent=2))
         return
     plan_label = f"[bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]"
     if receipt.run_id != migration_plan.plan_id:
@@ -898,7 +901,25 @@ def apply_plan_cmd(
             f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
             title="Migration applied", border_style="green", expand=False,
         ))
+    _render_left_to_you(migration_plan)
     next_step(project_path)
+
+
+def _render_left_to_you(plan) -> None:
+    """The plan's advisories (sites not rewritten, rewrites with a caveat) and manual items:
+    what apply did not do, or did with a condition a person must check."""
+    if not (plan.advisories or plan.manual):
+        return
+    console.print("\n[bold yellow]Left to you:[/bold yellow]")
+    for adv in plan.advisories:
+        tag = "caveat" if adv.severity == "precondition" else "not applied"
+        console.print(f"  [yellow]{escape(adv.path)}:{adv.line}[/yellow] — \\[{tag}] "
+                      f"{escape(adv.reason)}")
+    for item in plan.manual:
+        where = (f"{item.path}:{','.join(map(str, item.lines))}" if item.path and item.lines
+                 else item.path or "no site")
+        console.print(f"  [yellow]{escape(where)}[/yellow] — \\[blocked rule] "
+                      f"{escape(item.rule)}: {escape(item.reason)}")
 
 
 @app.command(rich_help_panel="Migration")

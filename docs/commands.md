@@ -86,7 +86,9 @@ plan and shows the diff. It writes no source file. Details are in [plan.md](plan
 Writes exactly the saved plan. It refuses if a planned file changed since the plan was made. Every
 changed file is prepared and parsed before the first write, and a failed apply restores them all.
 The original files are kept for `rollback`. Run again on an applied plan whose files still hold its
-changes, it writes nothing and says so.
+changes, it writes nothing and says so. Its summary and `--json` list what the plan leaves to you:
+the advisories (a site not rewritten, a rewrite with a caveat to check) and the manual items, each
+with its file and line.
 
 The plan stays valid while the setup (manifest file, base Python, toolset, container), the target
 manifest and the planned files are unchanged. Bumping the pins in the project's manifest does not
