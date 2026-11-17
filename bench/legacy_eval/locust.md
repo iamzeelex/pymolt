@@ -174,6 +174,30 @@ The verdict is still FAIL.
     DRIFT.
 - Raw categories: disappeared 2 → 1, drift 192 → 187, equal 6,529 → 6,531.
 
+## After the timing fix
+
+These are the same captures again, on `fix/verify-timing-determinism`, which is stacked on the
+decorator fix.
+
+| Ledger | Decorator fix | Timing fix |
+|---|---|---|
+| failing | 5 (3 findings) | 3 (1 finding: msgpack) |
+| review | 3 | 4 |
+| noise, measured by the replicate | 409 | 410 |
+| explained | 290 | 290 |
+| not comparable | 2 | 2 |
+| equal | 6,428 | 6,428 |
+
+- **`json.dumps` at `runners.py:1402` (8 → 7 users): now measured noise.** The replicate records
+  that calls at that site moved between inputs on the field `obj/"TestUser"`, and the migration
+  changed only that field.
+- **`assertEqual` at `test_runners.py:972`: now a review.** The value 2, seen on the old side only,
+  is an input variant: the call is made on both sides with the same outcome kinds. The
+  replicate's pairs there have an opaque receiver, so it cannot judge the variant strictly.
+- This re-verify ran after both locust containers had been removed by another session. So
+  verify could not resolve static identities: confirmed 3, BLIND 172, trust 4%. The fact diff,
+  the ledger above, does not depend on that. The full run's coverage (54 of 175, 65%) stands.
+
 ## Open issues, by how much they block PASS on an equivalent migration
 
 1. **Stacked decorators of one factory on one function (F2).** A false FAIL on every 3.8–3.10 →
@@ -183,6 +207,16 @@ The verdict is still FAIL.
    timing that the tracer's overhead shifts. Two runs on one backend cannot measure that.
    - Count shifts among recurring inputs are not treated as input variation.
    - Presence is confirmed from `equal@hidden` pairs.
+
+   Fixed on `fix/verify-timing-determinism`:
+   - calls that moved between inputs in the replicate are input variation, for the fields that
+     moved;
+   - an input seen on one side only, at a call both sides make, is an input change (review);
+   - across a Python or tracer change, an input or presence difference the replicate repeats is
+     called reproducible, not deterministic.
+
+   Still a false FAIL: a timing-dependent value at a call whose input the replicate records in
+   full, when both baseline runs agree.
 3. **A rare outcome's kind is judged strictly.** This was latent this run: the outcome happened on
    both sides. It is a false FAIL whenever a rare raise lands on one side only.
 4. **BLIND: 121 of 175 static symbols.** These are outside this test subset, and they alone keep

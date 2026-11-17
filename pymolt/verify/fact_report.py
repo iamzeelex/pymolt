@@ -191,6 +191,10 @@ def _why_not_noise(e: FactEntry, label: str, order: str | None = None) -> str:
     why = _order_why(e, label)
     if why is not None:
         return why
+    reproducible = next((n for n in e.notes
+                         if n.startswith("reproducible in the baseline replicate")), None)
+    if reproducible is not None:
+        return f"{label}; {reproducible}"
     if "confirmed deterministic" in " ".join(e.notes):
         return f"{label}; stable across baseline runs (confirmed deterministic)"
     rare = next((n for n in e.notes if n.startswith("rare outcome:")), None)

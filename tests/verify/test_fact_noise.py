@@ -1299,7 +1299,7 @@ def test_a_new_amount_behind_a_derived_session_is_not_explained():
     assert e.explained.startswith("unpaired-site") and e.review
 
 
-def test_a_uuid_keyed_call_with_a_new_amount_fails():
+def test_a_uuid_keyed_call_with_a_new_amount_is_an_input_change():
     def side(tag, amounts):
         out = []
         for k, amount in enumerate(amounts):
@@ -1310,7 +1310,13 @@ def test_a_uuid_keyed_call_with_a_new_amount_fails():
                          line=2, text="billing.charge(u, a)", first=2 * k + 1)]
         return out
     d = diff_facts(fs(*side("a", [100, 100, 100])), fs(*side("b", [100, 999])))
-    assert [e.symbol for e in failing(d)] == ["billing.charge"]
+    # The masked id must not explain the new amount. The call happens on both sides with the
+    # same outcome kinds; only what reached it changed: an input change (review), as when the
+    # calls pair one to one. A baseline replicate that repeats the site makes it strict.
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    (e,) = [e for e in d.entries if e.symbol == "billing.charge" and not e.old_site]
+    assert e.review.startswith("input changed") and "input-variant" in e.notes
+    assert not e.noise and not (e.explained or "").startswith(("source", "unpaired"))
 
 
 def test_a_static_value_on_the_lossy_side_is_no_lost_producer():

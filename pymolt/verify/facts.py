@@ -4386,6 +4386,8 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
     _soften_capped(entries, old, new, ov, nv, modes)
+    if not sampled:
+        _judge_input_variants(entries, ov, nv, modes)
     _review_masked_input(entries)
     variation = _run_variation(gstats)
     gated = _gate_unmeasured(entries, variation) if variation else 0
@@ -5304,6 +5306,76 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
                         f"visible cause ({shown}); {_REPLICATE_HINT}")
         count += 1
     return count
+
+
+INPUT_VARIANT = "input-variant"
+
+
+def _judge_input_variants(entries: list[FactEntry], ov: list[_V], nv: list[_V],
+                          modes: dict[str, str]) -> int:
+    """An input seen on one side only, at a call both sides make: a call on an unedited line
+    that has no partner, while the other side made the same call there with other inputs, with
+    the same outcome kinds and types over the site and the same call signature. A poll that saw
+    one more intermediate value, or a loop over a shorter list, looks like this: what reached
+    the call changed, which is not proof that the dependency did. A review, like an input change
+    (``input-variant``); a baseline replicate can show it to be noise but never confirms it,
+    since an unpaired input is call volume made visible by grouping calls per input. A new or
+    vanished outcome kind or type over the site, or a signature the other side never used
+    there, still fails. Not on a sampled capture (the caller skips it). Returns how many."""
+    by_site: tuple[dict[tuple, list[Fact]], dict[tuple, list[Fact]]] = (
+        defaultdict(list), defaultdict(list))
+    for side, views in enumerate((ov, nv)):
+        for v in views:
+            by_site[side][(v.fact.symbol, v.fact.file, v.fact.func, v.site_value)].append(v.fact)
+    count = 0
+    for e in entries:
+        if e.category not in (FactCategory.DISAPPEARED, FactCategory.APPEARED) \
+                or e.review or e.noise or e.unverified \
+                or e.provenance not in (None, "unedited"):
+            continue
+        mine = 0 if e.category is FactCategory.DISAPPEARED else 1
+        site = e.old_site if mine == 0 else e.new_site
+        if site is None:
+            continue
+        key = (e.symbol, site.file, site.func,
+               site.text if modes.get(site.file) == "text" else site.line)
+        other, here = by_site[1 - mine].get(key), by_site[mine].get(key, [])
+        if not other or not here:
+            continue
+        if _input_signature(e.input) not in {_signature(f) for f in other}:
+            continue
+        outs = ([o for f in here for o in f.outcomes], [o for f in other for o in f.outcomes])
+        if not (_kinds_match(*outs) and _cover(_distinct_types(outs[0]),
+                                               _distinct_types(outs[1]), _outcome_types_match)):
+            continue
+        nearest = min((sorted(input_leaf_differences(e.input, f.input)) for f in other),
+                      key=len)
+        shown = ", ".join(nearest[:3]) + (f" (+{len(nearest) - 3})" if len(nearest) > 3 else "")
+        where = "old" if mine == 0 else "new"
+        e.notes.extend(["input-changed", INPUT_VARIANT])
+        e.explained = e.explained or (
+            f"input-changed: an input seen on the {where} side only ({shown}), at a call both "
+            "sides make with the same outcome kinds")
+        e.review = (f"{INPUT_CHANGED}: an input reached this call on the {where} side only "
+                    f"({shown}), while the call itself happens on both sides with the same "
+                    f"outcome kinds; {_REPLICATE_HINT}")
+        count += 1
+    return count
+
+
+def input_leaf_differences(a: Any, b: Any) -> set[str]:
+    """Where two call inputs differ, as ``<argument>/<path>`` of their leaves (an unnamed
+    positional value by its position): a leaf whose value differs, or that one input lacks.
+    Type-only leaves compare by type name."""
+    def leaves(inputs: Any) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for i, (name, value) in enumerate(_argument_values(inputs)):
+            arg = name if name is not None else f"#{i}"
+            for path, _kind, leaf in _argument_leaves(value):
+                out["/".join([arg, *map(str, path)])] = _canon(leaf)
+        return out
+    la, lb = leaves(a), leaves(b)
+    return {k for k in la.keys() | lb.keys() if la.get(k) != lb.get(k)}
 
 
 _TYPE_ONLY_TAGS = ("__opaque__", "__cycle__", "__shape__", "__type__", "__nondeterministic__")
@@ -6264,7 +6336,10 @@ def _soften_capped(entries: list[FactEntry], old: FactSet, new: FactSet, ov: lis
 def _signature(f: Fact) -> tuple:
     """The input's structure without its values: bound parameter names, positional arity, and
     keyword names (a compiled call's constant marker counts as its own signature)."""
-    inputs = f.input
+    return _input_signature(f.input)
+
+
+def _input_signature(inputs: Any) -> tuple:
     if not isinstance(inputs, dict):
         return ("<value>",)
     if inputs.get("__c_call__") is True:

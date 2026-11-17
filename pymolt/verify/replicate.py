@@ -10,12 +10,20 @@ difference the baseline itself shows there:
   argument rendered by type only);
 * ``value@masked``: a value differs where the inputs matched only once volatile values were
   masked (a timestamp or id in the input);
-* ``input``: the input changed; ``kind``: an outcome kind changed; ``presence``: a call on one
-  side only; ``group``: a volatile site judged as a whole;
+* ``input``: the input changed, or an input was seen in one run only at a call both runs made
+  (``input-variant``); ``kind``: an outcome kind changed; ``presence``: a call on one side
+  only; ``group``: a volatile site judged as a whole;
 * ``order``: a dict key order differs (a returned dict's, or the input's of a call whose
   output then differs);
 
 and the classes of the pairs it found EQUAL there (``equal@complete`` and so on).
+
+Facts group calls per input, so calls that moved between inputs (a value logged 6 times in one
+run and 2 in the other, another the other way round) leave only equal pairs. ``input_shifts``
+keeps that evidence: per site, the input leaves where the inputs whose call counts rose differ
+from those whose counts fell. A migration input change at such a site is noise only when every
+leaf it changed is among them. Never inferred from sampled runs or from runs that lost, evicted,
+widened or capped calls, whose counts are not every call.
 
 Order evidence is kept per (site, dict key set), never per site alone (one call site may
 return a deterministic dict for one input and a hash-ordered one for another):
@@ -44,8 +52,16 @@ site.
   strictly only when every such key set is in ``order_equal`` at its site (FAIL, confirmed
   deterministic); otherwise it stays a review that says why the replicate cannot tell;
 * a replicate that lost events (queue drops) is no evidence about presence: a call missing
-  from one of its runs may just be lost, so presence differences are neither explained nor
-  confirmed by it.
+  from one of its runs may just be lost, so presence differences (input variants included) are
+  neither explained nor confirmed by it;
+* an input variant (an input seen on one side only, at a call both sides make) is judged as an
+  input change: which pairing a site's calls get depends only on whether their counts happen to
+  match;
+* the replicate runs at the baseline's timing. When the two sides ran a different Python or
+  tracer backend, their per-call overhead differs, which shifts what a timing-dependent call
+  sees (a poll, a count of reports). A two-sided input change or a presence difference the
+  replicate repeats exactly is then still judged strictly, but called reproducible in the
+  replicate, never confirmed deterministic.
 
 The profile is cached in ``.pymolt/noise_profile.json`` under the identity of both traces, the
 profile schema and the pymolt version. Host side only (never imported by the injected runtime).
@@ -65,6 +81,7 @@ from pymolt.verify import environment as _env
 from pymolt.verify.facts import (
     _MASKED_INPUT_REVIEW,
     INPUT_CHANGED,
+    INPUT_VARIANT,
     ORDER_REVIEWS,
     UNMEASURED_NOISE,
     Comparison,
@@ -75,11 +92,12 @@ from pymolt.verify.facts import (
     _kinds_match,
     diff_facts,
     input_hidden,
+    input_leaf_differences,
 )
 
 logger = logging.getLogger(__name__)
 
-NOISE_PROFILE_SCHEMA = "pymolt.noise-profile/4"   # /4: per-site call volume; groups = input
+NOISE_PROFILE_SCHEMA = "pymolt.noise-profile/5"   # /5: calls moved between inputs = input
 ORDER = "order"
 EQUAL_ORDER = "equal@order"
 ORDER_CHANCE_MAX = 1 / 100
@@ -89,9 +107,14 @@ ORDER_CHANCE_MAX = 1 / 100
 # of about e^-3 = 5%). Below that, a rare outcome (a greenlet killed mid-join in 1 of 76
 # calls) stays what the strict rules make it, without a determinism claim.
 RARE_EXPECTED_MIN = 3.0
+_SHIFT_SAMPLE = 20      # inputs per direction compared when naming a site's shifted leaves
 NOISE_PROFILE_PATH = Path(".pymolt") / "noise_profile.json"
 # Reviews that exist only because no replicate measured the noise: strict once confirmed.
 _STRICT_REVIEWS = (UNMEASURED_NOISE, INPUT_CHANGED, _MASKED_INPUT_REVIEW.split(":")[0])
+# Differences a different per-call overhead can produce (what a timing-dependent call sees, or
+# whether it happens at all): a same-timing replicate cannot confirm them across such a change.
+_TIMING_CLASSES = ("input", "presence")
+REPRODUCIBLE = "reproducible in the baseline replicate"
 _GROUP_NOTES = ("volatile-site", "unpaired-site")
 
 
@@ -119,7 +142,7 @@ def evidence(e: FactEntry) -> tuple[set[str], set[str]]:
     the entry is no evidence of that kind (an uncomparable fact, a difference for the second).
     ``equal@order`` is a site's (``build_noise_profile``), from the entries' agreed orders."""
     if e.category in (FactCategory.APPEARED, FactCategory.DISAPPEARED):
-        return {"presence"}, set()
+        return ({"input"} if INPUT_VARIANT in e.notes else {"presence"}), set()
     if e.category is FactCategory.UNCOMPARABLE:
         return set(), set()
     changed = e.category in (FactCategory.CHANGED, FactCategory.REWRITTEN)
@@ -154,6 +177,21 @@ def noise_class(e: FactEntry) -> str | None:
     return rest[0] if rest else ORDER
 
 
+def timing_difference(old: FactSet, new: FactSet) -> str | None:
+    """What differs between the two sides that changes per-call overhead, and so the timing a
+    timing-dependent call sees: the Python version or the tracer backend (None: the same, or
+    unknown). The replicate runs at the baseline's timing and cannot measure that."""
+    def pythons(fs: FactSet) -> list[str]:
+        return sorted({".".join(v.split(".")[:2]) for v in fs.python_versions if v})
+    po, pn = pythons(old), pythons(new)
+    bo, bn = sorted(set(old.backends)), sorted(set(new.backends))
+    if (po == pn or not po or not pn) and (bo == bn or not bo or not bn):
+        return None
+    def side(p: list[str], b: list[str]) -> str:
+        return ", ".join(x for x in ("/".join(f"Python {v}" for v in p), "/".join(b)) if x)
+    return f"the sides ran {side(po, bo)} vs {side(pn, bn)}"
+
+
 def build_noise_profile(first: FactSet, second: FactSet) -> dict[str, Any]:
     """The noise two runs of the same baseline show, per call site (see the module doc)."""
     diff = diff_facts(first, second)
@@ -162,16 +200,36 @@ def build_noise_profile(first: FactSet, second: FactSet) -> dict[str, Any]:
     calls: Counter = Counter()
     order_varying: dict[str, set[str]] = defaultdict(set)
     agreed: dict[str, set[str]] = defaultdict(set)
+    # Facts count calls per input, and a pair is judged on its outcomes, not its counts: calls
+    # that moved between inputs (a value logged 6 times in one run and 2 in the other, another
+    # the other way round) leave only equal pairs. The signs of the count differences keep it.
+    presence_ok = not (first.dropped_events or second.dropped_events)
+    counted = presence_ok and not any(
+        fs.site_tallies or fs.evicted or fs.widened or fs.outcomes_other or fs.c_capped
+        for fs in (first, second))
+    shifted: dict[str, tuple[list, list]] = defaultdict(lambda: ([], []))
     for e in diff.entries:
         key = site_key(e)
         calls[key] += _calls(e.old) + _calls(e.new)
         differs, same = evidence(e)
+        if INPUT_VARIANT in e.notes and not presence_ok:
+            differs = set()       # a call missing from one run may just be lost
         varying[key].update(differs)
         equal[key].update(same)
+        if counted and e.old_site and e.new_site and e.new_input is None \
+                and e.old_count != e.new_count \
+                and not (isinstance(e.input, dict) and e.input.get("__c_call__") is True):
+            shifted[key][0 if e.new_count > e.old_count else 1].append(e.input)
         if ORDER in differs:
             order_varying[key].update(e.order_keysets or ())
         for ks in e.order_agreed or ():
             agreed[key].add(_order.keyset_id(ks))
+    input_shifts: dict[str, list[str]] = {}
+    for key, (rose, fell) in shifted.items():
+        paths = {p for a in rose[:_SHIFT_SAMPLE] for b in fell[:_SHIFT_SAMPLE]
+                 for p in input_leaf_differences(a, b)}
+        if paths:
+            input_shifts[key] = sorted(paths)
     hashing = (_env.hash_randomized(first.environment),
                _env.hash_randomized(second.environment))
     order_evidence = hashing == (True, True) and first.dict_order and second.dict_order
@@ -191,7 +249,8 @@ def build_noise_profile(first: FactSet, second: FactSet) -> dict[str, Any]:
         "calls": dict(sorted(calls.items())),
         "order_varying": {k: sorted(v) for k, v in sorted(order_varying.items()) if v},
         "order_equal": {k: sorted(v) for k, v in sorted(order_equal.items()) if v},
-        "presence_evidence": not (first.dropped_events or second.dropped_events),
+        "input_shifts": dict(sorted(input_shifts.items())),
+        "presence_evidence": presence_ok,
         "order_evidence": order_evidence,
         "order_note": None if order_evidence else _order_note(first, second, hashing),
         "warnings": [w for w in diff.warnings if w.startswith(("run-variation", "volatile"))],
@@ -247,19 +306,24 @@ def _confirms(cls: str, equal: set[str]) -> bool:
     return bool(equal - {EQUAL_ORDER}) or EQUAL_ORDER in equal
 
 
-def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> dict[str, int]:
+def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str, *,
+                        timing: str | None = None) -> dict[str, int]:
     """Judge ``diff`` (baseline vs post-migration) with the replicate's ``profile``; sets
-    ``diff.noise_measured`` and returns the counts (explained, confirmed, strict)."""
+    ``diff.noise_measured`` and returns the counts (explained, confirmed, strict, rare,
+    timing). ``timing``: what differs between the two sides that shifts timing
+    (``timing_difference``), None when they ran alike."""
     varying = {k: set(v) for k, v in (profile.get("varying") or {}).items()}
     equal = {k: set(v) for k, v in (profile.get("equal") or {}).items()}
     order_varying = {k: set(v) for k, v in (profile.get("order_varying") or {}).items()}
     order_equal = {k: set(v) for k, v in (profile.get("order_equal") or {}).items()}
     site_calls = profile.get("calls") or {}
+    shifts = {k: set(v) for k, v in (profile.get("input_shifts") or {}).items()}
     presence_ok = bool(profile.get("presence_evidence"))
     counts: Counter = Counter()
     for e in diff.entries:
         classes = evidence(e)[0]
-        if not classes or ("presence" in classes and not presence_ok):
+        variant = INPUT_VARIANT in e.notes
+        if not classes or (("presence" in classes or variant) and not presence_ok):
             continue
         key = site_key(e)
         shown = "+".join(sorted(classes))
@@ -267,7 +331,13 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
         order_noise = ORDER not in classes or (
             bool(keysets) and keysets <= order_varying.get(key, set()))
         order_stable = bool(keysets) and keysets <= order_equal.get(key, set())
-        if (classes - {ORDER}) <= varying.get(key, set()) and order_noise:
+        varies = varying.get(key, set())
+        if "input" in classes and "input" not in varies and key in shifts \
+                and e.new_input is not None:
+            moved = input_leaf_differences(e.input, e.new_input)
+            if moved and moved <= shifts[key]:
+                varies = varies | {"input"}   # calls moved between such inputs in the replicate
+        if (classes - {ORDER}) <= varies and order_noise:
             if e.fails or e.inconclusive:
                 e.noise = (f"replicate: the baseline's own two runs differ here the same way "
                            f"({shown})")
@@ -307,7 +377,11 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
             e.notes.append(f"strict: the baseline replicate is equal here ({e.review[:40]})")
             e.review = None
             counts["strict"] += 1
-        if e.fails:
+        if e.fails and timing and cls in _TIMING_CLASSES:
+            e.notes.append(f"{REPRODUCIBLE}, not confirmed deterministic: {timing}, whose "
+                           "different per-call overhead the replicate cannot measure")
+            counts["timing"] += 1
+        elif e.fails:
             e.notes.append("confirmed deterministic: equal in the baseline replicate")
             counts["confirmed"] += 1
     stable = len(equal.keys() - varying.keys())
@@ -316,7 +390,7 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
         "sites_varying": len(varying),
         "sites_stable": stable,
         "presence_evidence": presence_ok,
-        **{k: counts[k] for k in ("explained", "confirmed", "strict", "rare")},
+        **{k: counts[k] for k in ("explained", "confirmed", "strict", "rare", "timing")},
     }
     diff.warnings = [w for w in diff.warnings if not w.startswith("run-variation")]
     diff.warnings.append(
@@ -325,6 +399,8 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
         f"noise (same evidence class at the same site), {counts['confirmed']} failure(s) "
         f"confirmed deterministic, {counts['strict']} review(s) judged strictly, "
         f"{counts['rare']} too rare to confirm"
+        + (f", {counts['timing']} failure(s) reproducible in the replicate but not confirmed "
+           f"({timing})" if counts["timing"] else "")
         + ("" if presence_ok else "; the replicate lost events, so it is no evidence about "
            "calls present on one side only"))
     return dict(counts)

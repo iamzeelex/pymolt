@@ -880,9 +880,10 @@ def build_contract_report(
                     order_causes=_order_causes(root, old_facts, new_facts, report.notes),
                 )
                 if noise_profile is not None:
-                    from pymolt.verify.replicate import apply_noise_profile
+                    from pymolt.verify.replicate import apply_noise_profile, timing_difference
 
-                    apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1])
+                    apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1],
+                                        timing=timing_difference(old_facts, new_facts))
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
                     report.calibration = _calibration(predictions, old_facts, fdiff, root)
