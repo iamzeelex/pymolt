@@ -170,7 +170,10 @@ def run_scenario(name: str, base: Path) -> dict:
     change, upgrade, expected = SCENARIOS[name]
     root = base / name
     make_project(root, change)
-    pymolt(root, "setup", ".", log="setup.log")
+    # Explicit versions: without them setup assumes the Python pymolt itself runs on, so the
+    # scenario would silently become a migration to whatever interpreter the dev venv has.
+    pymolt(root, "setup", ".", "--base-python", OLD["python"], "--target-python", NEW["python"],
+           "--target-env", str(ENVS / NEW["python"]), log="setup.log")
     rc_base = capture(root, "baseline", OLD)
     (root / "requirements-target.txt").write_text("pandas==2.2.3\nrequests\n")
     rc_plan = pymolt(root, "plan", ".", "--target-manifest", "requirements-target.txt",
@@ -241,16 +244,145 @@ def run(names: list[str]) -> int:
     return 0 if all(r["ok"] for r in rows) else 1
 
 
+# ── README example ────────────────────────────────────────────────────────────────────────────
+# The example in README.md is generated from a real run of the `change` scenario, never typed by
+# hand: `run.py readme-example` formats verify's JSON report and rewrites the block between the
+# markers below.
+
+README = REPO / "README.md"
+EXAMPLE_START = "<!-- example:verify:start -->"
+EXAMPLE_END = "<!-- example:verify:end -->"
+
+
+def _short_type(name: str) -> str:
+    return name.rsplit(".", 1)[-1]
+
+
+def _value_text(value) -> str:
+    if isinstance(value, dict):
+        if "__structure__" in value:
+            dtype = value.get("dtype")
+            return f"{_short_type(value['__structure__'])}({dtype})" if dtype else \
+                _short_type(value["__structure__"])
+        if "__dict__" in value:
+            return json.dumps({str(k): v for k, v in value["__dict__"]})
+        if "__opaque__" in value:
+            return _short_type(value["__opaque__"])
+    return json.dumps(value)
+
+
+def _outcome_text(outcomes) -> str:
+    """Every distinct outcome of the fact, e.g. `returns 2.0 or raises KeyError`."""
+    if not outcomes:
+        return "—"
+    texts = []
+    for o in outcomes:
+        if o.get("kind") == "raise":
+            texts.append(f"raises {_short_type(str(o.get('value')))}")
+        else:
+            texts.append(f"returns {_value_text(o.get('value'))}")
+    return " or ".join(dict.fromkeys(texts))
+
+
+def _drift_text(entry) -> str:
+    old = set((entry.get("old_defaulted") or [[]])[0])
+    new = set((entry.get("new_defaulted") or [[]])[0])
+    parts = [f"default `{p}` removed" for p in sorted(old - new)]
+    parts += [f"default `{p}` added" for p in sorted(new - old)]
+    return ", ".join(parts) or "defaults changed"
+
+
+def example_block(report: dict) -> str:
+    """The README example: verify's headline numbers and its non-equal facts."""
+    c = report.get("contract") or {}
+    facts = c.get("fact_diff") or {}
+    counts = ", ".join(f"{k} {v}" for k, v in (facts.get("counts") or {}).items() if v)
+    verdict = str(report.get("verdict", "?"))
+    # The same lines, in the same words, as `pymolt verify` prints (verify_cmd.py).
+    head = [
+        f"VERDICT: {verdict.upper()}",
+        f"Static symbols: {c.get('static_targets')}   confirmed: {c.get('confirmed')}   "
+        f"BLIND: {c.get('blind')}   dynamic-only: {c.get('dynamic_only')}",
+        f"Contract trust: {round((c.get('trust') or 0) * 100)}%  "
+        f"({c.get('trust_confirmed')}/{c.get('trust_static')} {c.get('trust_basis')})",
+    ]
+    if c.get("impact_filter_active"):
+        head.append(f"Impact focus: {len(c.get('impact_paths') or [])} changed API path(s); "
+                    f"full surface: {c.get('all_static_targets')} static / "
+                    f"{c.get('all_blind')} blind")
+    said = {"fail": "behavior changed", "pass": "no observed change on the covered surface"}
+    head.append(f"Version diff: {said.get(verdict, 'inconclusive')}  ({counts})")
+    rows = [("Change", "Dependency call", "Call site (your code)", "Before → after")]
+    order = ["changed", "disappeared", "appeared", "rewritten", "drift", "uncomparable"]
+    entries = [e for e in facts.get("entries", []) if e.get("category") in order]
+    entries.sort(key=lambda e: order.index(e["category"]))
+    for e in entries:
+        site = e.get("old_site") or e.get("new_site") or {}
+        where = f"{site.get('file')}:{site.get('line')} {site.get('func')}()"
+        if e["category"] == "drift":
+            change = _drift_text(e)
+        elif e["category"] == "rewritten" and e.get("comparison") == "equal":
+            change = "equal result"
+        else:
+            change = f"{_outcome_text(e.get('old'))} → {_outcome_text(e.get('new'))}"
+        rows.append((e["category"].upper(), e["symbol"], where, change))
+        if e.get("new_symbol"):
+            rows.append(("", f"→ {e['new_symbol']}", "", ""))
+    widths = [max(len(r[i]) for r in rows) for i in range(3)]
+    lines = [*head, ""]
+    lines += ["  ".join(r[i].ljust(widths[i]) for i in range(3)) + "  " + r[3] for r in rows]
+    return "```text\n" + "\n".join(line.rstrip() for line in lines) + "\n```"
+
+
+def readme_example(results: Path | None) -> int:
+    text = README.read_text()
+    if EXAMPLE_START not in text or EXAMPLE_END not in text:
+        print(f"README.md lacks the {EXAMPLE_START} / {EXAMPLE_END} markers")
+        return 2
+    if results is None:
+        if not env_python(OLD).exists() or not env_python(NEW).exists():
+            print("environments missing: run `python bench/e2e_pandas/run.py setup` first")
+            return 2
+        base = RESULTS / time.strftime("%Y%m%d-%H%M%S")
+        base.mkdir(parents=True)
+        row = run_scenario("change", base)
+        if not row["ok"]:
+            print(f"the change scenario did not meet its expectations: {row}")
+            return 1
+        results = base / "change"
+    try:
+        report = json.loads((results / "report.json").read_text())
+    except (OSError, ValueError) as exc:
+        print(f"no usable verify report in {results}: {exc}")
+        return 2
+    # The README's prose describes a failing run; a stale or broken result must not replace it.
+    if report.get("verdict") != "fail":
+        print(f"the report in {results} is not the expected FAIL (verdict: {report.get('verdict')})")
+        return 1
+    block = example_block(report)
+    start = text.index(EXAMPLE_START)
+    end = text.index(EXAMPLE_END, start)
+    README.write_text(text[: start + len(EXAMPLE_START)] + "\n" + block + "\n" + text[end:])
+    print(block)
+    print(f"README example updated from {results}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup")
+    ex_p = sub.add_parser("readme-example", help="rewrite README.md's example from a real run")
+    ex_p.add_argument("--results", type=Path, default=None,
+                      help="an existing change-scenario result dir (default: run it now)")
     run_p = sub.add_parser("run")
     run_p.add_argument("scenarios", nargs="*", help=f"any of {', '.join(SCENARIOS)} (default: all)")
     args = parser.parse_args()
     unknown = [name for name in getattr(args, "scenarios", []) if name not in SCENARIOS]
     if unknown:
         parser.error(f"unknown scenario(s): {', '.join(unknown)}")
+    if args.cmd == "readme-example":
+        return readme_example(args.results)
     if args.cmd == "setup":
         if shutil.which("uv") is None:
             print("uv is required")
