@@ -2972,11 +2972,11 @@ def _stamp_verdict(
 
     ``set_aside``: the post-migration capture a rollback set aside (see
     ``_missing_side_reason``)."""
-    # The verdict's FAIL evidence is the WHOLE surface (``all_*``): an impact filter is a focus
-    # for the report, not a limit on what can fail it, or a change nobody predicted could
-    # never be found. Coverage (BLIND, dynamic-only, trust, static targets) stays scoped to the
-    # impacted surface below: "what the migration touches was exercised" is the meaningful
-    # claim there, and the whole-surface BLIND count would drown it.
+    # The verdict reads the WHOLE surface: an impact filter (an applied plan's paths) is a focus
+    # for the report, not a limit on what can fail it or on what PASS must cover. FAIL takes
+    # the whole diff (``all_*``), or a change nobody predicted could never be found; coverage
+    # (BLIND, dynamic-only, static targets) is the whole surface in the headline fields, so the
+    # same captures get the same verdict whether the migration came from ``apply`` or by hand.
     whole_diff = report.all_fact_diff or report.fact_diff
     whole_clean = report.all_diff_clean if report.all_diff_clean is not None \
         else report.diff_clean
@@ -3093,8 +3093,7 @@ def _stamp_verdict(
     elif whole_counts.get("skipped_opaque", 0):
         reasons.append("some boundary interactions were opaque or nondeterministic")
     reasons.extend(_fact_diff_reasons(whole_diff))
-    if report.blind:
-        reasons.append(f"{report.blind} static dependency symbol(s) were not exercised")
+    reasons.extend(_blind_reasons(report))
     if report.dynamic_only:
         unverified = _unverified_dynamic_only(report)
         if unverified:
@@ -3129,15 +3128,33 @@ def _tallies_complete(fact_diff: dict | None) -> bool:
                for side in ("old", "new"))
 
 
+def _blind_reasons(report: ContractReport) -> list[str]:
+    """Why BLIND symbols block PASS. After ``apply`` the reasons name those inside the plan's
+    predicted impacts apart from those outside them; both block."""
+    if not report.blind:
+        return []
+    blind = [s for s in report.symbols if s.status == "blind"]
+    if not report.impact_filter_active or not blind:
+        return [f"{report.blind} static dependency symbol(s) were not exercised"]
+    reasons = []
+    for where, members in (("inside", [s.target for s in blind if s.impacted]),
+                           ("outside", [s.target for s in blind if not s.impacted])):
+        if members:
+            names = ", ".join(sorted(members)[:5]) + (", …" if len(members) > 5 else "")
+            reasons.append(f"{len(members)} static dependency symbol(s) {where} the plan's "
+                           f"predicted impacts were not exercised: {names}")
+    return reasons
+
+
 def _unverified_dynamic_only(report: ContractReport) -> list[str]:
-    """Dynamic-only symbols that still block PASS.
+    """Dynamic-only symbols that still block PASS, on the whole surface (an applied plan's
+    paths do not narrow it).
 
     A symbol the static map missed but the trace observed is only a coverage gap if its
     behaviour was not verified. With a fact diff, those whose every fact compared equal on
     both sides are verified; without one (custom comparator, single trace) none are.
     """
-    visible = report.impacted_symbols if report.impact_filter_active else report.symbols
-    dynamic = [s.target for s in visible if s.status == "dynamic-only"]
+    dynamic = [s.target for s in report.symbols if s.status == "dynamic-only"]
     if report.fact_diff is None:
         return dynamic
     verified = set(report.fact_equal_symbols)

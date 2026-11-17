@@ -966,6 +966,17 @@ def _risk_data(lists: _Lists, report) -> dict[str, Any]:
     }
 
 
+def impact_focus(rep) -> dict | None:
+    """After ``apply``: how many API paths the plan found changed, and the static and
+    dynamic-only symbols on them. The headline counts and the verdict stay the whole surface;
+    this is what to look at first. None without an applied plan."""
+    if not getattr(rep, "impact_filter_active", False):
+        return None
+    return {"paths": len(rep.impact_paths), "static_targets": rep.impacted_static_targets,
+            "confirmed": rep.impacted_confirmed, "blind": rep.impacted_blind,
+            "dynamic_only": rep.impacted_dynamic_only}
+
+
 def _site_text(site: dict | None) -> str:
     if not site:
         return "?"
@@ -1065,14 +1076,15 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
                      "trusting this verdict.")
-    narrowed = bool(getattr(rep, "impact_filter_active", False)) and (
-        getattr(rep, "all_static_targets", rep.static_targets) > rep.static_targets)
-    lines.append(f"Static {rep.static_targets}"
-                 + (f" of {rep.all_static_targets} (narrowed to the plan's packages)"
-                    if narrowed else "")
-                 + f", confirmed {rep.confirmed}, BLIND {rep.blind}, "
-                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%"
-                 + (" (over the narrowed set)." if narrowed else "."))
+    lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
+                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.")
+    focus = impact_focus(rep)
+    data["impact_focus"] = focus
+    if focus is not None:
+        lines.append(f"Impact focus: {focus['paths']} changed API path(s); on them "
+                     f"{focus['static_targets']} static, {focus['confirmed']} confirmed, "
+                     f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only "
+                     "(data.impact_focus).")
     lines.extend(f"{note}" for note in rep.notes if note.startswith("RED:"))
     if verdict == "pass" and rep.blind:
         lines.append(f"PASS covers the exercised calls only: {rep.blind} BLIND symbol(s) "
