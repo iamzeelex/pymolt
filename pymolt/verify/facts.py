@@ -4321,14 +4321,22 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     # interpreter: a closure is ``pkg.mod.decorator`` before 3.11 (no ``co_qualname``) and
     # ``pkg.mod.C.m.<locals>.decorator`` after; a decorator's application is on the ``def`` line
     # in 3.8 and on the ``@`` line in 3.12. Same file and function, same input, both lines
-    # definition lines (``def``/``class``/``@``) of one decorated statement, one-to-one only.
+    # definition lines (``def``/``class``/``@``) of one decorated statement, one-to-one; or
+    # stacked decorators (one factory applied twice to one function: one ``def``-line fact
+    # counted twice vs one fact per ``@`` line), merged per side and compared as one.
     pairs, old_left, new_left = _pair_qualname_equivalent(old_left, new_left, prov)
-    for o, n in pairs:
+    for o, n, stacked in pairs:
         e = _pair_entry(o, n, prof, modes, rewritten=None)
         e.notes.append("attribution-moved")
+        if stacked:
+            e.notes.append("stacked-decorators")
         e.explained = e.explained or (
-            f"attribution: {o.fact.symbol} -> {n.fact.symbol}, the interpreter names the closure "
-            "and attributes its call differently")
+            (f"attribution: stacked decorators, {o.fact.count} application(s) of "
+             f"{n.fact.symbol} on line(s) {', '.join(map(str, o.fact.lines))} -> "
+             f"{', '.join(map(str, n.fact.lines))} of one decorated statement, which the "
+             "interpreter attributes differently") if stacked else
+            (f"attribution: {o.fact.symbol} -> {n.fact.symbol}, the interpreter names the "
+             "closure and attributes its call differently"))
         entries.append(e)
         pending.append((o, n, e))
 
@@ -5973,26 +5981,62 @@ def _same_decorated_statement(o: _V, n: _V, prov: _Provenance) -> bool:
 
 def _pair_qualname_equivalent(
     old_left: list[_V], new_left: list[_V], prov: _Provenance,
-) -> tuple[list[tuple[_V, _V]], list[_V], list[_V]]:
+) -> tuple[list[tuple[_V, _V, bool]], list[_V], list[_V]]:
+    """``(old, new, stacked)`` pairs: one-to-one, or (``stacked``) a side's several views of one
+    decorated statement merged into one."""
     go: dict[tuple, list[_V]] = defaultdict(list)
     gn: dict[tuple, list[_V]] = defaultdict(list)
     for side, views in ((go, old_left), (gn, new_left)):
         for v in views:
             side[(v.fact.file, v.fact.func, v.core_key,
                   v.fact.symbol.rsplit(".", 1)[-1])].append(v)
-    pairs: list[tuple[_V, _V]] = []
+    pairs: list[tuple[_V, _V, bool]] = []
     paired: set[int] = set()
     for key, olds in go.items():
         news = gn.get(key)
-        if not news or len(olds) != 1 or len(news) != 1:
+        if not news:
             continue
-        o, n = olds[0], news[0]
-        if _qualname_equivalent(o.fact.symbol, n.fact.symbol) \
-                and _same_decorated_statement(o, n, prov):
-            pairs.append((o, n))
-            paired.update((id(o), id(n)))
+        if len(olds) == 1 and len(news) == 1:
+            o, n = olds[0], news[0]
+            if _qualname_equivalent(o.fact.symbol, n.fact.symbol) \
+                    and _same_decorated_statement(o, n, prov):
+                pairs.append((o, n, False))
+                paired.update((id(o), id(n)))
+            continue
+        if _stacked_decorators(olds, news, prov):
+            pairs.append((_merged_view(olds), _merged_view(news), True))
+            paired.update(id(v) for v in (*olds, *news))
     return (pairs, [v for v in old_left if id(v) not in paired],
             [v for v in new_left if id(v) not in paired])
+
+
+def _stacked_decorators(olds: list[_V], news: list[_V], prov: _Provenance) -> bool:
+    """The same input given to one decorator callable several times on one decorated
+    statement (``@app.route("/a")`` over ``@app.route("/b")``): 3.8-3.10 attribute every
+    application to the ``def`` line, so one fact counts them all, while 3.11+ attribute each
+    to its own ``@`` line. One callable per side (equal names, or a closure named both ways),
+    every view on a definition line of the same statement, and as many calls on each side."""
+    names_old = {v.fact.symbol for v in olds}
+    names_new = {v.fact.symbol for v in news}
+    if len(names_old) != 1 or len(names_new) != 1:
+        return False
+    a, b = next(iter(names_old)), next(iter(names_new))
+    if a != b and not _qualname_equivalent(a, b):
+        return False
+    if sum(v.fact.count for v in olds) != sum(v.fact.count for v in news):
+        return False
+    return all(_same_decorated_statement(o, n, prov) for o in olds for n in news)
+
+
+def _merged_view(views: list[_V]) -> _V:
+    """One view of several of a side's views (outcome counts add); the first-seen view gives
+    the site and the keys."""
+    if len(views) == 1:
+        return views[0]
+    head = min(views, key=lambda v: v.first_seen)
+    return _V(fact=_merge_facts([v.fact for v in views]), site_value=head.site_value,
+              input_key=head.input_key, core_key=head.core_key,
+              rewritten_site=any(v.rewritten_site for v in views), stmt_key=head.stmt_key)
 
 
 _NARROW_C_BACKENDS = frozenset({"setprofile", "hybrid"})

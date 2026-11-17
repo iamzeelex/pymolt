@@ -154,11 +154,31 @@ mocked RPC client.
 | `msgpack._cmsgpack.unpackb`: 3,292 not comparable, then review | Compared by value; noise measured by the replicate. |
 | `urllib3.response.HTTPResponse.close` at `locust/test/util.py:82` (`gc.collect()`) | Recorded in all three runs (35, 36, 36 calls), equal. |
 
+## After the stacked-decorator fix
+
+These are the same captures, verified again on `fix/verify-stacked-decorators`.
+
+| Ledger | Before | After |
+|---|---|---|
+| failing | 6 (4 findings) | 5 (3 findings) |
+| review | 3 | 3 |
+| noise, measured by the replicate | 409 | 409 |
+| explained | 293 | 290 |
+| not comparable | 2 | 2 |
+| equal | 6,428 | 6,428 |
+
+The verdict is still FAIL.
+- Two statements now pair as stacked decorators, both EQUAL:
+  - `@app.route` ×2 at `locust/test/testcases.py:65-67` (the flask FAIL);
+  - `@mock.patch` ×2 at `locust/test/test_runners.py:2206-2208`, which had been explained away as
+    DRIFT.
+- Raw categories: disappeared 2 → 1, drift 192 → 187, equal 6,529 → 6,531.
+
 ## Open issues, by how much they block PASS on an equivalent migration
 
 1. **Stacked decorators of one factory on one function (F2).** A false FAIL on every 3.8–3.10 →
    3.11+ migration whose code stacks the same decorator factory (two `@app.route` on one view).
-   It is deterministic.
+   It is deterministic. Fixed on `fix/verify-stacked-decorators`.
 2. **Timing confirmed as deterministic (F3).** A false FAIL wherever a test's values depend on
    timing that the tracer's overhead shifts. Two runs on one backend cannot measure that.
    - Count shifts among recurring inputs are not treated as input variation.

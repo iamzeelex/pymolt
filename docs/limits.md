@@ -95,13 +95,15 @@ Details: [scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md),
   events.
 - A full re-capture with every event-loss and recall fix in place (2026-11-17) lost no events on
   any of its three runs. The post side waited 1.4 s in total for its trace writer.
-- That re-capture's verdict is FAIL, with 4 failing findings:
+- That re-capture's verdict is FAIL. Verifying the same captures again with the fix below
+  gives 3 failing findings:
   - msgpack bytes reordered because Python 3.9 changed a TypedDict's key order. This is a real
     change.
-  - Two `@app.route` decorators on one function. 3.8 attributes both calls to the `def` line,
-    3.12 each to its own `@` line, and `verify` does not pair them. This is a `verify` bug.
   - Two values from one timing-sensitive test, which shift with the tracer's overhead. Both
     baseline runs agreed on them, so `verify` called them deterministic.
+- A fourth FAIL was a `verify` bug, now fixed: two `@app.route` decorators on one function. 3.8
+  attributes both calls to the `def` line and 3.12 each to its own `@` line, and `verify` did not
+  pair them.
 - 3 review items and 2 not-comparable entries remain:
   - two timing-dependent test values;
   - `typing_extensions.final`, which is the stdlib's `typing.final` on 3.12, so it is not traced;

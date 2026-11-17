@@ -175,7 +175,10 @@ Each comparison states its level:
 
 Two captures from different Python versions are compared fairly:
 - an untyped raise (≤3.11) matches any exception type;
-- C-level raise facts are left out when only one side's tracer records them.
+- C-level raise facts are left out when only one side's tracer records them;
+- a decorator's call is attributed to the `def` line before 3.11 and to its `@` line after. It
+  is compared within its decorated statement, including several decorators from one factory
+  stacked on one function.
 
 ## Coverage
 

@@ -577,6 +577,71 @@ def test_qualname_pairing_needs_the_same_leaf_and_input():
     assert not any((e.explained or "").startswith("attribution") for e in d.entries)
 
 
+STACKED = ('import flask\napp = flask.Flask("x")\n\n\n'
+           '@app.route("/post", methods=["POST"])\n'    # 5
+           '@app.route("/put", methods=["PUT"])\n'      # 6
+           'def manipulate():\n    return "ok"\n')      # 7
+OLD_DECO = "flask.sansio.scaffold.decorator"
+NEW_DECO = "flask.sansio.scaffold.Scaffold.route.<locals>.decorator"
+POST, PUT, DEF = '@app.route("/post", methods=["POST"])', '@app.route("/put", methods=["PUT"])', \
+    "def manipulate():"
+
+
+def applied(symbol, line, text, count=1, fn="app.manipulate"):
+    return fact(symbol, {"f": {"__callable__": fn}}, (("return", {"__callable__": fn}),),
+                func="<module>", line=line, text=text, count=count)
+
+
+def test_stacked_decorators_attributed_to_the_def_line_or_to_each_line_pair():
+    # 3.8-3.10: both applications on the def line (one fact, count 2); 3.11+: one per @ line.
+    py38 = [applied(OLD_DECO, 7, DEF, count=2)]
+    py312 = [applied(NEW_DECO, 5, POST), applied(NEW_DECO, 6, PUT)]
+    for old, new in ((py38, py312), (py312, py38)):
+        d = diff_facts(fs(*old, backends=("setprofile",)), fs(*new), context=ctx_for(STACKED))
+        assert not failing(d), [(e.category, e.symbol, e.notes) for e in d.entries]
+        (e,) = d.entries
+        assert e.category is FactCategory.EQUAL and "attribution-moved" in e.notes
+        assert e.explained.startswith("attribution") and "stacked" in e.explained
+
+
+def test_stacked_decorators_with_one_name_on_both_versions_pair():
+    # A module-level decorator function: no closure, so both versions name it alike.
+    old = fs(applied("lib.register", 7, DEF, count=2), backends=("setprofile",))
+    new = fs(applied("lib.register", 5, POST), applied("lib.register", 6, PUT))
+    d = diff_facts(old, new, context=ctx_for(STACKED))
+    assert not failing(d), [(e.category, e.symbol, e.notes) for e in d.entries]
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and "attribution-moved" in e.notes
+
+
+def test_stacked_pairing_needs_one_name_per_side():
+    other = "flask.sansio.scaffold.Scaffold.get.<locals>.decorator"
+    old = fs(applied(OLD_DECO, 7, DEF, count=2), backends=("setprofile",))
+    new = fs(applied(NEW_DECO, 5, POST), applied(other, 6, PUT))
+    d = diff_facts(old, new, context=ctx_for(STACKED))
+    assert not any("attribution-moved" in e.notes for e in d.entries)
+    assert [e.category for e in failing(d)] == [FactCategory.DISAPPEARED]
+
+
+def test_stacked_pairing_needs_as_many_calls_on_each_side():
+    old = fs(applied(OLD_DECO, 7, DEF, count=3), backends=("setprofile",))
+    new = fs(applied(NEW_DECO, 5, POST), applied(NEW_DECO, 6, PUT))
+    d = diff_facts(old, new, context=ctx_for(STACKED))
+    assert not any("stacked-decorators" in e.notes for e in d.entries)
+    assert d.verdict is not VerificationVerdict.PASS
+
+
+def test_stacked_pairing_needs_one_decorated_statement():
+    # The same input on the @ line of another decorated statement forty lines further down.
+    src = STACKED + "\n" * 38 + '@app.route("/again")\ndef again():\n    pass\n'
+    far = src.splitlines().index('@app.route("/again")') + 1
+    old = fs(applied(OLD_DECO, 7, DEF, count=2), backends=("setprofile",))
+    new = fs(applied(NEW_DECO, 5, POST), applied(NEW_DECO, far, '@app.route("/again")'))
+    d = diff_facts(old, new, context=ctx_for(src))
+    assert not any("attribution-moved" in e.notes for e in d.entries)
+    assert [e.category for e in failing(d)] == [FactCategory.DISAPPEARED]
+
+
 WITH_SRC = "def main(s):\n    with s.get('/') as r:\n        r.read()\n"
 
 
