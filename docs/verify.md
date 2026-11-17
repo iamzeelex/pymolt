@@ -38,6 +38,14 @@ For every call from your code into an installed dependency:
   3.6–3.11) a capture records that a call raised, not what it raised;
 - the duration and the thread.
 
+A function written in C or Cython has no Python frame. pymolt records the call and whether it
+raised, but not its result, and its arguments are not compared. Below 3.12 the public Cython
+functions of dependency modules are wrapped, so their arguments and results are recorded in full.
+
+When setup's base and target Python differ, captures also record calls into every standard-library
+module your project imports, less a short noise list (`--stdlib` changes the list). The test runner
+is never recorded.
+
 Values are rendered at the most exact level that can be compared:
 - scalars and containers as they are;
 - datetimes, decimals, UUIDs, enums, classes and dataclasses canonically;
@@ -86,10 +94,23 @@ then compares the two sides.
 | Category | Meaning | Fails? |
 |---|---|---|
 | CHANGED | same call, different outcome | yes |
-| DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes |
-| REWRITTEN | the call site's code changed between captures; old and new calls are compared by outcome | only if the outcome differs |
-| DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default | no, reported |
+| DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes, unless the name no longer refers to a dependency there or the function never ran (then inconclusive) |
+| REWRITTEN | the call site's line was edited; the call is compared with the one that replaced it | see [Edited lines](#edited-lines) |
+| DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view) | no, reported |
 | UNCOMPARABLE | the outcome could not be compared (e.g. its distribution was not recorded) | makes the verdict inconclusive |
+
+### Edited lines
+
+A line diff of the source each capture stored decides who edited a call's line:
+- **unedited**: compared strictly, as above;
+- **edited by `pymolt apply`** (its ledger records each edit): strict. The plan claimed a drop-in
+  replacement, so any different outcome fails;
+- **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
+  symbol from the plan, or by a one-statement edit. An equal outcome is REWRITTEN equal. A
+  different value is a review item, which makes the verdict inconclusive. A new raise fails. A
+  call with no partner is counted as an unverified edited site; it does not block PASS.
+
+The report prints the edited sites as equal, representation-only, need review and unverified.
 
 Each comparison states its level:
 - `exact`: the values were compared;
@@ -123,9 +144,10 @@ or dropped events, skipped instrumentation, or ran partly untraced, or if the tw
 commands, targets, modes, privacy profiles or sampling rates, the verdict is INCONCLUSIVE, even
 when facts changed. Sampled captures must also have complete call counts.
 
-- **FAIL**: a compared fact failed, or a sandbox replay, golden snapshot or canary gate failed.
+- **FAIL**: a compared fact failed anywhere in the recording, or a sandbox replay, golden snapshot
+  or canary gate failed.
 - **PASS** requires all of the following:
-  - no fact failed, and none was uncomparable;
+  - no fact failed, none was uncomparable, and no edited site needs review;
   - no static symbol is BLIND, of any contact kind (attribute reads and constants included);
   - every dynamic-only symbol had all its facts compared equal.
 - **INCONCLUSIVE**: anything else. The reasons name the missing evidence, for example "1 static
@@ -133,11 +155,14 @@ when facts changed. Sampled captures must also have complete call counts.
 
 ### Scope after `apply`
 
-When the post-migration code came from `pymolt apply`, the verdict covers only the calls into the
-API paths the plan found changed. The report prints this as *Impact focus* with the full surface
-next to it. The counts, trust, BLIND and the fact diff the verdict reads are narrowed to that
-set. The whole surface stays in the report (`all_fact_diff`, `all_blind`, …), but a change outside
-the set does not fail the verdict. Without an applied plan, the verdict covers every recorded call.
+When the post-migration code came from `pymolt apply`, coverage is narrowed to the API paths the
+plan found changed. The report prints this as *Impact focus* with the full surface next to it.
+- **Narrowed:** the static symbols, confirmed, BLIND, dynamic-only and trust. A symbol outside the
+  plan's paths that no run exercised does not block PASS.
+- **Not narrowed:** FAIL. A behaviour change in any recorded call fails the verdict. The report
+  lists the ones outside the plan's paths as changes outside the plan's predicted impacts.
+
+Without an applied plan, coverage counts every static symbol.
 
 ### Predicted risks
 
