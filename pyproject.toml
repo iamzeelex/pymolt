@@ -81,7 +81,7 @@ packages = ["pymolt"]
 [tool.hatch.build.targets.sdist]
 # Keep the sdist to the installable package only. Everything else here (bench/,
 # docs/, integrations/, plugin/, services/axiom_graph — repo-internal services and tooling per
-# EDITIONS.md — tests/, install.sh, tox.ini, uv.lock, requirements-target.txt) is
+# EDITIONS.md — tests/, install.sh, tox.ini, uv.lock) is
 # repo-only tooling/content, not part of the `pymolt` distribution.
 include = [
     "/pymolt",
