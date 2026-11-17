@@ -337,3 +337,17 @@ def test_backend_unobservable_raises_have_their_own_reason():
     reasons = _fact_diff_reasons(diff)
     assert any("could not record them" in r for r in reasons)
     assert not any("lost their outcome distribution" in r for r in reasons)
+
+
+def test_capped_and_shape_mismatched_facts_have_their_own_reasons():
+    diff = {"verdict": "inconclusive", "counts": {"uncomparable": 3}, "entries": [
+        {"category": "uncomparable", "comparison": "missing", "symbol": "lib.codec_b",
+         "notes": ["c-site-capped:new"]},
+        {"category": "uncomparable", "comparison": "missing", "symbol": "msgpack.unpackb",
+         "notes": ["call-shape:new"]},
+        {"category": "uncomparable", "comparison": "missing", "symbol": "msgpack.unpackb",
+         "notes": ["c-site-capped:new", "call-shape:new"]}]}
+    reasons = _fact_diff_reasons(diff)
+    assert any(r.startswith("2 call fact(s) are missing at compiled-call sites") for r in reasons)
+    assert any(r.startswith("1 call fact(s) were recorded as compiled calls") for r in reasons)
+    assert not any("lost their outcome distribution" in r for r in reasons)

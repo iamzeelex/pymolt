@@ -43,6 +43,8 @@ RULES = {
     "attribution": "facts._pair_qualname_equivalent / same-call relabel",
     "backend": "facts._soften_backend",
     "possibly-dropped": "facts._soften_dropped / _group_entries (lost producer)",
+    "c-site-capped": "facts._soften_capped (compiled calls counted past the per-site cap)",
+    "call-shape": "facts._soften_capped (compiled call vs call with inputs)",
     "implicit": "facts._apply_noise",
     "unmeasured-noise": "facts._gate_unmeasured",
     "replicate": "replicate.apply_noise_profile",

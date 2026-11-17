@@ -91,6 +91,16 @@ Round 1's results are in `bench/generalization` runs under the session scratchpa
 ### Runtime (R1a)
 - **Inherited stdlib methods on dependency objects:** a near call into stdlib code whose receiver is an instance of a target type is a dependency call named by the receiver type, for example `urllib3._collections.HTTPHeaderDict.get`.
 - **Setprofile cannot see Cython functions** (no `c_call` for `cython_function_or_method`). Below 3.12, `CompiledWrap` wraps compiled dependency modules' public callables instead.
+  - **So the two backends record a Cython call in different shapes.** A 3.6–3.11 side has a wrapped call with its inputs and result. A 3.12+ side has a `__c_call__` event: `arg0` only, result `unobserved:c-return`. sys.monitoring sees the Cython function natively, so nothing wraps it there.
+  - The host pairs one wrapped fact with the compiled-call fact at the same symbol and site. The other wrapped facts there cannot pair by input: they are UNCOMPARABLE `call-shape:<side>`, never DISAPPEARED. Locust: 3,292 `msgpack._cmsgpack.unpackb` facts at `locust/rpc/protocol.py:18`.
+  - **Open:** wrapping Cython under sys.monitoring too would let both sides record inputs and results, so these calls would compare by value. It changes how every 3.12 capture records compiled dependencies (pandas, SQLAlchemy and PyYAML in this matrix), so it needs its own evaluation.
+- **Per-site cap on compiled calls.** The first 2,000 calls of a compiled callable at one site are recorded. Later calls are counted, not recorded.
+  - Each process's sidecar states this in `c_site_cap`: the muted calls, and the capped sites with their counts (at most 1,000 sites, the most muted first). The account is always written, so a sidecar without one comes from an older runtime.
+  - setprofile counts exactly, since it sees every C call anyway. sys.monitoring keeps a capped site firing only to count it (about 1 µs per call). After 1,000,000 muted calls it stops the site, and that count becomes a lower bound (`exact: false`).
+  - The cap key differs: setprofile caps per symbol and line, sys.monitoring per call instruction. A polymorphic site under sys.monitoring can therefore mute a second callable entirely. The account lists it by symbol.
+  - The host marks a fact missing at a capped site as UNCOMPARABLE `c-site-capped:<side>`, never DISAPPEARED or APPEARED. So is an outcome missing only on the capped side of the same compiled call. A pair whose inputs differ is never softened.
+  - An older one-process trace with a compiled-call site that holds 2,000 calls is presumed capped there: the whole site under sys.monitoring, and that symbol under setprofile. Nothing is inferred across processes, since their calls add up without any of them reaching the cap.
+  - The runtime's own modules (`_rawthreads` included) are never the project's code. Before this, sys.monitoring recorded the JSONL writer's `deque.popleft`, and two of locust's three capped sites were the tracer itself.
 - **Open:** a warning raised by a C method itself (`datetime.utcnow`, `Element.getchildren`) is observed but not attributed to the `__c_call__` fact. The wiring is designed (R1b's report) and waits on the owner.
 
 ### Host (H)

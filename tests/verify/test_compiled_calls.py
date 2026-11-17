@@ -453,6 +453,60 @@ def test_a_hot_loop_of_compiled_calls_is_witnessed_not_replayed(cls):
     assert sum(r["count"] for r in recs) == 2000        # _C_SITE_MAX at that line
 
 
+def _hot_loop(cls, n, targets=("collections",), **kw):
+    import collections
+
+    d = collections.deque(range(5))
+    be = cls(PrefixMatcher(list(targets)), MemorySink(), source=__name__, **kw)
+    be.start()
+    try:
+        for _ in range(n):
+            d.append(d.popleft())
+    finally:
+        be.stop()
+    return be
+
+
+@pytest.mark.parametrize("cls", BACKENDS)
+def test_compiled_calls_past_the_site_cap_are_counted_and_their_site_reported(cls):
+    be = _hot_loop(cls, 3000)
+    acct = be.c_cap_account()
+    assert acct["max"] == 2000 and acct["exact"] is True
+    assert acct["muted"] == 2 * 1000            # popleft and append, 1,000 each past the cap
+    assert acct["sites_omitted"] == 0 and acct["unsited"] == 0
+    by_sym = dict((s["sym"], s) for s in acct["sites"])
+    site = by_sym["collections.deque.popleft"]
+    assert site["muted"] == 1000 and site["exact"] is True
+    assert site["file"] == __file__ and site["func"] == "_hot_loop"
+    assert isinstance(site["line"], int)
+
+
+@pytest.mark.parametrize("cls", BACKENDS)
+def test_no_account_when_no_site_reached_the_cap(cls):
+    assert _hot_loop(cls, 10).c_cap_account() is None
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", ["discover", "incremental"])
+def test_monitoring_stops_counting_a_site_after_the_mute_bound(monkeypatch, mode):
+    import pymolt.verify._monitoring as mon
+
+    monkeypatch.setattr(mon, "_C_MUTE_MAX", 50)
+    be = _hot_loop(MonitoringBackend, 3000, mode=mode)
+    acct = be.c_cap_account()
+    site = dict((s["sym"], s) for s in acct["sites"])["collections.deque.popleft"]
+    assert site["muted"] >= 50 and site["exact"] is False       # a lower bound from here
+    assert acct["exact"] is False
+
+
+@pytest.mark.parametrize("cls", BACKENDS)
+def test_a_forked_child_starts_a_fresh_cap_account(cls):
+    be = _hot_loop(cls, 2500)
+    assert be.c_cap_account()["muted"] == 1000
+    be.after_fork_child()
+    assert be.c_cap_account() is None and be._ccount == {}
+
+
 def test_bound_builtin_methods_are_decided_once_per_owner_class():
     import collections
 

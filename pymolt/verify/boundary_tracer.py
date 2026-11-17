@@ -85,6 +85,7 @@ import time
 from . import _normalize as _nz
 from . import _sinks
 from ._backend import (
+    _C_SITE_MAX,
     HAS_MONITORING,
     AnyMatcher,
     PrefixMatcher,
@@ -207,6 +208,11 @@ def _partition(impact_targets):
     return _partition_impact_targets(impact_targets)
 
 
+def _empty_c_cap():
+    return {"max": _C_SITE_MAX, "muted": 0, "exact": True, "sites": [], "sites_omitted": 0,
+            "unsited": 0}
+
+
 class Controller(object):
     """Mode B backend driver: ``discover``, ``watch``, ``incremental`` or ``auto``.
 
@@ -314,7 +320,45 @@ class Controller(object):
                 notes.append(note)
         if notes:
             meta["backend_notes"] = notes
+        cap = self._c_cap_account()
+        if cap is not None:
+            meta["c_site_cap"] = cap
         return meta
+
+    def _frame_backends(self):
+        """The frame backends (setprofile / sys.monitoring) this controller runs, once each,
+        including the profile half of a hybrid / targeted backend."""
+        out = []
+        for be in (self.discover, self.watch):
+            for b in (be, getattr(be, "sp", None), getattr(be, "profile", None)):
+                if b is not None and hasattr(b, "c_cap_account") \
+                        and not any(b is o for o in out):
+                    out.append(b)
+        return out
+
+    def _c_cap_account(self):
+        """The compiled-call cap's account over this process's frame backends (``c_site_cap``
+        in the sidecar): always written by a runtime that has one, so its absence means an
+        older runtime (unknown), and ``muted == 0`` means nothing went unrecorded. None when
+        no frame backend runs (a wrap backend records no compiled call by its own hook)."""
+        backends = self._frame_backends()
+        if not backends:
+            return None
+        merged = _empty_c_cap()
+        for be in backends:
+            try:
+                acct = be.c_cap_account()
+            except Exception:
+                merged["exact"] = False     # an account we could not read: not exact
+                continue
+            if not acct:
+                continue
+            merged["muted"] += acct["muted"]
+            merged["exact"] = merged["exact"] and acct["exact"]
+            merged["sites"].extend(acct["sites"])
+            merged["sites_omitted"] += acct["sites_omitted"]
+            merged["unsited"] += acct["unsited"]
+        return merged
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
     def _monitoring_family(self):
@@ -457,9 +501,17 @@ class Controller(object):
             pass  # the controller must never break the traced program
 
     def after_fork_child(self):
-        """Threads do not survive fork: restart the controller in the child if still discovering."""
+        """Threads do not survive fork: restart the controller in the child if still discovering.
+        The child's backends start a fresh compiled-call cap account (its own trace, sidecar
+        and per-site budget)."""
         self._lock = allocate_lock()
         self._wake = RawEvent()
+        for be in self._frame_backends():
+            try:
+                be.after_fork_child()
+            except Exception:
+                pass
+        self._note_c_cap()  # the sink's copied metadata still holds the parent's account
         if self._stopped:
             return
         if self.mode == "incremental" or (self.mode == "auto" and not self._switched):
@@ -544,6 +596,16 @@ class Controller(object):
                 pass
         if not self._switched or self.mode == "incremental":
             self._note_metadata(discovered=self.discovered)
+        else:
+            self._note_c_cap()  # the switch noted the rest; the cap kept counting
+
+    def _note_c_cap(self):
+        try:
+            cap = self._c_cap_account()
+            if cap is not None:
+                self.sink.set_metadata(c_site_cap=cap)
+        except Exception:
+            pass
 
 
 class Recorder(object):

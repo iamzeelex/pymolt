@@ -78,6 +78,7 @@ import time
 import types
 
 from ._backend import (
+    _C_MUTE_MAX,
     _C_SITE_MAX,
     _CODE_CACHE_MAX,
     _HEAPTYPE,
@@ -926,6 +927,8 @@ class MonitoringBackend(FrameBackend):
         ent = self._call_kind(callable_)
         kind = ent[1]
         key = (id(code), offset)
+        if kind == _K_C and self._ccount.get(key, 0) >= _C_SITE_MAX:
+            return self._c_over_cap(key, code, ent[2], None)   # the hot path of a capped site
         tid = stack_key()
         csym = None
         if kind == _K_NONE:
@@ -971,7 +974,8 @@ class MonitoringBackend(FrameBackend):
                 return True
         n = self._ccount.get(key, 0)
         if n >= _C_SITE_MAX:
-            return False        # a hot loop is witnessed, not replayed: this site stops here
+            # a hot loop is witnessed, not replayed: counted from here, never recorded
+            return self._c_over_cap(key, code, csym or ent[2], frame)
         if n == 0 and len(self._ccount) >= _CODE_CACHE_MAX:
             self._ccount.clear()
         self._ccount[key] = n + 1
@@ -984,6 +988,21 @@ class MonitoringBackend(FrameBackend):
             del stack[:]
         stack.append((callable_, code, offset, info))
         return True
+
+    def _c_over_cap(self, key, code, sym, frame):
+        """A compiled call past ``_C_SITE_MAX`` at its site (called from ``_observe_call``):
+        counted, not recorded. True keeps the site firing so the next one is counted too;
+        after ``_C_MUTE_MAX`` muted calls the site stops (False: ``DISABLE``) and its count
+        is a lower bound. A site's first muted call reads the caller frame for its location."""
+        mkey = (key, sym)
+        if frame is None and mkey not in self._cmuted:
+            frame = _getframe(3)    # _c_over_cap <- _observe_call <- _on_call <- caller
+            if frame.f_code is not code:
+                frame = _frame_of(code)
+        if self._c_mute(mkey, sym, frame) < _C_MUTE_MAX:
+            return True
+        self._c_mute_stopped(mkey)
+        return False
 
     def _on_c_return(self, code, offset, callable_, arg0):
         try:

@@ -242,3 +242,54 @@ def test_attached_capture_without_runtime_sidecar_keeps_loss_unknown(tmp_path):
     assert slot.backpressure_dropped is None
     assert slot.write_failures is None
     assert slot.sink_failures is None
+
+
+def test_a_capture_counts_compiled_calls_past_the_site_cap_and_lists_the_site(tmp_path):
+    """The locust ``msgpack.unpackb`` path end to end: a compiled call made 2,500 times from
+    one line records its first 2,000 and counts the rest; the sidecar lists the capped site
+    and the host reads it back onto the FactSet (no silent evidence drop)."""
+    from pymolt.verify.facts import load_facts
+
+    script = tmp_path / "hot.py"
+    script.write_text(
+        "import collections\n"
+        "d = collections.deque(range(5))\n"
+        "def spin():\n"
+        "    for _ in range(2500):\n"
+        "        d.rotate(1)\n"
+        "spin()\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "trace.jsonl"
+
+    result = service.capture_trace("collections", [sys.executable, str(script)], out, "auto")
+
+    records = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    assert sum(1 for r in records if r["q"] == "collections.deque.rotate") == 2000
+    metadata = json.loads(service.Path(result.metadata_path).read_text())
+    (process,) = metadata["processes"]
+    cap = process["c_site_cap"]
+    assert cap["max"] == 2000 and cap["muted"] == 500 and cap["exact"] is True
+    (site,) = cap["sites"]
+    assert site["sym"] == "collections.deque.rotate" and site["func"] == "spin"
+    assert site["line"] == 5 and site["muted"] == 500
+
+    fs = load_facts(out, root=tmp_path)
+    assert fs.c_cap_reported == 1 and fs.c_cap_unreported == 0 and fs.c_muted == 500
+    (capped,) = fs.c_capped
+    assert (capped.symbol, capped.file, capped.func, capped.line) == (
+        "collections.deque.rotate", "hot.py", "spin", 5)
+    (fact,) = [f for f in fs.facts if f.symbol == "collections.deque.rotate"]
+    assert capped.text == fact.text and capped.recorded == 2000 and fact.count == 2000
+
+
+def test_a_capture_with_no_capped_site_still_states_its_account(tmp_path):
+    """An account is always written, so its absence means an older runtime (unknown)."""
+    script = tmp_path / "cool.py"
+    script.write_text("import collections\ncollections.deque(range(3)).rotate(1)\n",
+                      encoding="utf-8")
+    out = tmp_path / "trace.jsonl"
+    result = service.capture_trace("collections", [sys.executable, str(script)], out, "auto")
+    (process,) = json.loads(service.Path(result.metadata_path).read_text())["processes"]
+    assert process["c_site_cap"] == {"max": 2000, "muted": 0, "exact": True, "sites": [],
+                                     "sites_omitted": 0, "unsited": 0}
