@@ -342,3 +342,32 @@ def test_plan_agent_prints_a_json_failure_when_the_resolver_fails(tmp_path, monk
     payload = json.loads(result.stdout)
     assert payload["ok"] is False and "does not resolve" in payload["error"]
     assert "Culprit(s): x" in payload["hint"]
+
+
+def test_apply_lists_what_the_plan_leaves_to_a_person(tmp_path, monkeypatch):
+    from pymolt.codemods.rules import RuleAdvisory
+
+    _configured_project(tmp_path)
+    source_path, original = _mock_plan_services(tmp_path, monkeypatch)
+    caveat = RuleAdvisory(line=1, column=0, site_kind="precondition", severity="precondition",
+                          reason="safe_join now raises on absolute paths")
+    skipped = RuleAdvisory(line=7, column=4, site_kind="return", severity="not-applied",
+                           reason="call is the return value; not auto-rewritable")
+    preview = FilePreview(path=str(source_path), old_source=original,
+                          new_source="from werkzeug.utils import safe_join\n", sites=1,
+                          advisories=[caveat, skipped])
+    monkeypatch.setattr(codemod_service, "preview_codemods",
+                        lambda *a, **k: ({"flask": []}, [preview]))
+    assert runner.invoke(app, ["plan", str(tmp_path)]).exit_code == 0
+
+    text = runner.invoke(app, ["apply", str(tmp_path)])
+    as_json = runner.invoke(app, ["apply", str(tmp_path), "--json"])
+
+    assert text.exit_code == 0, text.output
+    assert "Left to you" in text.output
+    assert "app.py:1 — [caveat] safe_join now raises" in text.output
+    assert "app.py:7 — [not applied] call is the return value" in " ".join(text.output.split())
+    payload = json.loads(as_json.stdout)
+    assert [(a["path"], a["line"], a["severity"]) for a in payload["advisories"]] == [
+        ("app.py", 1, "precondition"), ("app.py", 7, "not-applied")]
+    assert payload["manual"] == []
