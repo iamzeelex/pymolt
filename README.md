@@ -96,7 +96,7 @@ Where pymolt cannot help yet:
 - **Behaviour changes.** `apply` rewrites moved and renamed APIs and Python-version breakage. A behaviour change, like `DataFrame.mean` above, is reported; fixing it is up to you.
 - **Code no run exercises.** It is not checked: its symbols are BLIND and the verdict stays INCONCLUSIVE. After `apply`, BLIND counts only the APIs the plan found changed, so an unexercised symbol elsewhere does not block PASS.
 - **Differences it cannot judge alone.** These are review items, and the verdict is INCONCLUSIVE: a new value after your hand edit; a value that varies between runs, when the baseline was not captured with `--runs 2`; an environment difference between the two captures.
-- **Exception types on 3.6–3.11 test suites.** A call that raised is recorded without its exception type.
+- **Some exception types on 3.6–3.11 test suites.** A raise that your code handles without any call (`except ValueError: pass`), or that C code swallows (`hasattr`, a `for` loop's `StopIteration`), is recorded without its type.
 - **Compiled calls.** A C function is recorded without its result, and its arguments are not compared.
 - **Late contacts in long runs (3.12+).** A dunder, property or generator call first made more than 30 s after the last new contact is missed.
 - **Overhead.** Capture slows a test suite on Python 3.6 by 2.7–11.8×.

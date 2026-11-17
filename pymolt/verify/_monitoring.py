@@ -116,11 +116,11 @@ from ._backend import (
     install_warning_capture,
     is_compiled_callable,
     never_target,
+    raised_label,
     remove_warning_capture,
     same_c_callable,
 )
 from ._identity import _wrapped_of
-from ._normalize import typename
 from ._rawthreads import allocate_lock, stack_key
 from ._wrap import _WRAP_MARK, _WRAPPER_CODES, _partition_impact_targets, _WrapFinder
 
@@ -273,14 +273,6 @@ def _frame_of(code):
             return frame
         frame = frame.f_back
     return None
-
-
-def raised_label(exc):
-    """The exception type as ``module.Qualname`` (builtins bare, like every type label)."""
-    try:
-        return typename(exc)
-    except Exception:
-        return "<unknown>"
 
 
 # ── impact target -> code objects ────────────────────────────────────────────
