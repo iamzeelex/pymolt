@@ -39,6 +39,7 @@ _FILES = (
     "probe_contexts",
     "stdlib_changes",
     "stdlib_lifetimes",
+    "environment_readers",
 )
 
 
@@ -260,6 +261,23 @@ def stdlib_lifetimes() -> dict[str, Any]:
     except ValueError as exc:
         raise KnowledgeError(f"stdlib_lifetimes.json: {exc}") from exc
     return data
+
+
+class EnvironmentReaderEntry(_Entry):
+    """Calls whose outcome depends on an aspect of the runtime environment (verify reviews a
+    difference there when that aspect differs between the captures)."""
+
+    aspects: list[str]
+    symbols: list[str]                       # fnmatch patterns over the dependency symbol
+    readings: dict[str, str] = Field(default_factory=dict)  # symbol -> recorded reading
+    when: Literal["port<1024"] | None = None
+
+
+@cache
+def environment_readers() -> tuple[EnvironmentReaderEntry, ...]:
+    """The curated environment readers, validated."""
+    return tuple(EnvironmentReaderEntry.model_validate(e)
+                 for e in _load("environment_readers")["entries"])
 
 
 @cache

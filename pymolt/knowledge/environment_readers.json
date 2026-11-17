@@ -1,0 +1,99 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "version": "2026-11-16",
+  "description": "Calls whose outcome depends on an aspect of the runtime environment (rlimits, privilege, OS, CPUs, UTC offset, encoding). verify judges a difference at one of them as a review when that aspect differs between the two captures (facts._judge_environment). Symbols are fnmatch patterns over the canonical dependency symbol. An unlisted reader stays strict: the safe direction.",
+  "entries": [
+    {
+      "id": "rlimit-readers",
+      "aspects": ["rlimit"],
+      "symbols": ["resource.*", "os.sysconf"],
+      "readings": {"resource.getrlimit": "rlimit"},
+      "source": "Python docs: resource module, os.sysconf (limits are per process and per platform)",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "privilege-readers",
+      "aspects": ["privilege"],
+      "symbols": ["resource.setrlimit", "resource.prlimit", "os.set*id", "os.setgroups",
+                  "os.chown", "os.lchown", "os.fchown", "os.chroot", "os.nice", "os.get*id",
+                  "os.getgroups", "os.getlogin", "getpass.getuser", "pwd.*", "grp.*",
+                  "psutil.*"],
+      "readings": {"os.getuid": "uid", "os.geteuid": "euid"},
+      "source": "POSIX: raising a hard rlimit needs CAP_SYS_RESOURCE; uid/gid calls need privilege; pymolt locust pilot (root in Docker without CAP_SYS_RESOURCE vs a macOS user)",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "privileged-bind",
+      "aspects": ["privilege"],
+      "symbols": ["socket.socket.bind"],
+      "when": "port<1024",
+      "source": "POSIX: binding a port below 1024 needs privilege (CAP_NET_BIND_SERVICE)",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "os-readers",
+      "aspects": ["os", "release", "machine"],
+      "symbols": ["platform.system", "platform.machine", "platform.release",
+                  "platform.version", "platform.platform", "platform.uname",
+                  "platform.processor", "platform.architecture", "platform.mac_ver",
+                  "platform.win32_ver", "platform.win32_edition", "platform.libc_ver",
+                  "platform.freedesktop_os_release", "os.uname", "psutil.*", "sysconfig.get_platform",
+                  "ssl.get_default_verify_paths", "ctypes.util.find_library",
+                  "shutil.disk_usage", "os.statvfs", "os.getloadavg", "select.epoll",
+                  "select.kqueue", "select.poll", "os.sched_*"],
+      "readings": {"platform.system": "system", "platform.machine": "machine",
+                   "platform.release": "release"},
+      "source": "Python docs: platform, os, select, ssl (results differ by OS, kernel release and architecture); mimetypes is left out: its tables also change between Python versions (3.12: .js is text/javascript); platform.python_* are left out: they read the Python version, which is the migration itself",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "container-readers",
+      "aspects": ["container"],
+      "symbols": ["psutil.*", "shutil.disk_usage", "os.statvfs", "os.sched_getaffinity",
+                  "os.cpu_count", "multiprocessing.cpu_count", "socket.gethostname",
+                  "socket.getfqdn", "platform.node"],
+      "source": "A container limits CPUs, memory and the filesystem, and names the host by its id",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "cpu-readers",
+      "aspects": ["cpus"],
+      "symbols": ["os.cpu_count", "multiprocessing.cpu_count", "psutil.cpu_count",
+                  "os.sched_getaffinity", "psutil.Process.cpu_affinity"],
+      "readings": {"os.cpu_count": "cpus", "multiprocessing.cpu_count": "cpus",
+                   "psutil.cpu_count": "cpus"},
+      "source": "Python docs: os.cpu_count, multiprocessing.cpu_count",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "utc-offset-readers",
+      "aspects": ["utc_offset"],
+      "symbols": ["time.localtime", "time.mktime", "time.strftime", "time.ctime",
+                  "time.asctime", "datetime.datetime.now", "datetime.datetime.fromtimestamp",
+                  "datetime.datetime.astimezone", "datetime.date.today",
+                  "email.utils.formatdate", "email.utils.localtime"],
+      "source": "Python docs: time, datetime (naive local time follows the process's time zone)",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "tmpdir-readers",
+      "aspects": ["tmpdir"],
+      "symbols": ["tempfile.gettempdir", "tempfile.gettempdirb", "tempfile.mkdtemp",
+                  "tempfile.mkstemp", "tempfile.NamedTemporaryFile",
+                  "tempfile.TemporaryDirectory", "tempfile.TemporaryDirectory.__init__"],
+      "source": "Python docs: tempfile (TMPDIR, TEMP, TMP decide the directory)",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "encoding-readers",
+      "aspects": ["encoding"],
+      "symbols": ["locale.getlocale", "locale.getdefaultlocale", "locale.getpreferredencoding",
+                  "locale.getencoding", "locale.setlocale", "locale.localeconv",
+                  "locale.nl_langinfo", "_locale.setlocale", "_locale.localeconv",
+                  "_locale.nl_langinfo", "_locale.getencoding", "sys.getfilesystemencoding",
+                  "os.fsencode", "os.fsdecode"],
+      "source": "Python docs: locale (the getters and setters of the process locale only; formatting helpers such as locale.format_string also change with the Python version), sys.getfilesystemencoding, PEP 540 (UTF-8 mode)",
+      "date": "2026-11-16"
+    }
+  ]
+}
