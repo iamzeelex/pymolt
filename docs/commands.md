@@ -64,6 +64,8 @@ before any code change, because it cannot be recreated later. Details are in
 | `--privacy` | `auto` (values for tests, shape otherwise), `values` or `shape` |
 | `--sample-rate` | Fraction of calls whose values are kept; every call is still counted |
 | `--impact-targets` | Dependency symbols to focus on (post-migration default: the applied plan's) |
+| `--replicate` | Baseline only: run the baseline's command again on the same code and environment, to measure run-to-run noise (no command needed) |
+| `--runs 2` | Baseline only: record the baseline and then its replicate. Not with `--json`, `--agent` or `--mode attach` |
 | `--accept-failing` | Keep a capture whose command exited non-zero, stamped red |
 | `--force` | Replace an existing capture without asking |
 | `--deployment-id`, `--request-id`, `--correlation-id` | Identifiers stored with the capture |
@@ -96,7 +98,7 @@ the evidence. Details are in [verify.md](verify.md).
 
 | Option | Meaning |
 |---|---|
-| `--baseline`, `--post-migration` | Use other recordings instead of the captured ones (the result is not saved) |
+| `--baseline`, `--post-migration` | Compare other recordings. Against another baseline the verdict is not saved. On another post-migration recording it is saved with what it compared, and `status` does not count it |
 | `--profile`, `--comparator` | How values are compared: `exact`, `shape`, or `custom` with `module:callable` |
 | `--probe-python` | A target interpreter to replay the recorded calls in |
 | `--golden-before`, `--golden-after` | Golden snapshots from before and after |
@@ -106,7 +108,9 @@ the evidence. Details are in [verify.md](verify.md).
 
 ### `pymolt rollback [dir]`
 Restores the files the last `apply` changed. It refuses to discard edits made after the apply unless
-given `--force`. `--run-id` picks an earlier apply.
+given `--force`. `--run-id` picks an earlier apply. When it restored files, the post-migration
+capture is set aside in the archive. When it restored none, the capture still describes the code
+and is kept.
 
 ## Tools
 

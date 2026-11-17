@@ -57,7 +57,7 @@ pymolt verify .
 |---|---|
 | `setup` | Chooses the manifest, the resolution tool and the base and target Python. Writes `.pymolt/env_config.json`. |
 | `assess` | Resolves the dependencies under the target Python. Writes `requirements-target.txt`. |
-| `capture baseline` | Runs the command and records the calls. Run it before any code change: it cannot be recreated afterwards. |
+| `capture baseline` | Runs the command and records the calls. Run it before any code change: it cannot be recreated afterwards. With `--runs 2` it runs twice, to measure what varies between runs. |
 | `plan` | Lists the API changes your code uses, the rewrites and the predicted risks. Writes no source. |
 | `apply` | Writes the plan's rewrites. `pymolt rollback .` undoes them. |
 | `capture post-migration` | Runs the same command in the target environment. |
@@ -76,7 +76,7 @@ Every option is in [docs/commands.md](docs/commands.md).
 |---|---|---|
 | `FAIL` | A recorded call now has a different outcome (CHANGED), no longer happens (DISAPPEARED), or is new (APPEARED). | 1 |
 | `PASS` | Every recorded call has the same outcome, and the runs exercised every dependency symbol your code uses. | 0 |
-| `INCONCLUSIVE` | The captures, or some recorded values, cannot be compared (different command, dropped events, stale environment), or the runs left a dependency symbol unexercised (BLIND). The report names what is missing. | 4 |
+| `INCONCLUSIVE` | pymolt cannot decide on its own. The captures, or some recorded values, cannot be compared (different command, dropped events, stale environment); the runs left a dependency symbol unexercised (BLIND); or a difference needs a person's review. The report names what is missing and what settles each review item. | 4 |
 
 - A call on an edited line (REWRITTEN) is compared with the call that replaced it. If `pymolt apply` made the edit, any different outcome fails. If you made it, a different value is a review item (INCONCLUSIVE), and only a new exception fails.
 - DRIFT (a parameter the call leaves at its default was added or removed) is reported and does not fail.
@@ -91,14 +91,17 @@ The rules are in [docs/verify.md](docs/verify.md).
 
 ## Limits
 
-- After `apply`, BLIND symbols and trust count only the APIs the plan found changed, so a symbol outside them that the run never exercised does not block PASS. A behaviour change in any recorded call still fails.
-- A call is compared only if the run exercises it.
-- On 3.6–3.11, a test-suite capture records that a call raised, not the exception type.
-- A dependency function written in C is recorded without its result, and its arguments are not compared.
-- `assess` checks that the target resolves, not that it builds or imports.
-- Capture slows a test suite on Python 3.6 by 2.7–11.8×.
+Where pymolt cannot help yet:
+- **Targets that do not build or import.** `assess` checks that the target resolves, not that it builds or imports. If it does not import, there is no post-migration capture and nothing to compare. All six legacy projects we tried (Python 3.6 → 3.12) stop here today.
+- **Behaviour changes.** `apply` rewrites moved and renamed APIs and Python-version breakage. A behaviour change, like `DataFrame.mean` above, is reported; fixing it is up to you.
+- **Code no run exercises.** It is not checked: its symbols are BLIND and the verdict stays INCONCLUSIVE. After `apply`, BLIND counts only the APIs the plan found changed, so an unexercised symbol elsewhere does not block PASS.
+- **Differences it cannot judge alone.** These are review items, and the verdict is INCONCLUSIVE: a new value after your hand edit; a value that varies between runs, when the baseline was not captured with `--runs 2`; an environment difference between the two captures.
+- **Exception types on 3.6–3.11 test suites.** A call that raised is recorded without its exception type.
+- **Compiled calls.** A C function is recorded without its result, and its arguments are not compared.
+- **Late contacts in long runs (3.12+).** A dunder, property or generator call first made more than 30 s after the last new contact is missed.
+- **Overhead.** Capture slows a test suite on Python 3.6 by 2.7–11.8×.
 
-The full list, the measured overhead and the state of the legacy-project trials are in [docs/limits.md](docs/limits.md).
+The full list, the measured overhead and where pymolt was tried are in [docs/limits.md](docs/limits.md).
 
 ## Agents and CI
 
