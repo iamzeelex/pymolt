@@ -470,6 +470,17 @@ _STDLIB_NOT_TRACED = frozenset({
     "builtins",    # the interpreter's own names; they are never "imported" behaviour
     "warnings",    # the runtime's warning observer already records them; tracing the call
                    # would record the recorder
+    # Modules gevent / eventlet monkeypatch, or the runtime itself relies on: tracing them
+    # puts the recorder on the primitives it is built on (the writer, its locks, the clock).
+    "threading", "_thread", "socket", "ssl", "select", "selectors", "signal", "time",
+    "queue", "subprocess", "os", "sys", "gc", "atexit", "io", "weakref",
+    # Pervasive infrastructure: its calls dominate the event volume (every log line, every
+    # decorator, every context manager), while what a Python move breaks in it is spelled
+    # module-first (``inspect.getargspec``), so the static delta finds it. Not ``importlib``:
+    # its breakage sits on loader and finder objects (``SourceFileLoader(...).load_module()``),
+    # which only the trace can name.
+    "logging", "traceback", "types", "functools", "operator", "itertools", "copy",
+    "contextlib", "inspect",
 })
 _IMPORT_LINE = re.compile(
     r"^\s*(?:import\s+([\w., \t]+?)\s*(?:[#;].*)?$|from\s+([A-Za-z_]\w*)[\w.]*\s+import\b)")
