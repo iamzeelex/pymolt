@@ -452,7 +452,10 @@ def test_json_form_is_stable_and_self_describing(tmp_path):
     for doc in (first, second):  # first_seen differs; only the summaries mention sources
         doc.pop("old"), doc.pop("new")
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
-    assert first["schema"] == "pymolt.fact-diff/1" and first["verdict"] == "fail"
+    # /2 (verify noise, reporting): the ``summary`` of findings comes first; entries follow
+    assert first["schema"] == "pymolt.fact-diff/2" and first["verdict"] == "fail"
+    assert next(iter(k for k in first if k != "schema")) == "summary"
+    assert first["summary"]["failing"][0]["symbol"] in ("lib.f", "lib.g")
     assert [e["category"] for e in first["entries"]] == ["changed", "disappeared"]
     changed = first["entries"][0]
     assert changed["symbol"] == "lib.f" and changed["fails"] is True

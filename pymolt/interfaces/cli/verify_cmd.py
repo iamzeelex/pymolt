@@ -339,18 +339,43 @@ def _fmt_site(site: dict | None) -> str:
     return f"{where} {site.get('func')}()" if site.get("func") else where
 
 
+_MAX_ENTRY_ROWS = 50  # raw entry lines a table prints at most (the JSON has them all)
+
+
+def _render_fact_summary(fact_diff: dict | None, *, verbose: bool = False) -> None:
+    """Findings, not entries: the verdict with its reasons, failing findings, review items by
+    reason with the action that settles each; ``verbose`` adds what was explained away. An
+    older report without a summary falls back to the entry table."""
+    if not fact_diff:
+        return
+    summary = fact_diff.get("summary")
+    if not summary:
+        _render_fact_changes(fact_diff)
+        return
+    from pymolt.verify.fact_report import render_text
+
+    for line in render_text(summary, explained=verbose, max_lines=_MAX_ENTRY_ROWS):
+        style = ("bold red" if line.lstrip().startswith("✗") else
+                 "yellow" if line.startswith("Review") else
+                 "dim" if line.startswith(("Quality", "      ")) else None)
+        console.print(f"[{style}]{escape(line)}[/{style}]" if style else escape(line))
+
+
 def _render_fact_changes(fact_diff: dict | None,
                          title: str = "Behaviour diff — call facts that are not equal") -> None:
-    """Every non-equal call fact: what was called, where, and old -> new outcome."""
+    """Non-equal call facts (at most 50 rows): what was called, where, and old -> new."""
     if not fact_diff:
         return
     entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
     if not entries:
         return
+    total = len(entries)
     order = list(_FACT_LABEL)
     entries.sort(key=lambda e: (not e.get("fails"), order.index(e.get("category", "equal"))
                                 if e.get("category") in order else len(order)))
-    t = Table(title=f"{title} ({len(entries)})", header_style="bold")
+    entries = entries[:_MAX_ENTRY_ROWS]
+    shown = f"{len(entries)} of {total}" if total > len(entries) else str(total)
+    t = Table(title=f"{title} ({shown})", header_style="bold")
     t.add_column("Change", no_wrap=True)
     t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
     t.add_column("Call site (your code)", overflow="fold", ratio=2)
@@ -424,7 +449,7 @@ def _render_calibration(cal) -> None:
 
 
 
-def _render_contract_report(rep) -> None:
+def _render_contract_report(rep, *, verbose: bool = False) -> None:
     trust_pct = round(rep.trust * 100)
     border = {
         VerificationVerdict.PASS: "green",
@@ -491,7 +516,7 @@ def _render_contract_report(rep) -> None:
     if rep.verdict_reasons:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
-    _render_fact_changes(rep.fact_diff)
+    _render_fact_summary(rep.all_fact_diff or rep.fact_diff, verbose=verbose)
     if rep.unpredicted_changes:
         _render_fact_changes(
             {"entries": rep.unpredicted_changes},

@@ -982,6 +982,24 @@ def _calibration_data(lists: _Lists, calibration) -> dict[str, Any] | None:
 _CHANGE_CATEGORIES = ("changed", "disappeared", "appeared", "uncomparable", "rewritten")
 
 
+def _findings_data(summary: dict) -> dict:
+    """The fact diff's findings for an agent: failing findings (why each is not noise),
+    review reasons with the one action that settles each, and the explained mechanisms."""
+    def compact(f: dict) -> dict:
+        return {k: f[k] for k in ("symbol", "site", "entries", "change", "why", "explained")
+                if f.get(k) is not None}
+    return {
+        "ledger": summary.get("ledger"),
+        "failing": [compact(f) for f in (summary.get("failing") or [])[:20]],
+        "review": [{"reason": r["reason"], "entries": r["entries"], "action": r["action"],
+                    "sites": [compact(f) for f in r["findings"][:5]]}
+                   for r in summary.get("review") or []],
+        "explained": [{"mechanism": t["mechanism"], "entries": t["entries"]}
+                      for t in summary.get("explained") or []],
+        "quality": summary.get("quality"),
+    }
+
+
 def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | None) -> dict:
     """``UnifiedVerificationReport`` -> view.
 
@@ -1036,6 +1054,13 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
             if names:
                 data["changes"][category] = lists.fit(f"changes.{category}", names)
         data["change_counts"] = {k: v for k, v in (fact_diff.get("counts") or {}).items() if v}
+        summary = (rep.all_fact_diff or fact_diff).get("summary")
+        if summary:
+            data["findings"] = _findings_data(summary)
+            for f in data["findings"]["failing"][:3]:
+                lines.append(f"FAIL {f['symbol']} at {f['site']}: {f['why']}.")
+            for r in data["findings"]["review"]:
+                lines.append(f"REVIEW {r['entries']} {r['reason']}: {r['action']}.")
         counted = ", ".join(f"{k} {v}" for k, v in data["change_counts"].items())
         lines.append(f"Calls: {counted or 'nothing moved'}.")
         dropped = sum(v for k, v in lists.truncated.items() if k.startswith("changes."))

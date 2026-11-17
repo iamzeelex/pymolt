@@ -122,7 +122,7 @@ from pymolt.verify.models import BoundaryDiff, VerificationVerdict
 logger = logging.getLogger(__name__)
 
 SITE_TEXT_MAX = 240
-FACT_DIFF_SCHEMA = "pymolt.fact-diff/1"
+FACT_DIFF_SCHEMA = "pymolt.fact-diff/2"  # /2: ``summary`` (findings) first, capped values
 _ENTRY_OUTCOME_CAP = 20  # outcomes listed per entry side (a fact keeps all of them)
 
 # Keys whose presence makes a rendering comparable by type only.
@@ -339,6 +339,8 @@ class FactSet(BaseModel):
             snapshot=self.snapshot, calls=self.calls, evicted=self.evicted,
             widened=self.widened, outcomes_other=self.outcomes_other,
             tallies_complete=self.tallies_complete,
+            dropped_events=getattr(self, "dropped_events", None),
+            backends=list(self.backends),
         )
 
 
@@ -358,6 +360,8 @@ class TraceSummary(BaseModel):
     widened: int = 0
     outcomes_other: int = 0
     tallies_complete: bool = False
+    dropped_events: int | None = None   # events the runtime observed and lost (queue drops)
+    backends: list[str] = Field(default_factory=list)
 
 
 @dataclass
@@ -425,6 +429,12 @@ class FactEntry(BaseModel):
     # Run-to-run noise measured by a replicate capture: the difference is real but the baseline
     # itself varies there the same way. Neither failing nor inconclusive.
     noise: str | None = None
+    # The recorded values behind masked ones (None when no mask changed them): reporting shows
+    # both. Kept in memory only (the JSON entries carry the masked, compared values).
+    input_raw: Any = Field(default=None, exclude=True)
+    new_input_raw: Any = Field(default=None, exclude=True)
+    old_raw: list[Outcome] | None = Field(default=None, exclude=True)
+    new_raw: list[Outcome] | None = Field(default=None, exclude=True)
 
     @computed_field
     @property
@@ -464,6 +474,8 @@ class FactDiff(BaseModel):
     # was called, by a side that did not sample every call there: not compared, not failing.
     unsampled: int = 0
     no_ledger: bool = False  # edits were judged as hand edits: no apply ledger was available
+    # Run-to-run noise measured by a baseline replicate: what it covered (None: not measured).
+    noise_measured: dict[str, Any] | None = None
 
     def edited_sites(self) -> dict[str, int]:
         """Edited sites by outcome: equal / representation-only / need review / unverified
@@ -532,13 +544,16 @@ class FactDiff(BaseModel):
     def to_json_dict(self, *, include_equal: bool = False) -> dict[str, Any]:
         """Stable JSON form. Plain ``equal`` entries are omitted unless asked for; equal
         entries that carry notes (identity-changed, site-moved, ...) are always kept."""
+        from pymolt.verify.fact_report import cap_entry, summarize
+
         entries = [
-            e.model_dump(mode="json", exclude_none=True, exclude_defaults=False)
+            cap_entry(e.model_dump(mode="json", exclude_none=True, exclude_defaults=False))
             for e in self.entries
             if include_equal or e.category is not FactCategory.EQUAL or e.notes
         ]
         return {
             "schema": FACT_DIFF_SCHEMA,
+            "summary": summarize(self),
             "profile": self.profile.value,
             "verdict": self.verdict.value,
             "clean": self.is_clean(),
@@ -550,8 +565,15 @@ class FactDiff(BaseModel):
             "warnings": list(self.warnings),
             "old": self.old_summary.model_dump(mode="json"),
             "new": self.new_summary.model_dump(mode="json"),
+            "noise_measured": self.noise_measured,
             "entries": entries,
         }
+
+    def summary(self) -> dict[str, Any]:
+        """Findings, not entries (see ``fact_report.summarize``)."""
+        from pymolt.verify.fact_report import summarize
+
+        return summarize(self)
 
     def to_boundary_diff(self) -> BoundaryDiff:
         """Project onto today's ``BoundaryDiff`` so existing renderers/counters keep working.
@@ -4643,6 +4665,12 @@ def _site_entry(olds: list[_V], news: list[_V], category: FactCategory,
         new_count=sum(v.fact.count for v in news), notes=notes,
         old_where=of.where if of else None, new_where=nf.where if nf else None,
         explained=explained,
+        input_raw=_raw_of(so.fact).input if so is not None and _masks_of(so.fact) else None,
+        new_input_raw=_raw_of(sn.fact).input if sn is not None and _masks_of(sn.fact) else None,
+        old_raw=list(_raw_of(so.fact).outcomes) if so is not None and _masks_of(so.fact)
+        else None,
+        new_raw=list(_raw_of(sn.fact).outcomes) if sn is not None and _masks_of(sn.fact)
+        else None,
     )
 
 
@@ -5213,7 +5241,20 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         old_where=of.where, new_where=nf.where,
         old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
         explained=explained,
+        **_raw_samples(of, nf),
     )
+
+
+def _raw_samples(of: Fact, nf: Fact) -> dict[str, Any]:
+    """The recorded input and outcomes behind masked ones, for reporting (empty when no mask
+    changed either fact)."""
+    out: dict[str, Any] = {}
+    for side, f in (("old", of), ("new", nf)):
+        if _masks_of(f):
+            raw = _raw_of(f)
+            out[f"{side}_raw"] = list(raw.outcomes)
+            out["input_raw" if side == "old" else "new_input_raw"] = raw.input
+    return out
 
 
 def _explain_masked(of: Fact, nf: Fact, cmp: OutcomeComparison,
