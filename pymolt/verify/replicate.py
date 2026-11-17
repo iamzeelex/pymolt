@@ -79,10 +79,16 @@ from pymolt.verify.facts import (
 
 logger = logging.getLogger(__name__)
 
-NOISE_PROFILE_SCHEMA = "pymolt.noise-profile/3"   # /3: dict key order evidence
+NOISE_PROFILE_SCHEMA = "pymolt.noise-profile/4"   # /4: per-site call volume; groups = input
 ORDER = "order"
 EQUAL_ORDER = "equal@order"
 ORDER_CHANCE_MAX = 1 / 100
+# A difference seen in m of a side's n calls is "confirmed deterministic" only when the
+# baseline's two runs had enough calls at the site to have shown it as run noise: at the
+# observed rate they would show it RARE_EXPECTED_MIN times or more (absence then has a chance
+# of about e^-3 = 5%). Below that, a rare outcome (a greenlet killed mid-join in 1 of 76
+# calls) stays what the strict rules make it, without a determinism claim.
+RARE_EXPECTED_MIN = 3.0
 NOISE_PROFILE_PATH = Path(".pymolt") / "noise_profile.json"
 # Reviews that exist only because no replicate measured the noise: strict once confirmed.
 _STRICT_REVIEWS = (UNMEASURED_NOISE, INPUT_CHANGED, _MASKED_INPUT_REVIEW.split(":")[0])
@@ -125,7 +131,11 @@ def evidence(e: FactEntry) -> tuple[set[str], set[str]]:
     if e.comparison is Comparison.EQUAL or not changed:
         return set(), {f"equal@{cls}"}
     if any(n.startswith(_GROUP_NOTES) for n in e.notes):
-        return {"group"}, set()
+        # A site whose calls carried inputs that never recur between the two sides IS input
+        # variation: the same evidence as an input-changed pair (which pairing a site gets
+        # depends only on whether its call counts happen to match). A group that fails (a
+        # type change over the whole site) is its own class, never explained by inputs.
+        return ({"group"} if e.fails else {"input"}), set()
     if "order-changed" in e.notes:
         return {ORDER}, set()                 # same keys and values: only the order differs
     classes = {f"value@{cls}"}
@@ -149,10 +159,12 @@ def build_noise_profile(first: FactSet, second: FactSet) -> dict[str, Any]:
     diff = diff_facts(first, second)
     varying: dict[str, set[str]] = defaultdict(set)
     equal: dict[str, set[str]] = defaultdict(set)
+    calls: Counter = Counter()
     order_varying: dict[str, set[str]] = defaultdict(set)
     agreed: dict[str, set[str]] = defaultdict(set)
     for e in diff.entries:
         key = site_key(e)
+        calls[key] += _calls(e.old) + _calls(e.new)
         differs, same = evidence(e)
         varying[key].update(differs)
         equal[key].update(same)
@@ -176,6 +188,7 @@ def build_noise_profile(first: FactSet, second: FactSet) -> dict[str, Any]:
     return {
         "varying": {k: sorted(v) for k, v in sorted(varying.items())},
         "equal": {k: sorted(v) for k, v in sorted(equal.items())},
+        "calls": dict(sorted(calls.items())),
         "order_varying": {k: sorted(v) for k, v in sorted(order_varying.items()) if v},
         "order_equal": {k: sorted(v) for k, v in sorted(order_equal.items()) if v},
         "presence_evidence": not (first.dropped_events or second.dropped_events),
@@ -193,14 +206,44 @@ def _order_note(first: FactSet, second: FactSet, hashing: tuple) -> str:
     return "a run hashed with a pinned seed (PYTHONHASHSEED), which cannot measure hash order"
 
 
+def _calls(outcomes: list | None) -> int:
+    return sum(o.count for o in outcomes or ())
+
+
+def _rare(e: FactEntry, replicate_calls: int) -> str | None:
+    """Why the replicate cannot confirm ``e``'s difference as deterministic (None: it can):
+    the difference is a minority of one side's calls (outcomes that side has and the other
+    lacks), too rare for the baseline runs' call volume at the site to have shown it."""
+    def keys(outcomes):
+        return {(o.kind, json.dumps(o.value, sort_keys=True, default=str)): o.count
+                for o in outcomes or ()}
+    for side, mine, other in (("new", e.new, e.old), ("old", e.old, e.new)):
+        a, b = keys(mine), keys(other)
+        only = {k: c for k, c in a.items() if k not in b}
+        n = sum(a.values())
+        m = sum(only.values())
+        if not only or not n or m == n or set(a) - set(only) != set(b):
+            continue        # nothing one-sided, or not a minority on top of the same outcomes
+        expected = replicate_calls * m / n
+        if expected < RARE_EXPECTED_MIN:
+            return (f"rare outcome: {m} of {n} {side}-side call(s); at that rate the "
+                    f"baseline's two runs ({replicate_calls} call(s) here) would show it "
+                    f"about {expected:.1f} time(s) as run noise, too few to call it "
+                    "deterministic")
+    return None
+
+
 def _confirms(cls: str, equal: set[str]) -> bool:
     """Whether the replicate's equal pairs at a site show that a difference of class ``cls``
     there is no run noise: the same input class for a value change, ``equal@order`` for an
-    order change, any for the rest."""
+    order change, inputs that recurred exactly (``equal@complete``) for an input change, any
+    for the rest."""
     if cls.startswith("value@"):
         return "equal@" + cls.split("@", 1)[1] in equal
     if cls == ORDER:
         return EQUAL_ORDER in equal
+    if cls == "input":
+        return "equal@complete" in equal
     return bool(equal - {EQUAL_ORDER}) or EQUAL_ORDER in equal
 
 
@@ -211,6 +254,7 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
     equal = {k: set(v) for k, v in (profile.get("equal") or {}).items()}
     order_varying = {k: set(v) for k, v in (profile.get("order_varying") or {}).items()}
     order_equal = {k: set(v) for k, v in (profile.get("order_equal") or {}).items()}
+    site_calls = profile.get("calls") or {}
     presence_ok = bool(profile.get("presence_evidence"))
     counts: Counter = Counter()
     for e in diff.entries:
@@ -254,6 +298,11 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
         cls = noise_class(e)
         if cls is None or not _confirms(cls, equal.get(key, set())):
             continue
+        rare = _rare(e, int(site_calls.get(key, 0)))
+        if rare is not None:
+            e.notes.append(rare)
+            counts["rare"] += 1
+            continue
         if e.review and str(e.review).startswith(_STRICT_REVIEWS):
             e.notes.append(f"strict: the baseline replicate is equal here ({e.review[:40]})")
             e.review = None
@@ -267,14 +316,15 @@ def apply_noise_profile(diff: FactDiff, profile: dict[str, Any], label: str) -> 
         "sites_varying": len(varying),
         "sites_stable": stable,
         "presence_evidence": presence_ok,
-        **{k: counts[k] for k in ("explained", "confirmed", "strict")},
+        **{k: counts[k] for k in ("explained", "confirmed", "strict", "rare")},
     }
     diff.warnings = [w for w in diff.warnings if not w.startswith("run-variation")]
     diff.warnings.append(
         f"replicate: {label} measured run-to-run noise at {len(varying)} site(s) "
         f"({stable} equal in both runs); {counts['explained']} difference(s) explained as "
         f"noise (same evidence class at the same site), {counts['confirmed']} failure(s) "
-        f"confirmed deterministic, {counts['strict']} review(s) judged strictly"
+        f"confirmed deterministic, {counts['strict']} review(s) judged strictly, "
+        f"{counts['rare']} too rare to confirm"
         + ("" if presence_ok else "; the replicate lost events, so it is no evidence about "
            "calls present on one side only"))
     return dict(counts)

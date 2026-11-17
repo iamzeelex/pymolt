@@ -158,6 +158,8 @@ def _change_rank(e: FactEntry) -> tuple[int, str]:
     if not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
                   _outcome_types_match):
         return 2, "type changed"
+    if "outcomes-equal" in e.notes:
+        return 3, "input changed"      # the call answered the same; what it was given moved
     return 3, "value changed"
 
 
@@ -189,6 +191,9 @@ def _why_not_noise(e: FactEntry, label: str, order: str | None = None) -> str:
         return why
     if "confirmed deterministic" in " ".join(e.notes):
         return f"{label}; stable across baseline runs (confirmed deterministic)"
+    rare = next((n for n in e.notes if n.startswith("rare outcome:")), None)
+    if rare is not None:
+        return f"{label}; {rare}"
     if e.category is FactCategory.DISAPPEARED:
         return f"{label}: the call no longer happens at an unedited site"
     if e.category is FactCategory.APPEARED:
