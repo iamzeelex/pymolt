@@ -212,10 +212,14 @@ def _patterns_for(old: str, new: str, change, base: str | None) -> list[CodemodP
 _IMPORT_LINE = re.compile(r"^\s*(import|from)\s+[\w.]+")
 
 
-def minimal_diff_violations(old: str, new: str, patterns: Iterable[CodemodPattern]) -> list[str]:
+def minimal_diff_violations(old: str, new: str, patterns: Iterable[CodemodPattern],
+                            live: Iterable[int] | None = None) -> list[str]:
     """Changed lines that hold no flagged spelling. Every removed/replaced old line must name
     the leaf (or module) of a rewritten spelling; an inserted line must be an import (the
-    ``requires_import`` the rewrite adds) or blank; a deleted line must be an import."""
+    ``requires_import`` the rewrite adds) or blank; a deleted line must be an import. With
+    ``live`` (the live sites' lines in ``old``), a changed block that holds none of them and
+    is not an import edit changed a site the plan may not rewrite (a guarded fallback)."""
+    live_lines = set(live) if live is not None else None
     leaves = set()
     for p in patterns:
         leaves.add(p.old_qualname.rsplit(".", 1)[-1])
@@ -226,6 +230,12 @@ def minimal_diff_violations(old: str, new: str, patterns: Iterable[CodemodPatter
     matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
+            continue
+        if (live_lines is not None and i2 > i1
+                and not any(i1 < n <= i2 for n in live_lines)
+                and not all(_IMPORT_LINE.match(line) or not line.strip()
+                            for line in old_lines[i1:i2])):
+            bad.append(f"line {i1 + 1}: {old_lines[i1].strip()[:80]} (no live site)")
             continue
         for line in old_lines[i1:i2]:
             if tag == "delete" and _IMPORT_LINE.match(line):
@@ -324,9 +334,15 @@ def apply_python_fixes(
         except (OSError, UnicodeDecodeError):
             continue
         start = original if prior is None else prior.new_source
+        # The sites' lines are the original file's; on top of a dependency rewrite they are
+        # moved to where that text now is, or a fix lands on the wrong statement.
+        moved = _line_map(original, start) if start != original else None
 
-        def lines_for(pattern: CodemodPattern, rel=rel) -> frozenset[int]:
-            return lines.get((rel, pattern.old_qualname), frozenset())
+        def lines_for(pattern: CodemodPattern, rel=rel, moved=moved) -> frozenset[int]:
+            found = lines.get((rel, pattern.old_qualname), frozenset())
+            if moved is None:
+                return found
+            return frozenset(n for line in found for n in moved.get(line, ()))
 
         try:
             new, hits = apply_patterns(start, wanted, lines_for=lines_for)
@@ -335,7 +351,8 @@ def apply_python_fixes(
             continue
         if new == start or not hits:
             continue
-        bad = minimal_diff_violations(start, new, [p for p, _ in hits])
+        live_here = set().union(*(lines_for(p) for p, _ in hits))
+        bad = minimal_diff_violations(start, new, [p for p, _ in hits], live=live_here)
         if bad:
             reason = "its rewrite changed a line with no flagged spelling (" + bad[0] + ")"
             outcome.dropped[rel] = reason
@@ -366,6 +383,22 @@ def apply_python_fixes(
     outcome.previews = sorted(merged.values(), key=lambda p: (
         order.get(Path(p.path).resolve(), len(order)), p.path))
     return outcome
+
+
+def _line_map(old: str, new: str) -> dict[int, tuple[int, ...]]:
+    """Each 1-based line of ``old`` -> the lines of ``new`` holding its text: itself where the
+    text is unchanged, the same position in a block replaced line for line, and the whole new
+    block where one changed into another number of lines. A deleted line maps to none."""
+    out: dict[int, tuple[int, ...]] = {}
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = (j1 + k + 1,)
+        elif tag == "replace":
+            for k in range(i1, i2):
+                out[k + 1] = tuple(range(j1 + 1, j2 + 1))
+    return out
 
 
 def _recompile_gate(staged: dict, outcome: FixOutcome, target_exe: str | None,

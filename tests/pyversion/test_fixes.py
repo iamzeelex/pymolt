@@ -198,3 +198,48 @@ def test_the_rewrite_equals_ruff_up035(tmp_path, source):
     subprocess.run([*ruff, "check", "--select", "UP035", "--fix", "--target-version", "py312",
                     "--isolated", "--quiet", str(target)], capture_output=True)
     assert _normalise(ours) == _normalise(target.read_text())
+
+
+def test_python_fixes_land_on_the_live_site_after_a_dependency_rewrite_moved_it(tmp_path):
+    """The sites' lines are the original file's; a dependency rewrite that splits a
+    multi-name import (+1 line) shifts them. Applied unmapped, the fix rewrote the guarded
+    fallback (old line 6, new line 7) and left the live use (old line 7, new line 8)."""
+    source = ("import collections\n"                                          # 1
+              "from pandas.util.testing import assert_frame_equal, makeDataFrame\n"  # 2
+              "try:\n"                                                         # 3
+              "    from collections.abc import Iterable\n"                     # 4
+              "except ImportError:\n"                                          # 5
+              "    Iterable = collections.Iterable\n"                          # 6 guarded
+              "X = collections.Iterable\n")                                    # 7 live
+    (tmp_path / "app.py").write_text(source)
+    split = source.replace(
+        "from pandas.util.testing import assert_frame_equal, makeDataFrame\n",
+        "from pandas.util.testing import makeDataFrame\n"
+        "from pandas.testing import assert_frame_equal\n")
+    prior = FilePreview(path=str(tmp_path / "app.py"), old_source=source, new_source=split,
+                        sites=1)
+    guard = {"kind": "guarded-fallback", "detail": "except ImportError"}
+    sites = [_site("collections.Iterable", 6, guard=guard), _site("collections.Iterable", 7)]
+    report = _report(("collections.Iterable", "collections.abc.Iterable"))
+    pats = [p for p in python_patterns(report, sites) if p.kind == "rewrite-attr"]
+
+    out = apply_python_fixes(tmp_path, [prior], pats, sites, target="3.12",
+                             target_executable=sys.executable)
+
+    (merged,) = out.previews
+    lines = merged.new_source.splitlines()
+    assert "    Iterable = collections.Iterable" in lines           # the fallback is intact
+    assert "X = collections.abc.Iterable" in lines                   # the live use is fixed
+    assert "from pandas.testing import assert_frame_equal" in lines  # the dependency rewrite
+    assert out.dropped == {}
+
+
+def test_the_gate_flags_a_rewrite_of_a_line_that_holds_no_live_site():
+    pats = [CodemodPattern(old_qualname="collections.Iterable",
+                           new_qualname="collections.abc.Iterable", kind="rewrite-attr",
+                           scope="python")]
+    old = "import collections\nA = collections.Iterable\nB = collections.Iterable\n"
+    new = "import collections\nA = collections.abc.Iterable\nB = collections.Iterable\n"
+    assert minimal_diff_violations(old, new, pats, live={2}) == []
+    assert minimal_diff_violations(old, new, pats, live={3}) == [
+        "line 2: A = collections.Iterable (no live site)"]
