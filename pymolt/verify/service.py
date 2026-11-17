@@ -2597,7 +2597,8 @@ def _stamp_verdict(
     whole_counts = report.all_diff if report.all_diff is not None else report.diff
     for warning in (whole_diff or {}).get("warnings") or ():
         # Snapshot caps that lower the comparison level without blocking PASS.
-        if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:")):
+        if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:",
+                                    "volatile-sites:")):
             if warning not in report.notes:
                 report.notes.append(str(warning))
     comparability: list[str] = []

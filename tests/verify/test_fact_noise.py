@@ -83,3 +83,76 @@ def test_renderer_asymmetry_does_not_hide_a_new_raise():
     new = fs(fact("re.compile", {"pattern": "("}, (("raise", "re.error"),)))
     d = diff_facts(old, new)
     assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
+
+
+# ── step 2: volatile sites (every call a fresh input) compare as a group ──────────────────
+
+PACK = "msgpack.packb"
+PACK_LINE = "return msgpack.dumps((self.type, self.data, self.node_id))"
+
+
+def packs(ids, *, result=lambda i: {"__bytes__": f"93a3{i}"}, first=0, raise_at=None):
+    """One fact per call: each carries its own client id, so no input repeats across runs."""
+    facts = []
+    for k, i in enumerate(ids):
+        outcome = (("raise", raise_at),) if raise_at is not None and k == 0 else \
+            (("return", result(i)),)
+        facts.append(fact(PACK, {"o": {"__tuple__": ["ack", f"node_{i}"]}}, outcome,
+                          file="locust/rpc/protocol.py", func="serialize", line=14,
+                          text=PACK_LINE, first=first + k))
+    return facts
+
+
+def test_fresh_inputs_at_one_site_compare_as_one_group():
+    old = fs(*packs(["a1", "a2", "a3"]))
+    new = fs(*packs(["b1", "b2"]))
+    d = diff_facts(old, new)
+    assert not failing(d) and d.verdict is VerificationVerdict.PASS
+    (e,) = d.entries
+    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.TYPE
+    assert (e.old_count, e.new_count) == (3, 2)
+    assert e.explained.startswith("volatile-site") and "volatile-site:3/2" in e.notes
+    assert any(w.startswith("volatile-sites:1:") for w in d.warnings)
+
+
+def test_a_new_raise_type_in_a_volatile_group_fails():
+    old = fs(*packs(["a1", "a2", "a3"]))
+    new = fs(*packs(["b1", "b2"], raise_at="TypeError"))
+    d = diff_facts(old, new)
+    (e,) = failing(d)
+    assert e.category is FactCategory.CHANGED and e.explained.startswith("volatile-site")
+
+
+def test_a_new_return_type_in_a_volatile_group_fails():
+    old = fs(*packs(["a1", "a2"]))
+    new = fs(*packs(["b1", "b2", "b3"], result=lambda i: f"93a3{i}"))  # bytes -> str
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+def test_exact_repeats_at_a_volatile_site_still_compare_exactly():
+    # msgpack: the same message (same input) packs to different bytes (dict order changed):
+    # the repeat pairs exactly and fails; the fresh-input calls around it form the group.
+    stats = {"o": {"__tuple__": ["stats", {"__dict__": [["name", "/1"], ["method", "GET"]]}]}}
+    repeat_old = fact(PACK, stats, (("return", {"__bytes__": "93a5aa"}),),
+                      file="locust/rpc/protocol.py", func="serialize", line=14, text=PACK_LINE)
+    repeat_new = fact(PACK, stats, (("return", {"__bytes__": "93a5bb"}),),
+                      file="locust/rpc/protocol.py", func="serialize", line=14, text=PACK_LINE)
+    d = diff_facts(fs(repeat_old, *packs(["a1", "a2", "a3"], first=1)),
+                   fs(repeat_new, *packs(["b1", "b2"], first=1)))
+    (e,) = failing(d)
+    assert e.category is FactCategory.CHANGED and e.level is ComparisonLevel.EXACT
+    assert e.input == {"bound": stats}
+    assert d.counts()["equal"] == 1  # the group
+
+
+def test_one_sided_site_is_not_a_group():
+    d = diff_facts(fs(*packs(["a1", "a2"])), fs())
+    assert d.counts()["disappeared"] == 2 and d.verdict is VerificationVerdict.FAIL
+
+
+def test_a_changed_input_signature_is_not_absorbed_into_a_group():
+    # Same symbol and site, but the bound parameter was renamed: structure, not noise.
+    old = fs(*[fact("lib.f", {"a": i}, first=i) for i in range(2)])
+    new = fs(fact("lib.f", {"b": 9}))
+    d = diff_facts(old, new)
+    assert d.counts()["disappeared"] == 2 and d.counts()["appeared"] == 1
