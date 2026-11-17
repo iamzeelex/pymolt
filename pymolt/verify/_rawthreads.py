@@ -139,6 +139,17 @@ class RawQueue:
         except IndexError:
             raise Empty()
 
+    def get_many(self, limit):
+        """Up to ``limit`` items, oldest first, without waiting (possibly none)."""
+        pop = self._items.popleft
+        out = []
+        try:
+            while len(out) < limit:
+                out.append(pop())
+        except IndexError:
+            pass
+        return out
+
     def get(self, timeout=None):
         deadline = None if timeout is None else monotonic() + timeout
         while True:

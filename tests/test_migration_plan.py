@@ -173,9 +173,77 @@ def test_rollback_invalidates_post_migration_capture(tmp_path):
 
     state = service.load_contract_state(tmp_path)
     assert state.post_migration is None
-    assert "invalidated by rollback" in (
-        state.diagnostic_captures[-1].validity_reason or ""
+    aside = state.diagnostic_captures[-1]
+    assert "invalidated by rollback" in (aside.validity_reason or "")
+    assert aside.set_aside_by == plan.plan_id
+    # Its recording moved to the archive: the next post-migration capture cannot overwrite it.
+    assert "/archive/" in aside.trace_path
+    recorded = (tmp_path / aside.trace_path).read_bytes()
+    assert MigrationReceipt.load(tmp_path).files_restored == ["app0.py"]
+
+    service.capture_named_trace(
+        tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
+        command=[sys.executable, str(script)], target="json",
     )
+    assert (tmp_path / aside.trace_path).read_bytes() == recorded
+
+
+def _post_capture(tmp_path):
+    script = tmp_path / "post.py"
+    script.write_text("import json\njson.loads('{}')\n", encoding="utf-8")
+    return service.capture_named_trace(
+        tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
+        command=[sys.executable, str(script)], target="json",
+    )
+
+
+def test_rollback_of_a_run_that_changed_no_file_keeps_the_post_migration_capture(tmp_path):
+    """A no-op apply's rollback restores nothing, so the post-migration capture still records
+    the code on disk: it stays in its slot, and verify still compares it against the baseline
+    and reads that run's plan (the legacy harness rolls back after every run)."""
+    target = _project(tmp_path)
+    plan = create_migration_plan(
+        tmp_path, [], [DependencyMigration("flask", "2.0.3", "3.0.0")],
+        target_python="3.12", source_manifest="requirements.txt",
+        target_manifest_path=target, files_scanned=0, predict=False,
+        impacts={"flask": [ApiImpact(
+            path="json.loads", kind="signature-changed", state="changed", risk="low",
+            explanation="test impact",
+        )]},
+    )
+    apply_migration_plan(tmp_path, plan)
+    post = _post_capture(tmp_path)
+
+    rollback_migration(tmp_path)
+
+    state = service.load_contract_state(tmp_path)
+    assert state.post_migration == post
+    receipt = MigrationReceipt.load(tmp_path)
+    assert receipt.status == "rolled_back"
+    assert receipt.files_restored == []
+    assert receipt.in_effect
+    report = service.build_contract_report_from_state(tmp_path)
+    assert report.diff is not None or report.fact_diff  # compared, not "no capture yet"
+    assert not any("no post-migration capture" in reason for reason in report.verdict_reasons)
+    assert any("had changed no file" in note for note in report.notes)
+    assert service._applied_plan_impact_targets(tmp_path) == ["json.loads"]
+
+
+def test_verify_names_the_post_migration_capture_a_rollback_set_aside(tmp_path):
+    plan = _plan(tmp_path)
+    apply_migration_plan(tmp_path, plan)
+    _post_capture(tmp_path)
+
+    rollback_migration(tmp_path)
+
+    aside = service.set_aside_capture(service.load_contract_state(tmp_path))
+    assert aside is not None
+    report = service.build_contract_report_from_state(tmp_path)
+    reason = next(r for r in report.verdict_reasons if "post-migration capture" in r)
+    assert "set aside by the rollback of migration " + plan.plan_id[:8] in reason
+    assert aside.trace_path in reason
+    assert "yet" not in reason
+    assert not MigrationReceipt.load(tmp_path).in_effect
 
 
 def test_apply_rejects_a_stale_plan_before_any_write(tmp_path):

@@ -61,6 +61,8 @@ from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
+    C_SITE_CAPPED,
+    CALL_SHAPE,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
@@ -86,7 +88,7 @@ from pymolt.verify.models import (
     TraceArtifactQuality,
     VerificationVerdict,
 )
-from pymolt.verify.report import ContractReport, build_contract_report
+from pymolt.verify.report import ComparedRecordings, ContractReport, build_contract_report
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,10 @@ class TraceCaptureResult(BaseModel):
     backpressure_dropped: int | None = None
     write_failures: int | None = None
     sink_failures: int | None = None
+    # Seconds the traced program waited, summed over its threads and processes, for a JSONL
+    # trace writer that fell behind (``backpressure_wait_ms``): the price of keeping every
+    # event. None when no process reported it (an older runtime, a facts sink).
+    backpressure_wait_seconds: float | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
     # Interpreters where tracing was requested but the watcher could not load (each wrote
     # ``<trace>.activation-error.json``): those processes ran UNTRACED.
@@ -259,6 +265,8 @@ LONG_RUN_SINK, LONG_RUN_TRACE_MODE = "facts", "auto"
 LONG_RUN_SAMPLE_RATE, LONG_RUN_SAMPLE_FIRST = 0.1, 32
 _FORWARDED_TUNABLES = (
     "PYMOLT_TRACE_SAMPLE_KEYS",
+    "PYMOLT_TRACE_QUEUE_SIZE", "PYMOLT_TRACE_CLOSE_TIMEOUT", "PYMOLT_TRACE_BACKPRESSURE",
+    "PYMOLT_TRACE_STALL_SECONDS",
     "PYMOLT_TRACE_FLUSH_SECONDS", "PYMOLT_TRACE_FACTS_PER_SITE", "PYMOLT_TRACE_MAX_FACTS",
     "PYMOLT_TRACE_MAX_TALLIES", "PYMOLT_TRACE_MAX_FACT_BYTES", "PYMOLT_TRACE_FACT_VALUE_BYTES",
     "PYMOLT_TRACE_DISCOVER_QUIET", "PYMOLT_TRACE_DISCOVER_MAX",
@@ -304,12 +312,12 @@ def _normalize_impact_targets(values: list[str] | tuple[str, ...] | None) -> lis
 
 
 def _applied_plan_impact_targets(project_dir: str | Path) -> list[str]:
-    """Resolve old and replacement API paths from the currently applied plan."""
+    """Resolve old and replacement API paths from the plan whose code is on disk."""
     from pymolt.migration_plan import MigrationPlan
     from pymolt.migration_state import MigrationReceipt
 
     receipt = MigrationReceipt.load(project_dir)
-    if receipt is None or receipt.status != "applied" or not receipt.plan_path:
+    if receipt is None or not receipt.in_effect or not receipt.plan_path:
         return []
     plan = MigrationPlan.load(project_dir, receipt.plan_path)
     if plan is None:
@@ -419,7 +427,7 @@ def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
 
         receipt = MigrationReceipt.load(root)
         plan = (MigrationPlan.load(root, receipt.plan_path)
-                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                if receipt is not None and receipt.in_effect and receipt.plan_path
                 else None)
     except Exception as exc:  # noqa: BLE001 - best effort
         logger.info("stdlib tracing: could not read the apply receipt: %s", exc)
@@ -728,12 +736,16 @@ def capture_trace_in_container(
     sample_first: int | None = None,
     widen_targets: bool = False,
     trace_stdlib: list[str] | None = None,
+    log_path: Path | None = None,
 ) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
     No `docker run` from scratch and no new volume mounts: the standalone bundle is copied in,
     the command runs under it with PYMOLT_TRACE_* env, and the JSONL is copied back out. The
     target container and the app inside it are never modified (the bundle is temp + removed).
+
+    The command's output (stdout, then stderr) is written to ``log_path`` when given, as the
+    local path does: without it a failed run says nothing about which test failed.
     """
     tag = uuid.uuid4().hex[:8]
     bundle_in = f"/tmp/pymolt_bundle_{tag}"
@@ -756,12 +768,29 @@ def capture_trace_in_container(
         exec_args += ["-w", workdir]
     exec_args += [container, *command]
     command_result = _docker(exec_args, check=False)
+    if log_path is not None:
+        _write_command_log(log_path, command_result.stdout, command_result.stderr)
 
     pull = work / "pull"
     _docker(["cp", f"{container}:{trace_in}", str(pull)])
     # best-effort cleanup so the container is left exactly as found
     _docker(["exec", container, "rm", "-rf", bundle_in, trace_in], check=False)
     return _process_traces(pull, recursive=True), command_result.returncode
+
+
+def _write_command_log(log_path: Path, stdout: str | None, stderr: str | None) -> None:
+    """A finished command's captured output as its command log: stdout, then stderr (the
+    two streams were captured apart, so their interleaving is lost). Never fails the capture."""
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8", errors="replace") as log:
+            log.write(stdout or "")
+            if stderr:
+                if stdout and not stdout.endswith("\n"):
+                    log.write("\n")
+                log.write(stderr)
+    except OSError as exc:
+        logger.warning("could not write the command log %s: %s", log_path, exc)
 
 
 def _docker(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -1013,6 +1042,9 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
         "sink_failures": 0,
         "shutdown_dropped": 0,
     }
+    # What a full JSONL queue cost (runtimes that report it): producer waits, their total
+    # time, and writer stalls. Informational, never part of the loss accounting.
+    backpressure = {"waits": 0, "wait_ms": 0, "writer_stalls": 0, "reported": False}
     processes: list[dict] = []
     backends: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -1043,17 +1075,31 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
             value = raw_counters.get(name)
             if isinstance(value, int) and value >= 0:
                 counters[name] += value
+        for name, key in (("backpressure_waits", "waits"), ("backpressure_wait_ms", "wait_ms"),
+                          ("writer_stalls", "writer_stalls")):
+            value = raw_counters.get(name)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                backpressure[key] += value
+                backpressure["reported"] = True
         metadata_complete = metadata_complete and process_counters_complete
     if len(processes) != len(produced):
         metadata_complete = False
     counters["dropped_events"] = sum(counters[name] for name in _DROP_COUNTERS)
     return {
         "counters": counters,
+        "backpressure": backpressure,
         "metadata_complete": metadata_complete,
         "process_metadata": processes,
         "backends": backends,
         "instrumentation_skipped": skipped,
     }
+
+
+def _backpressure_wait_seconds(backpressure: dict) -> float | None:
+    """The producers' total wait for a JSONL writer, in seconds (None: nobody reported)."""
+    if not backpressure.get("reported"):
+        return None
+    return round(backpressure["wait_ms"] / 1000.0, 3)
 
 
 def _write_trace_metadata(trace_path: str | Path, payload: dict) -> str | None:
@@ -1144,9 +1190,10 @@ def capture_trace(
 
     ``cwd`` runs a local command in the target project rather than pymolt's own
     working directory (so e.g. ``pytest tests/`` collects the right tests). The
-    local command's merged stdout+stderr land in ``command.log`` next to the
-    trace artifacts (surfaced via ``command_log`` / ``returncode``), never on the
-    parent tty.
+    command's output lands in ``<trace stem>.command.log`` next to the trace
+    artifacts (surfaced via ``command_log`` / ``returncode``), never on the parent
+    tty: merged as it runs for a local command, stdout then stderr for one run in a
+    ``container``.
     """
     started = time.monotonic()
     impact_targets = _normalize_impact_targets(impact_targets)
@@ -1159,9 +1206,12 @@ def capture_trace(
     try:
         bundle = export_watcher(work / "bundle")
 
-        command_log: str | None = None
         returncode: int | None = None
         interrupted = threading.Event()
+        # Keep the log next to the durable trace artifact (out_path), not the
+        # ephemeral work tempdir, so the path stored on the slot stays valid.
+        out_p = Path(out_path)
+        log_path = out_p.parent / f"{out_p.stem}.command.log"
         if container:
             produced, returncode = capture_trace_in_container(
                 target, command, backend, bundle, work,
@@ -1169,12 +1219,9 @@ def capture_trace(
                 privacy, sample_rate, impact_targets,
                 deployment_id, request_id, correlation_id,
                 **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
+                log_path=log_path,
             )
         else:
-            # Keep the log next to the durable trace artifact (out_path), not the
-            # ephemeral work tempdir, so the path stored on the slot stays valid.
-            out_p = Path(out_path)
-            log_path = out_p.parent / f"{out_p.stem}.command.log"
             produced, returncode = capture_trace_local(
                 target, command, backend, bundle, work,
                 exclude, source, include_internal, cancel_event=cancel_event,
@@ -1184,7 +1231,7 @@ def capture_trace(
                 interrupted=interrupted,
                 **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
             )
-            command_log = str(log_path) if log_path.exists() else None
+        command_log = str(log_path) if log_path.exists() else None
 
         events = _merge_traces(produced, Path(out_path))
         facts = _merge_process_snapshots(produced, Path(out_path))
@@ -1223,6 +1270,7 @@ def capture_trace(
             ),
             write_failures=(counters["write_failures"] if metadata_complete else None),
             sink_failures=(counters["sink_failures"] if metadata_complete else None),
+            backpressure_wait_seconds=_backpressure_wait_seconds(runtime["backpressure"]),
             instrumentation_skipped=runtime["instrumentation_skipped"],
             activation_failures=activation_failures,
             facts_path=facts["path"] if facts else None,
@@ -1249,6 +1297,9 @@ def capture_trace(
             "activation_failures": activation_failures,
             "processes": runtime["process_metadata"],
         }
+        if runtime["backpressure"]["reported"]:
+            metadata["backpressure"] = {k: v for k, v in runtime["backpressure"].items()
+                                        if k != "reported"}
         if facts:
             metadata["facts_path"] = facts["path"]
             metadata["facts"] = facts
@@ -1517,6 +1568,23 @@ def parse_failed_count(command_log: str | Path | None) -> tuple[int | None, str]
         if match:
             return int(match.group(1)), line.strip(" =")
     return None, ""
+
+
+_FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+)")
+
+
+def failed_tests(command_log: str | Path | None, limit: int = 3) -> tuple[list[str], int]:
+    """``(first ``limit`` test ids, how many)`` from pytest's short summary (``FAILED
+    tests/x.py::test_y - ...`` and ``ERROR ...`` lines) in a command log; ``([], 0)`` when the
+    log is missing or has none."""
+    if not command_log:
+        return [], 0
+    try:
+        lines = Path(command_log).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return [], 0
+    found = [m.group(1) for m in map(_FAILED_TEST.match, lines) if m]
+    return found[:limit], len(found)
 
 
 def static_contact_count(project_dir: str | Path) -> int | None:
@@ -1856,6 +1924,7 @@ def capture_named_trace(
         backpressure_dropped=result.backpressure_dropped,
         write_failures=result.write_failures,
         sink_failures=result.sink_failures,
+        backpressure_wait_seconds=getattr(result, "backpressure_wait_seconds", None),
         instrumentation_skipped=result.instrumentation_skipped,
         activation_failures=getattr(result, "activation_failures", []),
         red=_red_stamp(result) if validity is CaptureValidity.VALID else None,
@@ -2060,6 +2129,56 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
             logger.warning("could not archive previous %s facts snapshot: %s", when, exc)
     _move_sources(current, destination)
     return str(destination)
+
+
+def restore_archived_capture(archived: str | Path, original: str | Path) -> None:
+    """Undo ``archive_existing_capture``: move a recording and its sidecars back."""
+    for src, dst in ((Path(archived), Path(original)),
+                     (_trace_metadata_path(archived), _trace_metadata_path(original)),
+                     (snapshot_path(archived), snapshot_path(original))):
+        if src.is_file():
+            shutil.move(str(src), str(dst))
+    _move_sources(archived, original)
+
+
+def set_aside_post_migration(project_dir: str | Path, state: ContractState,
+                             run_id: str) -> str | None:
+    """Take the post-migration capture out of its slot because a rollback restored the code
+    it recorded. It is kept, never deleted: in ``state.diagnostic_captures``, stamped
+    ``set_aside_by``, with its recording moved to the archive so the next post-migration
+    capture cannot overwrite what the entry points at. Changes ``state`` in place (the caller
+    saves it) and returns where the recording went (None: there was no slot, or the file
+    could not be moved and stays where it was)."""
+    slot = state.post_migration
+    if slot is None:
+        return None
+    archived = archive_existing_capture(project_dir, "post_migration")
+    update: dict = {
+        "validity": CaptureValidity.UNKNOWN,
+        "validity_reason": (f"invalidated by rollback of migration {run_id[:8]}: the code "
+                            "it recorded is no longer on disk"),
+        "set_aside_by": run_id,
+    }
+    if archived is not None:
+        update["trace_path"] = archived
+        if slot.metadata_path:
+            update["metadata_path"] = str(_trace_metadata_path(archived))
+        if slot.sources_path:
+            update["sources_path"] = str(sources_path(archived))
+    state.diagnostic_captures.append(slot.model_copy(update=update))
+    state.post_migration = None
+    return archived
+
+
+def set_aside_capture(state: ContractState) -> ContractSlot | None:
+    """The post-migration capture the last rollback set aside, while no newer one fills the
+    slot (None otherwise)."""
+    if state.post_migration is not None:
+        return None
+    for slot in reversed(state.diagnostic_captures):
+        if slot.set_aside_by:
+            return slot
+    return None
 
 
 def environment_fingerprint(project_dir: str | Path) -> str | None:
@@ -2580,14 +2699,15 @@ def build_contract_report_from_state(
     changed across the migration"); only one captured -> that one as trace,
     no diff; neither -> trace=None (today's all-BLIND behavior, unchanged).
     """
+    from pymolt.migration_state import MigrationReceipt
+
     state = load_contract_state(project_dir)
+    receipt = MigrationReceipt.load(project_dir)
 
     if changed_api_paths is None:
         from pymolt.migration_plan import MigrationPlan
-        from pymolt.migration_state import MigrationReceipt
 
-        receipt = MigrationReceipt.load(project_dir)
-        if receipt is not None and receipt.status == "applied" and receipt.plan_path:
+        if receipt is not None and receipt.in_effect and receipt.plan_path:
             applied_plan = MigrationPlan.load(project_dir, receipt.plan_path)
             if applied_plan is not None and applied_plan.impacts:
                 changed_api_paths = applied_plan.impacts
@@ -2672,9 +2792,34 @@ def build_contract_report_from_state(
     )
     if replicate_note:
         report.notes.append(replicate_note)
+    if (receipt is not None and receipt.status == "rolled_back" and receipt.in_effect
+            and any(name == "post-migration" for name, _ in used_slots)):
+        report.notes.append(
+            f"migration run {receipt.run_id[:8]} was rolled back, but it had changed no file: "
+            "the post-migration capture still records the code on disk, and verify still "
+            "reads that run's plan")
+    report.compared = _compared_recordings(project_dir, state, trace, against)
     _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
-    _stamp_verdict(report, trace, against, used_slots)
+    _stamp_verdict(report, trace, against, used_slots,
+                   set_aside=set_aside_capture(state) if trace_override is None else None)
     return report
+
+
+def _compared_recordings(project_dir: str | Path, state: ContractState, trace: str | None,
+                         against: str | None) -> ComparedRecordings:
+    """Which recordings a report compared, and which capture each one is (by path: a
+    recording named on the command line that is a capture's own file is that capture)."""
+    def capture(path: str | None, *names: str) -> str | None:
+        for name in names:
+            slot = getattr(state, name.replace("-", "_"))
+            if path and slot is not None and same_slot_path(project_dir, path, slot.trace_path):
+                return name
+        return None
+
+    return ComparedRecordings(
+        after=trace, after_capture=capture(trace, "post-migration", "baseline"),
+        before=against, before_capture=capture(against, "baseline"),
+    )
 
 
 def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path):
@@ -2712,7 +2857,7 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
 
         receipt = MigrationReceipt.load(root)
         plan = (MigrationPlan.load(root, receipt.plan_path)
-                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                if receipt is not None and receipt.in_effect and receipt.plan_path
                 else None)
         if plan is not None:
             for impact in plan.impacts:
@@ -2772,7 +2917,7 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
         is_baseline = slot.resolve() == Path(against).resolve()
     candidates = []
     receipt = MigrationReceipt.load(root)
-    if receipt is not None and receipt.status == "applied" and receipt.plan_path:
+    if receipt is not None and receipt.in_effect and receipt.plan_path:
         candidates.append(MigrationPlan.load(root, receipt.plan_path))
     candidates.append(MigrationPlan.load(root))
     bound = [plan for plan in candidates if plan is not None and is_baseline
@@ -2792,10 +2937,21 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
             "plan_id": bound[0].plan_id if bound else None, "notes": notes}
 
 
-def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]) -> str:
-    """Why there is nothing to diff against, naming the side that is actually missing."""
+def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]],
+                         set_aside: ContractSlot | None = None) -> str:
+    """Why there is nothing to diff against, naming the side that is actually missing.
+
+    ``set_aside``: the post-migration capture a rollback took out of its slot. It exists, so
+    "no capture yet" would be false: the reason names it, where its recording is, and how to
+    compare against it anyway."""
     names = {name for name, _ in used_slots}
     if names == {"baseline"}:
+        if set_aside is not None:
+            return (
+                f"no post-migration capture: the one of {set_aside.captured_at} was set aside "
+                f"by the rollback of migration {(set_aside.set_aside_by or '')[:8]}, which "
+                f"restored the code it recorded (kept at {set_aside.trace_path}); apply again "
+                "and capture post-migration, or pass that recording as --post-migration")
         return "no post-migration capture yet (only the baseline is recorded)"
     if names == {"post-migration"}:
         return "no baseline capture"
@@ -2809,8 +2965,13 @@ def _stamp_verdict(
     trace: str | None,
     against: str | None,
     used_slots: list[tuple[str, object]],
+    *,
+    set_aside: ContractSlot | None = None,
 ) -> None:
-    """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty."""
+    """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty.
+
+    ``set_aside``: the post-migration capture a rollback set aside (see
+    ``_missing_side_reason``)."""
     # The verdict's FAIL evidence is the WHOLE surface (``all_*``): an impact filter is a focus
     # for the report, not a limit on what can fail it, or a change nobody predicted could
     # never be found. Coverage (BLIND, dynamic-only, trust, static targets) stays scoped to the
@@ -2836,7 +2997,7 @@ def _stamp_verdict(
                 quality.reason or f"current trace is {quality.validity.value}"
             )
     if against is None:
-        comparability.append(_missing_side_reason(trace, used_slots))
+        comparability.append(_missing_side_reason(trace, used_slots, set_aside))
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
@@ -3064,8 +3225,17 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         if any(str(n).startswith("possibly-dropped") for n in e.get("notes") or ())
     )
     unobservable = sum(1 for e in entries if BACKEND_UNOBSERVABLE in (e.get("notes") or ()))
+    capped_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
+    )
+    shape_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith(CALL_SHAPE) for n in e.get("notes") or ())
+        and not any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
+    )
     uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries - dropped_entries - unobservable
+        - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries
     if unobservable:
         reasons.append(
             f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "
@@ -3075,6 +3245,16 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         reasons.append(
             f"{dropped_entries} call fact(s) are missing on a side that dropped events and "
             "cannot be compared"
+        )
+    if capped_entries:
+        reasons.append(
+            f"{capped_entries} call fact(s) are missing at compiled-call sites where the other "
+            "capture recorded only the first calls and counted the rest; they cannot be compared"
+        )
+    if shape_entries:
+        reasons.append(
+            f"{shape_entries} call fact(s) were recorded as compiled calls (no inputs) on one "
+            "side and with their inputs on the other, so they cannot be paired by input"
         )
     if evicted_entries:
         reasons.append(
@@ -3098,11 +3278,12 @@ def baseline_setup_unchanged(slot, current_setup: str | None) -> bool:
 
 
 def _applied_migration(project_dir: str | Path):
-    """The receipt of the migration currently applied, or None (none, or rolled back)."""
+    """The receipt of the migration whose code is on disk (applied, or rolled back without
+    restoring a file: ``MigrationReceipt.in_effect``), or None."""
     from pymolt.migration_state import MigrationReceipt
 
     receipt = MigrationReceipt.load(project_dir)
-    if receipt is None or receipt.status != "applied":
+    if receipt is None or not receipt.in_effect:
         return None
     return receipt
 

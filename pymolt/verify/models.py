@@ -244,6 +244,9 @@ class ContractSlot(BaseModel):
     backpressure_dropped: int | None = None
     write_failures: int | None = None
     sink_failures: int | None = None
+    # Seconds the traced program waited for a JSONL trace writer that fell behind (summed over
+    # threads and processes): every event was kept, at that cost in timing. None = unknown.
+    backpressure_wait_seconds: float | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
     # Processes where tracing was requested but the watcher could not load (untraced).
     activation_failures: list[dict] = Field(default_factory=list)
@@ -256,6 +259,10 @@ class ContractSlot(BaseModel):
     # same code in the same environment (None for every other slot). A replicate whose
     # baseline was replaced is stale and ignored.
     replicate_of: str | None = None
+    # A post-migration capture set aside by ``pymolt rollback``: the run id of the migration
+    # whose rollback restored the code it recorded (None for every other slot). Kept among the
+    # diagnostic captures, its recording moved to the archive so no later capture overwrites it.
+    set_aside_by: str | None = None
 
 
 class ContractState(BaseModel):
