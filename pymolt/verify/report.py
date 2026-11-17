@@ -933,8 +933,10 @@ def _attach_fact_diff(
     })
     report.fact_diff = scoped.to_json_dict()
     kept = {id(e) for e in scoped.entries}
+    from pymolt.verify.fact_report import cap_entry
+
     report.unpredicted_changes = [
-        e.model_dump(mode="json", exclude_none=True)
+        cap_entry(e.model_dump(mode="json", exclude_none=True))
         for e in fdiff.entries if id(e) not in kept and e.fails]
     report.fact_equal_symbols = _compared_equal_symbols(scoped)
     bdiff = scoped.to_boundary_diff()

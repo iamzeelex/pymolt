@@ -318,6 +318,9 @@ def verify_migration(
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Also show what was explained away (mechanism, count, example, rule)"),
 ):
     """Compare the baseline and post-migration captures. Prints PASS, FAIL or INCONCLUSIVE.
 
@@ -485,7 +488,7 @@ def verify_migration(
         typer.echo(json.dumps(unified.model_dump(mode="json"), indent=2))
         raise typer.Exit(code=_verification_exit(unified.verdict))
 
-    _render_contract_report(contract_report)
+    _render_contract_report(contract_report, verbose=verbose)
     if canary is not None:
         table = Table(title="Canary policy", show_header=True)
         table.add_column("Metric")
