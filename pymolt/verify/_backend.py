@@ -30,8 +30,11 @@ Compiled (C / Cython) dependency callables called from our code are recorded too
 method descriptors through ``c_call`` / ``c_return`` / ``c_exception``, but NOT Cython
 functions (``cython_function_or_method``: not an exact ``PyCFunction``) nor class
 instantiation, and it cannot see a call that fails while BINDING its arguments (no frame, no
-event): both are sys.monitoring-only (``CALL`` + ``C_RETURN`` / ``C_RAISE`` / ``RAISE``), and
-for Cython functions below 3.12 ``SetProfileBackend`` wraps them (see ``_wrap.CompiledWrap``).
+event): both are sys.monitoring-only (``CALL`` + ``C_RETURN`` / ``C_RAISE`` / ``RAISE``). The
+public Cython functions of dependency modules are wrapped by both backends instead (see
+``_wrap.CompiledWrap``), so they are recorded with their inputs and result on every Python. A
+Cython callable reached without the wrapper (bound before the wrap) stays a compiled call
+under sys.monitoring, and setprofile below 3.12 does not see it.
 
 Generators, coroutines and async generators are recorded ONCE per call, by every backend: at
 the generator's first start (when its arguments are still exactly what the caller passed),
@@ -802,10 +805,12 @@ _PENDING_MAX = 100000
 
 # The runtime's own modules are never a dependency, whatever the target says (a "all"
 # target with the runtime installed under site-packages would otherwise record its own
-# writer / controller threads).
+# writer / controller threads), and never the project's code: the bundle lives in a temp
+# directory, outside site-packages, so the near-side test alone would take it for the project
+# (sys.monitoring then recorded the JSONL writer's ``deque.popleft`` in ``_rawthreads``).
 _SELF_PKG = __name__.rsplit(".", 1)[0]
 _SELF_MODULES = frozenset(_SELF_PKG + "." + n for n in (
-    "_backend", "_monitoring", "_wrap", "_sinks", "_normalize", "_identity",
+    "_backend", "_monitoring", "_wrap", "_sinks", "_normalize", "_identity", "_rawthreads",
     "boundary_tracer", "sitecustomize", "_install_hook"))
 
 
@@ -832,6 +837,13 @@ WARN_UNRELATED = tuple(c for c in (ResourceWarning, ImportWarning, BytesWarning,
 ENV_WARNINGS = "PYMOLT_TRACE_WARNINGS"   # "0" / "off": do not wrap ``warnings.warn``
 _WARN_DEPTH = 256           # frames walked from the warn() caller to the call in flight
 _C_SITE_MAX = 2000          # compiled calls recorded per call site (a hot loop is witnessed)
+# Past ``_C_SITE_MAX`` a site's compiled calls are counted, never recorded (``c_site_cap``):
+# its absent facts are then "not recorded", not "not called". setprofile delivers every C call
+# anyway, so its count is exact; sys.monitoring keeps a capped site firing only to count, up
+# to ``_C_MUTE_MAX`` muted calls, then stops it (``DISABLE``) and the count is a lower bound.
+_C_MUTE_MAX = 1000000
+_C_MUTED_SITES_MAX = 100000  # capped sites tallied per backend (past it: counted, not sited)
+C_CAP_REPORT_SITES = 1000   # capped sites a sidecar lists (the most muted first)
 _C_STACK_MAX = 256          # compiled calls in flight per thread (a lost completion never grows it)
 _WARNED_MAX = 10000         # per backend: accumulators awaiting their call's completion
 
@@ -1233,7 +1245,7 @@ class FrameBackend(TraceBackend):
         self._last_start = {}       # tid -> frame of the last recorded start
         self._ccache = {}           # id(callable) -> (callable, sym | None): compiled decisions
         self._cmeth = {}            # (id(owner class), name) -> (owner, sym | None): bound builtins
-        self._ccount = {}           # (sym, id(code), line) -> compiled calls recorded there
+        self._reset_c_cap()         # _ccount: cap key -> compiled calls recorded there
         self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
         self._bind_kw = sink_binding(sink)
         self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
@@ -1548,15 +1560,83 @@ class FrameBackend(TraceBackend):
 
     def _c_muted(self, frame, sym):
         """True once ``sym`` has been called ``_C_SITE_MAX`` times from this line: the facts of
-        a hot loop (a deque's ``popleft`` a million times) are in the first ones."""
+        a hot loop (a deque's ``popleft`` a million times) are in the first ones. Every later
+        call there is counted (``_c_mute``), so the cap never hides that the site ran."""
         key = (sym, id(frame.f_code), frame.f_lineno)
         n = self._ccount.get(key, 0)
         if n >= _C_SITE_MAX:
+            self._c_mute(key, sym, frame)
             return True
         if n == 0 and len(self._ccount) >= _CODE_CACHE_MAX:
             self._ccount.clear()
         self._ccount[key] = n + 1
         return False
+
+    # ── the compiled-call cap's account (sidecar ``c_site_cap``) ───────────────
+    def _reset_c_cap(self):
+        """Fresh cap state: at construction, and in a forked child (its own trace, its own
+        budget per site; a lock held across the fork would never be released there)."""
+        self._ccount = {}
+        self._cmute_lock = allocate_lock()
+        self._cmuted = {}           # cap key -> [sym, site, muted calls, exact count]
+        self.c_muted = 0            # compiled calls past _C_SITE_MAX: counted, not recorded
+        self.c_muted_unsited = 0    # of which at a site past _C_MUTED_SITES_MAX (not listed)
+
+    def after_fork_child(self):
+        self._reset_c_cap()
+
+    def _c_mute(self, key, sym, frame):
+        """Count one compiled call past ``_C_SITE_MAX`` at its site (``key``: the backend's cap
+        key; ``frame``: the caller, read only for a site's first muted call). Returns the
+        site's muted calls so far (``_C_MUTE_MAX`` for a site that could not be tallied)."""
+        with self._cmute_lock:
+            self.c_muted += 1
+            ent = self._cmuted.get(key)
+            if ent is None:
+                if len(self._cmuted) >= _C_MUTED_SITES_MAX:
+                    self.c_muted_unsited += 1
+                    return _C_MUTE_MAX
+                site = self._site(frame) if frame is not None else None
+                ent = self._cmuted[key] = [sym, site, 0, True]
+            ent[2] += 1
+            return ent[2]
+
+    def _c_mute_stopped(self, key):
+        """The site stops counting (sys.monitoring ``DISABLE``): its count is a lower bound."""
+        ent = self._cmuted.get(key)
+        if ent is not None:
+            ent[3] = False
+
+    def c_cap_account(self):
+        """What the compiled-call cap left unrecorded, for the sidecar (None: nothing).
+
+        ``{"max": _C_SITE_MAX, "muted": calls counted past it, "exact": every count is exact,
+        "sites": [{"sym", "file", "func", "line", "muted", "exact"}] (the most muted first,
+        at most C_CAP_REPORT_SITES), "sites_omitted": capped sites not listed, "unsited": muted
+        calls at sites past _C_MUTED_SITES_MAX}``. A listed site recorded its first ``max``
+        calls of ``sym`` in this process. Sites omitted or unsited: the list is incomplete."""
+        with self._cmute_lock:
+            if not self.c_muted:
+                return None
+            items = [list(e) for e in self._cmuted.values()]
+            total, unsited = self.c_muted, self.c_muted_unsited
+        merged = {}
+        for sym, site, muted, exact in items:
+            site = site or {}
+            k = (sym, site.get("file"), site.get("func"), site.get("line"))
+            ent = merged.get(k)
+            if ent is None:
+                merged[k] = [muted, exact]
+            else:
+                ent[0] += muted
+                ent[1] = ent[1] and exact
+        ranked = sorted(merged.items(), key=lambda kv: (-kv[1][0], str(kv[0])))
+        sites = [{"sym": k[0], "file": k[1], "func": k[2], "line": k[3], "muted": v[0],
+                  "exact": v[1]} for k, v in ranked[:C_CAP_REPORT_SITES]]
+        omitted = max(0, len(ranked) - C_CAP_REPORT_SITES)
+        return {"max": _C_SITE_MAX, "muted": total,
+                "exact": not unsited and all(v[1] for _k, v in ranked),
+                "sites": sites, "sites_omitted": omitted, "unsited": unsited}
 
     def _c_decide(self, obj):
         try:

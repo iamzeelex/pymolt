@@ -505,6 +505,10 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     from pymolt.verify.unified import UnifiedVerificationReport
 
     verification = UnifiedVerificationReport.load(project_path)
+    # A verdict saved by `verify --post-migration OTHER` compared another recording: it is
+    # kept, but it is not the verdict on this migration's post-migration capture. (No record
+    # of what was compared: saved before it was recorded, when only the captures were saved.)
+    compared = verification.contract.compared if verification is not None else None
     if (
         verification is not None
         and receipt is not None
@@ -512,6 +516,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
         and verification.run_id == receipt.run_id
         and post_slot is not None
         and not _capture_precedes(verification.created_at, post_slot.captured_at)
+        and (compared is None or compared.after_capture == "post-migration")
     ):
         report = PhaseState(
             phase="report",

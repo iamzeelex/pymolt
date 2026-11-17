@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 from pymolt.verify.facts import (
+    CappedSite,
     Comparison,
     ComparisonLevel,
     DiffContext,
@@ -652,6 +653,164 @@ def test_a_new_raise_type_on_the_dropping_side_still_fails():
     old = fs(*packs(["a1", "a2", "a3"]))
     new = fs(*packs(["b1", "b2"], raise_at="TypeError"), dropped_events=5)
     assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+# ── compiled calls the other side did not record call by call (locust msgpack.unpackb) ─────
+
+UNPACK = "msgpack._cmsgpack.unpackb"
+UNPACK_SITE = {"file": "locust/rpc/protocol.py", "func": "unserialize", "line": 18,
+               "text": "return Message(*msgpack.loads(data, raw=False, strict_map_key=False))"}
+UNOBSERVED = ("return", {"__opaque__": "unobserved:c-return"})
+
+
+def unpacked(i):
+    """A Cython call as 3.8 records it (setprofile + CompiledWrap): inputs and result."""
+    return fact(UNPACK, {"packed": {"__bytes__": f"93{i:02x}"}, "strict_map_key": False},
+                (("return", {"__list__": ["ack", i]}),), first=i, **UNPACK_SITE)
+
+
+def unpack_c(count=2000):
+    """The same calls as sys.monitoring records them: a compiled call, no inputs."""
+    return fact(UNPACK, outcomes=(UNOBSERVED,), inp={"__c_call__": True}, count=count,
+                **UNPACK_SITE)
+
+
+POLY = {"file": "app.py", "func": "main", "line": 10, "text": "x = codec(a)"}
+
+
+def c_at(symbol, outcomes=(UNOBSERVED,), count=1):
+    return fact(symbol, outcomes=outcomes, inp={"__c_call__": True}, count=count, **POLY)
+
+
+def cap_of(symbol, muted=7, exact=True, **site):
+    where = {**POLY, **site}
+    return CappedSite(symbol=symbol, recorded=2000, muted=muted, exact=exact, **where)
+
+
+def capped_fs(*facts, sites=(), **kw):
+    return fs(*facts, c_capped=list(sites), c_cap_reported=1,
+              c_muted=sum(c.muted for c in sites), **kw)
+
+
+def test_wrapped_calls_against_compiled_call_events_are_not_disappearances():
+    old = fs(*[unpacked(i) for i in range(5)], backends=("setprofile",))
+    new = capped_fs(unpack_c())
+    d = diff_facts(old, new)
+    assert not failing(d) and d.verdict is VerificationVerdict.INCONCLUSIVE
+    shaped = [e for e in d.entries if e.category is FactCategory.UNCOMPARABLE]
+    assert len(shaped) == 4 and all("call-shape:new" in e.notes for e in shaped)
+    assert shaped[0].explained.startswith("call-shape: the new capture recorded this site's "
+                                          "calls as compiled calls")
+    assert [e.category for e in d.entries].count(FactCategory.EQUAL) == 1
+
+
+def test_a_shape_mismatch_softens_in_the_other_direction_too():
+    old = capped_fs(unpack_c())
+    new = fs(*[unpacked(i) for i in range(3)], backends=("setprofile",))
+    d = diff_facts(old, new)
+    assert not failing(d)
+    shaped = [e for e in d.entries if e.category is FactCategory.UNCOMPARABLE]
+    assert len(shaped) == 2 and all("call-shape:old" in e.notes for e in shaped)
+
+
+def test_a_shape_mismatch_excuses_only_its_own_site():
+    other_line = {**UNPACK_SITE, "func": "decode", "line": 40,
+                  "text": "return msgpack.loads(blob)"}
+    old = fs(*[unpacked(i) for i in range(3)],
+             fact("lib.gone", {"x": 1}, line=30, file=UNPACK_SITE["file"],
+                  func="unserialize"), backends=("setprofile",))
+    new = capped_fs(fact(UNPACK, outcomes=(UNOBSERVED,), inp={"__c_call__": True},
+                         count=2000, **other_line))
+    lost = [e for e in failing(diff_facts(old, new)) if e.category is FactCategory.DISAPPEARED]
+    assert {e.symbol for e in lost} == {UNPACK, "lib.gone"} and len(lost) == 4
+    assert not any(n.startswith("call-shape") for e in lost for n in e.notes)
+
+
+def test_a_compiled_call_missing_at_a_site_the_new_side_capped_is_not_comparable():
+    # sys.monitoring caps per call instruction: a polymorphic site muted ``codec_b`` once
+    # ``codec_a`` had used up its 2,000 recorded calls; setprofile caps per symbol.
+    old = fs(c_at("lib.codec_a", count=2000), c_at("lib.codec_b"), backends=("setprofile",))
+    new = capped_fs(c_at("lib.codec_a", count=2000), sites=[cap_of("lib.codec_b", muted=7)])
+    d = diff_facts(old, new)
+    (e,) = [e for e in d.entries if e.symbol == "lib.codec_b"]
+    assert e.category is FactCategory.UNCOMPARABLE and "c-site-capped:new" in e.notes
+    assert e.explained == ("c-site-capped: the new capture recorded the first 2000 calls of "
+                           "this compiled callable here and only counted the 7 after them; "
+                           "this fact may be among those")
+    assert not failing(d)
+    assert any(w.startswith("c-site-cap:new:7:") for w in d.warnings)
+
+
+def test_an_appearance_at_a_site_the_old_side_capped_is_not_comparable():
+    old = capped_fs(c_at("lib.codec_a", count=2000),
+                    sites=[cap_of("lib.codec_b", muted=1500, exact=False)])
+    new = fs(c_at("lib.codec_a", count=2000), c_at("lib.codec_b"))
+    (e,) = [e for e in diff_facts(old, new).entries if e.symbol == "lib.codec_b"]
+    assert e.category is FactCategory.UNCOMPARABLE and "c-site-capped:old" in e.notes
+    assert "counted the at least 1500 after them" in e.explained
+
+
+def test_a_cap_elsewhere_does_not_excuse_a_disappearance():
+    old = fs(c_at("lib.codec_a", count=2000), c_at("lib.codec_b"), backends=("setprofile",))
+    new = capped_fs(c_at("lib.codec_a", count=2000),
+                    sites=[cap_of("lib.codec_b", line=99, text="y = codec(b)")])
+    assert [e.symbol for e in failing(diff_facts(old, new))] == ["lib.codec_b"]
+
+
+def test_an_outcome_missing_on_the_capped_side_is_not_comparable():
+    old = fs(c_at("lib.codec_a", (UNOBSERVED, ("raise", "ValueError")), count=2500))
+    new = capped_fs(c_at("lib.codec_a", count=2000), sites=[cap_of("lib.codec_a", 500)])
+    (e,) = diff_facts(old, new).entries
+    assert e.category is FactCategory.UNCOMPARABLE and "c-site-capped:new" in e.notes
+
+
+def test_a_new_outcome_on_the_capped_side_still_fails():
+    old = fs(c_at("lib.codec_a", count=2500))
+    new = capped_fs(c_at("lib.codec_a", (UNOBSERVED, ("raise", "ValueError")), count=2000),
+                    sites=[cap_of("lib.codec_a", 500)])
+    assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
+
+
+def test_an_older_runtime_that_recorded_the_cap_is_presumed_capped():
+    # No account (its runtime muted silently): a sys.monitoring site holding 2,000 recorded
+    # calls may have had more, of any callable; one with fewer did not reach the cap.
+    old = fs(c_at("lib.codec_a", count=2000), c_at("lib.codec_b"), backends=("setprofile",))
+    new = fs(c_at("lib.codec_a", count=2000), c_cap_unreported=1)
+    (e,) = [e for e in diff_facts(old, new).entries if e.symbol == "lib.codec_b"]
+    assert e.category is FactCategory.UNCOMPARABLE and "c-site-capped:new" in e.notes
+    assert "silently stopped recording" in e.explained
+    below = fs(c_at("lib.codec_a", count=1999), c_cap_unreported=1)
+    assert [e.symbol for e in failing(diff_facts(old, below))] == ["lib.codec_b"]
+
+
+def test_an_older_setprofile_cap_is_presumed_per_symbol_and_never_across_processes():
+    new = fs(c_at("lib.codec_a", count=2000), c_at("lib.codec_b"), backends=("setprofile",))
+    # setprofile capped per symbol: codec_a's cap says nothing about a codec_c gone there.
+    old = fs(c_at("lib.codec_a", count=2500), c_at("lib.codec_b"), c_at("lib.codec_c"),
+             c_cap_unreported=1, backends=("setprofile",))
+    assert [e.symbol for e in failing(diff_facts(new, old))] == ["lib.codec_c"]
+    # ... but a codec_a outcome missing at its own capped site is not comparable.
+    old_raise = fs(c_at("lib.codec_a", (UNOBSERVED, ("raise", "ValueError")), count=2001))
+    capped_a = fs(c_at("lib.codec_a", count=2000), c_cap_unreported=1, backends=("setprofile",))
+    (e,) = diff_facts(old_raise, capped_a).entries
+    assert e.category is FactCategory.UNCOMPARABLE and "c-site-capped:new" in e.notes
+    # Two processes' calls add up past the cap without either reaching it: no inference.
+    two = fs(c_at("lib.codec_a", count=2400), c_cap_unreported=2)
+    old = fs(c_at("lib.codec_a", count=2000), c_at("lib.codec_b"), backends=("setprofile",))
+    assert [e.symbol for e in failing(diff_facts(old, two))] == ["lib.codec_b"]
+
+
+def test_a_cap_does_not_soften_an_input_change():
+    # The capped side recorded x=2 and the other side has no x=2: the cap explains nothing,
+    # so the entry is exactly what it is without a cap.
+    old = fs(fact("lib.codec", {"x": 1}, count=2500, **POLY))
+    capped = capped_fs(fact("lib.codec", {"x": 2}, count=2000, **POLY),
+                       sites=[cap_of("lib.codec", 500)])
+    plain = fs(fact("lib.codec", {"x": 2}, count=2000, **POLY))
+    (e,) = diff_facts(old, capped).entries
+    (u,) = diff_facts(old, plain).entries
+    assert e.category is u.category is FactCategory.CHANGED
+    assert e.notes == u.notes and not any(n.startswith("c-site-capped") for n in e.notes)
 
 
 REQ_SRC = "def test(port):\n    response = requests.get(url)\n    return response\n"
