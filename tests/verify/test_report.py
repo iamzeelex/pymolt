@@ -164,18 +164,20 @@ def test_impact_set_focuses_metrics_and_preserves_full_surface(tmp_path):
         "flask.cli.pass_context",
         "flask.cli.with_appcontext",
     ]
-    assert rep.static_targets == rep.impacted_static_targets == 1
-    assert rep.confirmed == rep.impacted_confirmed == 0
-    assert rep.blind == rep.impacted_blind == 1
-    assert rep.dynamic_only == rep.impacted_dynamic_only == 1
-    assert rep.trust == rep.impacted_trust == 0.0
+    # The focus: what the plan's paths name.
+    assert rep.impacted_static_targets == 1
+    assert rep.impacted_confirmed == 0
+    assert rep.impacted_blind == 1
+    assert rep.impacted_dynamic_only == 1
+    assert rep.impacted_trust == 0.0
 
-    # Full totals and every symbol remain available for audit/UI display.
-    assert rep.all_static_targets == 2
-    assert rep.all_confirmed == 1
-    assert rep.all_blind == 1
-    assert rep.all_dynamic_only == 1
+    # The headline is the whole surface, the one the verdict judges.
+    assert rep.static_targets == rep.all_static_targets == 2
+    assert rep.confirmed == rep.all_confirmed == 1
+    assert rep.blind == rep.all_blind == 1
+    assert rep.dynamic_only == rep.all_dynamic_only == 1
     assert rep.all_trust == 0.5
+    assert (rep.trust_confirmed, rep.trust_static) == (1, 2)  # Flask; with_appcontext BLIND
     assert len(rep.symbols) == 3
     assert {symbol.target for symbol in rep.impacted_symbols} == {
         "flask.cli.pass_context",
@@ -288,12 +290,13 @@ def test_empty_impact_set_is_active_and_reports_unmatched_paths(tmp_path):
     )
 
     assert rep.impact_filter_active is True
-    assert rep.static_targets == 0
+    assert rep.impacted_static_targets == 0
+    # the headline (and the verdict) still cover every static symbol
+    assert rep.static_targets == rep.all_static_targets > 0
     assert rep.symbols  # full details are not filtered away
     assert rep.impacted_symbols == []
     assert rep.unmatched_impact_paths == ["flask.no_longer_public"]
-    assert any("static contacts narrowed to the plan's packages" in note
-               and f"0 of {rep.all_static_targets} kept" in note for note in rep.notes)
+    assert not any("narrowed" in note for note in rep.notes)
 
 
 def test_single_serialized_axiom_impact_mapping_is_accepted(tmp_path):
@@ -529,9 +532,13 @@ def test_impact_paths_match_resolved_symbols_on_both_sides(tmp_path, monkeypatch
     assert impacted == {"fakedep.fetch": "confirmed", "fakedep._impl.other_thing": "dynamic-only"}
     assert rep.unmatched_impact_paths == []
     assert [c.target for c in rep.impacted_contacts] == ["fakedep.fetch"]
-    assert (rep.static_targets, rep.confirmed, rep.dynamic_only) == (1, 1, 1)
-    assert rep.trust == 1.0  # fetch: behavioural, in an executed file
+    assert (rep.impacted_static_targets, rep.impacted_confirmed,
+            rep.impacted_dynamic_only) == (1, 1, 1)
+    assert (rep.static_targets, rep.confirmed, rep.dynamic_only) == (
+        rep.all_static_targets, rep.all_confirmed, rep.all_dynamic_only)
     assert rep.all_static_targets == 8
+    # trust over the whole surface: fetch of the three behavioural contacts in executed files
+    assert (rep.trust_confirmed, rep.trust_static) == (1, 3)
 
 
 def test_identity_resolution_can_be_disabled(tmp_path, monkeypatch):

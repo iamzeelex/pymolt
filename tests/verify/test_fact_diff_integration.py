@@ -294,6 +294,99 @@ def test_a_change_inside_the_impact_set_fails_and_nothing_is_unpredicted(tmp_pat
     assert rep.unpredicted_changes == []
 
 
+def _plan_impact(path):
+    from pymolt.migration_plan import PlannedApiImpact
+
+    return PlannedApiImpact(package="dep", path=path, kind="signature-changed",
+                            state="changed", risk="medium", explanation="changed")
+
+
+def _one_call_run(tmp_path):
+    """dep.compute and dep.other are both in the code; the run only reaches dep.compute,
+    with the same outcome on both sides."""
+    (tmp_path / "app.py").write_text(
+        "import dep\n\n\ndef main():\n    dep.compute()\n\n\ndef never():\n    dep.other()\n")
+    events = [_event("dep.compute", 5, 1, tmp_path)]
+    return _write(tmp_path / "old.jsonl", events), _write(tmp_path / "new.jsonl", events)
+
+
+def test_after_apply_an_unexercised_symbol_outside_the_plan_blocks_pass(tmp_path):
+    from pymolt.verify.report import build_contract_report
+
+    old, new = _one_call_run(tmp_path)
+    by_hand = build_contract_report(tmp_path, trace=new, against=old)
+    _stamp_verdict(by_hand, str(new), str(old), [])
+    applied = build_contract_report(tmp_path, trace=new, against=old,
+                                    changed_api_paths=[_plan_impact("dep.compute")])
+    _stamp_verdict(applied, str(new), str(old), [])
+
+    # What the plan changed was exercised and compared equal, but dep.other never ran: the
+    # same captures without a plan are INCONCLUSIVE, and so is the applied migration.
+    assert applied.impacted_confirmed == 1 and applied.impacted_blind == 0
+    assert by_hand.verdict is VerificationVerdict.INCONCLUSIVE
+    assert applied.verdict is VerificationVerdict.INCONCLUSIVE
+    assert applied.verdict_reasons == [
+        "1 static dependency symbol(s) outside the plan's predicted impacts were not "
+        "exercised: dep.other"]
+    # the headline numbers are the whole surface, the plan's paths are the focus
+    assert (applied.static_targets, applied.confirmed, applied.blind, applied.trust) == (
+        by_hand.static_targets, by_hand.confirmed, by_hand.blind, by_hand.trust)
+    assert (applied.impacted_static_targets, applied.impacted_blind) == (1, 0)
+
+
+def test_after_apply_blind_reasons_name_inside_and_outside_the_plan_apart(tmp_path):
+    from pymolt.verify.report import build_contract_report
+
+    old, new = _one_call_run(tmp_path)
+    (tmp_path / "more.py").write_text("import dep\n\n\ndef later():\n    dep.later()\n")
+    rep = build_contract_report(tmp_path, trace=new, against=old,
+                                changed_api_paths=[_plan_impact("dep.later")])
+    _stamp_verdict(rep, str(new), str(old), [])
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
+    assert rep.verdict_reasons == [
+        "1 static dependency symbol(s) inside the plan's predicted impacts were not "
+        "exercised: dep.later",
+        "1 static dependency symbol(s) outside the plan's predicted impacts were not "
+        "exercised: dep.other"]
+
+
+def test_after_apply_the_whole_surface_can_pass(tmp_path):
+    from pymolt.verify.report import build_contract_report
+
+    root = _views_project(tmp_path)
+    # dep.Result.size is dynamic-only and outside the plan; its facts compared equal.
+    events = [_view_event("dep.compute", {"__opaque__": "dep.Result"}, root),
+              _view_event("dep.Result.size", 3, root, line=6)]
+    old = _write(root / "old.jsonl", events)
+    new = _write(root / "new.jsonl", events)
+    rep = build_contract_report(root, trace=new, against=old, resolve_identities=False,
+                                changed_api_paths=[_plan_impact("dep.compute")])
+    _stamp_verdict(rep, str(new), str(old), [])
+    assert rep.dynamic_only == 1 and rep.impacted_dynamic_only == 0
+    assert rep.verdict is VerificationVerdict.PASS, rep.verdict_reasons
+
+
+def test_after_apply_a_dynamic_only_symbol_outside_the_plan_must_be_compared_equal(tmp_path):
+    from pymolt.verify.report import SymbolStatus
+
+    root = _views_project(tmp_path)
+    compute = SymbolStatus(target="dep.compute", dep="dep", status="confirmed", impacted=True,
+                           matched_impact_paths=["dep.compute"])
+    outside = SymbolStatus(target="dep.Result.size", dep="dep", status="dynamic-only",
+                           impacted=False)
+    # A custom comparator gives counts only, so nothing is compared fact by fact.
+    report = ContractReport(
+        root=str(root), diff={"disappeared": 0}, diff_clean=True, all_diff={"disappeared": 0},
+        all_diff_clean=True, static_targets=1, confirmed=1, dynamic_only=1,
+        impact_filter_active=True, impact_paths=["dep.compute"],
+        symbols=[compute, outside], impacted_symbols=[compute],
+    )
+    trace = _write(root / "t.jsonl", [_view_event("dep.compute", 1, root)])
+    _stamp_verdict(report, str(trace), str(trace), [])
+    assert report.verdict is VerificationVerdict.INCONCLUSIVE
+    assert "1 observed symbol(s) are missing from the static map" in report.verdict_reasons
+
+
 def test_unverified_edited_sites_never_block_pass_but_review_items_do():
     inconclusive = {"verdict": "inconclusive", "counts": {"rewritten": 2}, "entries": [
         {"category": "rewritten", "comparison": "missing", "symbol": "dep.a", "unverified": True},

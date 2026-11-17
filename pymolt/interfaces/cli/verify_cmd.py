@@ -552,10 +552,14 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             for t in rep.trust_tiers
         )
         head += f"\n[dim]Trust tiers: {tiers}[/dim]"
-    if rep.impact_filter_active:
+    from pymolt.interfaces.views import impact_focus
+
+    focus = impact_focus(rep)
+    if focus is not None:
         head += (
-            f"\nImpact focus: [bold]{len(rep.impact_paths)}[/bold] changed API path(s); "
-            f"full surface: {rep.all_static_targets} static / {rep.all_blind} blind"
+            f"\nImpact focus: [bold]{focus['paths']}[/bold] changed API path(s); on them "
+            f"{focus['static_targets']} static, {focus['confirmed']} confirmed, "
+            f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only"
         )
     if rep.probed:
         head += (f"\nSandbox-probed: [bold]{rep.probed}[/bold] symbol(s) re-invoked under target — "
@@ -589,10 +593,20 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             title="Behaviour changes outside the plan's predicted impacts")
     _render_calibration(getattr(rep, "calibration", None))
 
-    visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols
+    # Every symbol counts toward the verdict; after `apply` the plan's paths are listed first.
+    visible_symbols = (sorted(rep.symbols, key=lambda s: not s.impacted)
+                       if rep.impact_filter_active else rep.symbols)
+
+    def _count(rows) -> str:
+        if not rep.impact_filter_active:
+            return str(len(rows))
+        on_plan = sum(1 for s in rows if s.impacted)
+        first = ", listed first" if 0 < on_plan < len(rows) else ""
+        return f"{len(rows)}; {on_plan} on the plan's paths{first}"
+
     probed = [s for s in visible_symbols if s.probed]
     if probed:
-        t = Table(title=f"Sandbox probes (re-invoked under target version) ({len(probed)})")
+        t = Table(title=f"Sandbox probes (re-invoked under target version) ({_count(probed)})")
         t.add_column("Dependency symbol", style="cyan")
         t.add_column("Probe verdict")
         _pv = {"stable": "[green]stable[/green]", "changed": "[bold red]CHANGED[/bold red]",
@@ -607,7 +621,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         # grep, or paste into --wrap. Truncating it to `apispec.ext.marshmallo…`
         # left a table that could only be looked at, never used. It folds now, and
         # the supporting columns give up their width first.
-        t = Table(title=f"BLIND — static contacts no trace exercised ({len(blind)})",
+        t = Table(title=f"BLIND — static contacts no trace exercised ({_count(blind)})",
                   header_style="yellow")
         t.add_column("Dependency symbol", style="cyan", overflow="fold", ratio=2)
         t.add_column("Called from (your code)", overflow="fold", ratio=2)
@@ -619,7 +633,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
 
     dyn = [s for s in visible_symbols if s.status == "dynamic-only"]
     if dyn:
-        t = Table(title=f"DYNAMIC-ONLY — observed but the static map missed ({len(dyn)})",
+        t = Table(title=f"DYNAMIC-ONLY — observed but the static map missed ({_count(dyn)})",
                   header_style="red")
         t.add_column("Dependency symbol", style="cyan", overflow="fold", ratio=2)
         t.add_column("Observed at", style="dim", overflow="fold", ratio=1)

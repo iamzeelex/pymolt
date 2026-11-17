@@ -46,11 +46,15 @@ Watcher environment:
                         targets unless PYMOLT_TRACE_TARGET names them.
   PYMOLT_TRACE_INCREMENTAL  "0" makes 3.12+ auto use discover -> watch instead (default "1")
   PYMOLT_TRACE_INCREMENTAL_SETTLE  seconds without a newly armed code after which incremental
-                        mode frees its second tool (the global PY_START for dunders, properties
-                        and generators); default 30, 0 = never. Contacts seen so far stay
-                        watched and plain calls are still found later, but a protocol, dunder or
-                        property contact FIRST used after the settle is missed (metadata:
+                        mode turns its second tool off (the global PY_START for dunders,
+                        properties and generators); default 30, 0 = never. Contacts seen so far
+                        stay watched and plain calls are still found later (metadata:
                         ``settled_at``, ``settle_reason``).
+  PYMOLT_TRACE_INCREMENTAL_REOPEN  after the settle, a line of the project's code that runs for
+                        the first time turns the second tool on again until no new line, contact
+                        or armed code was seen for this many seconds; default 5. 0 = never: a
+                        protocol, dunder, property or generator contact FIRST used after the
+                        settle is then missed (metadata: ``reopened``, ``reopen_seconds``).
   PYMOLT_TRACE_DISCOVER_QUIET  seconds without a new symbol that count as saturated (default 5;
                         the clock starts at the first observed symbol)
   PYMOLT_TRACE_DISCOVER_MAX    seconds after which discover -> watch switches anyway (default 60)
@@ -116,13 +120,15 @@ ENV_MAX = "PYMOLT_TRACE_DISCOVER_MAX"
 ENV_SINK = "PYMOLT_TRACE_SINK"
 ENV_INCREMENTAL = "PYMOLT_TRACE_INCREMENTAL"
 ENV_SETTLE = "PYMOLT_TRACE_INCREMENTAL_SETTLE"
+ENV_REOPEN = "PYMOLT_TRACE_INCREMENTAL_REOPEN"
 DEFAULT_OUT = "./pymolt-trace-{pid}.jsonl"
 MODES = ("discover", "watch", "auto", "incremental")
 DEFAULT_MODE = "auto"
 DEFAULT_QUIET = 5.0
 DEFAULT_MAX = 60.0
 REFRESH_SECONDS = 2.0       # incremental: how often the running discovered count is noted
-DEFAULT_SETTLE = 30.0       # incremental: seconds without a newly armed code -> free tool B
+DEFAULT_SETTLE = 30.0       # incremental: seconds without a newly armed code -> tool B off
+DEFAULT_REOPEN = 5.0        # incremental, post-settle: seconds tool B stays on after a new line
 
 
 def _split_excludes(raw):
@@ -239,7 +245,7 @@ class Controller(object):
     def __init__(self, target, sink, mode=DEFAULT_MODE, prefer="auto", exclude=(), source=None,
                  include_internal=False, impact_targets=(), quiet=DEFAULT_QUIET,
                  max_seconds=DEFAULT_MAX, legacy_watch=False, incremental=True,
-                 settle=DEFAULT_SETTLE):
+                 settle=DEFAULT_SETTLE, reopen=DEFAULT_REOPEN):
         self.target = target
         self.sink = sink
         self.requested_mode = mode
@@ -253,7 +259,8 @@ class Controller(object):
         self.max_seconds = max_seconds
         self.legacy_watch = legacy_watch    # watch through today's targeted backend selection
         self.incremental = incremental      # 3.12+ auto -> incremental
-        self.settle = settle                # incremental: free tool B after this quiet (0: never)
+        self.settle = settle                # incremental: tool B off after this quiet (0: never)
+        self.reopen = reopen                # ... on again at a new line of ours, this long
         self.notes = []
         if mode not in MODES:
             self.notes.append("unknown-mode: " + str(mode))
@@ -309,10 +316,17 @@ class Controller(object):
             meta["discovered"] = self.discovered
             meta["armed"] = getattr(be, "armed", None)
             meta["incremental_settle"] = self.settle
+            meta["incremental_reopen"] = getattr(be, "reopen", None)
             meta["settled_at"] = getattr(be, "settled_at", None)
             meta["settle_reason"] = getattr(be, "settle_reason", None)
             if getattr(be, "settled_at", None) is not None:
                 meta["handed_over"] = getattr(be, "handed_over", None)
+                meta["reopened"] = getattr(be, "reopened", None)
+                seconds = getattr(be, "reopen_seconds", None)
+                opened = getattr(be, "_opened_at", None)
+                if seconds is not None and opened is not None:
+                    seconds += time.monotonic() - opened    # on right now
+                meta["reopen_seconds"] = seconds
         notes = list(self.notes)
         for be in (self.discover, self.watch):
             note = getattr(be, "note", None)
@@ -410,7 +424,8 @@ class Controller(object):
         if mode in ("auto", "incremental") and monitoring and self.incremental:
             from ._monitoring import MonitoringBackend
             be = MonitoringBackend(self.target, *args, mode="incremental",
-                                   watch_targets=self.impact_targets)
+                                   watch_targets=self.impact_targets,
+                                   reopen=self.reopen if self.settle > 0 else 0.0)
             try:
                 be.start()
             except RuntimeError as exc:
@@ -465,19 +480,25 @@ class Controller(object):
         return None
 
     def settled(self, now=None):
-        """"quiet" when incremental mode should free its second tool, else None. The clock
-        starts at the first armed code (an idle start does not settle)."""
+        """"quiet" when incremental mode should turn its second tool off, else None: no newly
+        armed code or new symbol for ``settle`` seconds, the first time (the clock starts at the
+        first armed code: an idle start does not settle); after a new line of ours turned it
+        on again, nothing new (lines included) for ``reopen`` seconds."""
         be = self.discover
         if (self.mode != "incremental" or self.settle <= 0 or be is None
-                or getattr(be, "settled_at", None) is not None
-                or getattr(be, "_tool2", None) is None):
+                or getattr(be, "_tool2", None) is None
+                or not getattr(be, "_b_active", False)):
             return None
+        first = getattr(be, "settled_at", None) is None
         stamps = [t for t in (getattr(be, "last_armed_at", None),
-                              getattr(be, "last_new_at", None)) if t is not None]
+                              getattr(be, "last_new_at", None),
+                              None if first else getattr(be, "last_fresh_at", None))
+                  if t is not None]
         if not stamps:
             return None
         now = time.monotonic() if now is None else now
-        return "quiet" if now - max(stamps) >= self.settle else None
+        quiet = self.settle if first else self.reopen
+        return "quiet" if now - max(stamps) >= quiet else None
 
     def _run(self):
         try:
@@ -485,6 +506,8 @@ class Controller(object):
                 tick = REFRESH_SECONDS
                 if self.settle > 0:
                     tick = max(0.005, min(tick, self.settle / 4.0))
+                    if self.reopen > 0:
+                        tick = max(0.005, min(tick, self.reopen / 4.0))
                 while not self._wake.wait(tick):
                     reason = self.settled()
                     if reason is not None:
@@ -884,6 +907,7 @@ def activate():
         legacy_watch=legacy_watch,
         incremental=os.environ.get(ENV_INCREMENTAL, "1").strip() not in ("0", "false", "False"),
         settle=_float_env(ENV_SETTLE, DEFAULT_SETTLE),
+        reopen=_float_env(ENV_REOPEN, DEFAULT_REOPEN),
     )
     backend.requested_mode = raw_mode or None
     try:
