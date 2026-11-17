@@ -252,6 +252,10 @@ class ContractSlot(BaseModel):
     # ``{"returncode": int, "failed": int | None, "summary": str}``; None = not red.
     # The slot is still ``valid``; the stamp only says the run was not green.
     red: dict | None = None
+    # A baseline replicate: the ``captured_at`` of the baseline whose command it re-ran on the
+    # same code in the same environment (None for every other slot). A replicate whose
+    # baseline was replaced is stale and ignored.
+    replicate_of: str | None = None
 
 
 class ContractState(BaseModel):
@@ -260,6 +264,9 @@ class ContractState(BaseModel):
     schema_version: int = CONTRACT_STATE_SCHEMA_VERSION
     baseline: ContractSlot | None = None
     post_migration: ContractSlot | None = None
+    # The baseline's command run a second time (``pymolt capture baseline --replicate``):
+    # what differs between the two runs is run-to-run noise (``verify.replicate``).
+    baseline_replicate: ContractSlot | None = None
     # Failed/empty/corrupt attempts are durable diagnostics, but never replace
     # either active evidence slot above.
     diagnostic_captures: list[ContractSlot] = Field(default_factory=list)
@@ -282,10 +289,11 @@ class ContractState(BaseModel):
                 return value
 
         slots = [payload.get("baseline"), payload.get("post_migration"),
+                 payload.get("baseline_replicate"),
                  *(payload.get("diagnostic_captures") or [])]
         for slot in slots:
             if isinstance(slot, dict):
-                for key in ("trace_path", "metadata_path", "command_log"):
+                for key in ("trace_path", "metadata_path", "command_log", "sources_path"):
                     slot[key] = relative(slot.get(key))
         return payload
 

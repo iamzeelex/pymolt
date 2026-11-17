@@ -471,8 +471,12 @@ def build_contract_report(
     resolve_identities: bool = True,
     predictions: Mapping[str, Any] | None = None,
     diff_context: Any = None,
+    noise_profile: tuple[Mapping[str, Any], str] | None = None,
 ) -> ContractReport:
     """Build the unified report.
+
+    ``noise_profile`` (``(profile, label)``, from a baseline replicate): the run-to-run noise
+    the fact diff is judged with (``replicate.apply_noise_profile``).
 
     ``diff_context`` (a ``facts.DiffContext``): the snapshots, apply ledger, contact maps and
     successors that let the fact diff judge an edited site by who edited it.
@@ -850,6 +854,10 @@ def build_contract_report(
                     else DiffProfile.EXACT,
                     context=diff_context,
                 )
+                if noise_profile is not None:
+                    from pymolt.verify.replicate import apply_noise_profile
+
+                    apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1])
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
                     report.calibration = _calibration(predictions, old_facts, fdiff, root)
