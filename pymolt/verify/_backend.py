@@ -21,10 +21,12 @@ The backend knows nothing about the on-disk format: it calls ``sink.on_return`` 
 Raise capture under setprofile, honestly (verified empirically on CPython 3.6-3.12):
 ``sys.setprofile`` does NOT deliver a Python ``exception`` event. A Python function that
 raises is reported as a ``return`` with ``arg=None``; the frame's last opcode tells the two
-apart (``frame_outcome``). The exception itself is not visible at that event: the backend
-reads its TYPE later, when the caller handles it (``SetProfileBackend``'s deferred typing),
-and a raise handled without any call, or swallowed by C code, stays ``"<unknown>"``. The
-monitoring backend reports the type at the raise.
+apart (``frame_outcome``). The exception itself is not visible at that event: below 3.12 the
+backend reads its TYPE when the exception enters the frame that receives it (a one-shot
+``exception`` trace event, see ``SetProfileBackend``), or else when the caller handles it.
+A raise that C code swallows (``hasattr``), or that happens while another tool owns
+``sys.settrace`` and is handled without any call, stays ``"<unknown>"``. The monitoring
+backend reports the type at the raise.
 
 Compiled (C / Cython) dependency callables called from our code are recorded too, as
 ``in = {"__c_call__": true}`` (+ ``arg0`` under sys.monitoring) with an unobserved result
@@ -752,6 +754,18 @@ def raised_through(exc, frame, lasti=None):
     return None
 
 
+def raised_in(exc, tb, frame, lasti=None):
+    """``raised_through`` for an exception still propagating: its traceback so far is ``tb``
+    (an ``exception`` trace event's), not yet ``exc.__traceback__`` on Python <=3.10."""
+    n = 0
+    while tb is not None and n < _TB_WALK:
+        if tb.tb_frame is frame and (lasti is None or tb.tb_lasti == lasti):
+            return raised_label(exc)
+        tb = tb.tb_next
+        n += 1
+    return raised_through(exc, frame, lasti) if exc is not None else None
+
+
 def _opcode_sets():
     try:
         import dis
@@ -846,6 +860,10 @@ def first_start(frame):
 _CODE_CACHE_MAX = 200000
 _PENDING_MAX = 100000
 _PARKED_MAX = 64            # raises awaiting their type, per thread (see SetProfileBackend)
+# A parked raise arms the frame that receives it for one ``exception`` trace event. Not on
+# 3.12+: there ``sys.settrace`` runs on sys.monitoring and costs ~28 us per raise (and the
+# monitoring backend, which sees the type at the raise, is the one in use).
+_ARM_EXCEPTION_EVENT = sys.version_info < (3, 12) and hasattr(sys, "settrace")
 
 # The runtime's own modules are never a dependency, whatever the target says (a "all"
 # target with the runtime installed under site-packages would otherwise record its own
@@ -1763,18 +1781,33 @@ class SetProfileBackend(FrameBackend):
     before an unwinding frame's ``return`` (and a ``c_exception``) event, and ``sys.exc_info()``
     there shows an outer HANDLED exception, if any, not the propagating one. So a recorded
     call that raised is parked, holding its frame (a compiled call: the calling frame and its
-    instruction). At the thread's next event the propagating exception is usually being
-    handled: an ``except`` / ``finally`` / ``with`` body that makes any call, ``pytest.raises``,
-    ``assertRaises``, pytest's own handler for a failing test. ``sys.exc_info()`` then shows it,
-    and its traceback (or that of an exception raised from it or while handling it) passes
-    through the parked frame: that is the raised type. An unwinding ``return`` or a
-    ``c_exception`` means the exception is still propagating: the call stays parked. Any other
-    event means it was handled without a call (``except E: pass``) or swallowed by C code
-    (``hasattr``, ``getattr`` with a default, ``next`` with a default, a ``for`` loop's
-    StopIteration): the raise is recorded untyped, as before. On <=3.7 an ambiguous outcome
-    (``return`` inside ``try/finally`` / ``with``) is parked too: a match makes it a typed raise,
-    otherwise it stays ambiguous. The cost is one test per event, plus a traceback walk per
-    raise.
+    instruction), and typed by whichever comes first:
+
+    - Below 3.12, the frame that receives the exception (the caller; for a compiled call, the
+      calling frame) is armed: its ``f_trace`` is set and ``sys.settrace`` gets a hook that
+      traces nothing else. When the exception enters that frame, before any handler runs,
+      CPython reports it to ``f_trace`` as an ``exception`` event with its traceback (a
+      ``for`` loop reports the StopIteration it swallows the same way). If the traceback
+      passes through the parked frame, that is the raised type. The frame is disarmed at
+      once, and also at its next line or return without that exception (C code swallowed
+      it: untyped) and at the thread's next profile event. Every Python call and every C
+      call fires a profile event first, so the program never runs with the trace hook set.
+      It is armed only while ``sys.gettrace()`` is None: coverage or a debugger owning
+      ``sys.settrace`` is never displaced, and the profile path below types the raise.
+    - At the thread's next profile event, the propagating exception is usually being
+      handled: an ``except`` / ``finally`` / ``with`` body that makes any call,
+      ``pytest.raises``, ``assertRaises``, pytest's own handler for a failing test.
+      ``sys.exc_info()`` then shows it, and its traceback (or that of an exception raised
+      from it or while handling it) passes through the parked frame: that is the raised
+      type. An unwinding ``return`` or a ``c_exception`` means it is still propagating: the
+      call stays parked. Any other event means it was handled without a call or swallowed
+      by C code: untyped, as before.
+
+    C code that swallows the exception (``hasattr``, ``getattr`` / ``next`` with a default,
+    ``list()`` over an iterator) leaves it untyped either way. On <=3.7 an ambiguous outcome
+    (``return`` inside ``try/finally`` / ``with``) is parked too: a match makes it a typed
+    raise, otherwise it stays ambiguous. The cost is one test per profile event, plus about
+    a microsecond per raise.
     """
 
     name = "setprofile"
@@ -1794,6 +1827,9 @@ class SetProfileBackend(FrameBackend):
         # tid -> [(info, frame, lasti | None, outcome, end, warns)]: raises awaiting their type
         # (written by that thread only; ``stop`` flushes what is left).
         self._parked = {}
+        self._armed = {}             # tid -> the frame armed to receive that thread's raise
+        self._gtrace = self._no_trace      # one bound method each: identity marks them ours
+        self._ftrace = self._receive
 
     # ── deferred raise typing ──────────────────────────────────────────────────
     def _park(self, info, frame, lasti, outcome, warns):
@@ -1804,6 +1840,74 @@ class SetProfileBackend(FrameBackend):
         elif len(parked) >= _PARKED_MAX:
             self._give_up(parked.pop(0))
         parked.append((info, frame, lasti, outcome, _now(), warns))
+        self._arm(frame if lasti is not None else frame.f_back)
+
+    def _arm(self, frame):
+        """Arm ``frame`` to report the exception entering it (see the class docstring)."""
+        if frame is None or not _ARM_EXCEPTION_EVENT:
+            return
+        try:
+            current = sys.gettrace()
+            if current is not None and current is not self._gtrace:
+                return                  # coverage, a debugger: settrace is theirs
+            if frame.f_trace is not None and frame.f_trace is not self._ftrace:
+                return
+            tid = _get_ident()
+            old = self._armed.get(tid)
+            if old is not None and old is not frame:
+                self._unarm(old)
+            if current is None:
+                sys.settrace(self._gtrace)
+            frame.f_trace = self._ftrace
+            self._armed[tid] = frame
+        except Exception:
+            pass
+
+    def _unarm(self, frame):
+        try:
+            if frame.f_trace is self._ftrace:
+                frame.f_trace = None
+        except Exception:
+            pass
+
+    def _disarm(self, tid):
+        frame = self._armed.pop(tid, None)
+        if frame is None:
+            return
+        self._unarm(frame)
+        try:
+            if sys.gettrace() is self._gtrace:
+                sys.settrace(None)
+        except Exception:
+            pass
+
+    def _no_trace(self, frame, event, arg):
+        """``sys.settrace``'s hook while a frame is armed: traces no other frame, and removes
+        itself from a thread left armed when ``stop`` ran in another one."""
+        if _get_ident() not in self._armed:
+            try:
+                sys.settrace(None)
+            except Exception:
+                pass
+        return None
+
+    def _receive(self, frame, event, arg):
+        """The armed frame's ``f_trace``: an ``exception`` event carries the propagating
+        exception; a line or return without it means C code swallowed the raise."""
+        try:
+            tid = _get_ident()
+            self._disarm(tid)
+            parked = self._parked.pop(tid, None)
+            exc, tb = (arg[1], arg[2]) if event == "exception" else (None, None)
+            for item in parked or ():
+                label = raised_in(exc, tb, item[1], item[2]) if exc is not None else None
+                if label is not None:
+                    self._finish(item[0], OUTCOME_RAISE, label, item[5], end=item[4])
+                else:
+                    self._give_up(item)
+        except Exception:
+            pass
+        return None
 
     def _give_up(self, item):
         """Complete a parked call without a type: an untyped raise, or still ambiguous."""
@@ -1834,14 +1938,29 @@ class SetProfileBackend(FrameBackend):
                 self._give_up(item)
         if keep:
             self._parked[tid] = keep
+            if event == "return" and self._armed.get(tid) is not frame.f_back:
+                self._arm(frame.f_back)     # the next frame up receives it
+        else:
+            self._disarm(tid)
 
     def after_fork_child(self):
         FrameBackend.after_fork_child(self)
         # The other threads' parked raises are the parent's calls: the parent records them.
         mine = self._parked.get(_get_ident())
         self._parked = {_get_ident(): mine} if mine else {}
+        armed = self._armed.get(_get_ident())
+        self._armed = {_get_ident(): armed} if armed is not None else {}
 
     def _flush_parked(self):
+        for tid in list(self._armed):
+            frame = self._armed.pop(tid, None)
+            if frame is not None:
+                self._unarm(frame)  # another thread's settrace hook removes itself
+        try:
+            if sys.gettrace() is self._gtrace:
+                sys.settrace(None)
+        except Exception:
+            pass
         for tid in list(self._parked):
             for item in self._parked.pop(tid, None) or ():
                 try:

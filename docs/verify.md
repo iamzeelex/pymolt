@@ -43,11 +43,13 @@ For every call from your code into an installed dependency:
   a library that adds parameters does not change the fact;
 - the **result** or the **raised exception**. The exception type is recorded on 3.12+, and on
   3.6–3.11 by the targeted wrappers of a long run. Under `setprofile` (a test suite on 3.6–3.11)
-  the type is read when the code that handles the exception makes a call (your `except` block,
-  `pytest.raises`, the test runner); a raise handled without any call, or swallowed by C code, is
-  recorded without its type. On 3.6 and 3.7, when a call ends inside a `with` or `try`/`finally`
-  block with no return value, a `return None` cannot be told from a raise: it is recorded as
-  "return or raise", or as a typed raise when the code that handles its exception makes a call;
+  the type is read from a one-off `sys.settrace` event when the exception reaches the frame that
+  called the dependency. It is recorded without its type when C code swallows the exception
+  (`hasattr`, `getattr` or `next` with a default). While another tool owns `sys.settrace`
+  (coverage, a debugger), pymolt leaves it alone and reads the type only when the code that
+  handles the exception makes a call. On 3.6 and 3.7, when a call ends inside a `with` or
+  `try`/`finally` block with no return value, a `return None` cannot be told from a raise: it is
+  recorded as "return or raise" unless an exception is seen;
 - the duration and the thread.
 
 A function written in C or Cython has no Python frame. pymolt wraps the public Cython functions of
@@ -80,7 +82,7 @@ Values are rendered at the most exact level that can be compared:
 | Python | Tracer |
 |---|---|
 | 3.12+ | `sys.monitoring`. Tests: full discovery. Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A startup-only watcher covers properties, `x[k]`, `with`, operators and generators, and turns itself off 30 s after the last new contact. There is no warm-up window. |
-| 3.6–3.11 | `sys.setprofile`. Tests: for the whole run; a raise is typed when the code that handles it makes a call. Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
+| 3.6–3.11 | `sys.setprofile`. Tests: for the whole run, with a one-off `sys.settrace` event per raise for its type (none while coverage or a debugger owns `sys.settrace`). Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
 | 2.7 | not supported; the capture reports that the tracer failed to start |
 
 ### Sampling and counting
@@ -178,7 +180,8 @@ Each comparison states its level:
 - `kind`: from counts only, return versus raise type, when values were not sampled.
 
 Two captures from different Python versions are compared fairly:
-- an untyped raise (3.6–3.11, handled without a call) matches any exception type;
+- an untyped raise (3.6–3.11: swallowed by C code, or handled without a call while another tool
+  owns `sys.settrace`) matches any exception type;
 - C-level raise facts are left out when only one side's tracer records them.
 
 ## Coverage
