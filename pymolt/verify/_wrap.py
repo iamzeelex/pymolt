@@ -70,6 +70,8 @@ from ._normalize import OutcomeMarker, typename
 _WRAP_MARK = "__pymolt_wrapped__"
 _FUNCTION = types.FunctionType
 _MODULE = types.ModuleType
+_getframe = sys._getframe
+_NOT_NEAR_MAX = 200000
 # The code objects of the two wrapper ``def``s (every wrapper made from one ``def`` shares
 # its code): a frame running one is a wrapped call in flight (warning attribution).
 _WRAPPER_CODES = []
@@ -168,6 +170,11 @@ class WrapBackend(object):
         self.patch_aliases = patch_aliases
         self._aliases = None                          # built once at start when patching aliases
         self.near = None if include_internal else AppMatcher(_split(source))
+        # id(code) -> code of callers that are never a boundary contact (not our code, or a
+        # wrapper itself): a wrapper called from one calls through without recording anything.
+        # Dependency-internal traffic through a wrapped Cython function (pandas calling its own
+        # ``lib.is_list_like``) then costs a frame read and a dict lookup, not the record path.
+        self._not_near = {}
         self._require_call = False  # only a call instruction in the caller is a contact
         self._restore = []          # closures that undo each patch
         self._finder = None
@@ -318,8 +325,14 @@ class WrapBackend(object):
             ident = self._class_identity(holder, inner, ident)
         ident = ident + callable_receiver(inner, ident[0])
 
+        not_near = self._not_near
+
         @functools.wraps(inner)
         def wrapper(*a, **kw):
+            if not_near:
+                code = _getframe(1).f_code
+                if not_near.get(id(code)) is code:
+                    return inner(*a, **kw)      # never a boundary contact: nothing to record
             t0 = _now()
             try:
                 result = inner(*a, **kw)
@@ -392,8 +405,15 @@ class WrapBackend(object):
         # The receiver is the instance under construction (``bound_args[0]``).
         ident = ident + ("self", ident[0].rsplit(".", 1)[0])
 
+        not_near = self._not_near
+
         @functools.wraps(real_init)
         def init_wrapper(self_obj, *a, **kw):
+            if not_near:
+                code = _getframe(1).f_code
+                if not_near.get(id(code)) is code:
+                    real_init(self_obj, *a, **kw)   # never a boundary contact
+                    return
             bound_args = (self_obj,) + a            # include self so it binds to the real signature
             t0 = _now()
             try:
@@ -448,6 +468,7 @@ class WrapBackend(object):
             ccode = caller.f_code
             for known in _WRAPPER_CODES:
                 if ccode is known:
+                    self._never_near(ccode)
                     return      # a wrapped callable called by compiled code that a wrapper
                                 # called: dependency-internal, whatever the near matcher says
         if self._require_call and caller is not None and not _at_call(caller):
@@ -455,6 +476,8 @@ class WrapBackend(object):
         if self.near is not None:
             mod = caller.f_globals.get("__name__", "") if caller is not None else ""
             if caller is None or not self.near.matches(mod, caller):
+                if caller is not None:
+                    self._never_near(caller.f_code)
                 return                                  # internal dep<->dep call, not our boundary
         site = None
         if caller is not None:
@@ -500,6 +523,14 @@ class WrapBackend(object):
             self.sink.on_raise(qualname, inputs, raised, site, **extra)
         else:
             self.sink.on_return(qualname, inputs, result, site, **extra)
+
+    def _never_near(self, code):
+        """Remember a caller code whose calls are never recorded (decided per code, as the
+        frame backends decide the near side), so later calls skip the record path."""
+        not_near = self._not_near
+        if len(not_near) >= _NOT_NEAR_MAX:
+            not_near.clear()
+        not_near[id(code)] = code   # holds the code: its id cannot be recycled
 
     _SIG_FAILED = object()
 
@@ -624,15 +655,19 @@ def stdlib_file(filename, roots):
 
 
 class CompiledWrap(WrapBackend):
-    """Wrap the Cython functions of dependency modules (below 3.12, where nothing else sees them).
+    """Wrap the Cython functions of dependency modules, under both frame backends.
 
-    ``sys.setprofile`` reports only exact ``PyCFunction`` calls, never a
-    ``cython_function_or_method``
-    (a compiled pydantic 1.10 gave zero events), so the compiled module's module-level functions
+    ``sys.setprofile`` below 3.12 reports only exact ``PyCFunction`` calls, never a
+    ``cython_function_or_method`` (a compiled pydantic 1.10 gave zero events).
+    ``sys.monitoring`` sees the call, but only as a compiled call: the callable and its first
+    argument, no result. So both backends start this (``SetProfileBackend.start``,
+    ``MonitoringBackend._start_compiled``) and a Cython call is recorded in one shape on both
+    sides of a migration: the compiled module's module-level functions
     and the methods of the classes it defines (static / class / instance) are replaced, in
     memory, by the same transparent wrappers ``WrapBackend`` installs: full inputs and results,
     recorded only when the caller is the project's code. Underscore-prefixed names (hot
-    internal dunders and helpers) are left alone, except ``__init__`` / ``__call__``.
+    internal dunders and helpers) are left alone, except ``__init__`` / ``__call__``. Methods of
+    an extension type (``cdef class``) cannot be replaced (``skipped``: ``readonly``).
 
     Compiled modules are found at import (``ExtensionFileLoader.exec_module`` is wrapped while
     the backend runs) and at ``start`` (those already loaded). Reversible: ``stop`` restores."""

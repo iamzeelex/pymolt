@@ -50,6 +50,14 @@ Impact targets (``watch_targets``) are armed in EVERY mode: in discover they are
 top of the discover target (an impact target outside it would otherwise be invisible until
 the switch).
 
+Cython functions: in every mode the public Cython functions of target modules are wrapped
+(``_wrap.CompiledWrap``, as ``SetProfileBackend`` does), so a Cython call is recorded with its
+inputs and result, the shape a setprofile side records it in, not as a compiled call
+(``arg0``, result unobserved). The wrapper records the call once: its code is in the runtime's
+own module, so its ``PY_START`` and ``CALL`` are DISABLEd, no tool arms it, and an impact
+target that resolves to a wrapper is observed through it, not armed. A Cython callable
+reached without the wrapper (bound before the wrap) is still a compiled call.
+
 ``PY_UNWIND`` is global in both modes: CPython does not allow it as a local event, nor can it
 be disabled (returning DISABLE raises into the program and removes the callback). Its
 callback is a dict check when no recorded call is in flight. It carries the exception, so a
@@ -100,7 +108,7 @@ from ._backend import (
 from ._identity import _wrapped_of
 from ._normalize import typename
 from ._rawthreads import allocate_lock, stack_key
-from ._wrap import _partition_impact_targets, _WrapFinder
+from ._wrap import _WRAP_MARK, _WRAPPER_CODES, _partition_impact_targets, _WrapFinder
 
 _getframe = sys._getframe
 _FUNCTION = types.FunctionType
@@ -228,13 +236,15 @@ def raised_label(exc):
 
 def _function_codes(obj, out, seen, depth=0):
     """Every code object a call through ``obj`` starts in: the function and each function
-    down its ``__wrapped__`` chain (a decorator's wrapper runs first)."""
+    down its ``__wrapped__`` chain (a decorator's wrapper runs first). A pymolt wrapper
+    (``_wrap``: it records its own calls) is skipped: arming its shared code would record
+    the call twice, and every other wrapped callable's calls with it."""
     for _ in range(16):
         t = type(obj)
         if t is _METHOD:
             obj = obj.__func__
             continue
-        if t is _FUNCTION:
+        if t is _FUNCTION and not getattr(obj, _WRAP_MARK, False):
             code = obj.__code__
             if id(code) not in seen:
                 seen.add(id(code))
@@ -282,6 +292,24 @@ def target_codes(obj):
     except Exception:
         pass
     return out
+
+
+def _wrapper_observed(obj):
+    """True if a pymolt wrapper (``_wrap``) records the calls through ``obj``: a wrapped
+    callable, or a class with a wrapped method (a compiled dependency's, ``CompiledWrap``)."""
+    try:
+        if issubclass(type(obj), type):
+            return any(_wrapper_observed(v) for v in list(_TYPE_DICT.__get__(obj, type).values())
+                       if not issubclass(type(v), type))
+        for _ in range(4):
+            t = type(obj)
+            if t is _METHOD or issubclass(t, (staticmethod, classmethod)):
+                obj = obj.__func__
+                continue
+            return t is _FUNCTION and bool(getattr(obj, _WRAP_MARK, False))
+    except Exception:
+        pass
+    return False
 
 
 class _CodeTargets:
@@ -338,7 +366,8 @@ class _CodeTargets:
             self._done.add(full)
             codes = target_codes(obj)
             if not codes:
-                self._skip(full, "no-python-code")   # C callable / constant: not observable
+                if not _wrapper_observed(obj):      # a wrapped Cython callable is observed
+                    self._skip(full, "no-python-code")   # C callable / constant
                 continue
             self._on_codes(codes, full)
 
@@ -397,6 +426,8 @@ class MonitoringBackend(FrameBackend):
         self.settled_at = None      # wall time tool B was freed
         self.settle_reason = None
         self.handed_over = 0        # tool B codes moved to tool A's local events at settle
+        self.compiled_wrap = True   # wrap the Cython functions of dependency modules (see start)
+        self._compiled = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
     @property
@@ -440,10 +471,14 @@ class MonitoringBackend(FrameBackend):
             _USED_IDS.add(tool)
             if tool2 is not None:
                 _USED_IDS.add(tool2)
+            # Before the impact targets resolve: one that is a Cython callable resolves to
+            # its wrapper (observed), not to a compiled callable with no Python code.
+            self._start_compiled()
             if self._watch_targets:
                 self._arm_targets(self._watch_targets)
             self._set_global()
         except BaseException:
+            self._stop_compiled()
             self._tool = self._tool2 = None
             if tool2 is not None:
                 self._release(tool2, local_events=False)
@@ -451,7 +486,37 @@ class MonitoringBackend(FrameBackend):
             raise
         install_warning_capture(self)
 
+    def _start_compiled(self):
+        """Wrap the Cython functions of dependency modules, as ``SetProfileBackend`` does, so
+        a Cython call is recorded in the same shape on both sides of a migration: its bound
+        inputs and its result. Natively it is a ``__c_call__`` here (``arg0`` only, result
+        unobserved), and the profile hook below 3.12 does not see it at all. The wrapper
+        records the call once: its own code is never a dependency nor our code, so its
+        ``CALL`` / ``PY_START`` are ``DISABLE``d and its call of the Cython function is not a
+        compiled call from our code. A Cython callable reached without the wrapper (bound
+        before the wrap, a private name, an immutable type) is still a ``__c_call__``."""
+        if not self.compiled_wrap or self._compiled is not None:
+            return
+        compiled = None
+        try:
+            from ._wrap import CompiledWrap
+            compiled = CompiledWrap(self.sink, self.matcher)
+            compiled.near = self.near
+            self._compiled = compiled
+            compiled.start()
+        except Exception:
+            self._stop_compiled()   # never a half-installed wrap: the calls stay compiled calls
+
+    def _stop_compiled(self):
+        compiled, self._compiled = self._compiled, None
+        if compiled is not None:
+            try:
+                compiled.stop()     # restores every wrapped attribute and the loader
+            except Exception:
+                pass
+
     def stop(self):
+        self._stop_compiled()       # first: the originals are back while the tools still run
         tool, tool2 = self._tool, self._tool2
         if tool is None:
             return
@@ -922,6 +987,8 @@ class MonitoringBackend(FrameBackend):
             near = self._is_near(code)
             if near is None:
                 return None
+        elif any(code is c for c in _WRAPPER_CODES):
+            near = False    # no near side: a pymolt wrapper's call of what it wraps is its own
         if not near:
             return False
         ent = self._call_kind(callable_)
