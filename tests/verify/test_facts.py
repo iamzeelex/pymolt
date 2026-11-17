@@ -1327,7 +1327,11 @@ def test_wrapped_compiled_call_pairs_with_a_c_call_event(tmp_path):
            rv("lib.c", {"bound": {"a": 2}}, result=[2], line=10)]
     new = [rv("lib.c", {"__c_call__": True}, result={"__opaque__": "unobserved:c-return"})]
     d = diff_sites(tmp_path, old, new)
-    assert d.counts()["equal"] == 1 and d.counts()["disappeared"] == 1
+    # The compiled-call fact pairs with one wrapped call; the other cannot pair by input (the
+    # new side recorded no inputs there), so it is not comparable, not disappeared.
+    assert d.counts()["equal"] == 1 and d.counts()["disappeared"] == 0
+    (e,) = [e for e in d.entries if e.category is FactCategory.UNCOMPARABLE]
+    assert e.notes[-1] == "call-shape:new" and e.explained.startswith("call-shape:")
 
 
 def test_comprehension_scope_is_normalized_to_the_enclosing_function(tmp_path):

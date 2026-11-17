@@ -338,6 +338,15 @@ class FactSet(BaseModel):
     # The runtime environment record of each process (``boundary_tracer._environment``);
     # None when any process lacks one (unknown: every environment rule stays strict).
     environment: list[dict[str, Any]] | None = Field(default=None, exclude=True)
+    # The compiled-call cap (runtime ``c_site_cap``): sites where a process recorded only the
+    # first calls of a compiled callable and counted the rest. ``c_cap_reported`` processes
+    # gave an account, ``c_cap_unreported`` did not (a runtime that predates it: unknown);
+    # ``c_capped_complete``: every reported capped site is listed.
+    c_capped: list["CappedSite"] = Field(default_factory=list, exclude=True)
+    c_capped_complete: bool = Field(default=True, exclude=True)
+    c_cap_reported: int = Field(default=0, exclude=True)
+    c_cap_unreported: int = Field(default=0, exclude=True)
+    c_muted: int = Field(default=0, exclude=True)   # compiled calls counted, not recorded
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -396,6 +405,21 @@ class SiteTally:
     returns: int
     raises: dict[str, int]
     where: dict[str, Any] | None = None
+
+
+@dataclass
+class CappedSite:
+    """A (symbol, site) whose compiled calls past the runtime's per-site cap were counted, not
+    recorded (one process's ``c_site_cap`` site)."""
+
+    symbol: str
+    file: str
+    func: str
+    line: int | None
+    text: str | None
+    recorded: int        # the cap: calls recorded there before counting started
+    muted: int           # calls counted after it
+    exact: bool          # False: the count is a lower bound (sys.monitoring stopped counting)
 
 
 class SiteRef(BaseModel):
@@ -635,6 +659,10 @@ class FactDiff(BaseModel):
                     reason = "evicted"
                 elif any(n.startswith("possibly-dropped") for n in e.notes):
                     reason = "dropped"
+                elif any(n.startswith(C_SITE_CAPPED) for n in e.notes):
+                    reason = "c-site-capped"
+                elif any(n.startswith(CALL_SHAPE) for n in e.notes):
+                    reason = "call-shape"
                 elif e.comparison is Comparison.MISSING:
                     reason = "rewritten-unpaired"
                 else:
@@ -1533,6 +1561,7 @@ def load_facts(
     if header and not _capture_procs(meta):
         annotate_value_format(fs, header)  # a snapshot without its sidecar: its own header
     _add_sidecar_tally_warnings(fs, meta, site_text)
+    _annotate_c_cap(fs, meta, site_text)
     return fs
 
 
@@ -1681,6 +1710,33 @@ def _add_sidecar_tally_warnings(fs: FactSet, meta: Mapping[str, Any],
                 sw = _site_warnings(fs, tw, site_text)
                 if sw is not None:
                     fs.unsampled_warnings.append(sw)
+
+
+def _annotate_c_cap(fs: FactSet, meta: Mapping[str, Any],
+                    site_text: Mapping[str, str] | None) -> None:
+    """The compiled-call cap's account of each process (``c_site_cap``): the sites where only
+    the first calls were recorded, how many were counted after them, and whether the list is
+    complete. A process without one ran a runtime that predates the account."""
+    for proc in _capture_procs(meta):
+        cap = proc.get("c_site_cap")
+        if not isinstance(cap, Mapping):
+            fs.c_cap_unreported += 1
+            continue
+        fs.c_cap_reported += 1
+        fs.c_muted += _positive_int(cap.get("muted"))
+        if _positive_int(cap.get("sites_omitted")) or _positive_int(cap.get("unsited")):
+            fs.c_capped_complete = False
+        recorded = _positive_int(cap.get("max")) or _LEGACY_C_SITE_MAX
+        for site in cap.get("sites") or ():
+            if not isinstance(site, Mapping) or not isinstance(site.get("file"), str):
+                continue
+            file, line = site["file"], site.get("line") if _is_lineno(site.get("line")) else None
+            fs.c_capped.append(CappedSite(
+                symbol=str(site.get("sym") or "?"), file=_site_path(fs, file, count=False),
+                func=site.get("func") if isinstance(site.get("func"), str) else "?", line=line,
+                text=(site_text or {}).get(f"{file}:{line}") if line is not None else None,
+                recorded=recorded, muted=_positive_int(site.get("muted")),
+                exact=site.get("exact") is not False))
 
 
 def _read_json(path: Path) -> dict:
@@ -4321,6 +4377,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
+    _soften_capped(entries, old, new, ov, nv, modes)
     _review_masked_input(entries)
     variation = _run_variation(gstats)
     gated = _gate_unmeasured(entries, variation) if variation else 0
@@ -6025,6 +6082,141 @@ def _soften_dropped(entries: list[FactEntry], old: FactSet, new: FactSet) -> Non
                        "fact may be one of them")
 
 
+C_SITE_CAPPED = "c-site-capped"
+CALL_SHAPE = "call-shape"
+# The per-site compiled-call cap of a runtime that predates the ``c_site_cap`` account (it
+# recorded the first 2,000 calls of a compiled callable at a site and silently muted the rest).
+_LEGACY_C_SITE_MAX = 2000
+
+
+def _is_c_input(inputs: Any) -> bool:
+    return isinstance(inputs, dict) and inputs.get("__c_call__") is True
+
+
+def _capped_index(fs: FactSet, views: list[_V], modes: dict[str, str]
+                  ) -> tuple[dict[tuple, list[CappedSite]], set[tuple]]:
+    """Where this side recorded only the first calls of a compiled callable: the (symbol,
+    site) keys its processes' accounts list. A one-process capture whose runtime predates the
+    account (it muted without counting) is presumed capped at every compiled-call site that
+    holds the old cap's worth of calls: for sys.monitoring, which capped a call instruction
+    whatever it called, the whole site (a key without the symbol); for setprofile, which
+    capped per symbol and line, that symbol there. Not inferred across processes: their
+    recorded calls add up without any of them reaching the cap."""
+    idx: dict[tuple, list[CappedSite]] = defaultdict(list)
+    for c in fs.c_capped:
+        idx[_site_key(c.symbol, c.file, c.func, c.line, c.text, modes)].append(c)
+    inferred: set[tuple] = set()
+    if fs.c_cap_unreported == 1 and not fs.c_cap_reported:
+        counts: dict[tuple, int] = defaultdict(int)
+        for v in views:
+            if _is_c_input(v.fact.input) and not v.fact.binding:
+                counts[(v.fact.symbol, v.fact.file, v.fact.func, v.site_value)] += v.fact.count
+        whole_site = "monitoring" in fs.backends
+        for k, n in counts.items():
+            if n >= _LEGACY_C_SITE_MAX:
+                if whole_site:
+                    inferred.add(k[1:])
+                else:
+                    idx.setdefault(k, [])
+    return dict(idx), inferred
+
+
+def _is_capped(capped: tuple[dict[tuple, list[CappedSite]], set[tuple]], key: tuple) -> bool:
+    return key in capped[0] or key[1:] in capped[1]
+
+
+def _shape_index(views: list[_V]) -> tuple[dict[tuple, set[bool]], set[tuple]]:
+    """Per site key, the call shapes recorded there (True: a compiled call, no inputs; False:
+    a call with its inputs), binding failures aside; and the keys holding a binding failure
+    (recorded with the compiled-call marker, though its callee is a Python function)."""
+    shapes: dict[tuple, set[bool]] = defaultdict(set)
+    binding: set[tuple] = set()
+    for v in views:
+        k = (v.fact.symbol, v.fact.file, v.fact.func, v.site_value)
+        if v.fact.binding:
+            binding.add(k)
+        else:
+            shapes[k].add(_is_c_input(v.fact.input))
+    return shapes, binding
+
+
+def _soften_capped(entries: list[FactEntry], old: FactSet, new: FactSet, ov: list[_V],
+                   nv: list[_V], modes: dict[str, str]) -> int:
+    """A fact missing on one side at a site that side did not record call by call is
+    UNCOMPARABLE (inconclusive), never DISAPPEARED / APPEARED:
+
+    * ``c-site-capped:<side>``: that side's runtime recorded only the first calls of the
+      compiled callable there and counted the rest (``c_site_cap``), so the fact may be one of
+      the calls it counted. A CHANGED entry whose only difference is outcomes missing on the
+      capped side is softened the same way.
+    * ``call-shape:<side>``: that side recorded the site's calls in the other shape: as
+      compiled calls (``__c_call__``: no inputs, result unobserved; sys.monitoring sees a Cython
+      function natively) where this side has them with their inputs (``CompiledWrap`` under
+      setprofile), or the reverse. The compiled-call fact pairs with one of them; the others
+      cannot pair by input, and their absence there is no evidence.
+
+    Complete tallies that prove the call gone win. Returns how many entries this explained."""
+    capped = (_capped_index(old, ov, modes), _capped_index(new, nv, modes))
+    shapes = (_shape_index(ov), _shape_index(nv))
+    count = 0
+    for e in entries:
+        if "absent-from-tallies" in e.notes or "site-fully-sampled" in e.notes:
+            continue
+        lacking: int | None = None
+        if e.category is FactCategory.DISAPPEARED and e.old_site is not None:
+            lacking, key = 1, _entry_key(e, e.old_site, modes)
+        elif e.category is FactCategory.APPEARED and e.new_site is not None:
+            lacking, key = 0, _entry_key(e, e.new_site, modes, new_side=True)
+        elif e.category is FactCategory.CHANGED and e.old_site and e.new_site \
+                and e.new_input is None and _is_c_input(e.input):
+            # Only the same compiled call (its constant input) whose capped side lacks an
+            # outcome the other side has: a pair whose inputs differ is a real change.
+            for side, present, short, site in ((1, e.old, e.new, e.new_site),
+                                               (0, e.new, e.old, e.old_site)):
+                k = _entry_key(e, site, modes, new_side=side == 1)
+                if _is_capped(capped[side], k) and _only_missing(present, short):
+                    lacking, key = side, k
+                    break
+        if lacking is None:
+            continue
+        name, other = ("new", "old") if lacking == 1 else ("old", "new")
+        notes: list[str] = []
+        why: list[str] = []
+        if _is_capped(capped[lacking], key):
+            sites = capped[lacking][0].get(key)
+            notes.append(f"{C_SITE_CAPPED}:{name}")
+            if sites:
+                muted = sum(c.muted for c in sites)
+                bound = "" if all(c.exact for c in sites) else " at least"
+                why.append(f"{C_SITE_CAPPED}: the {name} capture recorded the first "
+                           f"{sites[0].recorded} calls of this compiled callable here and only "
+                           f"counted the{bound} {muted} after them; this fact may be among those")
+            else:
+                why.append(f"{C_SITE_CAPPED}: the {name} capture recorded {_LEGACY_C_SITE_MAX} "
+                           "or more compiled calls here with a runtime that silently stopped "
+                           "recording at that cap; this fact may be among the unrecorded calls")
+        if e.category is not FactCategory.CHANGED:
+            mine_c = _is_c_input(e.input)
+            other_shapes, other_binding = shapes[lacking]
+            own_binding = shapes[1 - lacking][1]
+            if (not mine_c) in other_shapes.get(key, ()) and not (mine_c and key in own_binding):
+                notes.append(f"{CALL_SHAPE}:{name}")
+                if mine_c:
+                    how = (f"the {name} capture recorded this site's calls with their inputs, "
+                           f"the {other} one as compiled calls (no inputs, result unobserved)")
+                else:
+                    how = (f"the {name} capture recorded this site's calls as compiled calls "
+                           f"(no inputs, result unobserved), the {other} one with their inputs")
+                why.append(f"{CALL_SHAPE}: {how}; the calls cannot be paired by input")
+        if not notes:
+            continue
+        e.category = FactCategory.UNCOMPARABLE
+        e.notes.extend(notes)
+        e.explained = "; ".join(why)
+        count += 1
+    return count
+
+
 def _signature(f: Fact) -> tuple:
     """The input's structure without its values: bound parameter names, positional arity, and
     keyword names (a compiled call's constant marker counts as its own signature)."""
@@ -6641,6 +6833,11 @@ def _warnings(old: FactSet, new: FactSet) -> list[str]:
         if fs.outcomes_other:
             out.append(f"outcomes-capped:{side}:{fs.outcomes_other}: calls past a fact's "
                        "distinct-outcome cap are compared by type")
+        if fs.c_muted:
+            sites = len({(c.symbol, c.file, c.func, c.line) for c in fs.c_capped})
+            out.append(f"c-site-cap:{side}:{fs.c_muted}: compiled call(s) at {sites} site(s) "
+                       "past the runtime's per-site cap were counted, not recorded; facts "
+                       "missing there are not comparable")
     return out
 
 
@@ -6693,13 +6890,15 @@ def _within(path: str, root: str) -> bool:
         return False
 
 
-def _site_path(fs: FactSet, file: str) -> str:
+def _site_path(fs: FactSet, file: str, *, count: bool = True) -> str:
     """A call-site file as a project-relative path; a container path goes through the
-    runner's mounts first (``/work/p/a.py`` -> ``<host>/a.py``)."""
+    runner's mounts first (``/work/p/a.py`` -> ``<host>/a.py``). ``count``: add the mapping to
+    ``paths_mapped`` (the call sites of facts, not those of a capture's accounts)."""
     if fs.runner is not None and os.path.isabs(file) and not _under_root(file, fs.root):
         host = to_host(fs.runner, file)
         if host is not None:
-            fs.paths_mapped += 1
+            if count:
+                fs.paths_mapped += 1
             return _relativize(host, fs.root)
     return _relativize(file, fs.root)
 

@@ -61,6 +61,8 @@ from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
+    C_SITE_CAPPED,
+    CALL_SHAPE,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
@@ -3092,8 +3094,17 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         if any(str(n).startswith("possibly-dropped") for n in e.get("notes") or ())
     )
     unobservable = sum(1 for e in entries if BACKEND_UNOBSERVABLE in (e.get("notes") or ()))
+    capped_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
+    )
+    shape_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith(CALL_SHAPE) for n in e.get("notes") or ())
+        and not any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
+    )
     uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries - dropped_entries - unobservable
+        - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries
     if unobservable:
         reasons.append(
             f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "
@@ -3103,6 +3114,16 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         reasons.append(
             f"{dropped_entries} call fact(s) are missing on a side that dropped events and "
             "cannot be compared"
+        )
+    if capped_entries:
+        reasons.append(
+            f"{capped_entries} call fact(s) are missing at compiled-call sites where the other "
+            "capture recorded only the first calls and counted the rest; they cannot be compared"
+        )
+    if shape_entries:
+        reasons.append(
+            f"{shape_entries} call fact(s) were recorded as compiled calls (no inputs) on one "
+            "side and with their inputs on the other, so they cannot be paired by input"
         )
     if evicted_entries:
         reasons.append(
