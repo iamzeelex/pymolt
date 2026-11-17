@@ -22,6 +22,7 @@ from pymolt.assess.service import resolve_target_graph as _resolve_target_graph
 from pymolt.assess.service import write_target_manifest as _write_target_manifest
 from pymolt.interfaces.cli.output import (
     EXIT_ENVIRONMENT,
+    EXIT_FINDING,
     EXIT_INCONCLUSIVE,
     EXIT_USAGE,
     console,
@@ -816,16 +817,23 @@ def apply_plan_cmd(
         "--allow-no-baseline",
         help="Apply without a baseline capture; verify will be INCONCLUSIVE",
     ),
+    smoke: bool = typer.Option(
+        False, "--smoke",
+        help="Also import the changed modules in the target environment, before and after "
+             "the write; undo the write if it breaks an import",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print the receipt as JSON"),
 ):
     """Apply the saved plan. Keeps the original files for `pymolt rollback`.
 
-    Refuses the plan if a planned file changed since `pymolt plan`, or if the
-    baseline capture is missing or does not match the project.
+    Refuses the plan if a planned file changed since `pymolt plan`, if the
+    baseline capture is missing or does not match the project, or if the plan's
+    new source does not compile on the target Python.
     """
     import json
 
     from pymolt.migration_plan import (
+        MigrationCheckError,
         MigrationConflictError,
         MigrationEvidenceError,
         MigrationPlan,
@@ -844,7 +852,15 @@ def apply_plan_cmd(
         )
     try:
         receipt = apply_migration_plan(
-            project_path, migration_plan, allow_no_baseline=allow_no_baseline
+            project_path, migration_plan, allow_no_baseline=allow_no_baseline, smoke=smoke
+        )
+    except MigrationCheckError as exc:
+        if not json_output:
+            console.print(f"[dim]Self-check: {escape(exc.check.summary())}[/dim]")
+        fail(
+            f"migration plan was not applied: {exc}",
+            hint=exc.hint, code=EXIT_FINDING, json_output=json_output,
+            extra={"self_check": exc.check.model_dump(mode="json")},
         )
     except MigrationEvidenceError as exc:
         fail(
@@ -901,6 +917,8 @@ def apply_plan_cmd(
             f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
             title="Migration applied", border_style="green", expand=False,
         ))
+    if receipt.outcome == "applied" and receipt.self_check is not None:
+        console.print(f"Self-check: {escape(receipt.self_check.summary())}")
     _render_left_to_you(migration_plan)
     next_step(project_path)
 

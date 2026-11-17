@@ -252,6 +252,14 @@ def recompile(files: dict[str, str], executable: str, *, runner: Any = None,
 
     Returns ``({path: error}, failure)``: ``failure`` is set when the check itself could not
     run (nothing is then known about the files)."""
+    bad, failure, _python = recompile_detailed(files, executable, runner=runner,
+                                               timeout=timeout)
+    return bad, failure
+
+
+def recompile_detailed(files: dict[str, str], executable: str, *, runner: Any = None,
+                       timeout: float = 120.0) -> tuple[dict[str, str], str | None, str | None]:
+    """``recompile``, plus the major.minor the interpreter reported (None if it did not)."""
     from pymolt.adapters.python_runner import run_in
 
     request = json.dumps({"files": [{"path": p, "source": s} for p, s in files.items()]})
@@ -259,16 +267,16 @@ def recompile(files: dict[str, str], executable: str, *, runner: Any = None,
         proc = run_in(runner, [executable, "-B", "-c", _RECOMPILE_SCRIPT], stdin=request,
                       timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - the check not running is a note, not a crash
-        return {}, f"{type(exc).__name__}: {exc}"
+        return {}, f"{type(exc).__name__}: {exc}", None
     for line in (proc.stdout or "").splitlines():
         if line.startswith("@@pymolt-recompile@@ "):
             try:
                 data = json.loads(line[len("@@pymolt-recompile@@ "):])
             except ValueError:
                 break
-            return {b["path"]: b["error"] for b in data["bad"]}, None
+            return {b["path"]: b["error"] for b in data["bad"]}, None, data.get("python")
     tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
-    return {}, f"exit {proc.returncode}: {tail[:160]}"
+    return {}, f"exit {proc.returncode}: {tail[:160]}", None
 
 
 # ── applying ──────────────────────────────────────────────────────────────────────────────

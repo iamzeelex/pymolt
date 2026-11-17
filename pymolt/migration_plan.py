@@ -50,6 +50,15 @@ class MigrationEvidenceError(MigrationPlanError):
     """Required baseline or migration evidence is absent, stale, or changed."""
 
 
+class MigrationCheckError(MigrationPlanError):
+    """apply's self-check found a failure the plan introduced; nothing stays written.
+    ``check``: the ``apply_check.SelfCheck`` with every result."""
+
+    def __init__(self, message: str, *, check, hint: str | None = None) -> None:
+        super().__init__(message, hint=hint)
+        self.check = check
+
+
 @contextmanager
 def _migration_lock(project_dir: str | Path, operation: str):
     """Serialize source mutations; the OS releases this lock after a crash."""
@@ -626,10 +635,15 @@ def apply_migration_plan(
     plan: MigrationPlan,
     *,
     allow_no_baseline: bool = False,
+    smoke: bool = False,
 ):
+    """Apply ``plan`` (see ``_apply_migration_plan_unlocked``). Before the first write every
+    changed file's new source is compiled (``apply_check``); with ``smoke`` the touched
+    modules are also imported in the target environment, before and after the write, and a
+    module the write broke undoes it. Raises ``MigrationCheckError`` for either failure."""
     with _migration_lock(project_dir, "apply"):
         return _apply_migration_plan_unlocked(
-            project_dir, plan, allow_no_baseline=allow_no_baseline
+            project_dir, plan, allow_no_baseline=allow_no_baseline, smoke=smoke
         )
 
 
@@ -667,6 +681,7 @@ def _apply_migration_plan_unlocked(
     plan: MigrationPlan,
     *,
     allow_no_baseline: bool = False,
+    smoke: bool = False,
 ):
     """Apply exactly one reviewed plan and retain everything needed to undo it."""
     from pymolt.codemods.apply import write_previews
@@ -759,6 +774,8 @@ def _apply_migration_plan_unlocked(
         # reviewed plan again as a new run, with no new plan.
         run_id, attempt = uuid.uuid4().hex, existing.attempt + 1
         run_dir = _run_dir(root, run_id)
+
+    check, smoke_before = _check_before_write(root, plan, smoke)
     run_dir.mkdir(parents=True, exist_ok=True)
     frozen_plan_path = plan.save(root, run_dir / "plan.json")
     state = MigrationRunState(
@@ -784,6 +801,19 @@ def _apply_migration_plan_unlocked(
             state.model_copy(update={"status": "failed", "error": str(exc)}),
         )
         raise
+    if smoke_before is not None:
+        check.smoke = _smoke_after(root, smoke_before)
+        if check.smoke.status == "failed":
+            _undo_write(previews)
+            failures = "; ".join(f"{name}: {error}" for name, error in check.smoke.failed.items())
+            _save_run_state(run_dir, state.model_copy(update={
+                "status": "failed", "error": f"smoke import failed: {failures}"}))
+            raise MigrationCheckError(
+                f"the smoke import failed after the write, so the files were restored: "
+                f"{failures}", check=check,
+                hint="The plan's rewrite broke an import that worked before it. The files are "
+                     "as they were before apply; fix the plan's rewrite by hand, or apply "
+                     "without --smoke and let capture and verify judge it.")
 
     applied_at = _now()
     _write_apply_ledger(root, plan, run_id, applied_at)
@@ -802,6 +832,7 @@ def _apply_migration_plan_unlocked(
         environment_fingerprint=starting_fingerprint,
         environment_setup_fingerprint=starting_setup,
         allow_no_baseline=allow_no_baseline,
+        self_check=check,
         files_changed=[str(_project_file(root, item.path)) for item in plan.changes],
         patterns_applied=sum(item.sites for item in plan.changes),
         no_codemods_required=not plan.changes,
@@ -841,6 +872,64 @@ def _apply_migration_plan_unlocked(
             pass
         raise
     return receipt
+
+
+def _check_before_write(root: Path, plan: MigrationPlan, smoke: bool):
+    """The compile check (refusing a file the plan breaks) and, with ``smoke``, the import
+    of the touched modules on the old code. Returns ``(SelfCheck, smoke state)``; the smoke
+    state is None when no smoke import follows the write (``check.smoke`` then says why)."""
+    from pymolt.apply_check import (
+        SelfCheck,
+        SmokeCheck,
+        compile_changes,
+        smoke_modules,
+        smoke_target,
+    )
+
+    check = SelfCheck(compile=compile_changes(root, plan))
+    broken = [(c.side, path, error) for c in check.compile for path, error in c.failed.items()]
+    if broken:
+        raise MigrationCheckError(
+            "the plan's new source does not compile: " + "; ".join(
+                f"{path} on the {side} ({error})" for side, path, error in broken),
+            check=check,
+            hint="Nothing was written. The rewrite of these files is invalid Python where "
+                 "the original compiled; make the change by hand or re-plan after fixing it.")
+    if not smoke:
+        return check, None
+    exe, why = smoke_target(root)
+    modules, left_out = smoke_modules(root, plan)
+    if exe is None or not modules:
+        check.smoke = SmokeCheck(status="skipped", not_imported=left_out,
+                                 reason=why or "no changed file is an importable module")
+        return check, None
+    from pymolt.apply_check import import_modules
+
+    before, python, before_why = import_modules(exe, root, modules)
+    return check, (exe, modules, left_out, before, python, before_why)
+
+
+def _smoke_after(root: Path, state):
+    from pymolt.apply_check import import_modules, smoke_verdict
+
+    exe, modules, left_out, before, python, before_why = state
+    if before is None:
+        after, after_why = None, "not run"
+    else:
+        after, python_after, after_why = import_modules(exe, root, modules)
+        python = python or python_after
+    return smoke_verdict(modules, before, after, exe=exe, python=python,
+                         before_why=before_why, after_why=after_why, left_out=left_out)
+
+
+def _undo_write(previews: list[FilePreview]) -> None:
+    from pymolt.codemods.apply import write_previews
+
+    write_previews([
+        FilePreview(path=p.path, old_source=p.new_source, new_source=p.old_source,
+                    sites=p.sites)
+        for p in previews
+    ])
 
 
 def _already_applied(root: Path, plan: MigrationPlan, state: MigrationRunState):
