@@ -2,17 +2,17 @@
 
 ## The verdict
 
-- **Scope after `apply`.** When the post-migration code came from `pymolt apply`, the verdict
-  covers only the calls into the API paths the plan found changed. A behaviour change in a call to
-  any other API appears in the full report (`all_fact_diff`) but does not fail the verdict, and
-  BLIND symbols outside that set do not block PASS. Without an applied plan, the verdict covers
-  every recorded call. See [verify.md](verify.md#scope-after-apply).
+- **Coverage after `apply`.** When the post-migration code came from `pymolt apply`, BLIND,
+  dynamic-only and trust count only the API paths the plan found changed. A symbol outside them
+  that no run exercised does not block PASS. A behaviour change in any recorded call still fails.
+  See [verify.md](verify.md#scope-after-apply).
 - **Only exercised calls are compared.** If the tests never call a dependency, there is nothing to
   compare, and the verdict stays INCONCLUSIVE.
 - **Exception types on 3.6–3.11.** A test-suite capture records that a call raised, not what it
   raised. Long runs record the type once the targeted wrappers take over. 3.12+ always records it.
-- **C-implemented dependency functions** are not recorded, except that `setprofile` notes when they
-  raise.
+- **Functions written in C** are recorded without their result, and their arguments are not
+  compared. Below 3.12 the public Cython functions of dependency modules are wrapped and recorded in
+  full.
 - **Late dunder contacts in long runs (3.12+).** Watching for dunder, property and generator calls
   stops 30 s after the last new contact, so one of these that is first used after that is missed.
 
@@ -26,7 +26,7 @@
 
 | Workload | Measured |
 |---|---|
-| Test suites, Python 3.6 in emulated containers (`setprofile`), five legacy projects | 2.7–7.6× slower ([scorecard](../bench/legacy_eval/results/after-wave2/scorecard.md)) |
+| Test suites, Python 3.6 in emulated containers (`setprofile`), six legacy projects | 2.7–11.8× slower ([scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md)) |
 | A Flask + SQLAlchemy + pydantic service on Python 3.12 (`sys.monitoring`), saturated | 16.8% lower throughput once steady; 74–76% of normal throughput in the first 30 s; 0 dropped calls |
 | Same service at 200 requests/s | p99 latency ×1.01; output about 2 MB per day |
 
@@ -41,10 +41,10 @@ every call ([verify.md](verify.md#sampling-and-counting)).
 
 Six legacy projects were migrated from Python 3.6 to 3.12: hyper, vibora, theano, lasagne,
 alphalens and zipline.
-- Five capture a baseline. vibora's was refused with no calls recorded.
-- Plans with rewrites were applied to four of them.
-- None reaches a compared post-migration capture. The target fails to import on four, vibora has no
-  baseline, and alphalens's post-migration test run was refused.
+- All six capture a baseline.
+- Plans with rewrites were applied to five of them. lasagne's plan has none.
+- None reaches a compared post-migration capture. The target fails to import on five. alphalens
+  imports, but its post-migration test run was refused.
 
-Details: [scorecard](../bench/legacy_eval/results/after-wave2/scorecard.md),
+Details: [scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md),
 [issues](../bench/legacy_eval/KEY_ISSUES.md).

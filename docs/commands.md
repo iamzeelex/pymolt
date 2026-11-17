@@ -58,6 +58,7 @@ before any code change, because it cannot be recreated later. Details are in
 | `--mode` | `tests` (your test suite), `command` (your app, the default) or `attach` (you run the command; pymolt prints it) |
 | `--collect` | Finish a `--mode attach` capture |
 | `--target`, `--exclude`, `--source` | Which dependencies to record, which top-level packages to skip, which packages are your code |
+| `--stdlib` | Standard-library modules to record (comma list), or `none`. Default: during a Python move, every stdlib module your project imports |
 | `--backend` | `auto`, `setprofile`, `monitoring`, `wrap` or `hybrid` |
 | `--container`, `--workdir` | Run `CMD` in a running container (default: the one setup configured) |
 | `--privacy` | `auto` (values for tests, shape otherwise), `values` or `shape` |

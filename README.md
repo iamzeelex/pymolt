@@ -78,7 +78,7 @@ Every option is in [docs/commands.md](docs/commands.md).
 | `PASS` | Every recorded call has the same outcome, and the runs exercised every dependency symbol your code uses. | 0 |
 | `INCONCLUSIVE` | The captures, or some recorded values, cannot be compared (different command, dropped events, stale environment), or the runs left a dependency symbol unexercised (BLIND). The report names what is missing. | 4 |
 
-- A call site that the migration rewrote (REWRITTEN) fails only if its outcome changed.
+- A call on an edited line (REWRITTEN) is compared with the call that replaced it. If `pymolt apply` made the edit, any different outcome fails. If you made it, a different value is a review item (INCONCLUSIVE), and only a new exception fails.
 - DRIFT (a parameter the call leaves at its default was added or removed) is reported and does not fail.
 - Other exit codes: 1 from `capture` means the captured command failed, 2 an invalid invocation, 3 an environment or service failure.
 
@@ -91,12 +91,12 @@ The rules are in [docs/verify.md](docs/verify.md).
 
 ## Limits
 
-- After `apply`, the verdict covers only the APIs the plan found changed. A change in any other call is in the report but does not fail the verdict.
+- After `apply`, BLIND symbols and trust count only the APIs the plan found changed, so a symbol outside them that the run never exercised does not block PASS. A behaviour change in any recorded call still fails.
 - A call is compared only if the run exercises it.
 - On 3.6–3.11, a test-suite capture records that a call raised, not the exception type.
-- Dependency functions written in C are not recorded.
+- A dependency function written in C is recorded without its result, and its arguments are not compared.
 - `assess` checks that the target resolves, not that it builds or imports.
-- Capture slows a test suite on Python 3.6 by 2.7–7.6×.
+- Capture slows a test suite on Python 3.6 by 2.7–11.8×.
 
 The full list, the measured overhead and the state of the legacy-project trials are in [docs/limits.md](docs/limits.md).
 
