@@ -40,13 +40,35 @@ import time
 import weakref
 
 from ._normalize import normalize
-from ._rawthreads import Empty, Full, RawEvent, RawQueue, allocate_lock, get_ident, spawn
+from ._rawthreads import (
+    Empty,
+    Full,
+    RawEvent,
+    RawQueue,
+    allocate_lock,
+    get_ident,
+    monotonic,
+    sleep,
+    spawn,
+)
 
 _NONDET = {"__nondeterministic__": True}
 
 DEFAULT_QUEUE_SIZE = 65536
 _WRITE_BATCH = 1024
 DEFAULT_CLOSE_TIMEOUT = 2.0
+# JsonlSink backpressure (``PYMOLT_TRACE_BACKPRESSURE``): ``block`` (default) makes a producer
+# that finds the queue full wait for the writer, ``drop`` counts the event as
+# ``backpressure_dropped`` instead. A waiting producer polls every ``_BACKPRESSURE_SLICE``
+# seconds; a writer that processes nothing for ``PYMOLT_TRACE_STALL_SECONDS`` is declared
+# stalled, and producers stop waiting for it until it moves again.
+BACKPRESSURE_POLICIES = ("block", "drop")
+DEFAULT_BACKPRESSURE = "block"
+DEFAULT_STALL_SECONDS = 10.0
+_BACKPRESSURE_SLICE = 0.002
+# One encoder for every JSONL line: the same bytes as ``json.dumps(obj, sort_keys=True,
+# default=str)`` without building a ``JSONEncoder`` per event on the writer thread.
+_encode_line = json.JSONEncoder(sort_keys=True, default=str).encode
 
 
 def _privacy():
@@ -184,10 +206,22 @@ class JsonlSink(object):
     """Streaming NDJSON writer. One event per line:
     ``{"v": 2, "t": "return"|"raise", "q": qualname, "sym": ..., "in": inputs, ...}``.
 
-    Producers only enqueue with ``put_nowait``.  A daemon writer owns the file,
-    so a slow filesystem, full pipe, or wedged sink cannot hold application
-    traffic indefinitely.  A bounded queue turns overload into an observable
-    ``backpressure_dropped`` counter instead of latency in the target process.
+    Producers enqueue on a bounded queue; a raw writer thread owns the file. The writer is
+    fast (~300k events/s) but GIL-starved while the program runs: a CPU-bound burst (the
+    locust pilot's ``gevent.sleep``/``random.choice`` loops on 3.12) outran it and dropped 43%
+    of a test suite's events. So a producer that finds the queue full **waits** for the writer
+    (``PYMOLT_TRACE_BACKPRESSURE=block``, the default): overload costs latency, never evidence
+    (the facts sink makes the same trade). The wait is bounded by progress, not by a clock: a
+    producer waits while the writer keeps processing events, and gives up only when
+    waiting cannot help — the writer's own thread, a writer that is gone, or one that
+    processed none for ``PYMOLT_TRACE_STALL_SECONDS`` (counted in ``writer_stalls``; producers then
+    stop waiting until it moves again). Those events, and every overflow under
+    ``PYMOLT_TRACE_BACKPRESSURE=drop``, are counted as ``backpressure_dropped``. The time
+    producers spent waiting is ``backpressure_waits`` / ``backpressure_wait_ms``: the honest
+    price of a complete recording (timing-sensitive code ran that much slower).
+
+    After a fork the child gets its own file (its pid), an empty queue, fresh counters and a
+    writer of its own (3.7+, ``os.register_at_fork``); the parent writes what it queued.
 
     Runtime metadata is written to ``<trace>.meta.json`` on close.  Keeping it
     out of the JSONL preserves compatibility with old trace readers.
@@ -195,8 +229,11 @@ class JsonlSink(object):
 
     _STOP = object()
 
-    def __init__(self, path_template, metadata=None, queue_size=None, close_timeout=None):
-        self.path = path_template.replace("{pid}", str(os.getpid()))
+    def __init__(self, path_template, metadata=None, queue_size=None, close_timeout=None,
+                 backpressure=None, stall_seconds=None):
+        self._template = path_template
+        self._pid = os.getpid()
+        self.path = path_template.replace("{pid}", str(self._pid))
         self.metadata_path = self.path + ".meta.json"
         self._metrics_lock = allocate_lock()
         self._metadata = dict(metadata or {})
@@ -207,6 +244,20 @@ class JsonlSink(object):
         self._privacy = _privacy()
         self._sampler = NoveltySampler()
         self._sample_rate = self._sampler.rate
+        if backpressure is None:
+            backpressure = os.environ.get("PYMOLT_TRACE_BACKPRESSURE") or DEFAULT_BACKPRESSURE
+        backpressure = str(backpressure).strip().lower()
+        self._backpressure = (backpressure if backpressure in BACKPRESSURE_POLICIES
+                              else DEFAULT_BACKPRESSURE)
+        self._block = self._backpressure == "block"
+        if stall_seconds is None:
+            stall_seconds = _env_number("PYMOLT_TRACE_STALL_SECONDS", DEFAULT_STALL_SECONDS,
+                                        float, 0.0)
+        self._stall_seconds = max(0.0, stall_seconds)
+        self._progress = 0          # events the writer has processed (only it writes this)
+        self._taken = 0             # events the writer took off the queue (only it writes this)
+        self._stalled = None        # ``_progress`` when the writer was declared stalled
+        self._wait_seconds = 0.0    # producers' total backpressure wait (under _metrics_lock)
         # The writer thread is not slow (~200k events/s) but it is GIL-starved while a
         # CPU-bound target runs: a 1024-slot queue dropped 84-99% of events in such runs
         # while saving the producer nothing. A deep queue costs memory only while the writer
@@ -224,7 +275,21 @@ class JsonlSink(object):
                 close_timeout = DEFAULT_CLOSE_TIMEOUT
         self._close_timeout = max(0.0, close_timeout)
         self._queue = RawQueue(max(1, queue_size))
-        self._metrics = {
+        self._metrics = self._fresh_metrics()
+        # Warnings of unsampled calls: the JSONL keeps no event for them, so their warnings
+        # go to the sidecar (``tally_warnings``), per (symbol, site), bounded.
+        self._tally_warnings = {}
+        # A raw OS thread on the primitives captured at start: a program that monkeypatches
+        # threading (gevent / eventlet) must not turn the writer into a hub waiter (see
+        # ``_rawthreads``). It imports nothing after it starts.
+        self._writer = None
+        self._start_writer()
+        _LIVE_JSONL_SINKS.add(self)
+        _register_fork_hook()
+
+    @staticmethod
+    def _fresh_metrics():
+        return {
             "events_seen": 0,
             "events_written": 0,
             "sampling_dropped": 0,
@@ -233,14 +298,43 @@ class JsonlSink(object):
             "sink_failures": 0,
             "shutdown_dropped": 0,
             "tallied": 0,
+            "backpressure_waits": 0,    # producers that found the queue full and waited
+            "writer_stalls": 0,         # times the writer processed nothing for stall_seconds
         }
-        # Warnings of unsampled calls: the JSONL keeps no event for them, so their warnings
-        # go to the sidecar (``tally_warnings``), per (symbol, site), bounded.
+
+    def _start_writer(self):
+        self._writer = spawn(self._writer_loop, "pymolt-trace-writer-{0}".format(self._pid))
+
+    def after_fork_child(self):
+        """Fork: the writer thread, the queued events and the file belong to the parent,
+        which writes them. The child starts empty under its own pid (a template without
+        ``{pid}`` gets ``.<pid>`` before ``.jsonl``) with a writer of its own, so a forked
+        worker's events are written instead of filling a queue nobody drains, and its
+        sidecar never overwrites the parent's. Run automatically via ``os.register_at_fork``."""
+        if self._closed:
+            return
+        pid = os.getpid()
+        template = self._template
+        if "{pid}" not in template:
+            base = template[:-len(".jsonl")] if template.endswith(".jsonl") else template
+            template = base + ".{pid}.jsonl"
+        self._pid = pid
+        self.path = template.replace("{pid}", str(pid))
+        self.metadata_path = self.path + ".meta.json"
+        self._metrics_lock = allocate_lock()
+        self._closing = RawEvent()
+        self._queue = RawQueue(self._queue.maxsize)
+        self._metrics = self._fresh_metrics()
         self._tally_warnings = {}
-        # A raw OS thread on the primitives captured at start: a program that monkeypatches
-        # threading (gevent / eventlet) must not turn the writer into a hub waiter (see
-        # ``_rawthreads``). It imports nothing after it starts.
-        self._writer = spawn(self._writer_loop, "pymolt-trace-writer-{0}".format(os.getpid()))
+        self._metadata = dict(self._metadata)
+        self._started_wall = time.time()
+        self._started_monotonic = time.monotonic()
+        self._progress = 0
+        self._taken = 0
+        self._stalled = None
+        self._wait_seconds = 0.0
+        self._sampler.reset()
+        self._start_writer()
 
     def set_metadata(self, **values):
         """Add runtime facts discovered after sink construction (for example backend name)."""
@@ -259,6 +353,7 @@ class JsonlSink(object):
     def metrics(self):
         with self._metrics_lock:
             counters = dict(self._metrics)
+            counters["backpressure_wait_ms"] = int(round(self._wait_seconds * 1000))
         counters["dropped_events"] = (
             counters["sampling_dropped"]
             + counters["backpressure_dropped"]
@@ -295,10 +390,66 @@ class JsonlSink(object):
         try:
             self._queue.put_nowait(obj)
         except Full:
+            self._put_waiting(obj)
+
+    def _put_waiting(self, obj):
+        """The queue is full: wait for the writer to make room while it keeps processing
+        events (latency, never a lost event). Counted as ``backpressure_dropped`` only
+        when waiting cannot help: the ``drop`` policy, the writer's own thread, a writer that
+        is gone (a forked child without one), or one that processed nothing for
+        ``stall_seconds`` (``writer_stalls``; producers then stop waiting until it moves).
+
+        No lock is held while waiting, and the wait sleeps on the original ``time.sleep``
+        (``_rawthreads``): it releases the GIL to the writer, and under gevent it pauses this
+        OS thread's greenlets instead of parking in the hub the writer never needs."""
+        writer = self._writer
+        if (not self._block or writer is None or self._pid != os.getpid()
+                or writer.ident == get_ident() or not writer.is_alive()):
             self.note_failure("backpressure_dropped")
+            return
+        stalled = self._stalled
+        if stalled is not None:
+            if self._progress == stalled:
+                self.note_failure("backpressure_dropped")
+                return
+            self._stalled = None            # the writer moved again: wait for it again
+        queue = self._queue
+        start = monotonic()
+        seen = self._progress
+        deadline = start + self._stall_seconds
+        lost = "backpressure_dropped"
+        try:
+            while True:
+                sleep(_BACKPRESSURE_SLICE)
+                if self._closed:
+                    lost = "shutdown_dropped"
+                    break
+                try:
+                    queue.put_nowait(obj)
+                except Full:
+                    pass
+                else:
+                    lost = None
+                    break
+                progress = self._progress
+                now = monotonic()
+                if progress != seen:
+                    seen = progress
+                    deadline = now + self._stall_seconds
+                elif now >= deadline or not writer.is_alive():
+                    self._stalled = seen
+                    self.note_failure("writer_stalls")
+                    break
+        finally:
+            waited = monotonic() - start
+            with self._metrics_lock:
+                self._metrics["backpressure_waits"] += 1
+                self._wait_seconds += waited
+                if lost is not None:
+                    self._metrics[lost] += 1
 
     def _write_line(self, fh, obj):
-        fh.write(json.dumps(obj, sort_keys=True, default=str) + "\n")
+        fh.write(_encode_line(obj) + "\n")
 
     def _writer_loop(self):
         # Batched writes, one flush per batch. The file used to be line-buffered: one
@@ -312,47 +463,43 @@ class JsonlSink(object):
         except Exception:
             self.note_failure("sink_failures")
         stop = False
+        queue = self._queue
         try:
             while not stop:
                 try:
-                    item = self._queue.get(timeout=0.05)
+                    item = queue.get(timeout=0.05)
                 except Empty:
                     if self._closing.is_set():
                         break
                     continue
                 batch = [item]
-                while len(batch) < _WRITE_BATCH:
+                batch.extend(queue.get_many(_WRITE_BATCH - 1))
+                self._taken += len(batch) - batch.count(self._STOP)
+                buf = io.StringIO()
+                serialized = 0
+                for obj in batch:
+                    if obj is self._STOP:
+                        stop = True
+                        continue
                     try:
-                        batch.append(self._queue.get_nowait())
-                    except Empty:
-                        break
-                try:
-                    buf = io.StringIO()
-                    serialized = 0
-                    for obj in batch:
-                        if obj is self._STOP:
-                            stop = True
-                            continue
+                        self._write_line(buf, obj)
+                    except Exception:
+                        self.note_failure("write_failures")
+                    else:
+                        serialized += 1
+                    # What a waiting producer and close() watch: the writer is moving.
+                    self._progress += 1
+                if serialized:
+                    if fh is None:
+                        self.note_failure("write_failures", serialized)
+                    else:
                         try:
-                            self._write_line(buf, obj)
+                            fh.write(buf.getvalue())
+                            fh.flush()
                         except Exception:
-                            self.note_failure("write_failures")
-                        else:
-                            serialized += 1
-                    if serialized:
-                        if fh is None:
                             self.note_failure("write_failures", serialized)
                         else:
-                            try:
-                                fh.write(buf.getvalue())
-                                fh.flush()
-                            except Exception:
-                                self.note_failure("write_failures", serialized)
-                            else:
-                                self.note_failure("events_written", serialized)
-                finally:
-                    for _ in batch:
-                        self._queue.task_done()
+                            self.note_failure("events_written", serialized)
         finally:
             if fh is not None:
                 try:
@@ -424,22 +571,46 @@ class JsonlSink(object):
             merge_warnings(slot[1], warnings)
 
     def close(self):
+        """Stop accepting events, let the writer drain the queue, write the sidecar.
+
+        The writer is waited for while it keeps processing events (a deep queue at exit is
+        written, not abandoned); one that processes none for ``close_timeout`` is given up
+        on. Whatever is not on disk then — still queued, queued after the writer stopped, or in
+        the hand of a writer given up on — is counted as ``shutdown_dropped``."""
         if self._closed:
             return
         self._closed = True
         self._closing.set()
+        queue = self._queue
+        writer = self._writer
         try:
-            self._queue.put(self._STOP, timeout=self._close_timeout)
+            # The writer also stops on its own once closing and drained; STOP only saves it
+            # the last idle poll, so a full queue need not wait for room.
+            queue.put_nowait(self._STOP)
         except Full:
-            # The writer is slow or stuck.  Do not wait indefinitely at process
-            # shutdown; account for the items that are still observably queued.
             pass
-        self._writer.join(self._close_timeout)
-        if self._writer.is_alive():
+        if writer is not None and self._pid == os.getpid():
+            seen = self._progress
+            deadline = monotonic() + self._close_timeout
+            while writer.is_alive():
+                writer.join(0.05)
+                progress = self._progress
+                if progress != seen:
+                    seen = progress
+                    deadline = monotonic() + self._close_timeout
+                elif monotonic() >= deadline:
+                    break
+        pending = sum(1 for item in list(queue._items) if item is not self._STOP)
+        if writer is None or writer.is_alive() or self._pid != os.getpid():
             self.note_failure("sink_failures")
-            pending = self._queue.qsize()
-            if pending:
-                self.note_failure("shutdown_dropped", pending)
+            if self._pid == os.getpid():
+                # The batch in the writer's hand is not on disk either (if it lands later,
+                # the sidecar overstates the loss, never understates it).
+                with self._metrics_lock:
+                    done = self._metrics["events_written"] + self._metrics["write_failures"]
+                pending += max(0, self._taken - done)
+        if pending:
+            self.note_failure("shutdown_dropped", pending)
         self._write_metadata()
 
     def _write_metadata(self):
@@ -453,6 +624,11 @@ class JsonlSink(object):
             "sample_rate": self._sample_rate,
             "sampling": self._sampler.policy(),
             "counters": metrics,
+            # What a full queue did: "block" = producers waited (backpressure_wait_ms),
+            # "drop" = events were counted as backpressure_dropped.
+            "backpressure": {"policy": self._backpressure,
+                             "stall_seconds": self._stall_seconds,
+                             "queue_size": self._queue.maxsize},
         }
         payload.update(self._metadata)
         with self._metrics_lock:
@@ -911,23 +1087,29 @@ class _Tally(object):
 
 
 _LIVE_FACT_SINKS = weakref.WeakSet()
+_LIVE_JSONL_SINKS = weakref.WeakSet()
 _FORK_HOOK = []
 
 
 def _register_fork_hook():
-    """Reset every live FactSink in a forked child (once per process; 3.7+ only)."""
+    """Reset every live FactSink / JsonlSink in a forked child (once per process; 3.7+
+    only: below, a JsonlSink in a child never waits for the parent's writer)."""
     if _FORK_HOOK or not hasattr(os, "register_at_fork"):
         return
     _FORK_HOOK.append(True)
-    os.register_at_fork(after_in_child=_after_fork_child)
+    try:
+        os.register_at_fork(after_in_child=_after_fork_child)
+    except Exception:
+        pass
 
 
 def _after_fork_child():
-    for sink in list(_LIVE_FACT_SINKS or ()):
-        try:
-            sink.after_fork_child()
-        except Exception:
-            pass
+    for live in (_LIVE_FACT_SINKS, _LIVE_JSONL_SINKS):
+        for sink in list(live or ()):
+            try:
+                sink.after_fork_child()
+            except Exception:
+                pass
 
 
 def _count_value(counter):

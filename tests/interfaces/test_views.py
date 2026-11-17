@@ -316,6 +316,25 @@ def test_capture_not_accepted_is_said_first_and_untraced_processes_are_warned():
     assert any("UNTRACED" in w for w in data["warnings"])
 
 
+def test_capture_states_a_long_wait_for_the_trace_writer():
+    from pymolt.verify.models import CaptureMode, CaptureValidity, ContractSlot, ContractState
+
+    def slot(waited):
+        return ContractSlot(
+            trace_path="/p/.pymolt/b.jsonl", captured_at="2026-11-16T00:00:00",
+            mode=CaptureMode.TEST_SUITE, validity=CaptureValidity.VALID, events=10,
+            processes=1, dropped_events=0, backpressure_wait_seconds=waited,
+        )
+
+    view = views.capture_view(slot(12.34), when="baseline", state=ContractState())
+    data = _assert_envelope(view, _CAPTURE_KEYS, ok=True)
+    (warning,) = data["warnings"]
+    assert "waited 12.3 s" in warning and "no event was lost" in warning
+    for quiet in (None, 0.0, 0.4):
+        view = views.capture_view(slot(quiet), when="baseline", state=ContractState())
+        assert not view["data"].get("warnings")
+
+
 def _refused(**kw):
     from pymolt.verify.models import CaptureMode, ContractSlot
 

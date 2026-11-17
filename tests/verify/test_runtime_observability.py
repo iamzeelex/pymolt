@@ -123,7 +123,9 @@ def test_sink_counts_sampling_and_backpressure_drops(tmp_path, monkeypatch):
     assert sampled_metadata["counters"]["dropped_events"] == 1
 
     monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "1")
-    pressured = JsonlSink(str(tmp_path / "pressured-{pid}.jsonl"))
+    # The ``drop`` policy: a full queue counts the event instead of waiting for the writer
+    # (the default ``block`` policy is covered by test_sink_backpressure).
+    pressured = JsonlSink(str(tmp_path / "pressured-{pid}.jsonl"), backpressure="drop")
 
     def full(_event):
         raise queue.Full
@@ -136,6 +138,32 @@ def test_sink_counts_sampling_and_backpressure_drops(tmp_path, monkeypatch):
     assert pressured_metadata["counters"]["events_seen"] == 1
     assert pressured_metadata["counters"]["backpressure_dropped"] == 1
     assert pressured_metadata["counters"]["dropped_events"] == 1
+
+
+def test_a_capture_through_a_one_slot_queue_keeps_every_event_and_states_the_wait(
+        tmp_path, monkeypatch):
+    """The locust drop path end to end: a JSONL capture whose writer cannot keep up (a
+    one-slot queue) used to lose events to ``backpressure_dropped``; it now keeps all of
+    them, and the result and sidecar say how long the program waited for the writer."""
+    monkeypatch.setenv("PYMOLT_TRACE_QUEUE_SIZE", "1")
+    monkeypatch.delenv("PYMOLT_TRACE_BACKPRESSURE", raising=False)
+    script = tmp_path / "burst.py"
+    script.write_text("import json\nfor i in range(3000):\n    json.loads('[%d]' % i)\n",
+                      encoding="utf-8")
+    out = tmp_path / "trace.jsonl"
+
+    result = service.capture_trace("json", [sys.executable, str(script)], out, "auto")
+
+    assert result.dropped_events == 0 and result.backpressure_dropped == 0
+    records = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    assert sorted(r["in"]["bound"]["s"] for r in records if r["q"] == "json.loads") == \
+        sorted(f"[{i}]" for i in range(3000))
+    metadata = json.loads(service.Path(result.metadata_path).read_text())
+    assert metadata["backpressure"]["waits"] >= 1
+    assert metadata["backpressure"]["writer_stalls"] == 0
+    assert result.backpressure_wait_seconds == metadata["backpressure"]["wait_ms"] / 1000.0
+    (process,) = metadata["processes"]
+    assert process["backpressure"]["policy"] == "block"
 
 
 def test_sink_counts_observable_write_failures(tmp_path, monkeypatch):
