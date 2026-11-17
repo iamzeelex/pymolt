@@ -597,15 +597,21 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 
 
 def capture_refusal_hint(slot, static_contacts: int | None) -> str:
-    """The hint for a capture that was not accepted, by what went wrong."""
-    from pymolt.verify.service import parse_failed_count
+    """The hint for a capture that was not accepted, by what went wrong. A failed run names
+    the failing tests the command log shows, and the log itself."""
+    from pymolt.verify.service import failed_tests, parse_failed_count
 
     rc = slot.returncode
     log = f" (see {slot.command_log})" if slot.command_log else ""
     if rc not in (None, 0) and slot.events > 0:
         failed, _ = parse_failed_count(slot.command_log)
-        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}). "
-                "Fix or deselect them, or keep a red baseline with --accept-failing.")
+        names, total = failed_tests(slot.command_log)
+        which = ""
+        if names:
+            more = f" and {total - len(names)} more" if total > len(names) else ""
+            which = f": {', '.join(names)}{more}"
+        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}){which}"
+                f"{log}. Fix or deselect them, or keep a red baseline with --accept-failing.")
     if rc not in (None, 0):
         return (f"The command failed (exit {rc}) and recorded no dependency call"
                 f"{log}. Fix the command and capture again; the slot is unchanged.")

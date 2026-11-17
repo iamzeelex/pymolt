@@ -340,8 +340,17 @@ def test_capture_refusal_hint_follows_the_cause(tmp_path):
     red = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=1, events=40,
                       command_log=str(log))
     view = views.capture_view(red, when="baseline", state=state)
-    assert view["hint"] == ("3 test(s) failed (exit 1). Fix or deselect them, or keep a red "
-                            "baseline with --accept-failing.")
+    assert view["hint"] == (f"3 test(s) failed (exit 1) (see {log}). Fix or deselect them, or "
+                            "keep a red baseline with --accept-failing.")
+
+    # pytest's short summary names them: the hint says which, and where the full output is.
+    log.write_text("".join(f"FAILED tests/test_{n}.py::test_it - AssertionError\n"
+                           for n in "abcd") + "=== 4 failed, 10 passed in 1.2s ===\n")
+    view = views.capture_view(red, when="baseline-replicate", state=state)
+    assert view["hint"] == (
+        "4 test(s) failed (exit 1): tests/test_a.py::test_it, tests/test_b.py::test_it, "
+        f"tests/test_c.py::test_it and 1 more (see {log}). Fix or deselect them, or keep a "
+        "red baseline with --accept-failing.")
 
     dead = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=127, events=0)
     hint = views.capture_view(dead, when="baseline", state=state)["hint"]
