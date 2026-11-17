@@ -943,6 +943,13 @@ class MonitoringBackend(FrameBackend):
                         self._callname.clear()
                     self._callname[tid] = (ent[3].__code__, ent[4])
                     self._renames = True
+            if kind == _K_PY and ent[4] is not None:
+                # A callee that declares a name of its own (a decorator wrapper: its code is
+                # shared, or generated and swapped in on first call, as networkx's argmap
+                # does) is named by this event, so its site never settles: once CALL stopped
+                # firing, later calls would take the code's name (locust: 2 calls of 6,572
+                # named ``Process.memory_info``, the rest the wrapper's closure name).
+                return True
             site = self._csites.get(key)
             if site is None or site[0] is not code:
                 if len(self._csites) >= _SITES_MAX:
