@@ -31,6 +31,7 @@ import dis
 import functools
 import importlib.util
 import inspect
+import os
 import sys
 import types
 
@@ -42,6 +43,7 @@ from ._backend import (
     _get_ident,
     _now,
     _split,
+    _stdlib_roots,
     install_warning_capture,
     privacy_normalizer,
     remove_warning_capture,
@@ -605,6 +607,22 @@ def _is_cython(obj):
     return type(obj).__name__ in _CYTHON_TYPES
 
 
+_SITE_DIRS = ("site-packages", "dist-packages")
+
+
+def stdlib_file(filename, roots):
+    """True for a file of the standard library itself: under a stdlib root, not under that
+    root's ``site-packages``. A venv's ``platstdlib`` is ``<venv>/lib/pythonX.Y`` and a system
+    Python's stdlib is ``/usr/local/lib/pythonX.Y``: both CONTAIN the installed packages, so a
+    plain prefix test takes every compiled dependency (pydantic v1's Cython) for stdlib."""
+    for root in roots or ():
+        if filename.startswith(root):
+            head = filename[len(root):].split(os.sep, 1)[0]
+            if head not in _SITE_DIRS:
+                return True
+    return False
+
+
 class CompiledWrap(WrapBackend):
     """Wrap the Cython functions of dependency modules (below 3.12, where nothing else sees them).
 
@@ -625,6 +643,7 @@ class CompiledWrap(WrapBackend):
         WrapBackend.__init__(self, [], sink, source=source, include_internal=include_internal)
         self._matcher = matcher
         self._require_call = True
+        self._stdlib = _stdlib_roots()   # a stdlib module is never wrapped in place
         self._scanned = set()
         self._loader_undo = None
 
@@ -673,6 +692,8 @@ class CompiledWrap(WrapBackend):
         if not filename.endswith(self._suffixes):
             return
         self._scanned.add(modname)
+        if stdlib_file(filename, self._stdlib):
+            return          # the profile hook sees stdlib code; a wrapper would be visible to it
         if not self._matcher.matches(modname, None):
             return
         for name, obj in list(module.__dict__.items()):

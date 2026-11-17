@@ -151,9 +151,14 @@ def run_sh(cmd: str, **kw) -> Result:
     return run_proc(cmd, **kw)
 
 
+PROJECT_OVERRIDES = ("image", "platform", "base_python", "target_python")
+
+
 class Project:
     def __init__(self, name, cfg, defaults, pymolt: str, out: Path):
-        self.name, self.cfg, self.d = name, cfg, defaults
+        self.name, self.cfg = name, cfg
+        # a project may override the container defaults (a newer base Python, a native platform)
+        self.d = {**defaults, **{k: cfg[k] for k in PROJECT_OVERRIDES if k in cfg}}
         self.pymolt = pymolt
         self.art = (REPO / cfg["artifact"]).resolve()
         self.out = (out / name).resolve()
@@ -561,14 +566,13 @@ class Project:
         return True
 
     def phase_plan(self):
-        if not (self.art / "requirements-target.txt").exists():
-            self.record(
-                "plan", "not-reached", note="no requirements-target.txt (assess wrote none)"
-            )
+        # a project may pin its own target (e.g. dependencies as of the real migration's date)
+        # under a name assess does not overwrite
+        target = self.cfg.get("target_manifest", "requirements-target.txt")
+        if not (self.art / target).exists():
+            self.record("plan", "not-reached", note=f"no {target} (assess wrote none)")
             return False
-        r = self.pm(
-            "plan", ["plan", ".", "--target-manifest", "requirements-target.txt", "--agent"]
-        )
+        r = self.pm("plan", ["plan", ".", "--target-manifest", target, "--agent"])
         js = r.json() or {}
         d = js.get("data", {})
         impacts = d.get("api_impacts") or []
@@ -874,7 +878,8 @@ def write_scorecard(out: Path, meta: dict, results: dict) -> dict:
 
 def cmd_run(a) -> int:
     cfg = json.loads((HERE / "projects.json").read_text())
-    names = a.projects or list(cfg["projects"])
+    # a project marked "default": false (a noisy pilot) runs only when named
+    names = a.projects or [n for n, p in cfg["projects"].items() if p.get("default", True)]
     unknown = [n for n in names if n not in cfg["projects"]]
     if unknown:
         sys.exit(f"unknown project(s): {unknown}; known: {list(cfg['projects'])}")
@@ -888,9 +893,12 @@ def cmd_run(a) -> int:
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     d = cfg["defaults"]
-    img = subprocess.run(["docker", "image", "inspect", d["image"]], capture_output=True)
-    if img.returncode != 0:
-        subprocess.run(["docker", "pull", "--platform", d["platform"], d["image"]], check=True)
+    images = {(p.get("image", d["image"]), p.get("platform", d["platform"]))
+              for p in (cfg["projects"][n] for n in names)}
+    for image, platform in sorted(images):
+        img = subprocess.run(["docker", "image", "inspect", image], capture_output=True)
+        if img.returncode != 0:
+            subprocess.run(["docker", "pull", "--platform", platform, image], check=True)
     started = datetime.now(UTC).isoformat(timespec="seconds")
     t0 = time.time()
     meta = {
@@ -986,7 +994,8 @@ def main(argv=None) -> int:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run the evaluation")
-    r.add_argument("projects", nargs="*", help="default: all six")
+    r.add_argument("projects", nargs="*",
+                   help="default: every project not marked \"default\": false (the six legacy)")
     r.add_argument("--pymolt", required=True, help="path to the pymolt executable under test")
     r.add_argument("--out", required=True, help="output directory (logs, scorecard.json/.md)")
     r.add_argument("--parallel", type=int, default=1)

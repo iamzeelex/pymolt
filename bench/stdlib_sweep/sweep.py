@@ -40,6 +40,9 @@ SKIP = {
     "antigravity", "this", "idlelib", "turtledemo", "test", "tests", "__main__", "__phello__",
     "__hello__", "encodings", "fixes", "pydoc_data", "_bundled",
 }
+#: packages typeshed lists in stdlib/VERSIONS (it ships stubs for them) that no interpreter's
+#: standard library has: ``typing_extensions`` is a PyPI package, ``_typeshed`` a stub-only module.
+TYPESHED_ONLY = {"_typeshed", "typing_extensions"}
 #: top-level stdlib packages that typeshed does not list (it has no stubs for them).
 EXTRA_TOPS = {"idlelib": ["3.0", None], "turtledemo": ["3.0", None], "test": ["3.0", None]}
 
@@ -67,6 +70,8 @@ def parse_versions(text: str) -> dict[str, list]:
             continue
         name, _, span = line.partition(":")
         lo, _, hi = span.strip().partition("-")
+        if name.strip().split(".")[0] in TYPESHED_ONLY:
+            continue
         out[name.strip()] = [lo, hi or None]
     return out
 
