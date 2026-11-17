@@ -839,29 +839,38 @@ def apply_plan_cmd(
     except MigrationEvidenceError as exc:
         fail(
             f"migration plan needs evidence: {exc}",
-            hint="Capture a valid baseline and regenerate the plan.",
+            hint=exc.hint or "Capture a valid baseline and regenerate the plan.",
             code=EXIT_INCONCLUSIVE,
             json_output=json_output,
         )
     except MigrationConflictError as exc:
         fail(
             f"migration plan conflicts with current state: {exc}",
-            hint="Review current files/run state and regenerate the plan if needed.",
+            hint=exc.hint or "Review current files/run state and regenerate the plan if needed.",
             code=EXIT_USAGE,
             json_output=json_output,
         )
     except (MigrationPlanError, OSError, RuntimeError) as exc:
         fail(
             f"migration plan was not applied: {exc}",
-            hint="Nothing was written. Run `pymolt plan .` again if files changed.",
+            hint=getattr(exc, "hint", None)
+            or "Nothing was written. Run `pymolt plan .` again if files changed.",
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
 
     if json_output:
-        typer.echo(json.dumps(receipt.model_dump(mode="json"), indent=2))
+        typer.echo(json.dumps({**receipt.model_dump(mode="json"), "outcome": receipt.outcome},
+                              indent=2))
         return
-    if not receipt.files_changed:
+    if receipt.outcome == "already_applied":
+        console.print(Panel(
+            f"Plan [bold cyan]{receipt.run_id[:8]}[/bold cyan] is already applied "
+            f"(at {receipt.applied_at}): its {len(receipt.files_changed)} file(s) still hold "
+            "the plan's changes. [bold]Nothing was written.[/bold]",
+            title="Already applied", border_style="green", expand=False,
+        ))
+    elif not receipt.files_changed:
         console.print(Panel(
             f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]: "
             "[bold]it changed no file[/bold] (0 files, 0 rewrite sites).\n"

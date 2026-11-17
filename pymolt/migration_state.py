@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_core import ValidationError
 
 MIGRATION_STATE_SCHEMA_VERSION = 1
@@ -52,6 +52,16 @@ class MigrationReceipt(BaseModel):
     # The project files the rollback rewrote ([] = it restored no file: the run had changed
     # none). None = not rolled back, or rolled back before this was recorded.
     files_restored: list[str] | None = None
+    # What the apply call that returned this receipt did; not saved. ``already_applied``: the
+    # plan was applied before and its files still hold its changes, so nothing was written.
+    _outcome: Literal["applied", "already_applied"] = PrivateAttr(default="applied")
+
+    @property
+    def outcome(self) -> str:
+        return self._outcome
+
+    def mark_outcome(self, outcome: Literal["applied", "already_applied"]) -> None:
+        self._outcome = outcome
 
     @property
     def in_effect(self) -> bool:

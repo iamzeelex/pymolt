@@ -109,6 +109,23 @@ def test_plan_apply_rollback_cli_lifecycle(tmp_path, monkeypatch):
     assert status.next_command == "pymolt plan ."
 
 
+def test_apply_again_says_the_plan_is_already_applied(tmp_path, monkeypatch):
+    _configured_project(tmp_path)
+    source_path, _original = _mock_plan_services(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["plan", str(tmp_path)]).exit_code == 0
+    assert runner.invoke(app, ["apply", str(tmp_path)]).exit_code == 0
+    applied = source_path.read_text(encoding="utf-8")
+
+    again = runner.invoke(app, ["apply", str(tmp_path)])
+    as_json = runner.invoke(app, ["apply", str(tmp_path), "--json"])
+
+    assert again.exit_code == 0, again.output
+    assert "already applied" in again.output and "Nothing was written" in again.output
+    assert as_json.exit_code == 0, as_json.output
+    assert json.loads(as_json.stdout)["outcome"] == "already_applied"
+    assert source_path.read_text(encoding="utf-8") == applied
+
+
 def test_rollback_json_says_what_became_of_the_post_migration_capture(tmp_path, monkeypatch):
     _configured_project(tmp_path)
     _mock_plan_services(tmp_path, monkeypatch)

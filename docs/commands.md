@@ -85,7 +85,8 @@ plan and shows the diff. It writes no source file. Details are in [plan.md](plan
 ### `pymolt apply [dir]`
 Writes exactly the saved plan. It refuses if a planned file changed since the plan was made. Every
 changed file is prepared and parsed before the first write, and a failed apply restores them all.
-The original files are kept for `rollback`.
+The original files are kept for `rollback`. Run again on an applied plan whose files still hold its
+changes, it writes nothing and says so.
 
 | Option | Meaning |
 |---|---|
