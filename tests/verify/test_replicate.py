@@ -220,7 +220,7 @@ def test_verify_judges_the_migration_with_the_measured_noise(tmp_path, monkeypat
         "billing.total"]["notes"]
     assert rep.all_fact_diff["noise_measured"]["explained"] == 1
     cache = json.loads((tmp_path / NOISE_PROFILE_PATH).read_text())
-    assert cache["schema"] == "pymolt.noise-profile/2" and cache["identity"]["pymolt"]
+    assert cache["schema"] == "pymolt.noise-profile/3" and cache["identity"]["pymolt"]
     # a stale replicate is ignored, and the report says so
     state = service.load_contract_state(tmp_path)
     state.baseline_replicate.replicate_of = "earlier"
