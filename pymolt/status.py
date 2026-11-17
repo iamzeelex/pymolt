@@ -377,6 +377,52 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     )
 
 
+def _precedes_start(post_slot, baseline_slot, receipt) -> bool:
+    """A post-migration capture taken before the baseline, or before the rollback that took
+    the last apply away: it cannot record a migration made since."""
+    if baseline_slot is not None and _capture_precedes(post_slot.captured_at,
+                                                       baseline_slot.captured_at):
+        return True
+    after = getattr(receipt, "rolled_back_at", None)
+    return bool(after) and _capture_precedes(post_slot.captured_at, after)
+
+
+def _hand_migration(project_path: Path, baseline_slot, post_slot, plan: PhaseState,
+                    current: str | None, current_setup: str | None,
+                    receipt) -> PhaseState | None:
+    """The migration phase when no apply run is in effect and the baseline is done: DONE when
+    the project shows a migration made by hand, else None (the receipt-based phase stands).
+
+    The evidence, in order: a post-migration capture taken since the baseline; then, unless a
+    valid saved plan is waiting for `apply`, files that differ from the baseline's source
+    snapshot or pins bumped in the same manifest since the baseline."""
+    from pymolt.verify.service import sources_changed
+
+    if post_slot is not None and not _precedes_start(post_slot, baseline_slot, receipt):
+        return PhaseState(
+            phase="migration", state=DONE,
+            detail="no apply run: a migration made by hand, which the post-migration "
+                   "capture records",
+        )
+    if plan.state == DONE:
+        return None
+    changed = sources_changed(project_path, baseline_slot.sources_path) or []
+    pins = (current is not None and baseline_slot.env_fingerprint is not None
+            and baseline_slot.env_fingerprint != current
+            and _setup_unchanged(baseline_slot, current_setup))
+    if not (changed or pins):
+        return None
+    found = []
+    if changed:
+        found.append(f"{len(changed)} file(s) changed since the baseline")
+    if pins:
+        found.append("the manifest's pins changed since the baseline")
+    return PhaseState(
+        phase="migration", state=DONE,
+        detail="no apply run: " + " and ".join(found) + ", taken as a migration made by hand",
+    )
+
+
 def _capture_precedes(captured_at: str, applied_at: str) -> bool:
     try:
         captured = datetime.fromisoformat(captured_at)
@@ -472,14 +518,31 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     assert assess_phase is not None
     plan = _plan_phase(project_path, assess_phase, receipt)
     migration = _migration_phase(receipt, baseline, baseline_slot, project_path)
+    # No apply run is in effect: plan and apply are optional, so the migration may be one made
+    # by hand (or by an agent). It is judged by what is on disk, not by a receipt.
+    hand = receipt is None or (receipt.status == "rolled_back" and not receipt.in_effect)
+    if hand and baseline.state == DONE:
+        migration = _hand_migration(
+            project_path, baseline_slot, post_slot, plan, fingerprint, setup_fingerprint,
+            receipt) or migration
+    by_hand = hand and migration.state == DONE
+    if by_hand and plan.state == TODO:
+        plan = plan.model_copy(update={"detail": plan.detail + " (optional: the migration was "
+                                                               "made by hand)"})
     post = _capture_phase("post_migration", post_slot, fingerprint)
-    if post_slot is not None and receipt is None:
+    if post_slot is not None and hand and _precedes_start(post_slot, baseline_slot, receipt):
+        post = PhaseState(
+            phase="post-migration", state=STALE,
+            detail=f"{post.detail} — captured before the migration it should record",
+        )
+    elif post_slot is not None and hand and not by_hand:
         post = PhaseState(
             phase="post-migration", state=STALE,
             detail=f"{post.detail} — no recorded migration precedes this capture",
         )
     elif (
-        post_slot is not None
+        not hand
+        and post_slot is not None
         and receipt is not None
         and _capture_precedes(post_slot.captured_at, receipt.applied_at)
     ):
@@ -514,9 +577,8 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     compared = verification.contract.compared if verification is not None else None
     if (
         verification is not None
-        and receipt is not None
-        and receipt.status == "applied"
-        and verification.run_id == receipt.run_id
+        and (by_hand or (receipt is not None and receipt.status == "applied"
+                         and verification.run_id == receipt.run_id))
         and post_slot is not None
         and not _capture_precedes(verification.created_at, post_slot.captured_at)
         and (compared is None or compared.after_capture == "post-migration")
@@ -540,7 +602,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     workload = detect_workload_command(project_path)
     _decide_next(
         status, config, baseline, plan, migration, post, report,
-        receipt, verification, workload,
+        receipt, verification, workload, by_hand=by_hand,
         has_replicate=usable_replicate(project_path, contract)[0] is not None,
         can_replicate=lambda: baseline_slot is not None and fingerprint is not None
         and fingerprint == baseline_slot.env_fingerprint
@@ -564,6 +626,7 @@ def _decide_next(
     verification,
     workload: list[str],
     *,
+    by_hand: bool = False,
     has_replicate: bool = False,
     can_replicate=lambda: False,
 ) -> None:
@@ -628,6 +691,12 @@ def _decide_next(
         status.next_reason = "Both captures exist. Compare them."
         return
     if verification is not None and verification.verdict.value == "fail":
+        if by_hand:
+            status.next_command = None
+            status.next_reason = (
+                "The verdict is FAIL. No apply run made this migration, so there is nothing to "
+                "roll back: fix the changes, then capture post-migration again.")
+            return
         status.next_command = "pymolt rollback ."
         status.next_reason = "The verdict is FAIL. Rollback restores the files apply changed."
         return
@@ -640,6 +709,14 @@ def _decide_next(
                 "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. Run "
                 "the baseline's command again (same code, same environment) so verify can "
                 "measure that noise, then verify again.")
+        elif by_hand:
+            status.next_command = None
+            status.next_reason = (
+                "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. A "
+                "baseline replicate measures it but must run the baseline's code in its "
+                "environment: put that back, `pymolt capture baseline --replicate`, redo the "
+                "migration, verify. (`pymolt capture baseline --runs 2` records both before "
+                "migrating.)")
         else:
             status.next_command = "pymolt rollback ."
             status.next_reason = (

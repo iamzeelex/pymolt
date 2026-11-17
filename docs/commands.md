@@ -10,7 +10,10 @@ authoritative list of options.
 
 ### `pymolt status [dir]`
 Shows where the project stands, whether its environments exist, and the single next command. Run it
-at any time. Options: `--json`, `--agent`.
+at any time. Options: `--json`, `--agent`. With no apply run in effect, a migration made by hand is
+recognised by a post-migration capture taken since the baseline, or, unless a valid plan waits for
+`apply`, by files or pins changed since the baseline. Its verdict completes it; a FAIL then has no
+rollback to point at.
 
 ### `pymolt scan [dir]`
 Lists the manifests, the Python-version divergence, the dependency edges, and every place your code
