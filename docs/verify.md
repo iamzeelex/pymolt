@@ -75,7 +75,7 @@ Values are rendered at the most exact level that can be compared:
 
 | Python | Tracer |
 |---|---|
-| 3.12+ | `sys.monitoring`. Tests: full discovery. Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A startup-only watcher covers properties, `x[k]`, `with`, operators and generators, and turns itself off 30 s after the last new contact. There is no warm-up window. |
+| 3.12+ | `sys.monitoring`. Tests: full discovery. Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A second watcher covers properties, `x[k]`, `with`, operators and generators. It turns off 30 s after the last new contact, and back on whenever a line of your code runs for the first time, until nothing new happened for 5 s. While it is on, capture costs as much as before it first turned off. Each line of your code is watched once, then costs nothing. The capture metadata counts the times it came back on (`reopened`) and their total length (`reopen_seconds`). There is no warm-up window. |
 | 3.6–3.11 | `sys.setprofile`. Tests: for the whole run. Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
 | 2.7 | not supported; the capture reports that the tracer failed to start |
 
