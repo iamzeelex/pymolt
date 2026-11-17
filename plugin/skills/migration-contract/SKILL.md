@@ -99,8 +99,9 @@ else, or stopped happening. A green test suite does not tell you that.
 - `assess` output is an input, not a conclusion. Report which versions move and
   what enters the manual zone; leave the verdict to `verify`.
 - `plan` writes no source. Never run `pymolt apply` without the user's explicit
-  go-ahead in this conversation, after they have seen the diffs and
-  `data.advisories` (sites that need a person). `pymolt rollback .` undoes an apply.
+  go-ahead in this conversation, after they have seen the diffs,
+  `data.advisories` (sites that need a person) and `data.manual` (rule matches
+  that are not applied). `pymolt rollback .` undoes an apply.
 - Use `pymolt --help` and `pymolt <command> --help` for options; do not invent flags.
 
 ## Dead frameworks

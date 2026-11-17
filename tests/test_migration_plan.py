@@ -613,3 +613,71 @@ def test_a_baseline_from_another_setup_is_still_refused(tmp_path):
 
     with pytest.raises(MigrationEvidenceError, match="invalid or stale"):
         apply_migration_plan(tmp_path, plan)
+
+
+def _blocked_preview(tmp_path, *, with_change=False):
+    from pymolt.codemods.models import BlockedRewrite
+    from pymolt.codemods.rules import CodemodRule
+
+    # An unverified LEGACY rule: its evidence says "same object", its golden pair failed.
+    blocked = CodemodRule(
+        library="flask", from_version="2.0.3", to_version="3.0.0",
+        match="flask.helpers.escape", rewrite=["markupsafe.escape"], kind="rewrite-import",
+        old_qualname="flask.helpers.escape", new_qualname="markupsafe.escape",
+        confidence="heuristic",
+        evidence=["pymolt.delta MOVED: flask.helpers.escape -> markupsafe.escape",
+                  "pymolt knowledge flask-escape (curated, 2026-01-01)"])
+    old = "from flask.helpers import escape\nfrom flask.helpers import safe_join\n"
+    new = old.replace("from flask.helpers import safe_join",
+                      "from werkzeug.utils import safe_join") if with_change else old
+    path = tmp_path / "app0.py"
+    path.write_text(old, encoding="utf-8")
+    applied = CodemodPattern(old_qualname="flask.helpers.safe_join",
+                             new_qualname="werkzeug.utils.safe_join", kind="rewrite-import",
+                             evidence=["pymolt.delta MOVED: flask.helpers.safe_join"])
+    return FilePreview(
+        path=str(path), old_source=old, new_source=new, sites=1 if with_change else 0,
+        rules=[blocked], patterns=[applied] if with_change else [],
+        blocked=[BlockedRewrite(rule=blocked, sites=1, lines=[1])])
+
+
+def _plan_from(tmp_path, previews, downgraded=()):
+    target = _project(tmp_path)
+    return create_migration_plan(
+        tmp_path, previews, [DependencyMigration("flask", "2.0.3", "3.0.0")],
+        target_python="3.12", source_manifest="requirements.txt",
+        target_manifest_path=target, files_scanned=1, predict=False,
+        downgraded=list(downgraded))
+
+
+def test_a_file_whose_only_hit_was_a_blocked_rule_becomes_a_manual_item(tmp_path):
+    plan = _plan_from(tmp_path, [_blocked_preview(tmp_path)], downgraded=[
+        "flask-escape: flask.helpers.escape → markupsafe.escape (its golden pair did not "
+        "verify)",
+        "flask-other: flask.x → flask.y (needs `import flask` in app.py)"])
+
+    assert plan.changes == []
+    blocked, unmatched = plan.manual
+    assert (blocked.path, blocked.lines, blocked.sites) == ("app0.py", [1], 1)
+    assert blocked.rule == "rewrite-import:flask.helpers.escape→markupsafe.escape"
+    assert "its golden pair did not verify" in blocked.reason
+    assert unmatched.path is None and unmatched.rule.startswith("flask-other:")
+    assert MigrationPlan.model_validate(plan.model_dump()).manual == plan.manual
+
+
+def test_a_blocked_rule_is_never_a_recipe_claim_or_ledger_entry(tmp_path):
+    import json
+
+    from pymolt.apply_ledger import claim_for
+
+    preview = _blocked_preview(tmp_path, with_change=True)
+    plan = _plan_from(tmp_path, [preview])
+
+    [change] = plan.changes
+    assert change.recipes == ["rewrite-import:flask.helpers.safe_join→werkzeug.utils.safe_join"]
+    assert set(change.claims) == set(change.recipes)
+    assert claim_for(preview.blocked[0].rule) is None    # unverified: no claim, any evidence
+    apply_migration_plan(tmp_path, plan)
+    ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
+    assert {e["rule"] for e in ledger["entries"]} == set(change.recipes)
+    assert [m.path for m in plan.manual] == ["app0.py"]

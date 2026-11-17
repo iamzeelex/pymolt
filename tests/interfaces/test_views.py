@@ -402,7 +402,8 @@ def test_capture_accepted_points_at_the_other_side():
 
 _PLAN_KEYS = {
     "plan_id", "plan_path", "source", "dependencies", "per_package", "files_to_change",
-    "files_total", "rewrite_sites", "diffs", "advisories", "advisories_total", "api_impacts",
+    "files_total", "rewrite_sites", "diffs", "advisories", "advisories_total", "manual",
+    "manual_total", "api_impacts",
     "api_impacts_total", "baseline_bound", "api_deltas_inconclusive", "api_deltas_total",
     "risks_status", "risks_attention",
     "risks_attention_total", "risks_fixed", "risks_fixed_total",

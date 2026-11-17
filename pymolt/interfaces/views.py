@@ -753,6 +753,10 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         f"{a.path}:{a.line} [{'caveat' if a.severity == 'precondition' else 'not applied'}] "
         f"{a.reason}" for a in plan.advisories
     ]
+    manual = [
+        (f"{m.path}:{','.join(map(str, m.lines))}" if m.path and m.lines else m.path or "no site")
+        + f" [blocked rule] {m.rule}: {m.reason}" for m in getattr(plan, "manual", None) or ()
+    ]
     impacts = [
         f"{i.package} {i.path} {i.kind} risk={i.risk}"
         + (f" -> {i.replacement_path}" if i.replacement_path else "")
@@ -784,6 +788,8 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         "diffs": [json.loads(d) for d in lists.fit("diffs", diffs, ANSWER_BUDGET_CHARS * 2)],
         "advisories": lists.fit("advisories", advisories),
         "advisories_total": len(advisories),
+        "manual": lists.fit("manual", manual),
+        "manual_total": len(manual),
         "api_impacts": lists.fit("api_impacts", impacts),
         "api_impacts_total": len(impacts),
         "baseline_bound": plan.baseline_trace_path is not None,
@@ -807,6 +813,9 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
     ]
     if advisories:
         lines.append(f"{len(advisories)} site(s) need manual review (data.advisories).")
+    if manual:
+        lines.append(f"{len(manual)} rule match(es) are not applied and need a person "
+                     "(data.manual).")
     if impacts:
         lines.append(f"{len(impacts)} API impact(s) (data.api_impacts).")
     python_line = python_summary_line(plan)

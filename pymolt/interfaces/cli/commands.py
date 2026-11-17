@@ -618,6 +618,7 @@ def plan(
         "files_to_change": len(migration_plan.changes),
         "rewrite_sites": sum(item.sites for item in migration_plan.changes),
         "advisories": len(migration_plan.advisories),
+        "manual": [item.model_dump(mode="json") for item in migration_plan.manual],
         "api_impacts": len(migration_plan.impacts),
         "patch_path": str(patch_path) if patch_path else None,
         "risks": _risks_payload(migration_plan.risks),
@@ -641,10 +642,12 @@ def plan(
         f"files: [bold]{payload['files_to_change']}[/bold]   "
         f"rewrite sites: [bold]{payload['rewrite_sites']}[/bold]   "
         f"API impacts: [bold]{payload['api_impacts']}[/bold]   "
-        f"advisories: [yellow]{payload['advisories']}[/yellow]",
+        f"advisories: [yellow]{payload['advisories']}[/yellow]   "
+        f"manual: [yellow]{len(migration_plan.manual)}[/yellow]",
         title="Migration plan", border_style="cyan", expand=False,
     ))
-    _render_recipes(by_pkg, previews, migration_plan.files_scanned, migration_plan.risks)
+    _render_recipes(by_pkg, previews, migration_plan.files_scanned, migration_plan.risks,
+                    manual=migration_plan.manual)
     from pymolt.interfaces.views import dependency_risks
 
     deps = dependency_risks(migration_plan.risks)
@@ -751,8 +754,9 @@ def _render_risks(risks) -> None:
         console.print(f"[dim]  note: {note}[/dim]")
 
 
-def _render_recipes(by_pkg, previews, files_scanned: int, risks=None) -> None:
-    """What the service returned per package, what needs a person, and whether it matched."""
+def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=()) -> None:
+    """What the service returned per package, what needs a person, and whether it matched.
+    ``manual``: the plan's manual items (rules that matched but are not applied)."""
     from pymolt.codemods.models import CodemodPattern
 
     for pkg, items in by_pkg.items():
@@ -773,7 +777,7 @@ def _render_recipes(by_pkg, previews, files_scanned: int, risks=None) -> None:
         console.print(table)
 
     advised = [p for p in previews if p.advisories]
-    if advised:
+    if advised or manual:
         console.print("\n[bold yellow]Manual review needed:[/bold yellow]")
         for preview in advised:
             for adv in preview.advisories:
@@ -781,6 +785,11 @@ def _render_recipes(by_pkg, previews, files_scanned: int, risks=None) -> None:
                 console.print(
                     f"  [yellow]{preview.path}:{adv.line}[/yellow] — [{tag}] {adv.reason}"
                 )
+        for item in manual:
+            where = (f"{item.path}:{','.join(map(str, item.lines))}" if item.path and item.lines
+                     else item.path or "no site")
+            console.print(f"  [yellow]{escape(where)}[/yellow] — \\[blocked rule] "
+                          f"{escape(item.rule)}: {escape(item.reason)}")
     if by_pkg and not any(p.old_source != p.new_source for p in previews):
         from pymolt.interfaces.views import inconclusive_deltas
 

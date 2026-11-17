@@ -64,8 +64,9 @@ A codemod is a match/rewrite template applied with LibCST, for example
 `Series_1.append(Series_2)` → `pd.concat([Series_1, Series_2])`.
 - **Binding-aware.** It rewrites only true bindings of the old name, not textual matches.
 - **Formatting kept.** Indentation and comments stay as written.
-- **Checked first.** Every rule is re-checked before it enters a plan. Rules that cannot be checked
-  are listed for manual review.
+- **Checked first.** Every rule is re-checked before it enters a plan. A rule that is not verified,
+  or that the check downgraded, is never applied: the plan lists it as manual work (`manual` in
+  `--json`), with each file and line it matched and the reason.
 - **All or nothing.** `apply` prepares and parses every changed file before the first write, and a
   failed apply restores them all. `pymolt rollback` undoes a successful one.
 

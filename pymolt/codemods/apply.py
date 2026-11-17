@@ -23,6 +23,7 @@ see rules.py's module docstring).
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import stat
@@ -38,6 +39,7 @@ from libcst.metadata import MetadataWrapper, PositionProvider, ScopeProvider
 from libcst.metadata.scope_provider import ImportAssignment
 
 from pymolt.codemods.models import (
+    BlockedRewrite,
     CodemodPattern,
     CodemodRunResult,
     FileChange,
@@ -1128,6 +1130,7 @@ def apply_rules(
     rules: list[CodemodRule],
     *,
     allow: Callable[[CodemodRule], bool] | None = None,
+    blocked: list[BlockedRewrite] | None = None,
 ) -> tuple[str, list[tuple[CodemodRule, int]], list[CodemodRule], list[RuleAdvisory]]:
     """
     Apply `rules` to `source` sequentially — each rule is fed the PREVIOUS
@@ -1145,7 +1148,9 @@ def apply_rules(
     blocked rewrite is simply discarded (the chain continues from the
     unmodified source). Used by `apply_rules_to_repo` to keep unverified rules
     detect-only when writing to disk. `allow=None` (the default; always used by
-    `preview_rules_repo`) adopts every rewrite unconditionally.
+    `preview_rules_repo`) adopts every rewrite unconditionally. ``blocked``, when
+    given, receives each rule whose rewrite matched but was not adopted, with the
+    lines it would have changed.
     """
     hits: list[tuple[CodemodRule, int]] = []
     touched: list[CodemodRule] = []
@@ -1158,7 +1163,21 @@ def apply_rules(
         if app.sites and (allow is None or allow(rule)):
             hits.append((rule, app.sites))
             source = app.new_source
+        elif app.sites and blocked is not None:
+            blocked.append(BlockedRewrite(rule=rule, sites=app.sites,
+                                          lines=_changed_lines(source, app.new_source)))
     return source, hits, touched, advisories
+
+
+def _changed_lines(old: str, new: str) -> list[int]:
+    """The 1-based lines of ``old`` that ``new`` changes (an insertion: the line after)."""
+    old_lines = old.splitlines()
+    out: list[int] = []
+    matcher = difflib.SequenceMatcher(None, old_lines, new.splitlines(), autojunk=False)
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag != "equal":
+            out.extend(range(i1 + 1, i2 + 1) if i2 > i1 else [i1 + 1])
+    return sorted(set(out))
 
 
 def apply_rules_to_repo(
@@ -1317,9 +1336,10 @@ def preview_mixed_repo(
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
+        blocked: list[BlockedRewrite] = []
         try:
             after_rules, rule_hits, touched, advisories = apply_rules(
-                original, rules, allow=allow
+                original, rules, allow=allow, blocked=blocked
             )
             new_source, pattern_hits = apply_patterns(after_rules, patterns)
         except Exception as exc:
@@ -1339,6 +1359,7 @@ def preview_mixed_repo(
                 patterns=[pattern for pattern, _ in pattern_hits],
                 rules=touched,
                 advisories=advisories,
+                blocked=blocked,
             )
         )
         _emit(on_file, path, [*rule_hits, *pattern_hits])
@@ -1369,9 +1390,10 @@ def preview_rules_repo(
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
+        blocked: list[BlockedRewrite] = []
         try:
             new_source, hits, touched, advisories = apply_rules(
-                original, rules, allow=allow
+                original, rules, allow=allow, blocked=blocked
             )
         except Exception as exc:  # malformed rule / libcst parse error → skip
             log.warning("skip %s (rule error): %s", path, exc)
@@ -1388,6 +1410,7 @@ def preview_rules_repo(
                 sites=sum(n for _, n in hits),
                 rules=touched,
                 advisories=advisories,
+                blocked=blocked,
             )
         )
     return previews

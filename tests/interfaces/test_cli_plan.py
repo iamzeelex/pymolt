@@ -276,6 +276,41 @@ def test_plan_names_what_needs_manual_review(tmp_path, monkeypatch):
     assert "No call sites matched" in result.output
 
 
+def test_plan_lists_a_blocked_rule_as_manual_work(tmp_path, monkeypatch):
+    from pymolt.codemods.models import BlockedRewrite
+    from pymolt.codemods.rules import CodemodRule
+
+    _configured_without_baseline(tmp_path)
+    rule = CodemodRule(
+        library="pandas", from_version="1.0.0", to_version="1.2.0",
+        match="$DF.lookup($ROWS, $COLS)", rewrite=["$RESULT = $DF.to_numpy()"],
+        confidence="heuristic",
+    )
+    source = "vals = df.lookup(rows, cols)\n"
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    preview = FilePreview(path=str(tmp_path / "app.py"), old_source=source, new_source=source,
+                          sites=0, rules=[rule],
+                          blocked=[BlockedRewrite(rule=rule, sites=1, lines=[1])])
+    monkeypatch.setattr(
+        codemod_service, "resolve_codemod_migrations",
+        lambda *a, **k: ([DependencyMigration("pandas", "1.0.0", "1.2.0")], "target"),
+    )
+    monkeypatch.setattr(
+        codemod_service, "preview_codemods", lambda *a, **k: ({"pandas": [rule]}, [preview]),
+    )
+
+    text = runner.invoke(app, ["plan", str(tmp_path)])
+    as_json = runner.invoke(app, ["plan", str(tmp_path), "--json"])
+    agent = runner.invoke(app, ["plan", str(tmp_path), "--agent"])
+
+    assert text.exit_code == 0, text.output
+    assert "app.py:1" in text.output and "[blocked rule]" in text.output
+    [item] = json.loads(as_json.stdout)["manual"]
+    assert (item["path"], item["lines"], item["sites"]) == ("app.py", [1], 1)
+    assert "not applied" in item["reason"]
+    assert json.loads(agent.stdout)["data"]["manual_total"] == 1
+
+
 def test_apply_of_a_plan_with_no_files_says_it_changed_nothing(tmp_path, monkeypatch):
     _configured_project(tmp_path)
     migration = DependencyMigration("flask", "2.0.3", "3.0.0")
