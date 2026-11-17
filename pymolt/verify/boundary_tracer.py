@@ -55,6 +55,9 @@ Watcher environment:
                         or armed code was seen for this many seconds; default 5. 0 = never: a
                         protocol, dunder, property or generator contact FIRST used after the
                         settle is then missed (metadata: ``reopened``, ``reopen_seconds``).
+  PYMOLT_TRACE_EXECUTED "0" to not record which of the project's own lines (3.12+) or functions
+                        (below 3.12) ran (default on: sidecar ``executed``, read by the host
+                        for coverage and recall). Each line or function costs one callback, once
   PYMOLT_TRACE_DISCOVER_QUIET  seconds without a new symbol that count as saturated (default 5;
                         the clock starts at the first observed symbol)
   PYMOLT_TRACE_DISCOVER_MAX    seconds after which discover -> watch switches anyway (default 60)
@@ -96,6 +99,7 @@ from ._backend import (
     SetProfileBackend,
     _warnings_disabled,
     build_matcher,
+    executed_metadata,
     loaded_distributions,
     select_backend,
     stdlib_targets,
@@ -621,6 +625,17 @@ class Controller(object):
             self._note_metadata(discovered=self.discovered)
         else:
             self._note_c_cap()  # the switch noted the rest; the cap kept counting
+        self._note_executed()
+
+    def _note_executed(self):
+        """The project's code this process ran (``executed`` in the sidecar; see
+        ``_backend.executed_metadata``), once, at stop: the backends no longer add to it."""
+        try:
+            executed = executed_metadata(self._frame_backends())
+            if executed is not None:
+                self.sink.set_metadata(executed=executed)
+        except Exception:
+            pass
 
     def _note_c_cap(self):
         try:

@@ -858,6 +858,123 @@ _SELF_MODULES = frozenset(_SELF_PKG + "." + n for n in (
     "boundary_tracer", "sitecustomize", "_install_hook"))
 
 
+# ── executed project code (what the run reached, for the host's coverage) ────
+# The host judges each static contact: recorded, ran but not recorded, or not run. "Ran"
+# needs to know which of the project's own lines ran. The backends keep it as cheaply as
+# they can: setprofile notes each code object of ours at its first ``call`` event (function
+# granularity: a contact counts as ran when it lies in a code object that started), the
+# monitoring backend observes lines (each line's first LINE event, then DISABLE). The record
+# goes to the sidecar metadata as ``executed`` (``executed_metadata``).
+EXECUTED_SCHEMA = 1
+ENV_EXECUTED = "PYMOLT_TRACE_EXECUTED"
+
+
+def executed_enabled():
+    """``PYMOLT_TRACE_EXECUTED=0`` turns the executed-code record off (default on)."""
+    raw = (os.environ.get(ENV_EXECUTED) or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def code_lines(code):
+    """The line numbers in ``code``'s own line table (nested code objects have their own).
+
+    A decorator, a default value or a class statement runs in the enclosing code object, so
+    it is in that one's table, which is what "the enclosing function ran" means for it."""
+    co_lines = getattr(code, "co_lines", None)
+    try:
+        if co_lines is not None:                        # 3.10+, a C iterator
+            return set(line for _start, _end, line in co_lines() if line and line > 0)
+        import dis
+        return set(line for _offset, line in dis.findlinestarts(code) if line and line > 0)
+    except Exception:
+        return set()
+
+
+def encode_lines(lines):
+    """Line numbers as sorted ranges: ``{1, 2, 3, 5}`` -> ``"1-3,5"``."""
+    out = []
+    start = prev = None
+    for line in sorted(lines):
+        if prev is not None and line == prev + 1:
+            prev = line
+            continue
+        if start is not None:
+            out.append(str(start) if start == prev else "{0}-{1}".format(start, prev))
+        start = prev = line
+    if start is not None:
+        out.append(str(start) if start == prev else "{0}-{1}".format(start, prev))
+    return ",".join(out)
+
+
+def decode_lines(text):
+    """The inverse of ``encode_lines`` (malformed parts are skipped)."""
+    out = set()
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                out.update(range(int(lo), int(hi) + 1))
+            else:
+                out.add(int(part))
+        except ValueError:
+            continue
+    return out
+
+
+def executed_metadata(backends):
+    """The ``executed`` sidecar record of a process, merged over its frame backends, or None
+    when none of them observed the project's code (watch mode from the start, wrap backends,
+    boundary filtering off, ``PYMOLT_TRACE_EXECUTED=0``).
+
+    ``{"v": 1, "granularity": "line" | "function", "complete": bool, "until": wall time | None,
+    "files": {co_filename: {"lines": "1-3,5", "functions": "7-9"}}}``. ``lines`` ran, seen
+    line by line; ``functions`` are the line tables of code objects that started but whose lines
+    were not seen one by one (a line there ran or not: function granularity). ``complete`` is
+    False when recording stopped before the process ended (``until``: the discover -> watch
+    switch) or a cap left code objects out."""
+    files = {}
+    granularity = None
+    complete = True
+    until = None
+    for be in backends:
+        try:
+            if not be.executed_observed():
+                continue
+            seen = be.executed_files()
+        except Exception:
+            continue
+        granularity = "line" if (granularity == "line" or be.executed_granularity == "line") \
+            else "function"
+        if not be.executed_complete():
+            complete = False
+        stopped = getattr(be, "_exec_until", None)
+        if stopped is not None:
+            until = stopped if until is None else min(until, stopped)
+        for name, (lines, functions) in seen.items():
+            ent = files.get(name)
+            if ent is None:
+                ent = files[name] = [set(), set()]
+            ent[0].update(lines)
+            ent[1].update(functions)
+    if granularity is None:
+        return None
+    out = {}
+    for name, (lines, functions) in files.items():
+        rec = {}
+        if lines:
+            rec["lines"] = encode_lines(lines)
+        functions = functions - lines
+        if functions:
+            rec["functions"] = encode_lines(functions)
+        if rec:
+            out[name] = rec
+    return {"v": EXECUTED_SCHEMA, "granularity": granularity, "complete": complete,
+            "until": until, "files": out}
+
+
 def privacy_normalizer():
     """``normalize_input`` (call inputs: generic objects stay opaque; results use ``normalize``)
     bound to the privacy profile read ONCE (per backend), not per value:
@@ -1294,6 +1411,12 @@ class FrameBackend(TraceBackend):
         self._bind_kw = sink_binding(sink)
         self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
         self._inh_codes = {}        # id(code) -> code: stdlib code armed for inherited-method calls
+        # Executed project code (``executed_metadata``): id(code) -> code of ours that started
+        # (held: its id cannot be reused). Off without a near side (nothing is "ours").
+        self.executed = self.near is not None and executed_enabled()
+        self._exec_codes = {}
+        self._exec_until = None     # wall time the record stopped early (None: the whole run)
+        self._exec_capped = False   # code objects were left out (a cap)
 
     def _target_module(self, module, frame):
         """Far-side decision for a module (cached per code by the callers)."""
@@ -1746,6 +1869,40 @@ class FrameBackend(TraceBackend):
         if new_code:
             self._on_new_code(code, ent)
 
+    # ── executed project code ──────────────────────────────────────────────────
+    executed_granularity = "function"
+
+    def executed_observed(self):
+        """True if this backend saw the project's code start, in its mode (setprofile: every
+        call event reaches the hook)."""
+        return self.executed
+
+    def executed_complete(self):
+        return self._exec_until is None and not self._exec_capped
+
+    def _exec_started(self, code):
+        """A code object of ours started (function granularity)."""
+        codes = self._exec_codes
+        if id(code) not in codes:
+            if len(codes) >= _CODE_CACHE_MAX:
+                self._exec_capped = True
+                return
+            codes[id(code)] = code
+
+    def executed_files(self):
+        """``{co_filename: (lines, function lines)}`` of the project's code that ran (sets of
+        line numbers; see ``executed_metadata``). Read after ``stop``."""
+        out = {}
+        for code in list(self._exec_codes.values()):
+            name = code.co_filename
+            if not name or name[0] == "<":
+                continue                    # <string>, <frozen ...>: no file to attribute
+            ent = out.get(name)
+            if ent is None:
+                ent = out[name] = (set(), set())
+            ent[1].update(code_lines(code))
+        return out
+
     def _on_new_code(self, code, ent):
         """Hook: a code object was recorded for the first time (monitoring arms its return)."""
 
@@ -1865,6 +2022,10 @@ class SetProfileBackend(FrameBackend):
                    (not body and code.co_argcount > 0 and not never_target(module)
                     and code.co_varnames[0] in ("self", "cls"))]
             self._callee[id(code)] = ent
+            # The code's first call event (or the first since the cache was rebuilt): one of
+            # ours started. Once per code object, so the hot path does not pay for it.
+            if self.executed and not ent[1] and self._code_is_near(frame):
+                self._exec_started(code)
         return ent
 
     @staticmethod
@@ -2010,6 +2171,7 @@ class SetProfileBackend(FrameBackend):
 
     def start(self):
         self._retired = self._stopped = False
+        self._exec_until = None
         self._start_tid = _get_ident()
         self._prev = sys.getprofile()
         sys.setprofile(self._hook)
@@ -2030,6 +2192,8 @@ class SetProfileBackend(FrameBackend):
         flight, except that an observed code entered without its wrapper (the call looked its
         callee up before the wrap) is still recorded, so the switch loses no call."""
         self._retired = True
+        if self._exec_until is None:
+            self._exec_until = time.time()  # code of ours first run from now on is not seen
         threading.setprofile(None)
         try:
             if not self._inflight.get(_get_ident()):
