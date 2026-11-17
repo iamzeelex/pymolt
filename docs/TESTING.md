@@ -67,14 +67,15 @@ pymolt capture baseline --mode tests \
     --project-dir tests/artifacts/flasgger -- python -c "import flasgger"
 pymolt verify tests/artifacts/flasgger        # one side captured: coverage, no diff yet
 ```
-Expect: a narrow (import-time) capture → **confirmed** small, **trust** low —
-that's honest. Any **dynamic-only** rows are symbols the static map *missed*
+Expect: a narrow (import-time) capture → **confirmed** small, **coverage** low
+(most contacts are in code the import never runs), **recall** near 100% — that's honest. Any **dynamic-only** rows are symbols the static map *missed*
 (flasgger's heavy decorators / metaclasses → static under-approximation):
 exactly why static is the *map* and dynamic is the *confirmation*.
 
 ```bash
 pymolt verify tests/artifacts/flasgger --json \
-  | jq '.contract | {static:.static_targets, confirmed, blind, dynamic_only, trust}'
+  | jq '.contract | {static:.static_targets, confirmed, blind, dynamic_only, coverage, recall,
+                     coverage_granularity}'
 ```
 
 ---
@@ -93,7 +94,8 @@ pymolt verify "$T" --post-migration "$T/trace.jsonl" --probe-python "$(which pyt
 rm -rf "$T"
 ```
 Expect: `yaml.safe_load` → **confirmed, probe: stable**; `yaml.dump` → **BLIND** (no inputs);
-trust 0.5. Change the `result` in `trace.jsonl` to anything else → the probe reports **CHANGED**.
+coverage 100% and recall 50% at file granularity (a hand-written trace has no executed-code
+record, so both contacts in `app/m.py` count as run). Change the `result` in `trace.jsonl` to anything else → the probe reports **CHANGED**.
 On a real migration, point `--probe-python` at a venv that has the **new** dependency version.
 
 ---

@@ -518,10 +518,17 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
         and not _capture_precedes(verification.created_at, post_slot.captured_at)
         and (compared is None or compared.after_capture == "post-migration")
     ):
+        judged = verification.contract
+        coverage = ""
+        if judged.coverage is not None:
+            coverage = (f"; coverage {round(judged.coverage * 100)}%"
+                        + (f", recall {round(judged.recall * 100)}%"
+                           if judged.recall is not None else "")
+                        + f" (granularity {judged.coverage_granularity})")
         report = PhaseState(
             phase="report",
             state=DONE,
-            detail=f"verdict: {verification.verdict.value}",
+            detail=f"verdict: {verification.verdict.value}{coverage}",
         )
     status.phases.append(report)
 

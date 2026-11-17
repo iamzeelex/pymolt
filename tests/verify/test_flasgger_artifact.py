@@ -45,7 +45,7 @@ def test_static_only_report_is_all_blind():
     assert rep.static_targets >= 40
     assert rep.confirmed == 0                 # no trace given -> nothing confirmed
     assert rep.blind == rep.static_targets
-    assert rep.trust == 0.0
+    assert rep.coverage == 0.0 and rep.recall is None
 
 
 def test_fold_invariants_over_local_capture():
@@ -62,11 +62,14 @@ def test_fold_invariants_over_local_capture():
     # confirmed / BLIND partition the static denominator; dynamic-only sits outside it.
     assert rep.confirmed + rep.blind == rep.static_targets
     assert rep.dynamic_only >= 0
-    assert 0.0 <= rep.trust <= 1.0
-    # The headline trust is over behavioural contacts in executed files (``trust_basis``);
-    # every tier is its own confirmed / static ratio, and the headline is the last tier.
-    for tier in rep.trust_tiers:
+    # coverage and recall are their own definitions over the contacts' statuses
+    reached = rep.contacts_recorded + rep.contacts_ran_not_recorded
+    observable = reached + rep.contacts_not_run
+    assert rep.contacts_total == observable + rep.contacts_unobservable
+    if observable:
+        assert rep.coverage == pytest.approx(reached / observable)
+    if reached:
+        assert rep.recall == pytest.approx(rep.contacts_recorded / reached)
+    for tier in rep.identity_tiers:
         if tier.static:
-            assert tier.trust == pytest.approx(tier.confirmed / tier.static)
-    if rep.trust_tiers:
-        assert rep.trust == pytest.approx(rep.trust_tiers[-1].trust)
+            assert tier.share == pytest.approx(tier.confirmed / tier.static)

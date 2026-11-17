@@ -44,12 +44,14 @@ pymolt contract report . --json     # the verdict
 command to run next.
 
 Repeat the edit → re-capture → report loop until `pymolt contract report` comes
-back clean. Each report gives three numbers; read all three to the user:
+back clean. Read its numbers to the user:
 
 - **confirmed** — calls the run actually exercised on both sides.
 - **BLIND** — calls in the static map the run never touched. High BLIND means the
   test suite proves little, however green it is. Say this out loud.
-- **trust %** — confirmed against the static denominator.
+- **coverage %** — the share of the static contacts the run reached; **recall %** — the
+  share of those the capture recorded (below 100% is a tracer limit), with their
+  granularity (line, function, file).
 
 ## Reading the output honestly
 

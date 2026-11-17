@@ -75,13 +75,18 @@ summary says why. Fix that before going on.
 
 ## Reading verify
 
-Read all three coverage numbers to the user:
+Read the coverage numbers to the user:
 
 - **confirmed**: calls the run exercised on both sides.
 - **BLIND**: calls in the static map the run never touched. High BLIND means the
   test suite proves little, however green it is. Say this out loud. A PASS covers
-  only what was exercised.
-- **trust %**: confirmed against the static denominator.
+  only what was exercised. `data.blind_split` says why: not run (a test gap), ran but
+  not recorded (a tracer gap), unobservable (no capture can record it).
+- **coverage %** (`data.coverage_pct`): the share of the static contacts the run reached.
+- **recall %** (`data.recall_pct`): the share of the contacts that ran which the capture
+  recorded. Below 100% is a tracer limit: say so.
+- `data.granularity` says how "ran" was known: `line` (3.12+), `function` (3.6–3.11,
+  so recall is a lower bound), `file` (older captures), `symbol`.
 
 `data.changes` lists the dependency calls that now return or raise something
 else, or stopped happening. A green test suite does not tell you that.

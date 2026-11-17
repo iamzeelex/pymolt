@@ -733,7 +733,9 @@ class Project:
             "confirmed": d.get("confirmed"),
             "blind": d.get("blind"),
             "dynamic_only": d.get("dynamic_only"),
-            "trust_pct": d.get("trust_pct"),
+            "coverage_pct": d.get("coverage_pct"),
+            "recall_pct": d.get("recall_pct"),
+            "granularity": d.get("granularity"),
             "compared": d.get("compared"),
         }
         reasons = d.get("reasons") or []
@@ -901,7 +903,8 @@ def note_for(phase: str, rec: dict) -> str:
             )
         )
     elif phase == "verify":
-        bits.append(f"{str(n.get('verdict')).upper()}, trust {n.get('trust_pct')}%")
+        bits.append(f"{str(n.get('verdict')).upper()}, coverage {n.get('coverage_pct')}%, "
+                    f"recall {n.get('recall_pct')}% ({n.get('granularity')})")
     if rec.get("note") and rec["outcome"] == "not-reached":
         bits.append(rec["note"])
     return "; ".join(b for b in bits if b)

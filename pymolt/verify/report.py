@@ -15,12 +15,16 @@ Merges the two axes we locked:
   name confirms a static path when it is the resolved symbol, a method of a
   resolved class, or a legacy name unique in the defining module. Unresolvable
   paths keep the exact-string rule and are counted as such.
-* **trust** = confirmed / static over *behavioural* contacts (call, decorator,
-  context-manager, protocol) in files the trace executed — existence contacts
-  (attribute reads, bases, constants) are proven by an import, not by a trace,
-  and code the workload never ran cannot be blamed on the trace. The tiers
-  (exact-join → canonical → behavioural → executed) stay in ``trust_tiers`` so
-  every step is auditable; ``all_*`` keeps the full-surface totals.
+* **coverage and recall**, over static *contacts* (a place your code touches a dependency:
+  file, line, symbol, kind), not symbols. Each contact is ``recorded`` (the trace has a call of
+  its symbol at its statement), ``ran-not-recorded`` (its line ran, the trace has nothing
+  there: a tracer gap), ``not-run`` (its line never ran: a test gap) or ``unobservable`` (no
+  trace can record it, see ``UNOBSERVABLE_CLASSES`` and existence contacts below). coverage =
+  (recorded + ran-not-recorded) / observable contacts, the pytest-coverage analogue; recall =
+  recorded / (recorded + ran-not-recorded), about 100% unless the tracer missed something.
+  "Ran" comes from the capture's executed record (lines on 3.12+, functions below), else from
+  the files the trace recorded call sites in; ``coverage_granularity`` says which.
+  ``identity_tiers`` (exact-join vs canonical identity) keep the symbol join auditable.
 * **version diff** (optional) — two traces (old vs new dependency version) folded
   into a :class:`BoundaryDiff`; behavior changes are only trustworthy over the
   area the dynamics covered.
@@ -60,7 +64,19 @@ from pymolt.verify.predict import Calibration, calibrate, predict_risks
 
 logger = logging.getLogger(__name__)
 
-TRUST_BASIS = "behavioural contacts in executed files"
+# Per-contact statuses (``ContactStatus.status``).
+RECORDED = "recorded"
+RAN_NOT_RECORDED = "ran-not-recorded"
+NOT_RUN = "not-run"
+UNOBSERVABLE = "unobservable"
+# Symbol classes (``SymbolStatus.contact_class``) whose contacts no trace can record: a chain
+# through a call's return value, a dependency missing where the capture ran, the test runner
+# (not traced), interpreter code reached by a protocol (``type.__or__``).
+UNOBSERVABLE_CLASSES = ("returned-value", "absent-dependency", "test-runner", "interpreter")
+# How "ran" was known, finest first: the executed record's lines (3.12+) or functions (below
+# 3.12, and 3.12 code objects too large for line events), the files the trace recorded call
+# sites in (older captures), or nothing but the symbol (a trace without call sites).
+GRANULARITIES = ("line", "function", "file", "symbol")
 # Packages the injected runtime never treats as a boundary unless a target names them (it
 # keeps its own copy in ``_backend.TEST_RUNNER_PACKAGES``; a test keeps the two equal).
 TEST_RUNNER_PACKAGES = frozenset((
@@ -87,19 +103,40 @@ class SymbolStatus(BaseModel):
     # builtins/stdlib code, e.g. ``type.__or__`` for ``A | B`` — not dependency code) |
     # returned-value (a chain through a call result) | absent-dependency (not installed)
     contact_class: str | None = None
-    executed: bool | None = None  # a behavioural contact sits in a file the trace ran
     matched_by: str | None = None  # exact (v1 string join) | canonical
     observed_as: list[str] = Field(default_factory=list)  # runtime names that confirmed it
+    # Its contacts by status (``ContactStatus.status``), and for a BLIND symbol why: not-run
+    # (none of its contacts ran), ran-not-recorded (one ran, the trace has nothing there) or
+    # unobservable (no trace could record any of them).
+    contact_status: dict[str, int] = Field(default_factory=dict)
+    blind_reason: str | None = None
 
 
-class TrustTier(BaseModel):
-    """One step from the old exact-string join to the headline trust."""
+class ContactStatus(BaseModel):
+    """One static contact: a place your code touches a dependency, and what the run says."""
 
-    name: str  # exact | canonical | behavioural | executed
+    file: str | None = None
+    line: int | None = None
+    span: tuple[int, int] | None = None  # the statement's lines; a multi-line one counts whole
+    target: str
+    kind: str
+    caller: str = ""
+    status: str  # recorded | ran-not-recorded | not-run | unobservable
+    granularity: str | None = None  # how "ran" was known (``GRANULARITIES``); None: unobservable
+    # recorded: ``site`` (a call of its symbol at its statement) or ``symbol`` (an existence
+    # contact whose line ran, of a symbol the trace observed elsewhere)
+    matched_by: str | None = None
+    why: str | None = None  # unobservable: existence or one of ``UNOBSERVABLE_CLASSES``
+
+
+class IdentityTier(BaseModel):
+    """Static symbols one identity rule confirms: identity-resolution diagnostics."""
+
+    name: str  # exact | canonical
     basis: str
     confirmed: int = 0
     static: int = 0
-    trust: float = 0.0
+    share: float = 0.0
 
 
 class ComparedRecordings(BaseModel):
@@ -131,21 +168,35 @@ class ContractReport(BaseModel):
     # These headline fields are the whole recorded surface, the one the verdict judges, with
     # or without an impact filter: an applied plan's paths focus the report (``impacted_*``),
     # they do not shrink what PASS must cover.
-    # Headline: confirmed / static over ``trust_basis`` (behavioural contacts in
-    # files the trace executed), over the whole surface.
-    trust: float = 0.0
-    trust_basis: str = TRUST_BASIS
-    trust_confirmed: int = 0
-    trust_static: int = 0
-    # The same scope, tier by tier: exact-join (the v1 string rule) → canonical
-    # identity → behavioural contacts only → executed files only (= trust).
-    exact_trust: float = 0.0
-    canonical_trust: float = 0.0
-    behavioural_trust: float = 0.0
-    executed_trust: float = 0.0
-    trust_tiers: list[TrustTier] = Field(default_factory=list)
-    # Project files holding contacts that the trace executed; ``executed_scope``
-    # is False when the trace carries no usable call sites (scope = all files).
+    # Headline: coverage and recall over static contacts (``contacts``), the whole surface.
+    # coverage = (recorded + ran-not-recorded) / observable contacts: how much of the
+    # dependency surface the run reached. recall = recorded / (recorded + ran-not-recorded):
+    # how much of what ran the tracer caught. None when the denominator is empty.
+    # ``coverage_granularity`` is how "ran" was known for the contacts it decided (the
+    # coarsest; ``granularity_counts`` has them all): line | function | file | symbol.
+    coverage: float | None = None
+    recall: float | None = None
+    coverage_granularity: str | None = None
+    granularity_counts: dict[str, int] = Field(default_factory=dict)
+    contacts_total: int = 0
+    contacts_recorded: int = 0
+    contacts_ran_not_recorded: int = 0
+    contacts_not_run: int = 0
+    contacts_unobservable: int = 0
+    unobservable_by_reason: dict[str, int] = Field(default_factory=dict)
+    # The executed record covered every process for its whole run (False: a process had
+    # none, or it stopped early; None: no record, the file rule decided).
+    executed_complete: bool | None = None
+    contacts: list[ContactStatus] = Field(default_factory=list)
+    # BLIND symbols split by why (``SymbolStatus.blind_reason``).
+    blind_not_run: int = 0
+    blind_ran_not_recorded: int = 0
+    blind_unobservable: int = 0
+    # Identity diagnostics over the static symbols: the v1 exact-string join, then
+    # canonical identity (which ``confirmed`` uses).
+    identity_tiers: list[IdentityTier] = Field(default_factory=list)
+    # Project files holding contacts where the trace recorded a call site; ``executed_scope``
+    # is False when the trace carries no usable call sites.
     executed_files: list[str] = Field(default_factory=list)
     executed_scope: bool | None = None
     trace_schema: int | None = None  # 1 = runtime q only, 2 = canonical sym present
@@ -178,7 +229,6 @@ class ContractReport(BaseModel):
     all_confirmed: int = 0
     all_blind: int = 0
     all_dynamic_only: int = 0
-    all_trust: float = 0.0
     all_probed: int = 0
     all_probe_changed: int = 0
     all_by_dep: dict[str, dict[str, int]] = Field(default_factory=dict)
@@ -192,7 +242,8 @@ class ContractReport(BaseModel):
     impacted_confirmed: int = 0
     impacted_blind: int = 0
     impacted_dynamic_only: int = 0
-    impacted_trust: float = 0.0
+    impacted_coverage: float | None = None   # coverage / recall over the impacted symbols' contacts
+    impacted_recall: float | None = None
     impacted_probed: int = 0
     impacted_probe_changed: int = 0
     impacted_by_dep: dict[str, dict[str, int]] = Field(default_factory=dict)
@@ -316,6 +367,7 @@ class _Observation:
     canonical: bool  # ``name`` came from a v2 ``sym``
     legacy: set[str] = field(default_factory=set)  # the v1 ``q`` spellings seen
     sites: dict[str, None] = field(default_factory=dict)  # ordered set of file:line
+    site_lines: set[tuple[str, int]] = field(default_factory=set)  # (raw file, line)
 
 
 @dataclass
@@ -365,6 +417,9 @@ def _load_observations(path: str | Path) -> _TraceView:
         if isinstance(file, str) and file:
             view.files.add(file)
         obs.sites.setdefault(f"{where.get('file', '?')}:{where.get('line', '?')}", None)
+        line = where.get("line")
+        if isinstance(file, str) and file and isinstance(line, int):
+            obs.site_lines.add((file, line))
     return view
 
 
@@ -414,43 +469,106 @@ class _IdentityIndex:
         return hits
 
 
-def _executed_files(
+def _map_files(
     raw_files: Iterable[str], root: Path, contact_files: Iterable[str]
-) -> tuple[set[str], str | None]:
-    """Contact files (as the contact map spells them) that the trace executed."""
+) -> tuple[dict[str, str], str | None]:
+    """Runtime file names (``where.file``, ``co_filename``) -> contact files, as the contact map
+    spells them. A path under the project root maps by its relative path; when every path
+    lies outside the root (a container capture, a moved checkout) they map by path suffix,
+    the longest contact path first, rather than claim nothing ran."""
     by_posix = {Path(f).as_posix(): f for f in contact_files}
-    under_root: set[str] = set()
+    mapping: dict[str, str] = {}
+    under_root = False
     outside: list[str] = []
     for raw in raw_files:
         if raw.startswith("<"):  # <string>, <frozen ...>: no file to attribute
             continue
         path = Path(raw)
-        if not path.is_absolute():
-            under_root.add(path.as_posix())
-            continue
         rel = None
-        for candidate in (path, Path(os.path.realpath(raw))):
-            try:
-                rel = candidate.relative_to(root).as_posix()
-                break
-            except ValueError:
-                continue
-        if rel is None:
-            outside.append(raw.replace("\\", "/"))
+        if not path.is_absolute():
+            rel = path.as_posix()
         else:
-            under_root.add(rel)
-    executed = {by_posix[rel] for rel in under_root if rel in by_posix}
+            for candidate in (path, Path(os.path.realpath(raw))):
+                try:
+                    rel = candidate.relative_to(root).as_posix()
+                    break
+                except ValueError:
+                    continue
+        if rel is None:
+            outside.append(raw)
+            continue
+        under_root = True
+        if rel in by_posix:
+            mapping[raw] = by_posix[rel]
     if under_root or not outside:
-        return executed, None
-    # Every call site lies outside the project root: a container capture or a
-    # moved checkout. Attribute by path suffix rather than claim nothing ran.
-    for rel, original in by_posix.items():
-        if any(raw.endswith("/" + rel) for raw in outside):
-            executed.add(original)
-    return executed, (
+        return mapping, None
+    for raw in outside:
+        parts = raw.replace("\\", "/").split("/")
+        for i in range(1, len(parts)):      # longest suffix first
+            hit = by_posix.get("/".join(parts[i:]))
+            if hit is not None:
+                mapping[raw] = hit
+                break
+    return mapping, (
         "the trace's call sites lie outside the project root; executed files were "
         "matched by path suffix"
     )
+
+
+@dataclass
+class _Executed:
+    """The capture's executed record (``executed`` in each process's sidecar), merged."""
+
+    granularity: str | None = None      # the finest any process recorded: line | function
+    coarsest: str | None = None         # the coarsest (a not-run claim is this precise)
+    complete: bool = True               # every record covers its process's whole run
+    processes: int = 0                  # processes with a record
+    without: int = 0                    # processes without one (older runtime, watch mode)
+    lines: dict[str, set[int]] = field(default_factory=dict)       # raw file -> lines
+    functions: dict[str, set[int]] = field(default_factory=dict)   # raw file -> lines
+
+
+def _load_executed(trace: str | Path | None) -> _Executed | None:
+    """The executed record of ``trace``'s sidecar (``<trace>.meta.json``): the merged capture's
+    ``processes`` or, for one process's own sidecar, itself. None when no process has one."""
+    if trace is None:
+        return None
+    try:
+        meta = json.loads(Path(str(trace) + ".meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    procs = [p for p in (meta.get("processes") or ()) if isinstance(p, dict)] or [meta]
+    from pymolt.verify._backend import decode_lines
+
+    ex = _Executed()
+    order = {"line": 0, "function": 1}
+    for proc in procs:
+        rec = proc.get("executed")
+        if not isinstance(rec, dict) or rec.get("v") != 1 or rec.get("granularity") not in order:
+            ex.without += 1
+            continue
+        ex.processes += 1
+        gran = rec["granularity"]
+        if ex.granularity is None or order[gran] < order[ex.granularity]:
+            ex.granularity = gran
+        if ex.coarsest is None or order[gran] > order[ex.coarsest]:
+            ex.coarsest = gran
+        if rec.get("complete") is not True:
+            ex.complete = False
+        for name, item in (rec.get("files") or {}).items():
+            if not isinstance(item, dict):
+                continue
+            for key, into in (("lines", ex.lines), ("functions", ex.functions)):
+                found = decode_lines(item.get(key) or "")
+                if found:
+                    into.setdefault(name, set()).update(found)
+    if not ex.processes:
+        return None
+    if ex.without:
+        ex.complete = False
+    return ex
 
 
 def _container_path_note(scope_note: str, trace: str | Path | None, root: Path) -> str:
@@ -520,7 +638,7 @@ def build_contract_report(
 
     ``changed_api_paths`` (an applied plan's impacts) focuses the report on the changed
     API paths: ``impacted_*``, ``fact_diff`` and ``diff`` hold the focus, while the headline
-    coverage, trust and every verdict input stay the whole surface. Items may
+    coverage, recall and every verdict input stay the whole surface. Items may
     be dotted strings, serialized changes, or objects with ``path`` and optional
     ``replacement_path`` fields. ``impact_set`` is an equivalent alias useful
     to callers that already use that terminology; values from both are merged.
@@ -544,15 +662,12 @@ def build_contract_report(
                 "callers": set(),
                 "files": set(),
                 "kinds": set(),
-                "behavioural_files": set(),
             },
         )
         s["callers"].add(c.caller)
         s["kinds"].add(c.kind)
         if c.file:
             s["files"].add(c.file)
-            if contact_class(c.kind) == "behavioural":
-                s["behavioural_files"].add(c.file)
 
     view = _load_observations(trace) if trace else _TraceView()
     if not trace:
@@ -609,17 +724,23 @@ def build_contract_report(
             unmatched.append(obs)
 
     contact_files = {f for s in static.values() for f in s["files"]}
+    executed = _load_executed(trace)
+    raw_files = set(view.files)
+    if executed is not None:
+        raw_files |= set(executed.lines) | set(executed.functions)
+    file_map, scope_note = _map_files(raw_files, root, contact_files)
+    if scope_note and (view.events or executed is not None):
+        report.notes.append(_container_path_note(scope_note, trace, root))
     executed_files: set[str] = set()
     executed_scope: bool | None = None
     if view.events:
-        executed_files, scope_note = _executed_files(view.files, root, contact_files)
-        if scope_note:
-            report.notes.append(_container_path_note(scope_note, trace, root))
+        executed_files = {file_map[f] for f in view.files if f in file_map}
         executed_scope = bool(view.files - {f for f in view.files if f.startswith("<")})
         if not executed_scope:
             report.notes.append(
-                "the trace records no call sites, so the executed-file scope is unknown: "
-                "trust is computed over behavioural contacts in every file"
+                "the trace records no call sites: a contact counts as recorded when its "
+                "symbol was observed anywhere, and whether it ran is unknown (granularity "
+                "symbol)"
             )
     report.executed_files = sorted(executed_files)
     report.executed_scope = executed_scope
@@ -650,7 +771,7 @@ def build_contract_report(
             # "Not installed" is only believable when the resolver ran in the capture's
             # own interpreter AND the trace saw nothing from that package; under pymolt's
             # interpreter every dependency could look absent and silently empty the
-            # trust denominator.
+            # coverage denominator.
             if unobservable == "absent-dependency" and (
                 report.identity_source == "host" or s["dep"] in observed_tops
             ):
@@ -660,7 +781,7 @@ def build_contract_report(
                 and not hits and not observed_tops & TEST_RUNNER_PACKAGES):
             # the capture does not trace the test runner (unless a target names one of the
             # family, which lifts the exclusion for all of it), so its contacts can never be
-            # confirmed; counting them would lower trust for nothing
+            # confirmed; counting them would lower coverage for nothing
             klass = "test-runner"
         names = [target]
         if identity is not None and identity.resolved:
@@ -684,9 +805,6 @@ def build_contract_report(
                 identity_kind=identity.kind if identity is not None else None,
                 identity_error=identity.error if identity is not None else None,
                 contact_class=klass,
-                executed=(
-                    bool(s["behavioural_files"] & executed_files) if executed_scope else None
-                ),
                 matched_by=(
                     ("exact" if target in view.q_names else "canonical") if hits else None
                 ),
@@ -720,7 +838,6 @@ def build_contract_report(
     report.all_dynamic_only = all_counts["dynamic-only"]
     report.all_static_targets = len(static)
     report.all_observed_targets = len(view.observations)
-    report.all_trust = _ratio(report.all_confirmed, report.all_static_targets)
     report.all_by_dep = _by_dep(symbols)
 
     report.impacted_symbols = [symbol for symbol in symbols if symbol.impacted]
@@ -730,7 +847,6 @@ def build_contract_report(
     report.impacted_dynamic_only = impacted_counts["dynamic-only"]
     report.impacted_static_targets = report.impacted_confirmed + report.impacted_blind
     report.impacted_observed_targets = report.impacted_confirmed + report.impacted_dynamic_only
-    report.impacted_trust = _ratio(report.impacted_confirmed, report.impacted_static_targets)
     report.impacted_by_dep = _by_dep(report.impacted_symbols)
     sym_of = {s.target: s.sym for s in symbols if s.status != "dynamic-only"}
     report.impacted_contacts = [
@@ -753,65 +869,28 @@ def build_contract_report(
     report.observed_targets = report.all_observed_targets
     report.by_dep = report.all_by_dep
 
-    # ── trust tiers over the whole surface ───────────────────────────────────
-    scope = [s for s in symbols if s.status != "dynamic-only"]
-    behavioural_scope = [s for s in scope if s.contact_class == "behavioural"]
-    for klass, why in (
-        ("returned-value", "chain through a function's return value (e.g. typer.prompt().strip): "
-                           "statically unnameable, so neither BLIND nor confirmable"),
-        ("absent-dependency", "target a package that is not installed in the capture's "
-                              "interpreter, so no trace there can exercise them"),
-        ("test-runner", "belong to the test runner, which captures do not trace"),
-    ):
-        excluded = [s.target for s in scope if s.contact_class == klass]
-        if excluded:
-            sample = ", ".join(excluded[:3]) + (", …" if len(excluded) > 3 else "")
-            report.notes.append(
-                f"{len(excluded)} behavioural contact(s) {why} ({sample}); left out of trust"
-            )
-    interpreter = [s.target for s in scope if s.contact_class == "interpreter"]
-    if interpreter:
-        sample = ", ".join(interpreter[:3]) + (", …" if len(interpreter) > 3 else "")
+    # ── coverage and recall over the whole surface ───────────────────────────
+    contacts, outside = _judge_contacts(
+        cmap.contacts, symbols, matched, file_map, executed, executed_files,
+        traced=bool(trace), sited=bool(executed_scope), events=view.events)
+    _stamp_coverage(report, contacts, executed, traced=bool(trace),
+                    sited=bool(executed_scope), events=view.events)
+    if outside:
         report.notes.append(
-            f"{len(interpreter)} behavioural contact(s) resolve to interpreter code, not "
-            f"dependency code ({sample}); they are left out of trust"
-        )
-    executed_basis = TRUST_BASIS
-    if executed_scope:
-        executed_scope_symbols = [s for s in behavioural_scope if s.executed]
-    else:
-        executed_scope_symbols = behavioural_scope
-        if trace:
-            executed_basis = "behavioural contacts (the trace records no call sites)"
+            f"{outside} recorded contact(s) lie on lines the executed record does not list "
+            "there: the record is incomplete for them")
+    scope = [s for s in symbols if s.status != "dynamic-only"]
 
-    def tier(name: str, basis: str, members: list[SymbolStatus], exact: bool = False) -> TrustTier:
-        if exact:
-            confirmed = sum(1 for s in members if s.target in view.q_names)
-        else:
-            confirmed = sum(1 for s in members if s.status == "confirmed")
-        return TrustTier(
-            name=name,
-            basis=basis,
-            confirmed=confirmed,
-            static=len(members),
-            trust=_ratio(confirmed, len(members)),
-        )
+    def tier(name: str, basis: str, confirmed: int) -> IdentityTier:
+        return IdentityTier(name=name, basis=basis, confirmed=confirmed, static=len(scope),
+                            share=_ratio(confirmed, len(scope)))
 
-    report.trust_tiers = [
-        tier("exact", "exact string join of static path and runtime q (v1 rule)", scope, True),
-        tier("canonical", "canonical identity, every static contact", scope),
-        tier("behavioural", "canonical identity, behavioural contacts", behavioural_scope),
-        tier("executed", executed_basis, executed_scope_symbols),
+    report.identity_tiers = [
+        tier("exact", "exact string join of static path and runtime q (v1 rule)",
+             sum(1 for s in scope if s.target in view.q_names)),
+        tier("canonical", "canonical identity (what confirmed uses)",
+             sum(1 for s in scope if s.status == "confirmed")),
     ]
-    exact_tier, canonical_tier, behavioural_tier, executed_tier = report.trust_tiers
-    report.exact_trust = exact_tier.trust
-    report.canonical_trust = canonical_tier.trust
-    report.behavioural_trust = behavioural_tier.trust
-    report.executed_trust = executed_tier.trust
-    report.trust = executed_tier.trust
-    report.trust_basis = executed_tier.basis
-    report.trust_confirmed = executed_tier.confirmed
-    report.trust_static = executed_tier.static
 
     if trace and probe_python:
         from pymolt.verify.probe import probe_trace
@@ -870,6 +949,203 @@ def build_contract_report(
             report.notes.append(f"version diff failed: {e}")
 
     return report
+
+
+_UNOBSERVABLE_NOTES = {
+    "existence": "attribute reads, bases or constants of symbols no capture observed: reading "
+                 "a name runs no dependency code there, so no call can record them",
+    "returned-value": "chains through a function's return value (e.g. typer.prompt().strip): "
+                      "statically unnameable, so neither BLIND nor confirmable",
+    "absent-dependency": "target a package that is not installed in the capture's "
+                         "interpreter, so no trace there can exercise them",
+    "test-runner": "belong to the test runner, which captures do not trace",
+    "interpreter": "resolve to interpreter code, not dependency code",
+}
+
+
+def _judge_contacts(
+    cmap_contacts: Iterable[Contact], symbols: Iterable[SymbolStatus],
+    matched: Mapping[str, list[_Observation]], file_map: Mapping[str, str],
+    executed: _Executed | None, executed_files: Collection[str], *, traced: bool, sited: bool,
+    events: int,
+) -> tuple[list[ContactStatus], int]:
+    """Every static contact's status, and how many recorded contacts the executed record
+    does not list as run (it is incomplete there).
+
+    * a contact of a symbol in ``UNOBSERVABLE_CLASSES`` is ``unobservable`` (that class);
+    * ``recorded``: the trace has a call of the contact's symbol (canonical identity) whose
+      site lies on the contact's statement, in its file;
+    * an existence contact (attribute read, base, constant) runs no dependency code at its
+      site: of a symbol the trace observed elsewhere it is ``recorded`` (matched by symbol)
+      when its line ran, ``not-run`` when it did not; of one never observed, ``unobservable``;
+    * otherwise ``ran-not-recorded`` when its statement ran, else ``not-run``. "Ran": a line
+      of the statement in the executed record (granularity line), a line of a code object
+      that started (function), else a file the trace recorded a call site in (file).
+    """
+    by_target = {s.target: s for s in symbols if s.status != "dynamic-only"}
+    recorded_at: dict[str, dict[str, set[int]]] = {}
+    for target, hits in matched.items():
+        for obs in hits:
+            for raw, line in obs.site_lines:
+                rel = file_map.get(raw)
+                if rel is not None:
+                    recorded_at.setdefault(target, {}).setdefault(rel, set()).add(line)
+    ex_lines: dict[str, set[int]] = {}
+    ex_functions: dict[str, set[int]] = {}
+    if executed is not None:
+        for into, source in ((ex_lines, executed.lines), (ex_functions, executed.functions)):
+            for raw, lines in source.items():
+                rel = file_map.get(raw)
+                if rel is not None:
+                    into.setdefault(rel, set()).update(lines)
+
+    def hit(lines: set[int] | None, first: int | None, last: int | None) -> bool:
+        return bool(lines) and first is not None and any(
+            n in lines for n in range(first, (last or first) + 1))
+
+    def ran(file: str | None, first: int | None, last: int | None) -> tuple[bool | None, str]:
+        if executed is not None and file is not None:
+            if hit(ex_lines.get(file), first, last):
+                return True, "line"
+            if hit(ex_functions.get(file), first, last):
+                return True, "function"
+            if file in ex_lines:
+                return False, "line"
+            if file in ex_functions:
+                return False, "function"
+        if not sited:
+            if executed is not None:
+                return False, executed.coarsest or "line"
+            return (None, "symbol") if events else (False, "file")
+        if file in executed_files:
+            return True, "file"     # the trace recorded calls here; no executed record says more
+        return False, (executed.coarsest or "line") if executed is not None else "file"
+
+    out: dict[tuple, ContactStatus] = {}
+    outside = 0
+    for c in cmap_contacts:
+        sym = by_target.get(c.target)
+        if sym is None:
+            continue
+        spans = c.spans or [(c.line, c.line, c.line)]
+        for line, first, last in spans:
+            key = (c.file, line, c.target, c.kind)
+            if key in out:
+                continue
+            status = ContactStatus(file=c.file, line=line, target=c.target, kind=c.kind,
+                                   caller=c.caller, status=NOT_RUN,
+                                   span=(first, last) if first is not None else None)
+            out[key] = status
+            klass = sym.contact_class
+            if klass in UNOBSERVABLE_CLASSES:
+                status.status, status.why = UNOBSERVABLE, klass
+                continue
+            if not traced:
+                if contact_class(c.kind) == "existence":
+                    status.status, status.why = UNOBSERVABLE, "existence"
+                continue
+            if sited and hit((recorded_at.get(c.target) or {}).get(c.file or ""), first, last):
+                status.status, status.matched_by = RECORDED, "site"
+                if (executed is not None and (c.file in ex_lines or c.file in ex_functions)
+                        and not hit(ex_lines.get(c.file), first, last)
+                        and not hit(ex_functions.get(c.file), first, last)):
+                    outside += 1
+                continue
+            has_run, granularity = ran(c.file, first, last)
+            if contact_class(c.kind) == "existence":
+                if sym.status != "confirmed":
+                    status.status, status.why = UNOBSERVABLE, "existence"
+                    continue
+                status.granularity = granularity
+                if has_run is not False:
+                    status.status, status.matched_by = RECORDED, "symbol"
+                continue
+            status.granularity = granularity
+            if has_run is None:         # no call sites: the symbol is all there is
+                if sym.status == "confirmed":
+                    status.status, status.matched_by = RECORDED, "symbol"
+            elif has_run:
+                status.status = RAN_NOT_RECORDED
+    return list(out.values()), outside
+
+
+def _coverage_ratios(contacts: Iterable[ContactStatus]) -> tuple[float | None, float | None]:
+    counts = Counter(c.status for c in contacts)
+    reached = counts[RECORDED] + counts[RAN_NOT_RECORDED]
+    observable = reached + counts[NOT_RUN]
+    return (reached / observable if observable else None,
+            counts[RECORDED] / reached if reached else None)
+
+
+def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
+                    executed: _Executed | None, *, traced: bool, sited: bool,
+                    events: int) -> None:
+    """Coverage, recall, their granularity, the BLIND split and the notes, from the contacts."""
+    report.contacts = contacts
+    counts = Counter(c.status for c in contacts)
+    report.contacts_total = len(contacts)
+    report.contacts_recorded = counts[RECORDED]
+    report.contacts_ran_not_recorded = counts[RAN_NOT_RECORDED]
+    report.contacts_not_run = counts[NOT_RUN]
+    report.contacts_unobservable = counts[UNOBSERVABLE]
+    report.unobservable_by_reason = dict(sorted(Counter(
+        c.why for c in contacts if c.status == UNOBSERVABLE and c.why).items()))
+    report.coverage, report.recall = _coverage_ratios(contacts)
+    decided = Counter(c.granularity for c in contacts if c.granularity)
+    report.granularity_counts = {g: decided[g] for g in GRANULARITIES if decided[g]}
+    if decided:
+        report.coverage_granularity = max(decided, key=GRANULARITIES.index)
+    elif executed is not None:
+        report.coverage_granularity = executed.granularity
+    elif traced:
+        report.coverage_granularity = "file" if sited or not events else "symbol"
+    report.executed_complete = executed.complete if executed is not None else None
+
+    by_target: dict[str, list[ContactStatus]] = {}
+    for c in contacts:
+        by_target.setdefault(c.target, []).append(c)
+    for sym in report.symbols:
+        mine = by_target.get(sym.target)
+        if not mine:
+            continue
+        sym.contact_status = dict(sorted(Counter(c.status for c in mine).items()))
+        if sym.status == "blind":
+            statuses = {c.status for c in mine}
+            sym.blind_reason = (RAN_NOT_RECORDED if RAN_NOT_RECORDED in statuses
+                                else NOT_RUN if NOT_RUN in statuses else UNOBSERVABLE)
+    blind = Counter(s.blind_reason for s in report.symbols if s.status == "blind")
+    report.blind_not_run = blind[NOT_RUN]
+    report.blind_ran_not_recorded = blind[RAN_NOT_RECORDED]
+    report.blind_unobservable = blind[UNOBSERVABLE]
+    impacted = {s.target for s in report.impacted_symbols}
+    if impacted:
+        report.impacted_coverage, report.impacted_recall = _coverage_ratios(
+            c for c in contacts if c.target in impacted)
+
+    for why, text in _UNOBSERVABLE_NOTES.items():
+        members = sorted({c.target for c in contacts if c.why == why})
+        if members:
+            n = sum(1 for c in contacts if c.why == why)
+            sample = ", ".join(members[:3]) + (", …" if len(members) > 3 else "")
+            report.notes.append(f"{n} contact(s) {text} ({sample}): unobservable, left out of "
+                                "coverage and recall")
+    if not traced:
+        return
+    if executed is None:
+        report.notes.append(
+            "the capture has no executed-code record (an older runtime, a watch-mode capture, "
+            "or PYMOLT_TRACE_EXECUTED=0): a contact counts as run when the trace recorded a "
+            "call site in its file (granularity file)")
+    else:
+        note = (f"executed-code record: granularity {executed.granularity}, from "
+                f"{executed.processes} process(es)")
+        if executed.without:
+            note += (f"; {executed.without} process(es) have none, so their files count by "
+                     "the call sites the trace recorded there (granularity file)")
+        if not executed.complete and not executed.without:
+            note += ("; it stops before the end of the run (the discover -> watch switch, or a "
+                     "cap): code first run after that reads as not run")
+        report.notes.append(note)
 
 
 def _capture_python(fs: FactSet) -> str | None:

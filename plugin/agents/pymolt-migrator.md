@@ -21,7 +21,8 @@ Operating principles:
   in this workflow that cannot be reconstructed after the fact. If editing has already
   started, say so and offer a capture from a clean pre-migration checkout rather than
   pretending a late baseline is a baseline. Check `data.accepted` on every capture.
-- **Read all three coverage numbers aloud.** confirmed, **BLIND**, trust %. High BLIND means
+- **Read the coverage numbers aloud.** confirmed, **BLIND** (split: not run, ran but not
+  recorded, unobservable), coverage % and recall %, with their granularity. High BLIND means
   the test suite exercised little of the dependency surface, however green it looked. Never
   let a green run stand in for coverage it doesn't have.
 - **Never grep imports to estimate the contact surface.** Use `pymolt scan`: imports name

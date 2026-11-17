@@ -84,8 +84,8 @@ recorded as its own type, without evaluating it.
 
 | Python | Tracer |
 |---|---|
-| 3.12+ | `sys.monitoring`. Tests: full discovery. Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A second watcher covers properties, `x[k]`, `with`, operators and generators. It turns off 30 s after the last new contact, and back on whenever a line of your code runs for the first time, until nothing new happened for 5 s. While it is on, capture costs as much as before it first turned off. Each line of your code is watched once, then costs nothing. The capture metadata counts the times it came back on (`reopened`) and their total length (`reopen_seconds`). There is no warm-up window. |
-| 3.6–3.11 | `sys.setprofile`. Tests: for the whole run; a raise is typed when the code that handles it makes a call. Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
+| 3.12+ | `sys.monitoring`. Tests: full discovery, plus the lines of your code that ran, each one callback at its first run ([coverage](#coverage)). Long runs: incremental. A `CALL` event at your call sites arms only the functions your code actually calls. A second watcher covers properties, `x[k]`, `with`, operators and generators. It turns off 30 s after the last new contact, and back on whenever a line of your code runs for the first time, until nothing new happened for 5 s. While it is on, capture costs as much as before it first turned off. Each line of your code is watched once, then costs nothing. The capture metadata counts the times it came back on (`reopened`) and their total length (`reopen_seconds`). There is no warm-up window. |
+| 3.6–3.11 | `sys.setprofile`. Tests: for the whole run, plus the functions of your code that started; a raise is typed when the code that handles it makes a call. Long runs: then targeted wrappers on the discovered functions (switch after 5 s with no new contact, at most 60 s) |
 | 2.7 | not supported; the capture reports that the tracer failed to start |
 
 ### Sampling and counting
@@ -188,19 +188,60 @@ Two captures from different Python versions are compared fairly:
 
 ## Coverage
 
-- **Static symbols**: `scan` lists every place your code touches a dependency. Each dependency
-  symbol those contacts name (`module.Class.method`) is one static symbol, however many call
-  sites name it. These are the denominator.
+`scan` lists every place your code touches a dependency: a **contact** (file, line, symbol,
+kind). The dependency symbols those contacts name (`module.Class.method`) are the **static
+symbols**, one per symbol however many contacts name it.
+
 - **Confirmed**: a static symbol a capture exercised.
 - **BLIND**: a static symbol no capture exercised. A green suite with many BLIND symbols proves
   little.
 - **Dynamic-only**: a symbol the captures saw but the static map did not list, typically a method on
   an object a dependency returned.
-- **Trust**: confirmed over the static symbols reached by behavioural contacts (calls, decorators,
-  context managers, protocol use) in files the run executed. The report shows the steps from the raw string
-  match to this number. It leaves out, with a note, contacts that resolve to interpreter code,
-  chains through a function's return value, and dependencies that are not installed where the
-  capture ran.
+
+Each contact gets one status from the recording `verify` judges (the post-migration capture, or
+the only one):
+
+| Status | Meaning |
+|---|---|
+| recorded | The trace has a call of the contact's symbol on its statement. A multi-line statement counts by its lines; a decorator, a default value or a base class by its `def` or `class` header |
+| ran, not recorded | The statement ran and the trace has nothing there: a tracer gap |
+| not run | The statement never ran: a test or run gap |
+| unobservable | No trace can record it (see below) |
+
+- **Coverage** = (recorded + ran, not recorded) / the contacts that are not unobservable: how much
+  of the dependency surface the run reached, the analogue of pytest's line coverage.
+- **Recall** = recorded / (recorded + ran, not recorded): how much of what ran the tracer caught.
+  It should be about 100%. Less is a tracer limit or a bug; the contacts it missed are in the JSON
+  report (`contract.contacts`, status `ran-not-recorded`).
+
+Whether a statement ran comes from the capture. The numbers say how (**granularity**):
+
+| Granularity | Source |
+|---|---|
+| line | Python 3.12+: each line of your code that ran. It costs one callback per line, at its first run |
+| function | Python 3.6–3.11: the functions of your code that started. A contact in a function that started counts as ran even on a branch not taken, so recall is a lower bound. Also used on 3.12 for code objects too large for line events (about 8,000 instructions) |
+| file | A capture without this record (an older capture, a watch-mode capture, `PYMOLT_TRACE_EXECUTED=0`): a contact counts as ran when the trace recorded a call site in its file |
+| symbol | A trace without call sites: a contact counts as recorded when its symbol was observed anywhere |
+
+The record is in each process's capture metadata (`executed`). Below 3.12, a long-run capture
+records functions only until it switches from discovery to the targeted wrappers, and the report
+notes it. When contacts were judged at different granularities, the headline gives the coarsest
+and the count for each.
+
+**Unobservable** contacts are left out of both numbers and counted on their own line:
+- attribute reads, base classes and constants (`Loader=yaml.SafeLoader`, `class V(dep.Base)`,
+  `dep.DEFAULT`) of a symbol no capture observed: reading a name runs no dependency code there.
+  Of a symbol observed elsewhere, such a contact counts as recorded when its line ran, and as not
+  run when it did not;
+- chains through a function's return value (`typer.prompt().strip`), which have no static name;
+- dependencies that are not installed where the capture ran;
+- the test runner (`pytest`, `pluggy` and similar), which captures do not trace, unless a target
+  names it;
+- protocol use that resolves to interpreter code (`A | B` on two classes runs `type.__or__`).
+
+BLIND symbols are split the same way: not run, ran but not recorded, unobservable. The report also
+shows **symbol matching**: the share of static symbols the exact string join confirms, then the
+share canonical identity confirms (what *confirmed* uses).
 
 ## The verdict
 
@@ -213,22 +254,24 @@ when facts changed. Sampled captures must also have complete call counts.
   or canary gate failed.
 - **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
-  - no static symbol is BLIND, of any contact kind (attribute reads and constants included);
+  - no static symbol is BLIND, of any contact kind (attribute reads, constants and unobservable
+    contacts included);
   - every dynamic-only symbol had all its facts compared equal.
-- **INCONCLUSIVE**: anything else. The reasons name the missing evidence, for example "1 static
-  dependency symbol(s) were not exercised" or "capture freshness could not be established". Review
+- **INCONCLUSIVE**: anything else. The reasons name the missing evidence, for example "2 static
+  dependency symbol(s) were not exercised (1 not run by the workload; 1 ran but not recorded)" or
+  "capture freshness could not be established". Review
   items land here: differences pymolt cannot judge on its own, such as a hand edit's new value, a
   value that varies between runs, or an environment difference. Each names what settles it.
 
 ### Scope after `apply`
 
 When the post-migration code came from `pymolt apply`, the verdict is the one the same captures get
-without a plan. The static symbols, confirmed, BLIND, dynamic-only and trust count the whole
-recorded surface, and a behaviour change in any recorded call fails.
+without a plan. The static symbols, confirmed, BLIND, dynamic-only, coverage and recall count the
+whole recorded surface, and a behaviour change in any recorded call fails.
 
 The API paths the plan found changed only focus the report:
 - *Impact focus* gives the number of those paths and the static symbols on them: confirmed, BLIND
-  and dynamic-only.
+  and dynamic-only, and the coverage of their contacts.
 - The BLIND and dynamic-only tables list the symbols on the plan's paths first. The INCONCLUSIVE
   reasons name the BLIND symbols inside the plan's predicted impacts apart from those outside them.
 - The version diff's counts and listed changes cover the plan's paths. Behaviour changes outside

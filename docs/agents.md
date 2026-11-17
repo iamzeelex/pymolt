@@ -62,4 +62,4 @@ plan, and a person applies it.
 | `assess` | which versions move or conflict, what needs manual work, how to build the target environment, optional risk scores |
 | `capture` | runs your test or app command with the tracer and keeps the capture. It runs a process on your machine, so it needs `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment |
 | `plan` | the API changes, Python breakage, codemods and predicted risks, as a saved plan and unified diffs |
-| `verify` | the verdict, coverage, which predicted risks came true, and which dependency calls changed |
+| `verify` | the verdict, coverage and recall with their granularity, which predicted risks came true, and which dependency calls changed |

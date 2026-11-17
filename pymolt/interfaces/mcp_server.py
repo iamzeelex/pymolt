@@ -282,7 +282,7 @@ def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
 def verify(project_dir: str = ".") -> dict:
     """The verdict on whether the migration changed your program's behaviour: PASS,
     FAIL or INCONCLUSIVE, with the reasons, the coverage of the static contact map
-    (confirmed / BLIND / trust %), and which dependency calls now return or raise
+    (confirmed / BLIND; coverage and recall %), and which dependency calls now return or raise
     something else, or stopped happening.
 
     No file reading, type checking or dependency resolution answers this; it needs

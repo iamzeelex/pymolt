@@ -33,7 +33,9 @@ def test_report_static_only_all_blind(tmp_path):
     assert rep.static_targets == 2
     assert rep.blind == 2
     assert rep.confirmed == 0
-    assert rep.trust == 0.0
+    # no trace: nothing ran, nothing to recall
+    assert (rep.coverage, rep.recall) == (0.0, None)
+    assert rep.contacts_not_run == 2 and rep.coverage_granularity is None
     assert any("BLIND" in n for n in rep.notes)
 
 
@@ -43,13 +45,15 @@ def test_report_confirmed_and_blind(tmp_path):
     trace = _trace(
         tmp_path,
         [
-            {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 4}},
+            {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 5}},
         ],
     )
     rep = build_contract_report(root, trace=trace)
     assert rep.confirmed == 1
     assert rep.blind == 1
-    assert rep.trust == 0.5
+    # no executed record: views.py ran (a call site there), so with_appcontext's line counts
+    # as run but not recorded (granularity file)
+    assert (rep.coverage, rep.recall, rep.coverage_granularity) == (1.0, 0.5, "file")
     by_target = {s.target: s.status for s in rep.symbols}
     assert by_target["flask.Flask"] == "confirmed"
     assert by_target["flask.cli.with_appcontext"] == "blind"
@@ -140,7 +144,7 @@ def test_impact_set_focuses_metrics_and_preserves_full_surface(tmp_path):
     trace = _trace(
         tmp_path,
         [
-            {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 4}},
+            {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 5}},
             {
                 "q": "flask.cli.pass_context",
                 "where": {"file": "myapp/views.py", "line": 8},
@@ -169,15 +173,16 @@ def test_impact_set_focuses_metrics_and_preserves_full_surface(tmp_path):
     assert rep.impacted_confirmed == 0
     assert rep.impacted_blind == 1
     assert rep.impacted_dynamic_only == 1
-    assert rep.impacted_trust == 0.0
+    # with_appcontext's contact ran (its file did) and was not recorded
+    assert (rep.impacted_coverage, rep.impacted_recall) == (1.0, 0.0)
 
     # The headline is the whole surface, the one the verdict judges.
     assert rep.static_targets == rep.all_static_targets == 2
     assert rep.confirmed == rep.all_confirmed == 1
     assert rep.blind == rep.all_blind == 1
     assert rep.dynamic_only == rep.all_dynamic_only == 1
-    assert rep.all_trust == 0.5
-    assert (rep.trust_confirmed, rep.trust_static) == (1, 2)  # Flask; with_appcontext BLIND
+    assert (rep.contacts_recorded, rep.contacts_ran_not_recorded) == (1, 1)
+    assert (rep.coverage, rep.recall) == (1.0, 0.5)
     assert len(rep.symbols) == 3
     assert {symbol.target for symbol in rep.impacted_symbols} == {
         "flask.cli.pass_context",
@@ -385,12 +390,18 @@ def _canonical_project(tmp_path, monkeypatch):
     return root
 
 
+# Where each symbol is called in app/main.py (the trace's call sites).
+_MAIN_LINES = {"fakedep._impl.Client.__init__": 10, "fakedep._impl.fetch": 11,
+               "fakedep.vanished": 15}
+
+
 def _events(root, *events, file="app/main.py"):
     out = []
     for event in events:
         record = {"t": "return", "in": {"bound": {}}, "result": None, **event}
         if file is not None:
-            record.setdefault("where", {"file": str(root / file), "line": 9, "func": "run"})
+            line = _MAIN_LINES.get(event.get("sym") or event.get("q"), 9)
+            record.setdefault("where", {"file": str(root / file), "line": line, "func": "run"})
         out.append(record)
     return out
 
@@ -436,26 +447,33 @@ def test_v2_sym_confirms_constructor_reexport_and_unresolvable_exact(tmp_path, m
     assert by["fakedep.Base"].contact_class == "existence"
     assert by["fakedep.CONSTANT"].contact_class == "existence"
     assert by["fakedep.Client.__or__"].contact_class == "interpreter"
-    assert by["fakedep.Client"].executed is True
-    assert by["fakedep.helper"].executed is False  # cold.py never ran
     assert rep.executed_files == ["app/main.py"]
     assert rep.identity_unresolved == 1
     assert rep.identity_resolved == 6  # CONSTANT is a value: imported fine, no code identity
     assert any("1 unresolvable (fakedep.vanished)" in n for n in rep.notes)
 
-    tiers = {t.name: (t.confirmed, t.static) for t in rep.trust_tiers}
+    tiers = {t.name: (t.confirmed, t.static) for t in rep.identity_tiers}
     assert tiers == {
         "exact": (1, 8),  # Base CONSTANT Client fetch helper vanished Client.__or__ Other.__ror__
         "canonical": (3, 8),
-        "behavioural": (3, 4),  # Client fetch vanished helper
-        "executed": (3, 3),  # helper lives in a file the trace never executed
     }
-    assert rep.trust == rep.executed_trust == 1.0
-    assert rep.trust_basis == "behavioural contacts in executed files"
-    assert (rep.trust_confirmed, rep.trust_static) == (3, 3)
-    assert rep.all_trust == rep.canonical_trust == 3 / 8
-    assert rep.exact_trust == 1 / 8
     assert (rep.confirmed, rep.blind, rep.dynamic_only) == (3, 5, 1)
+    # Contacts: Client, fetch, vanished recorded at their lines; helper in cold.py, which
+    # never ran (no call site there; no executed record: the file rule); Base and CONSTANT
+    # are existence contacts of symbols never observed and the two ``|`` protocols resolve to
+    # interpreter code: unobservable.
+    status = {c.target: c.status for c in rep.contacts}
+    assert status == {
+        "fakedep.Client": "recorded", "fakedep.fetch": "recorded",
+        "fakedep.vanished": "recorded", "fakedep.helper": "not-run",
+        "fakedep.Base": "unobservable", "fakedep.CONSTANT": "unobservable",
+        "fakedep.Client.__or__": "unobservable", "fakedep.Other.__ror__": "unobservable",
+    }
+    assert rep.unobservable_by_reason == {"existence": 2, "interpreter": 2}
+    assert (rep.coverage, rep.recall, rep.coverage_granularity) == (0.75, 1.0, "file")
+    assert by["fakedep.helper"].blind_reason == "not-run"
+    assert by["fakedep.Base"].blind_reason == "unobservable"
+    assert (rep.blind_not_run, rep.blind_ran_not_recorded, rep.blind_unobservable) == (1, 0, 4)
 
 
 def test_v1_trace_matches_only_unambiguous_legacy_names(tmp_path, monkeypatch):
@@ -492,7 +510,8 @@ def test_executed_scope_relative_suffix_and_missing_sites(tmp_path, monkeypatch)
     )
     rep = build_contract_report(root, trace=relative)
     assert rep.executed_files == ["app/cold.py"]
-    assert {s.target: s.executed for s in rep.symbols}["fakedep.helper"] is True
+    helper = [c for c in rep.contacts if c.target == "fakedep.helper"]
+    assert [(c.status, c.granularity) for c in helper] == [("ran-not-recorded", "file")]
 
     moved = _write_trace(
         tmp_path / "moved.jsonl",
@@ -505,9 +524,12 @@ def test_executed_scope_relative_suffix_and_missing_sites(tmp_path, monkeypatch)
     no_sites = _write_trace(tmp_path / "nosites.jsonl", [fetch])
     rep = build_contract_report(root, trace=no_sites)
     assert rep.executed_scope is False
-    assert rep.trust_basis == "behavioural contacts (the trace records no call sites)"
-    assert rep.trust_static == 4  # every behavioural contact, whichever file
-    assert rep.trust == rep.behavioural_trust
+    # no call sites: recorded by symbol, "ran" unknown (granularity symbol)
+    by = {c.target: c for c in rep.contacts}
+    assert (by["fakedep.fetch"].status, by["fakedep.fetch"].matched_by) == ("recorded", "symbol")
+    assert by["fakedep.helper"].status == "not-run"
+    assert rep.coverage_granularity == "symbol" and rep.recall == 1.0
+    assert any("records no call sites" in n for n in rep.notes)
 
 
 def test_impact_paths_match_resolved_symbols_on_both_sides(tmp_path, monkeypatch):
@@ -537,8 +559,11 @@ def test_impact_paths_match_resolved_symbols_on_both_sides(tmp_path, monkeypatch
     assert (rep.static_targets, rep.confirmed, rep.dynamic_only) == (
         rep.all_static_targets, rep.all_confirmed, rep.all_dynamic_only)
     assert rep.all_static_targets == 8
-    # trust over the whole surface: fetch of the three behavioural contacts in executed files
-    assert (rep.trust_confirmed, rep.trust_static) == (1, 3)
+    # the plan's focus: fetch's contact was recorded at its line
+    assert (rep.impacted_coverage, rep.impacted_recall) == (1.0, 1.0)
+    # the whole surface: Client and vanished ran in main.py (file rule) but were not recorded
+    assert (rep.contacts_recorded, rep.contacts_ran_not_recorded, rep.contacts_not_run) == (
+        1, 2, 1)
 
 
 def test_identity_resolution_can_be_disabled(tmp_path, monkeypatch):
@@ -549,7 +574,7 @@ def test_identity_resolution_can_be_disabled(tmp_path, monkeypatch):
     )
     rep = build_contract_report(root, trace=trace, resolve_identities=False)
     assert rep.identity_interpreter is None
-    assert rep.canonical_trust == rep.exact_trust == 0.0
+    assert [t.share for t in rep.identity_tiers] == [0.0, 0.0]
     # No identity cache; the contact-map cache (cache/contacts) is allowed.
     assert not list((root / ".pymolt" / "cache").glob("identity-*.json"))
 
@@ -586,7 +611,7 @@ def _stub_resolution(monkeypatch, source, results):
     monkeypatch.setattr(identity_resolver, "resolve_identities", fake)
 
 
-def test_absent_dependency_leaves_trust_only_with_capture_interpreter_evidence(
+def test_absent_dependency_leaves_coverage_only_with_capture_interpreter_evidence(
     tmp_path, monkeypatch
 ):
     root = _project(tmp_path)
@@ -610,9 +635,9 @@ def test_absent_dependency_leaves_trust_only_with_capture_interpreter_evidence(
     assert set(classes.values()) == {"behavioural"}
 
 
-def test_test_runner_contacts_are_left_out_of_trust_unless_traced(tmp_path):
+def test_test_runner_contacts_are_left_out_of_coverage_unless_traced(tmp_path):
     """Captures never trace the test runner, so its contacts can't be confirmed: they are
-    left out of trust rather than counted BLIND. Traced (a target named it) they count."""
+    unobservable, left out of coverage and recall. Traced (a target named it) they count."""
     root = _project(tmp_path)
     (root / "tests").mkdir()
     (root / "tests" / "test_views.py").write_text(
@@ -624,16 +649,18 @@ def test_test_runner_contacts_are_left_out_of_trust_unless_traced(tmp_path):
         encoding="utf-8",
     )
     trace = _trace(tmp_path, [
-        {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 4}}])
+        {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 5}}])
     rep = build_contract_report(root, trace=trace)
     runner = [s for s in rep.symbols if s.dep == "pytest"]
     assert runner and {s.contact_class for s in runner} == {"test-runner"}
     assert any("test runner" in note for note in rep.notes)
-    # flask.Flask confirmed, with_appcontext blind; pytest.raises is not in the denominator
-    assert rep.trust == 0.5
+    # flask.Flask recorded, with_appcontext ran (its file did) unrecorded; pytest.raises is in
+    # neither denominator
+    assert rep.unobservable_by_reason == {"test-runner": 1}
+    assert (rep.coverage, rep.recall) == (1.0, 0.5)
 
     traced = _trace(tmp_path, [
-        {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 4}},
+        {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 5}},
         {"q": "_pytest.python_api.raises", "where": {"file": "tests/test_views.py", "line": 5}}])
     rep = build_contract_report(root, trace=traced)
     assert {s.contact_class for s in rep.symbols if s.dep == "pytest"} == {"behavioural"}

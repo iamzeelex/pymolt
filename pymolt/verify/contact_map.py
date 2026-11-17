@@ -7,8 +7,9 @@ resolvable protocol operations can all break without making a direct call in
 application code. We retain those contacts while excluding stdlib and
 first-party imports.
 
-Attribution is function-level (caller qualname → dependency qualname); exact
-call-site lines are the dynamic trace's job (``where`` in the contract).
+Attribution is function-level (caller qualname → dependency qualname). Every place a contact
+occurs is kept with its line and the line span of its statement (``Contact.spans``): the
+host matches each one against the trace's call sites (``where``) and the lines that ran.
 
 Honest scope: this resolves direct, syntactically-visible imported references.
 Like any pure-static pass it does not infer the runtime type of local variables,
@@ -66,7 +67,7 @@ _IGNORE_DEPS = {"pymolt", "pymolt_trace"}
 
 # Bump when the per-file records (or the way they are derived) change: it is part of the
 # per-file cache key, so a bump retires every cached file.
-CONTACT_MAP_VERSION = "2"
+CONTACT_MAP_VERSION = "3"
 
 ContactKind = Literal[
     "call",
@@ -80,8 +81,8 @@ ContactKind = Literal[
 
 
 # Behavioural contacts run dependency code at our call site, so a trace can
-# witness them. Existence contacts are proven by an import that resolves; they
-# are not trace evidence and do not belong in the trust denominator.
+# witness them. Existence contacts run none there: the report counts one only when its
+# symbol was observed elsewhere, else it is unobservable (``report._judge_contacts``).
 BEHAVIOURAL_KINDS: frozenset[str] = frozenset({"call", "decorator", "context-manager", "protocol"})
 EXISTENCE_KINDS: frozenset[str] = frozenset({"attribute-read", "class-base", "imported-constant"})
 
@@ -100,6 +101,11 @@ class Contact(BaseModel):
     # were introduced: every old contact represented a direct call.
     kind: ContactKind = "call"
     line: int | None = None  # where in ``file`` this contact is (first one when repeated)
+    # Every place this caller names ``target`` with this kind: ``(line, first, last)``, the
+    # contact's own line and the lines of the statement it is in. A multi-line statement
+    # counts by its span; for a decorator, a default or a base the span is the ``def`` /
+    # ``class`` header from its first decorator. Empty in maps saved before spans existed.
+    spans: list[tuple[int, int, int]] = Field(default_factory=list)
 
 
 class StdlibSite(BaseModel):
@@ -318,6 +324,28 @@ class _ContactVisitor(cst.CSTVisitor):
     def _line(self, node: cst.CSTNode) -> int:
         return self.get_metadata(PositionProvider, node).start.line
 
+    def _span(self, node: cst.CSTNode) -> tuple[int, int]:
+        """The lines of the statement ``node`` is in: a simple statement whole; a compound
+        statement's header part (an ``if`` test, a ``with`` item, an ``except`` clause) from
+        the statement's first line; a ``def`` / ``class`` header from its first decorator
+        (decorators run, and on 3.8-3.10 are applied, at those lines)."""
+        child = node
+        parent = self.get_metadata(ParentNodeProvider, child, None)
+        while parent is not None:
+            if isinstance(parent, cst.BaseSmallStatement):
+                pos = self.get_metadata(PositionProvider, parent)
+                return pos.start.line, pos.end.line
+            if isinstance(parent, _HEADER_OWNERS):
+                head = self._line(parent)      # the ``def`` / ``if`` / ``except`` line
+                start = head
+                if isinstance(parent, (cst.FunctionDef, cst.ClassDef)) and parent.decorators:
+                    start = min(start, self._line(parent.decorators[0]))
+                end = self.get_metadata(PositionProvider, child).end.line
+                return start, max(head, end)
+            child, parent = parent, self.get_metadata(ParentNodeProvider, parent, None)
+        pos = self.get_metadata(PositionProvider, node)
+        return pos.start.line, pos.end.line
+
     def _record(
         self,
         node: cst.CSTNode,
@@ -332,6 +360,7 @@ class _ContactVisitor(cst.CSTVisitor):
             "ckind": ckind,
             "skind": skind,
             "line": self._line(node),
+            "span": list(self._span(node)) if ckind else None,
             "reached_at": "call" if self._fn_depth else "import",
             "guard": self._guard(node) if skind else None,
         })
@@ -560,6 +589,10 @@ _BROAD_EXC = {"Exception", "BaseException"}
 _SYS_VERSION = {"sys.version_info", "sys.version"}
 _VERSION_NAME = re.compile(r"^(?:is_?)?py(?:thon)?_?[23](?:\d+|k)?$", re.IGNORECASE)
 _TRY_TYPES = tuple(t for t in (cst.Try, getattr(cst, "TryStar", None)) if t is not None)
+# Where a contact sits in a statement header rather than in a simple statement.
+_HEADER_OWNERS = tuple(t for t in (cst.BaseCompoundStatement, cst.ExceptHandler,
+                                   getattr(cst, "ExceptStarHandler", None), cst.MatchCase)
+                       if t is not None)
 
 
 def _dotted(node: cst.BaseExpression | None) -> str:
@@ -808,25 +841,29 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
             if dependencies is not None and dep_top not in dependencies:
                 continue
             caller = rec["caller"]
+            line = rec["line"]
+            first, last = rec.get("span") or (line, line)
             cmap.contacts.append(
                 Contact(
                     caller=caller, target=rec["target"], dep=dep_top,
                     file=_file_for_qualname(caller, file_by_module), kind=rec["ckind"],
-                    line=rec["line"],
+                    line=line, spans=[(line, first, last)],
                 )
             )
             by_dep.setdefault(dep_top, set()).add(rec["target"])
 
     # The same symbol can legitimately appear under multiple contact kinds, but
-    # repeated syntax of one kind does not add evidence.
-    seen: set[tuple[str, str, ContactKind]] = set()
-    unique: list[Contact] = []
+    # repeated syntax of one kind does not add evidence: one contact per (caller, target,
+    # kind), the first place it occurs, with every place in ``spans``.
+    unique: dict[tuple[str, str, ContactKind], Contact] = {}
     for c in sorted(cmap.contacts, key=lambda c: (c.dep, c.target, c.caller, c.kind, c.line or 0)):
         key = (c.caller, c.target, c.kind)
-        if key not in seen:
-            seen.add(key)
-            unique.append(c)
-    cmap.contacts = unique
+        kept = unique.get(key)
+        if kept is None:
+            unique[key] = c
+        elif c.spans and c.spans[0] not in kept.spans:
+            kept.spans.append(c.spans[0])
+    cmap.contacts = list(unique.values())
     cmap.by_dep = {dep: sorted(targets) for dep, targets in sorted(by_dep.items())}
     cmap.stdlib_sites = sorted(sites.values(), key=lambda x: (x.file, x.line, x.spelling, x.kind))
     if legacy_imports:
