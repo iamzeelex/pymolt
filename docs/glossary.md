@@ -16,6 +16,9 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **dynamic-only** | A symbol the captures saw that the static map did not list |
 | **trust** | Confirmed static symbols over the static symbols reached by behavioural contacts in the files the run executed |
 | **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)) |
+| **replicate** | A second run of the baseline's command on the same code and environment; what differs between the two is run-to-run noise |
+| **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it |
+| **finding** | One reported difference: failing facts grouped by symbol and call site, or a review item |
 | **API change** | A symbol your code uses that is removed, moved, or changed in signature, default or deprecation status between base and target |
 | **codemod** | A rewrite for one API or Python-version change, applied with LibCST |
 | **plan** | The API changes, the codemods applied to your files as a diff, and the predicted risks, saved for `apply` |
