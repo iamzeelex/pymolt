@@ -329,6 +329,57 @@ def test_import_machinery_is_never_a_target():
     assert not never_target("importlib.metadata")
 
 
+MEMO_COMMON = (
+    "import functools\n"
+    "def memoize_when_activated(fun):\n"
+    "    @functools.wraps(fun)\n"
+    "    def wrapper(self):\n"
+    "        return fun(self)\n"
+    "    return wrapper\n"
+)
+MEMO_MAIN = (
+    "from vfakememo_common import memoize_when_activated\n"
+    "class Process(object):\n"
+    "    @memoize_when_activated\n"
+    "    def memory_info(self):\n"
+    "        return 1\n"
+    "    @memoize_when_activated\n"
+    "    def cpu_times(self):\n"
+    "        return 2\n"
+)
+
+
+@pytest.mark.parametrize("cls", BACKENDS)
+def test_a_decorator_wrapper_is_named_after_what_it_wraps_on_every_call(cls):
+    # psutil's ``memoize_when_activated``: one ``wrapper(self)`` code serves every memoized
+    # method. Named by that code, memory_info and cpu_times would merge; named by the CALL
+    # event (3.12 only), the name changed once the call site settled (locust: 2 calls of
+    # 6,572 were ``Process.memory_info``, the rest the wrapper's closure name).
+    mods = {}
+    for name, src in (("vfakememo_common", MEMO_COMMON), ("vfakememo", MEMO_MAIN)):
+        mod = types.ModuleType(name)
+        sys.modules[name] = mod
+        exec(compile(src, "<" + name + ">", "exec"), mod.__dict__)
+        mods[name] = mod
+    proc = mods["vfakememo"].Process()
+
+    def body():
+        for _ in range(6):
+            proc.memory_info()
+            proc.cpu_times()
+
+    try:
+        sink = _run(cls, ["vfakememo", "vfakememo_common"], body)
+    finally:
+        for name in mods:
+            del sys.modules[name]
+    by = _by_name(sink)
+    assert set(by) == {"vfakememo.Process.memory_info", "vfakememo.Process.cpu_times"}, set(by)
+    for recs in by.values():
+        assert sum(r["count"] for r in recs) == 6
+        assert all(r.get("symq") != "fallback" for r in recs)
+
+
 @needs_monitoring
 def test_decorator_wrapper_is_named_by_the_declared_callable():
     dep = types.ModuleType("vfakedeco")
@@ -344,12 +395,35 @@ def test_decorator_wrapper_is_named_by_the_declared_callable():
     dep.g.__qualname__ = "declared_g"
     sys.modules["vfakedeco"] = dep
     try:
-        sink = _run(MonitoringBackend, ["vfakedeco"], lambda: dep.g(1))
+        # more calls than it takes a call site to settle: every one keeps the declared name
+        sink = _run(MonitoringBackend, ["vfakedeco"], lambda: [dep.g(1) for _ in range(5)])
     finally:
         del sys.modules["vfakedeco"]
-    syms = {r.get("sym") for r in sink.records.values()}
-    assert "vfakedeco.declared_g" in syms
+    by = _by_name(sink)
+    assert set(by) == {"vfakedeco.declared_g"}, set(by)
+    assert sum(r["count"] for r in by["vfakedeco.declared_g"]) == 5
     assert any(r["qualname"].endswith(".wrapper") for r in sink.records.values())
+
+
+@pytest.mark.parametrize("cls", BACKENDS)
+def test_a_generic_wrapper_keeps_its_name_after_the_call_site_settles(cls):
+    dep = types.ModuleType("vfakedeco")
+    exec("import functools\n"
+         "def deco(f):\n"
+         "    @functools.wraps(f)\n"
+         "    def wrapper(*a, **k):\n"
+         "        return f(*a, **k)\n"
+         "    return wrapper\n"
+         "def f(x):\n    return x\n"
+         "g = deco(f)\n", dep.__dict__)
+    sys.modules["vfakedeco"] = dep
+    try:
+        sink = _run(cls, ["vfakedeco"], lambda: [dep.g(1) for _ in range(5)])
+    finally:
+        del sys.modules["vfakedeco"]
+    by = _by_name(sink)
+    assert set(by) == {"vfakedeco.f"}, set(by)
+    assert sum(r["count"] for r in by["vfakedeco.f"]) == 5
 
 
 def test_static_c_types_render_opaque_not_structurally():

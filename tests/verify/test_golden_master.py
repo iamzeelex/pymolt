@@ -44,3 +44,17 @@ def test_diff_skips_opaque_points():
     d = diff_snapshots(old, new)
     assert "p" in d.skipped
     assert d.is_clean() is True
+
+
+def test_a_snapshot_from_before_dict_order_was_recorded_is_not_a_reorder():
+    new = snapshot({"row": {"name": "a", "method": "GET", "age": 1}}, "v2")
+    old = {"version": "v1", "values": {"row": {"__dict__": [["age", 1], ["method", "GET"],
+                                                            ["name", "a"]]}}}
+    assert "__order__" in new["values"]["row"]           # insertion order is recorded now
+    assert diff_snapshots(old, new).is_clean()
+
+
+def test_a_key_order_change_shows_when_both_snapshots_recorded_it():
+    old = snapshot({"row": {"name": "a", "method": "GET", "age": 1}}, "v1")
+    new = snapshot({"row": {"age": 1, "name": "a", "method": "GET"}}, "v2")
+    assert not diff_snapshots(old, new).is_clean()

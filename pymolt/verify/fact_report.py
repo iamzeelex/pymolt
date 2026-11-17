@@ -45,7 +45,8 @@ RULES = {
     "possibly-dropped": "facts._soften_dropped / _group_entries (lost producer)",
     "implicit": "facts._apply_noise",
     "unmeasured-noise": "facts._gate_unmeasured",
-    "replicate": "facts._apply_noise_profile",
+    "replicate": "replicate.apply_noise_profile",
+    "order": "facts._judge_order",
 }
 
 # review reason (the review text's prefix) -> the one action that settles it
@@ -54,6 +55,13 @@ ACTIONS = {
     "masked input": "capture a baseline replicate (pymolt capture baseline --replicate)",
     "input changed": "capture a baseline replicate (pymolt capture baseline --replicate)",
     "unpaired site": "capture a baseline replicate (pymolt capture baseline --replicate)",
+    "order changed": "capture a baseline replicate (random hash seeds): pymolt capture "
+                     "baseline --replicate",
+    "input order changed": "capture a baseline replicate (random hash seeds): pymolt capture "
+                           "baseline --replicate",
+    "environment differs": "capture both sides in the same environment (the post-migration "
+                           "capture in the baseline's container or host, with the target "
+                           "Python)",
     "the value differs on a hand-edited line": "review the hand edit at the call site",
     "not reached": "check that the code around the call still runs under the tests",
     "no longer a dependency call here": "check what the name refers to on that line now",
@@ -143,18 +151,49 @@ def _change_rank(e: FactEntry) -> tuple[int, str]:
     )
     if e.category in (FactCategory.DISAPPEARED, FactCategory.APPEARED):
         return 1, "presence changed"
+    if "order-changed" in e.notes:
+        return 4, "order changed"
     if not _kinds_match(e.old, e.new):
         return 0, "kind changed"
     if not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
                   _outcome_types_match):
         return 2, "type changed"
+    if "outcomes-equal" in e.notes:
+        return 3, "input changed"      # the call answered the same; what it was given moved
     return 3, "value changed"
 
 
-def _why_not_noise(e: FactEntry, label: str) -> str:
+def _order_why(e: FactEntry, label: str) -> str | None:
+    """The why text of a failing entry whose dict key order differs (``FactEntry.order``)."""
+    o = e.order or {}
+    if not o:
+        return None
+    where = f"{o.get('path')} ({o.get('keys')} keys)"
+    cause = f"; cause: {o['cause']}" if o.get("cause") else ""
+    confirmed = "; stable across baseline runs (confirmed deterministic)" \
+        if "confirmed deterministic" in " ".join(e.notes) else ""
+    pinned = "; the same pinned hash seed on both sides" if any(
+        n.startswith("order-controlled") for n in e.notes) else ""
+    if o.get("side") == "output":
+        return f"{label}: same keys and values, key order at {where}{cause}{confirmed}{pinned}"
+    if "input-order-changed" in e.notes:
+        return (f"{label} as the input's dict key order changed (same keys and values) at "
+                f"{where}; the output is {o.get('output')}{cause}{confirmed}{pinned}")
+    if e.new_input is None:
+        return f"{label}; input equal except dict key order at {o.get('path')}{confirmed}"
+    return None
+
+
+def _why_not_noise(e: FactEntry, label: str, order: str | None = None) -> str:
     from pymolt.verify.facts import FactCategory, input_hidden
+    why = _order_why(e, label)
+    if why is not None:
+        return why
     if "confirmed deterministic" in " ".join(e.notes):
         return f"{label}; stable across baseline runs (confirmed deterministic)"
+    rare = next((n for n in e.notes if n.startswith("rare outcome:")), None)
+    if rare is not None:
+        return f"{label}; {rare}"
     if e.category is FactCategory.DISAPPEARED:
         return f"{label}: the call no longer happens at an unedited site"
     if e.category is FactCategory.APPEARED:
@@ -164,10 +203,17 @@ def _why_not_noise(e: FactEntry, label: str) -> str:
     if e.provenance in ("ledger",):
         return f"{label} on pymolt's own edit (strict: it claimed equivalence)"
     if e.new_input is None and not input_hidden(e.input):
+        if order != "compared" and _order_unrecorded_matters(e.input):
+            return f"{label}; same input content (dict key order not recorded by these captures)"
         return f"{label}; same complete input on both sides"
     if label != "value changed":
         return label
     return f"{label}; the input is equal on both sides"
+
+
+def _order_unrecorded_matters(inputs: Any) -> bool:
+    from pymolt.verify.dict_order import has_dict
+    return has_dict(inputs)
 
 
 def _site(e: FactEntry) -> tuple[str, str | None]:
@@ -209,6 +255,8 @@ def _sample(e: FactEntry) -> dict[str, Any]:
         raw["new"] = _outs(e.new_raw)
     if raw:
         out["raw"] = raw
+    if e.order:
+        out["order"] = dict(e.order)
     return out
 
 
@@ -239,6 +287,21 @@ def _group(entries: list[FactEntry]) -> dict[tuple, list[FactEntry]]:
     return groups
 
 
+def _environment_stamp(diff: FactDiff, by_class: dict[str, list[FactEntry]]) -> Any:
+    """``quality.environment``: "same", the differing aspects with the reviews and readings
+    they explain, or "not recorded (<side>)" (with an inference from the call-site paths)."""
+    env = diff.environment
+    if env is None:
+        return "not recorded (old, new)"
+    if isinstance(env, dict) and "differs" in env:
+        reviews = sum(1 for e in by_class["review"]
+                      if str(e.review or "").startswith("environment differs"))
+        explained = sum(1 for e in diff.entries
+                        if str(e.explained or "").startswith("environment: the value is"))
+        return {**env, "reviews": reviews, "explained": explained}
+    return env
+
+
 def summarize(diff: FactDiff) -> dict[str, Any]:
     entries = list(diff.entries)
     by_class: dict[str, list[FactEntry]] = defaultdict(list)
@@ -249,7 +312,7 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
     for (_cls, _mech, _sym, _site_), group in _group(by_class["failing"]).items():
         rank, label = min(_change_rank(e) for e in group)
         failing.append((rank, -len(group), _finding(
-            group, change=label, why=_why_not_noise(group[0], label))))
+            group, change=label, why=_why_not_noise(group[0], label, diff.dict_order))))
     failing.sort(key=lambda t: (t[0], t[1], t[2]["symbol"], t[2]["site"]))
 
     reviews: dict[str, list[FactEntry]] = defaultdict(list)
@@ -286,7 +349,8 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
         "dropped": {"old": diff.old_summary.dropped_events,
                     "new": diff.new_summary.dropped_events},
         "backends": {"old": diff.old_summary.backends, "new": diff.new_summary.backends},
-        "platforms": "not recorded by the capture",
+        "dict_order": diff.dict_order or "not recorded (old, new)",
+        "environment": _environment_stamp(diff, by_class),
         "levels": {k: {"entries": v, "share": round(v / total, 3)}
                    for k, v in sorted(levels.items())},
     }
@@ -384,6 +448,10 @@ def render_text(summary: dict[str, Any], *, explained: bool = False,
     noise_text = noise if isinstance(noise, str) else "measured by a baseline replicate"
     dropped = q.get("dropped") or {}
     shares = ", ".join(f"{k} {v['share']:.0%}" for k, v in (q.get("levels") or {}).items())
+    env = q.get("environment")
+    env_text = env if isinstance(env, str) or env is None else \
+        f"differs ({', '.join(env.get('differs') or ())})"
     out.append(f"Quality: noise {noise_text}; dropped events old {dropped.get('old')} / new "
-               f"{dropped.get('new')}; backends {q.get('backends')}; levels {shares}")
+               f"{dropped.get('new')}; backends {q.get('backends')}; levels {shares}; dict "
+               f"order {q.get('dict_order')}; environment {env_text}")
     return out

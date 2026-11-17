@@ -15,10 +15,15 @@ result in its per-code decision cache):
      module globals: module-level functions, classes and their methods (plain, static, class,
      property accessors, ``__wrapped__`` chains), nested classes. A unique hit is exact. A miss
      rebuilds the index a bounded number of times while the module keeps growing.
-  3. a generic decorator wrapper (free variables + ``*args``/``**kwargs``) whose frame holds
-     exactly one function-valued closure cell, that function being a dependency function, is
-     attributed to that function (``__wrapped__`` chain followed): ``symq = "unwrapped"``.
-     Per call (cells differ per decorated function); cached per inner function.
+  3. a decorator wrapper whose frame holds exactly one function-valued closure cell, that
+     function being a dependency function, is attributed to that function (``__wrapped__``
+     chain followed): ``symq = "unwrapped"``. Two shapes: a generic wrapper (free variables +
+     ``*args``/``**kwargs``), and a signature-preserving one whose parameters are exactly the
+     inner function's (psutil's ``memoize_when_activated``: ``wrapper(self)`` around
+     ``memory_info(self)``). One wrapper code serves every function it decorated, so its own
+     name would merge them. Per call (cells differ per decorated function); cached per inner
+     function. A ``__class__`` cell (``super()``) is never a candidate. Both backends name a
+     wrapper this way on every call, so the name never depends on which event saw the call.
   4. a method created by a factory and attached to classes elsewhere (pandas 1.5
      ``NDFrame._add_numeric_operations(cls)`` -> ``cls.mean = mean``): when the index misses or
      the name has ``<locals>`` and the code takes ``self``/``cls``, the receiver's MRO is walked
@@ -81,7 +86,7 @@ class CodeIdentity:
     """Everything the hot path needs about one code object, computed once."""
 
     __slots__ = ("q", "sym", "symq", "argnames", "posnames", "varargs", "varkw",
-                 "defaults", "cells", "recv", "prefix", "via_recv")
+                 "defaults", "cells", "same_sig", "recv", "prefix", "via_recv")
 
     def derived(self):
         """A copy, to specialise per receiver type."""
@@ -94,7 +99,7 @@ class CodeIdentity:
 class InnerIdentity:
     """A wrapped dependency function reached through a generic wrapper's closure."""
 
-    __slots__ = ("sym", "sig", "recv", "prefix")
+    __slots__ = ("sym", "sig", "recv", "prefix", "params")
 
 
 def _receiver_of(posnames, sym):
@@ -199,6 +204,28 @@ def code_args(code):
     if code.co_flags & _CO_VARKEYWORDS:
         varkw = names[i]
     return tuple(names[:nnamed]), tuple(names[:npos]), varargs, varkw
+
+
+def _wrapper_cells(code, argnames, posnames, varargs, varkw):
+    """(closure cells to look in for a wrapped function, signature-preserving shape?).
+
+    Generic wrapper: free variables + ``*args``/``**kwargs``. Signature-preserving wrapper:
+    free variables, positional parameters only (the inner function must then have exactly
+    these, checked per call). ``__class__`` (the ``super()`` cell) never holds the wrapped."""
+    cells = tuple(n for n in code.co_freevars if n != "__class__")
+    if not cells:
+        return (), False
+    if varargs or varkw:
+        return cells, False
+    if posnames and argnames == posnames:
+        return cells, True
+    return (), False
+
+
+def wraps_inner(ci, inner):
+    """True when ``inner`` (from a wrapper's closure) is what the wrapper stands for: any inner
+    for a generic wrapper, an inner with exactly the wrapper's parameters otherwise."""
+    return inner is not None and (not ci.same_sig or inner.params == ci.posnames)
 
 
 def _defaults_of(func, code):
@@ -478,7 +505,7 @@ class IdentityResolver:
         ci = CodeIdentity()
         ci.q = module + "." + code.co_name                  # v1 legacy name, unchanged
         ci.argnames, ci.posnames, ci.varargs, ci.varkw = argnames, posnames, varargs, varkw
-        ci.cells = code.co_freevars if (code.co_freevars and (varargs or varkw)) else ()
+        ci.cells, ci.same_sig = _wrapper_cells(code, argnames, posnames, varargs, varkw)
         qual = None
         func = None
         cacheable = True
@@ -602,8 +629,12 @@ class IdentityResolver:
         info = InnerIdentity()
         info.sym = sym
         info.sig = inspect.signature(func)              # follows __wrapped__, honours __signature__
-        names = [p.name for p in info.sig.parameters.values()
+        params = list(info.sig.parameters.values())
+        names = [p.name for p in params
                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        # the parameter list a signature-preserving wrapper must repeat exactly (None: the
+        # inner takes *args/**kwargs/keyword-only parameters, which no such wrapper passes)
+        info.params = tuple(names) if len(names) == len(params) else None
         info.recv, info.prefix = _receiver_of(names[:1], sym)
         return info
 
@@ -643,7 +674,7 @@ def fallback_identity(code, module):
     ci.argnames, ci.posnames, ci.varargs, ci.varkw = code_args(code)
     ci.sym, ci.symq = ci.q, SYMQ_FALLBACK
     ci.defaults = None
-    ci.cells = ()
+    ci.cells, ci.same_sig = (), False
     ci.recv, ci.prefix = _receiver_of(ci.posnames, ci.sym)
     ci.via_recv = False
     return ci

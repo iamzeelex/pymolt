@@ -21,7 +21,7 @@ from pymolt.interfaces.cli.commands import app  # noqa: E402
 from pymolt.status import build_status  # noqa: E402
 from pymolt.verify import service  # noqa: E402
 from pymolt.verify.fact_report import summarize  # noqa: E402
-from pymolt.verify.facts import FactCategory, diff_facts  # noqa: E402
+from pymolt.verify.facts import FactCategory, Outcome, diff_facts  # noqa: E402
 from pymolt.verify.models import CaptureMode, ContractState  # noqa: E402
 from pymolt.verify.replicate import (  # noqa: E402
     NOISE_PROFILE_PATH,
@@ -220,7 +220,7 @@ def test_verify_judges_the_migration_with_the_measured_noise(tmp_path, monkeypat
         "billing.total"]["notes"]
     assert rep.all_fact_diff["noise_measured"]["explained"] == 1
     cache = json.loads((tmp_path / NOISE_PROFILE_PATH).read_text())
-    assert cache["schema"] == "pymolt.noise-profile/2" and cache["identity"]["pymolt"]
+    assert cache["schema"] == "pymolt.noise-profile/4" and cache["identity"]["pymolt"]
     # a stale replicate is ignored, and the report says so
     state = service.load_contract_state(tmp_path)
     state.baseline_replicate.replicate_of = "earlier"
@@ -407,3 +407,65 @@ def test_an_explicit_post_migration_recording_is_compared_with_the_baseline_slot
     rep = service.build_contract_report_from_state(tmp_path, trace_override=str(post))
     assert rep.all_fact_diff["noise_measured"]["explained"] == 1
     assert any("baseline capture dropped 7 event(s)" in r for r in rep.verdict_reasons)
+
+
+# ── evidence classes the locust re-capture exposed (2026-11-16) ───────────────────────────
+
+
+def _site_run(*ports):
+    return fs(*[fact("urlparse", {"url": f"http://127.0.0.1:{p}"},
+                     (("return", f"127.0.0.1:{p}"),), line=1, text="u = urlparse(url)")
+                for p in ports])
+
+
+def test_fresh_inputs_grouped_in_the_replicate_explain_an_input_change_paired_in_the_diff():
+    # The replicate's runs made 2 and 3 calls with fresh ports: an unpaired-site group. The
+    # migration's diff pairs its calls one to one (input changed). Same noise: the class a
+    # site gets must not depend on whether its call counts happen to match. Before, the
+    # group was its own class and the recurring port made the change "confirmed" -> FAIL.
+    base, rep, post = _site_run(50000, 40001), _site_run(50000, 40002, 40004), \
+        _site_run(50000, 40003)
+    d, counts, by = judged(base, rep, post)
+    changed = [e for e in d.entries if e.symbol == "urlparse" and e.new_input is not None]
+    assert changed and all(e.noise and not e.fails for e in changed)
+    assert d.verdict.value == "pass"
+
+
+def _calls_run(raises=0, returns=75):
+    outs = [Outcome(kind="return", value=True, count=returns)]
+    if raises:
+        outs.append(Outcome(kind="raise", value="greenlet.GreenletExit", count=raises))
+    f = fact("Group.join", {"self": {"__opaque__": "gevent.pool.Group"}}, line=4,
+             text="g.join()")
+    f.outcomes = outs
+    f.count = returns + raises
+    return fs(f)
+
+
+def test_a_rare_new_outcome_is_not_called_deterministic():
+    # 1 GreenletExit in 76 calls on the post side; the baseline's two runs (150 calls) would
+    # show it about twice as noise: their agreement proves nothing. Kind stays strict.
+    d, counts, by = judged(_calls_run(), _calls_run(), _calls_run(raises=1))
+    e = by["Group.join"]
+    assert e.fails
+    assert not any("confirmed deterministic" in n for n in e.notes)
+    assert any(n.startswith("rare outcome: 1 of 76") for n in e.notes)
+    assert counts["rare"] == 1
+    why = summarize(d)["failing"][0]["why"]
+    assert "rare outcome" in why and "confirmed" not in why
+
+
+def test_a_frequent_new_outcome_is_still_confirmed():
+    d, counts, by = judged(_calls_run(), _calls_run(), _calls_run(raises=40, returns=36))
+    assert any("confirmed deterministic" in n for n in by["Group.join"].notes)
+    assert counts["confirmed"] == 1
+
+
+def test_a_strict_input_change_is_labelled_as_an_input_change():
+    base, rep = side(port=1, total=10), side(port=1, total=10)
+    post = side(port=1, total=10)
+    post.facts[1].input = {"bound": {"cart": "c2"}}
+    d, _, by = judged(base, rep, post)
+    (finding,) = summarize(d)["failing"]
+    assert finding["change"] == "input changed"
+    assert finding["why"].startswith("input changed; stable across baseline runs")

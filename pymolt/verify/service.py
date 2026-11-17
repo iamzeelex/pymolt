@@ -61,7 +61,10 @@ from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
+    ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
+    INPUT_ORDER_CHANGED,
+    ORDER_CHANGED,
     UNMEASURED_NOISE,
     UNPAIRED_SITE,
     find_facts_snapshot,
@@ -1979,7 +1982,35 @@ def usable_replicate(project_dir: str | Path, state: ContractState | None = None
     if differ:
         return None, ("baseline replicate ignored: the code differs between the two runs "
                       f"({', '.join(differ[:3])})")
+    env_differs = _replicate_environment_differs(slot_path(project_dir, base.trace_path),
+                                                 rep_trace)
+    if env_differs:
+        return None, ("baseline replicate ignored: its runtime environment differs from the "
+                      f"baseline's ({env_differs}): it would measure the environment, not run "
+                      "noise")
     return rep.model_copy(update={"trace_path": rep_trace}), None
+
+
+def _replicate_environment_differs(base_trace: str | Path | None,
+                                   rep_trace: str | Path | None) -> str | None:
+    """The aspects in which the replicate's recorded runtime environment differs from the
+    baseline's (None when they agree, or when either did not record one: unknown is accepted
+    as before)."""
+    from pymolt.verify import environment as env
+
+    def envs(trace: str | Path | None) -> list | None:
+        if not trace:
+            return None
+        meta = _read_trace_metadata(trace)
+        procs = [p for p in (meta.get("processes") or ()) if isinstance(p, dict)] or (
+            [meta] if meta else [])
+        records = [p.get("environment") for p in procs]
+        return records if records and all(isinstance(r, dict) for r in records) else None
+
+    cmp = env.compare(envs(base_trace), envs(rep_trace))
+    if cmp is None or cmp.same:
+        return None
+    return cmp.describe(list(cmp.differs)[:4])
 
 
 def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
@@ -2687,10 +2718,16 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
             for impact in plan.impacts:
                 if impact.replacement_path:
                     successors.setdefault(impact.path, impact.replacement_path)
+            predicted: set[str] = set()
             for risk in plan.risks.risks if plan.risks is not None else ():
+                if getattr(risk, "symbol", None):
+                    predicted.add(risk.symbol)
                 for fact in [risk.fact, *risk.facts]:
+                    if fact and fact.get("symbol"):
+                        predicted.add(fact["symbol"])
                     if fact and fact.get("symbol") and fact.get("successor"):
                         successors.setdefault(fact["symbol"], fact["successor"])
+            ctx.predicted_symbols = predicted or None
             relocations = getattr(plan, "type_relocations", None)
             if relocations:
                 ctx.type_relocations = _relocation_map(relocations)
@@ -2978,12 +3015,34 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     settle = ("the baseline replicate did not settle them (they vary there in another way, or "
               "it did not reach them)" if fact_diff.get("noise_measured")
               else "a baseline replicate would tell run noise from a real change")
+    order_settle = ("the baseline replicate could not tell (too few keys compared, or a pinned "
+                    "hash seed)" if fact_diff.get("noise_measured")
+                    else "a baseline replicate with random hash seeds would tell a hash-seeded "
+                         "order from a deterministic one")
     for prefix, text in classes:
         hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
         reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
         if hit:
             names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
             reasons.append(f"{len(hit)} {text} ({names}); {settle}")
+    for prefix, text in (
+            (ORDER_CHANGED, "returned dict(s) whose key order changed (same keys and values)"),
+            (INPUT_ORDER_CHANGED, "call(s) whose output changed as the dict key order of "
+                                  "their input did (same keys and values)")):
+        hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
+        reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
+        if hit:
+            names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+            reasons.append(f"{len(hit)} {text} ({names}); {order_settle}")
+    hit = [e for e in reviews if str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
+    reviews = [e for e in reviews if not str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
+    if hit:
+        env = ((fact_diff.get("summary") or {}).get("quality") or {}).get("environment")
+        aspects = ", ".join((env.get("differs") or ())[:6]) if isinstance(env, dict) else "?"
+        names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+        reasons.append(f"the captures ran in different environments ({aspects}): {len(hit)} "
+                       f"difference(s) at calls that read them are reviews ({names}); capture "
+                       "both sides in the same environment to settle")
     if reviews:
         names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
         reasons.append(f"{len(reviews)} edited call(s) need review: {names}")
