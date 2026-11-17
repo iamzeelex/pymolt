@@ -286,12 +286,13 @@ def verify_migration(
     ),
     baseline_file: str | None = typer.Option(
         None, "--baseline",
-        help="Use this recording as the baseline instead of the captured one (not saved)",
+        help="Use this recording as the baseline instead of the captured one (the verdict "
+             "is then not saved)",
     ),
     post_file: str | None = typer.Option(
         None, "--post-migration",
         help="Use this recording as the post-migration side instead of the captured one "
-             "(not saved)",
+             "(saved; status counts only a verdict on the captured one)",
     ),
     golden_before: str | None = typer.Option(
         None, "--golden-before", help="Golden snapshot JSON from before the migration"
@@ -327,7 +328,9 @@ def verify_migration(
     The verdict is saved to .pymolt/ for `pymolt status`. Golden snapshots, a
     cascade report and canary metrics, when given, are folded into the same
     verdict. --baseline/--post-migration compare other recordings instead of the
-    captures; that verdict is not saved.
+    captures. A verdict against another --baseline is not saved; one on another
+    --post-migration recording is saved, with what it compared, but `status` does
+    not count it as the migration's verdict.
     """
     import json
 
@@ -364,7 +367,6 @@ def verify_migration(
     project_path = require_project_dir(project_dir, json_output=json_output)
     if agent:
         project_path = project_path.resolve()
-    explicit = bool(baseline_file or post_file)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
         if path_value:
@@ -464,8 +466,13 @@ def verify_migration(
         if rollback_decision is not None and rollback_decision.should_rollback:
             rollback_migration(project_path, run_id=rollback_decision.run_id)
             unified.rollback_executed = True
-        # A verdict on recordings other than the captures is not this migration's.
-        saved_path = None if explicit else unified.save(project_path)
+        # Saved with what it compared (``contract.compared``), unless the baseline side is
+        # another recording: a verdict against another baseline is not this project's.
+        # ``status`` counts only a verdict on the post-migration capture.
+        compared = contract_report.compared
+        foreign_baseline = (compared is not None and compared.before is not None
+                            and compared.before_capture != "baseline")
+        saved_path = None if foreign_baseline else unified.save(project_path)
     except (ComparatorError, ValueError) as exc:
         fail(
             f"verification input is invalid: {exc}",
@@ -513,16 +520,18 @@ def verify_migration(
         VerificationVerdict.FAIL: "red",
         VerificationVerdict.INCONCLUSIVE: "yellow",
     }[unified.verdict]
+    from pymolt.interfaces import views
+
     rollback_note = (
         "\n[bold red]Automatic rollback executed.[/bold red]"
         if unified.rollback_executed else ""
     )
+    saved_lines = [f"saved: {saved_path}"] if saved_path else []
+    if note := views.saved_verdict_note(contract_report.compared, saved_path):
+        saved_lines.append(note)
     console.print(Panel(
         f"[bold {border}]{unified.verdict.value.upper()}[/bold {border}]"
-        f"{rollback_note}\n[dim]"
-        + (f"saved: {saved_path}" if saved_path else
-           "not saved: compared recordings other than the captures")
-        + "[/dim]",
+        f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
         title="Verdict", border_style=border, expand=False,
     ))
     raise typer.Exit(code=_verification_exit(unified.verdict))
@@ -913,17 +922,34 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
+    from pymolt.verify.service import load_contract_state, set_aside_capture
+
+    # What became of the post-migration capture: kept while the code it recorded is still on
+    # disk (the run had changed no file), set aside (kept among the diagnostics) otherwise.
+    contract = load_contract_state(project_path)
+    aside = set_aside_capture(contract)
+    post, post_trace = None, None
+    if contract.post_migration is not None:
+        post, post_trace = "kept", contract.post_migration.trace_path
+    elif aside is not None and aside.set_aside_by == migration_plan.plan_id:
+        post, post_trace = "set_aside", aside.trace_path
     payload = {
         "run_id": migration_plan.plan_id,
         "rolled_back_at": rolled_back_at,
         "files_restored": len(migration_plan.changes),
+        "post_migration_capture": post,
+        "post_migration_trace": post_trace,
     }
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
+    post_line = {
+        "kept": "\nPost-migration capture: kept (the run had changed no file)",
+        "set_aside": f"\nPost-migration capture: set aside, kept at {post_trace}",
+    }.get(post or "", "")
     console.print(Panel(
         f"Rolled back run [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]\n"
-        f"Files restored: [bold]{len(migration_plan.changes)}[/bold]",
+        f"Files restored: [bold]{len(migration_plan.changes)}[/bold]{escape(post_line)}",
         title="Migration rolled back", border_style="yellow", expand=False,
     ))
     next_step(project_path)

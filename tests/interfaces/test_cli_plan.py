@@ -109,6 +109,27 @@ def test_plan_apply_rollback_cli_lifecycle(tmp_path, monkeypatch):
     assert status.next_command == "pymolt plan ."
 
 
+def test_rollback_json_says_what_became_of_the_post_migration_capture(tmp_path, monkeypatch):
+    _configured_project(tmp_path)
+    _mock_plan_services(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["plan", str(tmp_path)]).exit_code == 0
+    assert runner.invoke(app, ["apply", str(tmp_path)]).exit_code == 0
+    script = tmp_path / "post.py"
+    script.write_text("import json\njson.loads('{}')\n", encoding="utf-8")
+    verify_service.capture_named_trace(
+        tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
+        command=[sys.executable, str(script)], target="json",
+    )
+
+    result = runner.invoke(app, ["rollback", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["files_restored"] == 1
+    assert payload["post_migration_capture"] == "set_aside"
+    assert "/archive/" in payload["post_migration_trace"]
+
+
 def test_plan_json_is_machine_readable(tmp_path, monkeypatch):
     _configured_project(tmp_path)
     _mock_plan_services(tmp_path, monkeypatch)

@@ -180,7 +180,7 @@ Evidence: on 22 API changes in flask, werkzeug and pandas, the local computation
 | `pymolt capture baseline\|post-migration -- <cmd>` | Runs your command and keeps only a valid recording; failed/empty captures remain diagnostic artifacts. |
 | `pymolt plan [dir]` | API changes, codemods and predicted risks as a plan with the diff; `--online` reads intermediate releases from PyPI, `--endpoint URL` uses a remote Axiom, `--patch FILE` exports the diff. Writes no source. |
 | `pymolt apply [dir]` | Writes only the saved plan; validates hashes and retains rollback data. |
-| `pymolt verify [dir]` | `PASS` / `FAIL` / `INCONCLUSIVE`, confirmed / BLIND / trust %, and behavioural changes; also golden snapshots, canary policy, shadow classification, opt-in rollback. `--baseline`/`--post-migration` compare other recordings (not saved). |
+| `pymolt verify [dir]` | `PASS` / `FAIL` / `INCONCLUSIVE`, confirmed / BLIND / trust %, and behavioural changes; also golden snapshots, canary policy, shadow classification, opt-in rollback. `--baseline`/`--post-migration` compare other recordings: against another baseline the verdict is not saved; on another post-migration recording it is saved with what it compared, and `status` does not count it. |
 | `pymolt rollback [dir]` | Restores the sources of the last apply; protects later edits unless `--force`. |
 
 **Tools**

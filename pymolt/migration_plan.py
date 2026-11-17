@@ -762,8 +762,11 @@ def _rollback_migration_unlocked(
     """Atomically restore every source frozen in an applied migration plan."""
     from pymolt.codemods.apply import write_previews
     from pymolt.migration_state import MigrationReceipt
-    from pymolt.verify.models import CaptureValidity
-    from pymolt.verify.service import load_contract_state
+    from pymolt.verify.service import (
+        load_contract_state,
+        restore_archived_capture,
+        set_aside_post_migration,
+    )
 
     root = Path(project_dir).resolve()
     receipt = MigrationReceipt.load(root)
@@ -807,8 +810,16 @@ def _rollback_migration_unlocked(
             new_source=change.old_source,
             sites=change.sites,
         ))
+    # What the rollback rewrites: a run that changed no file (a no-op apply) restores nothing.
+    restored = [
+        change.path for change, preview in zip(plan.changes, previews, strict=True)
+        if preview.old_source != preview.new_source
+    ]
     rolled_back_at = _now()
     write_previews(previews)
+    state_path = root / ".pymolt" / "contract_state.json"
+    original_post = original_contract_state.post_migration
+    archived: str | None = None
     try:
         _save_run_state(
             run_dir,
@@ -819,21 +830,14 @@ def _rollback_migration_unlocked(
         if receipt and receipt.run_id == effective_run_id:
             receipt = receipt.model_copy(update={
                 "status": "rolled_back", "rolled_back_at": rolled_back_at,
+                "files_restored": restored,
             })
             receipt.save(root)
-        if contract_state.post_migration is not None:
-            invalidated = contract_state.post_migration.model_copy(update={
-                "validity": CaptureValidity.UNKNOWN,
-                "validity_reason": (
-                    f"invalidated by rollback of migration {effective_run_id[:8]}"
-                ),
-            })
-            contract_state.diagnostic_captures.append(invalidated)
-            contract_state.post_migration = None
-            _atomic_json(
-                root / ".pymolt" / "contract_state.json",
-                contract_state.model_dump(mode="json"),
-            )
+        # The post-migration capture stays while the code it recorded is still on disk (the
+        # rollback restored no file); otherwise it is set aside, kept among the diagnostics.
+        if contract_state.post_migration is not None and restored:
+            archived = set_aside_post_migration(root, contract_state, effective_run_id)
+            contract_state.save(state_path)
     except BaseException as metadata_exc:
         forward = [
             FilePreview(
@@ -855,10 +859,9 @@ def _rollback_migration_unlocked(
             _save_run_state(run_dir, state)
             if original_receipt is not None:
                 original_receipt.save(root)
-            _atomic_json(
-                root / ".pymolt" / "contract_state.json",
-                original_contract_state.model_dump(mode="json"),
-            )
+            if archived is not None and original_post is not None:
+                restore_archived_capture(archived, original_post.trace_path)
+            original_contract_state.save(state_path)
         except OSError:
             pass
         raise

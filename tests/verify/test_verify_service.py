@@ -96,6 +96,28 @@ class TestCaptureTrace:
         assert produced == ["trace-1.jsonl"]
         assert returncode == 7
 
+    def test_container_capture_keeps_the_command_output(self, tmp_path, monkeypatch):
+        """A run in a container leaves its output next to the trace, as a local run does:
+        without it a failed run (a replicate, say) shows nothing of which test failed."""
+        def fake_docker(args, check=True):
+            if args[:1] == ["exec"] and "pytest" in args:
+                return subprocess.CompletedProcess(
+                    args, 1, "FAILED tests/test_a.py::test_x - assert 0\n=== 1 failed ===",
+                    "DeprecationWarning: old\n")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(service, "_docker", fake_docker)
+
+        result = service.capture_trace(
+            "json", ["pytest"], tmp_path / "trace.jsonl", "auto", container="legacy")
+
+        assert result.returncode == 1
+        assert result.command_log == str(tmp_path / "trace.command.log")
+        assert Path(result.command_log).read_text() == (
+            "FAILED tests/test_a.py::test_x - assert 0\n=== 1 failed ===\n"
+            "DeprecationWarning: old\n")
+        assert service.failed_tests(result.command_log) == (["tests/test_a.py::test_x"], 1)
+
 
 class TestCaptureNamedTrace:
     def test_writes_slot_and_persists_state(self, tmp_path):
@@ -124,6 +146,26 @@ class TestCaptureNamedTrace:
 
         assert slot.privacy_profile == "shape"
         assert "secret" not in Path(slot.trace_path).read_text()
+
+    def test_a_failed_container_run_keeps_its_log_with_the_diagnostic(self, tmp_path,
+                                                                        monkeypatch):
+        def fake_docker(args, check=True):
+            if args[:1] == ["exec"] and "pytest" in args:
+                return subprocess.CompletedProcess(args, 1, "=== 2 failed ===\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(service, "_docker", fake_docker)
+        monkeypatch.setattr(service, "_container_runner_spec", lambda container: None)
+
+        slot = service.capture_named_trace(
+            tmp_path, "baseline", CaptureMode.TEST_SUITE, command=["pytest"], target="json",
+            container="legacy",
+        )
+
+        assert slot.validity is CaptureValidity.COMMAND_FAILED
+        assert slot.command_log == str(Path(slot.trace_path).with_suffix(".command.log"))
+        assert Path(slot.command_log).read_text() == "=== 2 failed ===\n"
+        assert not list((tmp_path / ".pymolt" / "contract_traces").glob(".*pending*"))
 
     def test_failed_command_is_diagnostic_and_not_active_evidence(self, tmp_path):
         script = _write_script(
