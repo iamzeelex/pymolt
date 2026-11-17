@@ -317,35 +317,43 @@ def test_removed_contract_commands_name_their_replacement(old, new):
     assert new in result.output
 
 
-def test_report_renders_trust_basis_and_tiers(tmp_path, monkeypatch):
-    """The headline trust names its basis, and every tier from exact-join up is shown."""
+def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeypatch):
+    """The headline is coverage and recall over contacts, stamped with how "ran" was known,
+    the BLIND split, and the symbol-matching tiers from exact-join up."""
     site = tmp_path / "site" / "fakedep"
     site.mkdir(parents=True)
-    (site / "__init__.py").write_text("from fakedep._impl import fetch\n")
-    (site / "_impl.py").write_text("def fetch(value):\n    return value\n")
+    (site / "__init__.py").write_text("from fakedep._impl import fetch, other\n")
+    (site / "_impl.py").write_text("def fetch(value):\n    return value\n\n"
+                                   "def other():\n    return 2\n")
     monkeypatch.setenv("PYTHONPATH", str(site.parent))
     project = tmp_path / "proj"
     project.mkdir()
-    (project / "app.py").write_text("from fakedep import fetch\n\ndef run():\n    fetch(1)\n")
+    (project / "app.py").write_text("from fakedep import fetch, other\n\ndef run():\n"
+                                    "    fetch(1)\n\ndef never():\n    other()\n")
     trace = tmp_path / "trace.jsonl"
     trace.write_text(json.dumps({
         "t": "return", "q": "fakedep._impl.fetch", "sym": "fakedep._impl.fetch",
         "in": {"bound": {}}, "result": 1,
         "where": {"file": str(project / "app.py"), "line": 4, "func": "run"},
     }) + "\n")
+    # the executed record: run() ran, never() did not
+    (tmp_path / "trace.jsonl.meta.json").write_text(json.dumps({"processes": [{"executed": {
+        "v": 1, "granularity": "line", "complete": True, "until": None,
+        "files": {str(project / "app.py"): {"lines": "1,3,4,6"}}}}]}))
 
     result = runner.invoke(cli, ["verify", str(project), "--post-migration", str(trace)])
     assert "Traceback" not in result.output
     text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", result.output).split())
-    assert "Contract trust: 100% (1/1 behavioural contacts in executed files)" in text
-    assert "Trust tiers: exact-join 0% (0/1) → canonical 100% (1/1)" in text
-    assert "executed files 100% (1/1)" in text
+    assert ("Coverage: 50% (1 of 2 contacts ran; granularity line) "
+            "Recall: 100% (1 of 1 recorded)") in text
+    assert "BLIND symbols: not run 1, ran but not recorded 0, unobservable 0" in text
+    assert "Symbol matching: exact-join 0% (0/2) → canonical 50% (1/2)" in text
 
     data = json.loads(runner.invoke(
         cli, ["verify", str(project), "--post-migration", str(trace), "--json"]
     ).output)["contract"]
-    assert [tier["name"] for tier in data["trust_tiers"]] == [
-        "exact", "canonical", "behavioural", "executed",
-    ]
-    assert data["trust"] == data["executed_trust"] == 1.0
-    assert data["exact_trust"] == 0.0
+    assert [tier["name"] for tier in data["identity_tiers"]] == ["exact", "canonical"]
+    assert (data["coverage"], data["recall"], data["coverage_granularity"]) == (0.5, 1.0, "line")
+    assert {c["target"]: c["status"] for c in data["contacts"]} == {
+        "fakedep.fetch": "recorded", "fakedep.other": "not-run"}
+    assert "trust" not in data

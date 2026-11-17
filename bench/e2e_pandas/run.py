@@ -218,7 +218,9 @@ def run_scenario(name: str, base: Path) -> dict:
         if predicted:
             detail += f"; predicted {predicted[0].get('tier')} -> {predicted[0].get('result')}"
     return {"scenario": name, "expected": expected, "verdict": verdict, "ok": ok,
-            "facts": counts, "trust": rep.get("trust"), "reasons": rep.get("verdict_reasons"),
+            "facts": counts, "coverage": rep.get("coverage"), "recall": rep.get("recall"),
+            "granularity": rep.get("coverage_granularity"),
+            "reasons": rep.get("verdict_reasons"),
             "detail": detail, "captures_rc": [rc_base, rc_post],
             "plan_rc": rc_plan, "apply_rc": rc_apply,
             "calibration": {k: calibration.get(k) for k in
@@ -234,10 +236,16 @@ def run(names: list[str]) -> int:
     base.mkdir(parents=True)
     rows = [run_scenario(name, base) for name in names]
     (base / "summary.json").write_text(json.dumps(rows, indent=2))
-    print(f"{'scenario':<16}{'expected':<10}{'verdict':<14}{'ok':<5}facts / detail")
+    print(f"{'scenario':<16}{'expected':<10}{'verdict':<14}{'ok':<5}coverage / recall; "
+          "facts / detail")
+
+    def pct(value):
+        return "n/a" if value is None else f"{round(value * 100)}%"
+
     for r in rows:
         print(f"{r['scenario']:<16}{r['expected']:<10}{str(r['verdict']):<14}"
-              f"{'yes' if r['ok'] else 'NO':<5}{r['facts']} {r['detail']}")
+              f"{'yes' if r['ok'] else 'NO':<5}{pct(r['coverage'])} / {pct(r['recall'])} "
+              f"({r['granularity']}); {r['facts']} {r['detail']}")
         if not r["ok"] and r["reasons"]:
             print(f"{'':<16}reasons: {r['reasons']}")
     print(f"results: {base}")
@@ -294,7 +302,12 @@ def _drift_text(entry) -> str:
 
 def example_block(report: dict) -> str:
     """The README example: verify's headline numbers and its non-equal facts."""
+    sys.path.insert(0, str(REPO))
+    from pymolt.interfaces.views import coverage_lines, impact_focus
+    from pymolt.verify.report import ContractReport
+
     c = report.get("contract") or {}
+    rep = ContractReport.model_validate(c)
     facts = c.get("fact_diff") or {}
     counts = ", ".join(f"{k} {v}" for k, v in (facts.get("counts") or {}).items() if v)
     verdict = str(report.get("verdict", "?"))
@@ -303,14 +316,15 @@ def example_block(report: dict) -> str:
         f"VERDICT: {verdict.upper()}",
         f"Static symbols: {c.get('static_targets')}   confirmed: {c.get('confirmed')}   "
         f"BLIND: {c.get('blind')}   dynamic-only: {c.get('dynamic_only')}",
-        f"Contract trust: {round((c.get('trust') or 0) * 100)}%  "
-        f"({c.get('trust_confirmed')}/{c.get('trust_static')} {c.get('trust_basis')})",
+        *coverage_lines(rep),
     ]
-    if c.get("impact_filter_active"):
-        head.append(f"Impact focus: {len(c.get('impact_paths') or [])} changed API path(s); "
-                    f"on them {c.get('impacted_static_targets')} static, "
-                    f"{c.get('impacted_confirmed')} confirmed, {c.get('impacted_blind')} BLIND, "
-                    f"{c.get('impacted_dynamic_only')} dynamic-only")
+    focus = impact_focus(rep)
+    if focus is not None:
+        head.append(f"Impact focus: {focus['paths']} changed API path(s); on them "
+                    f"{focus['static_targets']} static, {focus['confirmed']} confirmed, "
+                    f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only"
+                    + (f"; coverage {focus['coverage_pct']}%"
+                       if focus["coverage_pct"] is not None else ""))
     said = {"fail": "behavior changed", "pass": "no observed change on the covered surface"}
     head.append(f"Version diff: {said.get(verdict, 'inconclusive')}  ({counts})")
     rows = [("Change", "Dependency call", "Call site (your code)", "Before → after")]

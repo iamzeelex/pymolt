@@ -966,15 +966,44 @@ def _risk_data(lists: _Lists, report) -> dict[str, Any]:
     }
 
 
+def _pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{round(value * 100)}%"
+
+
+def coverage_lines(rep) -> list[str]:
+    """The coverage and recall lines, in the words ``pymolt verify`` prints them: coverage =
+    contacts that ran over observable contacts, recall = recorded over those that ran, how
+    "ran" was known, the BLIND symbols split by why, and the unobservable contacts."""
+    reached = rep.contacts_recorded + rep.contacts_ran_not_recorded
+    observable = reached + rep.contacts_not_run
+    granularity = rep.coverage_granularity or "n/a"
+    counts = rep.granularity_counts or {}
+    if len(counts) > 1:
+        granularity += " (" + ", ".join(f"{n} by {g}" for g, n in counts.items()) + ")"
+    lines = [f"Coverage: {_pct(rep.coverage)} ({reached} of {observable} contacts ran; "
+             f"granularity {granularity})   Recall: {_pct(rep.recall)} "
+             f"({rep.contacts_recorded} of {reached} recorded)"]
+    if rep.blind:
+        lines.append(f"BLIND symbols: not run {rep.blind_not_run}, ran but not recorded "
+                     f"{rep.blind_ran_not_recorded}, unobservable {rep.blind_unobservable}")
+    if rep.contacts_unobservable:
+        why = ", ".join(f"{k} {v}" for k, v in rep.unobservable_by_reason.items())
+        lines.append(f"Unobservable contacts: {rep.contacts_unobservable} ({why}), left out of "
+                     "coverage and recall")
+    return lines
+
+
 def impact_focus(rep) -> dict | None:
     """After ``apply``: how many API paths the plan found changed, and the static and
     dynamic-only symbols on them. The headline counts and the verdict stay the whole surface;
     this is what to look at first. None without an applied plan."""
     if not getattr(rep, "impact_filter_active", False):
         return None
+    coverage = getattr(rep, "impacted_coverage", None)
     return {"paths": len(rep.impact_paths), "static_targets": rep.impacted_static_targets,
             "confirmed": rep.impacted_confirmed, "blind": rep.impacted_blind,
-            "dynamic_only": rep.impacted_dynamic_only}
+            "dynamic_only": rep.impacted_dynamic_only,
+            "coverage_pct": None if coverage is None else round(coverage * 100)}
 
 
 def _site_text(site: dict | None) -> str:
@@ -1052,7 +1081,6 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
                  else write_full_report(project_dir, "verify", unified.model_dump(mode="json")))
     lists = _Lists()
     verdict = unified.verdict.value
-    trust_pct = round(rep.trust * 100)
     data: dict[str, Any] = {
         "verdict": verdict,
         "reasons": list(unified.reasons),
@@ -1064,7 +1092,15 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "confirmed": rep.confirmed,
         "blind": rep.blind,
         "dynamic_only": rep.dynamic_only,
-        "trust_pct": trust_pct,
+        # coverage: contacts that ran / observable contacts; recall: recorded / ran.
+        # ``granularity`` says how "ran" was known (line | function | file | symbol).
+        "coverage_pct": None if rep.coverage is None else round(rep.coverage * 100),
+        "recall_pct": None if rep.recall is None else round(rep.recall * 100),
+        "granularity": rep.coverage_granularity,
+        "blind_split": {"not_run": rep.blind_not_run,
+                        "ran_not_recorded": rep.blind_ran_not_recorded,
+                        "unobservable": rep.blind_unobservable},
+        "unobservable_contacts": rep.contacts_unobservable,
         "compared": rep.diff is not None or bool(rep.fact_diff),
         "changes": {},
         "change_counts": {},
@@ -1077,14 +1113,17 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
                      "environment than the one it must describe. Capture again before "
                      "trusting this verdict.")
     lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
-                 f"dynamic-only {rep.dynamic_only}. Contract trust: {trust_pct}%.")
+                 f"dynamic-only {rep.dynamic_only}.")
+    lines.extend(coverage_lines(rep))
     focus = impact_focus(rep)
     data["impact_focus"] = focus
     if focus is not None:
         lines.append(f"Impact focus: {focus['paths']} changed API path(s); on them "
                      f"{focus['static_targets']} static, {focus['confirmed']} confirmed, "
-                     f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only "
-                     "(data.impact_focus).")
+                     f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only"
+                     + (f"; coverage {focus['coverage_pct']}%"
+                        if focus["coverage_pct"] is not None else "")
+                     + " (data.impact_focus).")
     lines.extend(f"{note}" for note in rep.notes if note.startswith("RED:"))
     if verdict == "pass" and rep.blind:
         lines.append(f"PASS covers the exercised calls only: {rep.blind} BLIND symbol(s) "

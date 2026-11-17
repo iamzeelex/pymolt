@@ -14,8 +14,8 @@ Python 3.11 + pandas 1.5.3 → Python 3.12 + pandas 2.2.3. The tests pass on bot
 ```text
 VERDICT: FAIL
 Static symbols: 4   confirmed: 4   BLIND: 0   dynamic-only: 3
-Contract trust: 100%  (4/4 behavioural contacts in executed files)
-Impact focus: 8 changed API path(s); on them 3 static, 3 confirmed, 0 BLIND, 1 dynamic-only
+Coverage: 100% (6 of 6 contacts ran; granularity line)   Recall: 100% (6 of 6 recorded)
+Impact focus: 8 changed API path(s); on them 3 static, 3 confirmed, 0 BLIND, 1 dynamic-only; coverage 100%
 Version diff: behavior changed  (changed 1, rewritten 1, disappeared 1, drift 1, equal 7)
 
 Change       Dependency call                      Call site (your code)          Before → after

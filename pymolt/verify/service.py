@@ -48,6 +48,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3128,21 +3129,47 @@ def _tallies_complete(fact_diff: dict | None) -> bool:
                for side in ("old", "new"))
 
 
+def _blind_split(symbols: list, report: ContractReport) -> str:
+    """Why these BLIND symbols are BLIND: not run by the workload (a test gap), ran but not
+    recorded (a tracer gap), or unobservable by any trace (``SymbolStatus.blind_reason``).
+    A "ran" coarser than line is said: at file granularity "ran" means "its file ran"."""
+    counts = Counter(s.blind_reason for s in symbols)
+    targets = {s.target for s in symbols}
+    coarse = {c.granularity for c in report.contacts
+              if c.target in targets and c.status == "ran-not-recorded"} - {"line", None}
+    parts = []
+    for key, label in (("not-run", "not run by the workload"),
+                       ("ran-not-recorded", "ran but not recorded"),
+                       ("unobservable", "unobservable")):
+        if counts[key]:
+            part = f"{counts[key]} {label}"
+            if key == "ran-not-recorded" and coarse:
+                part += " at " + "/".join(sorted(coarse)) + " granularity"
+            parts.append(part)
+    return "; ".join(parts)
+
+
 def _blind_reasons(report: ContractReport) -> list[str]:
-    """Why BLIND symbols block PASS. After ``apply`` the reasons name those inside the plan's
-    predicted impacts apart from those outside them; both block."""
+    """Why BLIND symbols block PASS, split by why each is BLIND. After ``apply`` the reasons
+    name those inside the plan's predicted impacts apart from those outside them; both block.
+    An unobservable symbol blocks too (the owner's open decision)."""
     if not report.blind:
         return []
     blind = [s for s in report.symbols if s.status == "blind"]
     if not report.impact_filter_active or not blind:
-        return [f"{report.blind} static dependency symbol(s) were not exercised"]
+        split = _blind_split(blind, report)
+        return [f"{report.blind} static dependency symbol(s) were not exercised"
+                + (f" ({split})" if split else "")]
     reasons = []
-    for where, members in (("inside", [s.target for s in blind if s.impacted]),
-                           ("outside", [s.target for s in blind if not s.impacted])):
+    for where, members in (("inside", [s for s in blind if s.impacted]),
+                           ("outside", [s for s in blind if not s.impacted])):
         if members:
-            names = ", ".join(sorted(members)[:5]) + (", …" if len(members) > 5 else "")
+            targets = sorted(s.target for s in members)
+            names = ", ".join(targets[:5]) + (", …" if len(targets) > 5 else "")
             reasons.append(f"{len(members)} static dependency symbol(s) {where} the plan's "
-                           f"predicted impacts were not exercised: {names}")
+                           f"predicted impacts were not exercised "
+                           f"({_blind_split(members, report)}): "
+                           f"{names}")
     return reasons
 
 

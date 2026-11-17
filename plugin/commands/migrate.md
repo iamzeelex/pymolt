@@ -33,9 +33,10 @@ whenever unsure.
    user explicitly approves, run `pymolt apply <dir>`; `pymolt rollback <dir>` undoes it.
    (You may also edit the code yourself.)
 6. **capture post-migration** (same command with `post-migration`, plus `--force` on a
-   re-run), then **verify** (`pymolt verify <dir> --agent`). Report all three numbers:
+   re-run), then **verify** (`pymolt verify <dir> --agent`). Report the numbers:
    confirmed, **BLIND** (surface the run never touched; a green suite with high BLIND
-   proves little, say so), and trust %, plus `data.changes`. Loop edit → re-capture →
+   proves little, say so) with `data.blind_split`, coverage % and recall % with
+   `data.granularity`, plus `data.changes`. Loop edit → re-capture →
    verify until PASS. A passing baseline test run promotes a bronze base to **silver**.
 
 Rules: never claim "upgrade feasible" or "migration done" from a successful resolve or a green

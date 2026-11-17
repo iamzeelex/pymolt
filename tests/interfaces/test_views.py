@@ -444,8 +444,9 @@ def test_plan_shows_manual_review_and_an_unbound_baseline():
 _VERIFY_KEYS = {
     "verdict", "reasons", "saved_path", "compared_recordings", "baseline_stale",
     "static_targets", "confirmed",
-    "blind", "dynamic_only", "trust_pct", "compared", "changes", "change_counts",
-    "calibration", "impact_focus",
+    "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "blind_split",
+    "unobservable_contacts", "compared", "changes", "change_counts", "calibration",
+    "impact_focus",
 }
 
 
@@ -460,13 +461,19 @@ def test_verify_pass_with_blind_calls_says_what_it_did_not_cover(tmp_path):
     from pymolt.verify.models import VerificationVerdict
 
     unified = _unified(verdict=VerificationVerdict.PASS, static_targets=10, confirmed=7,
-                       blind=3, trust=0.7, diff={"result_changed": 0},
-                       notes=["trust basis: executed files"])
+                       blind=3, coverage=0.7, recall=1.0, coverage_granularity="line",
+                       contacts_recorded=7, contacts_not_run=3, blind_not_run=3,
+                       diff={"result_changed": 0}, notes=["executed-code record: line"])
     view = views.verify_view(unified, tmp_path, saved_path=tmp_path / "verification.json")
     data = _assert_envelope(view, _VERIFY_KEYS)
     assert view["summary"].startswith("VERDICT: PASS")
     assert "3 BLIND symbol(s) were never run" in view["summary"]
-    assert data["warnings"] == ["trust basis: executed files"]
+    assert ("Coverage: 70% (7 of 10 contacts ran; granularity line)   "
+            "Recall: 100% (7 of 7 recorded)") in view["summary"]
+    assert "BLIND symbols: not run 3, ran but not recorded 0, unobservable 0" in view["summary"]
+    assert (data["coverage_pct"], data["recall_pct"], data["granularity"]) == (70, 100, "line")
+    assert data["blind_split"] == {"not_run": 3, "ran_not_recorded": 0, "unobservable": 0}
+    assert data["warnings"] == ["executed-code record: line"]
     assert data["compared"] is True and view["hint"] is None
 
 
@@ -476,19 +483,20 @@ def test_verify_after_apply_counts_the_whole_surface_and_shows_the_plan_focus(tm
     reason = ("3 static dependency symbol(s) outside the plan's predicted impacts were not "
               "exercised: pandas.a, pandas.b, pandas.c")
     unified = _unified(verdict=VerificationVerdict.INCONCLUSIVE, static_targets=10, confirmed=7,
-                       blind=3, trust=0.7, diff={"result_changed": 0},
+                       blind=3, coverage=0.7, diff={"result_changed": 0},
                        impact_filter_active=True, impact_paths=["pandas.x", "pandas.y"],
-                       impacted_static_targets=2, impacted_confirmed=2,
+                       impacted_static_targets=2, impacted_confirmed=2, impacted_coverage=1.0,
                        verdict_reasons=[reason])
     view = views.verify_view(unified, tmp_path, saved_path=None)
     data = _assert_envelope(view, _VERIFY_KEYS)
     # the headline is the surface the verdict judges; the plan's paths are a focus beside it
     assert data["blind"] == 3 and data["reasons"] == [f"contract: {reason}"]
     assert data["impact_focus"] == {"paths": 2, "static_targets": 2, "confirmed": 2,
-                                    "blind": 0, "dynamic_only": 0}
-    assert "Static 10, confirmed 7, BLIND 3, dynamic-only 0. Contract trust: 70%." in view["summary"]
+                                    "blind": 0, "dynamic_only": 0, "coverage_pct": 100}
+    assert "Static 10, confirmed 7, BLIND 3, dynamic-only 0." in view["summary"]
+    assert "Coverage: 70%" in view["summary"]
     assert ("Impact focus: 2 changed API path(s); on them 2 static, 2 confirmed, 0 BLIND, "
-            "0 dynamic-only (data.impact_focus).") in view["summary"]
+            "0 dynamic-only; coverage 100% (data.impact_focus).") in view["summary"]
 
 
 def test_verify_stale_evidence_and_unsaved_verdict_are_stated(tmp_path):

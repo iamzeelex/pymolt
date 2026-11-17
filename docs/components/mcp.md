@@ -46,7 +46,7 @@ The tools have the names of the CLI commands. Every tool takes
 | `assess` | `pymolt assess` | Resolves base vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest, and returns how to build the target environment. `risk=true` does cached network calls. |
 | `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Runs a host process, so it is opt-in: set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment. |
 | `plan` | `pymolt plan` | Saves the API changes, codemods and predicted risks for the target manifest as the migration plan and returns the diffs. Writes no source. |
-| `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND / trust %, and the calls that changed, plus how the plan's predicted risks fared. Saved like the CLI's. |
+| `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND, coverage and recall % with their granularity, and the calls that changed, plus how the plan's predicted risks fared. Saved like the CLI's. |
 
 ### Workflow
 

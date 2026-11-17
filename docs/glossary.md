@@ -9,12 +9,16 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **capture** | The calls your code made into its dependencies while a command ran, recorded without changing the code |
 | **baseline** | The capture taken before the migration. Nothing else is called baseline |
 | **post-migration** | The capture taken after the migration, in the target environment |
-| **call site** | A place in your code that touches a dependency (a contact). `scan` lists them (the contact map) |
+| **call site** / **contact** | A place in your code that touches a dependency: file, line, symbol and kind (call, decorator, context manager, protocol, attribute read, base class, constant). `scan` lists them (the contact map) |
 | **fact** | A callee, a call site and the arguments your code passed, mapped to the outcomes seen |
 | **static symbol** | A dependency symbol (`module.Class.method`) your code names at one or more call sites |
-| **confirmed** / **BLIND** | A static symbol a capture exercised / one no capture exercised |
+| **confirmed** / **BLIND** | A static symbol a capture exercised / one no capture exercised. A BLIND symbol is *not run* (none of its contacts ran), *ran but not recorded* (one ran and the capture has nothing there) or *unobservable* (no capture can record its contacts) |
 | **dynamic-only** | A symbol the captures saw that the static map did not list |
-| **trust** | Confirmed static symbols over the static symbols reached by behavioural contacts in the files the run executed |
+| **recorded**, **ran, not recorded**, **not run** | A contact the capture recorded on its statement / whose statement ran with nothing recorded there (a tracer gap) / whose statement never ran (a test gap) |
+| **unobservable** | A contact no capture can record: an attribute read, base class or constant of a symbol never observed, a chain through a return value, a dependency not installed where the capture ran, the test runner, or interpreter code. Left out of coverage and recall |
+| **coverage** | (recorded + ran, not recorded) over the contacts that are not unobservable: how much of the dependency surface the run reached |
+| **recall** | Recorded over (recorded + ran, not recorded): how much of what ran the capture caught. About 100%, or a tracer limit |
+| **granularity** | How coverage and recall knew a contact ran: `line` (3.12+), `function` (3.6–3.11), `file` (captures without the executed-code record), `symbol` (traces without call sites) |
 | **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)) |
 | **replicate** | A second run of the baseline's command on the same code and environment; what differs between the two is run-to-run noise |
 | **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it |

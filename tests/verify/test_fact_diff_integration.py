@@ -325,12 +325,14 @@ def test_after_apply_an_unexercised_symbol_outside_the_plan_blocks_pass(tmp_path
     assert applied.impacted_confirmed == 1 and applied.impacted_blind == 0
     assert by_hand.verdict is VerificationVerdict.INCONCLUSIVE
     assert applied.verdict is VerificationVerdict.INCONCLUSIVE
+    # (no executed record: app.py ran, so dep.other's line counts as ran by its file)
     assert applied.verdict_reasons == [
         "1 static dependency symbol(s) outside the plan's predicted impacts were not "
-        "exercised: dep.other"]
+        "exercised (1 ran but not recorded at file granularity): dep.other"]
     # the headline numbers are the whole surface, the plan's paths are the focus
-    assert (applied.static_targets, applied.confirmed, applied.blind, applied.trust) == (
-        by_hand.static_targets, by_hand.confirmed, by_hand.blind, by_hand.trust)
+    assert (applied.static_targets, applied.confirmed, applied.blind, applied.coverage,
+            applied.recall) == (by_hand.static_targets, by_hand.confirmed, by_hand.blind,
+                                by_hand.coverage, by_hand.recall)
     assert (applied.impacted_static_targets, applied.impacted_blind) == (1, 0)
 
 
@@ -345,9 +347,9 @@ def test_after_apply_blind_reasons_name_inside_and_outside_the_plan_apart(tmp_pa
     assert rep.verdict is VerificationVerdict.INCONCLUSIVE
     assert rep.verdict_reasons == [
         "1 static dependency symbol(s) inside the plan's predicted impacts were not "
-        "exercised: dep.later",
+        "exercised (1 not run by the workload): dep.later",
         "1 static dependency symbol(s) outside the plan's predicted impacts were not "
-        "exercised: dep.other"]
+        "exercised (1 ran but not recorded at file granularity): dep.other"]
 
 
 def test_after_apply_the_whole_surface_can_pass(tmp_path):

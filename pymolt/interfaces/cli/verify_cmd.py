@@ -362,11 +362,15 @@ def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bo
     next_step(project_dir)
 
 
-_TRUST_TIER_LABELS = {
+_BLIND_WHY = {
+    "not-run": "not run",
+    "ran-not-recorded": "[bold]ran, not recorded[/bold]",
+    "unobservable": "[dim]unobservable[/dim]",
+}
+
+_IDENTITY_TIER_LABELS = {
     "exact": "exact-join",
     "canonical": "canonical",
-    "behavioural": "behavioural",
-    "executed": "executed files",
 }
 
 
@@ -516,7 +520,8 @@ def _render_calibration(cal) -> None:
 
 
 def _render_contract_report(rep, *, verbose: bool = False) -> None:
-    trust_pct = round(rep.trust * 100)
+    from pymolt.interfaces.views import coverage_lines, impact_focus
+
     border = {
         VerificationVerdict.PASS: "green",
         VerificationVerdict.FAIL: "red",
@@ -540,19 +545,17 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         f"[green]confirmed: {rep.confirmed}[/green]   "
         f"[yellow]BLIND: {rep.blind}[/yellow]   "
         f"[red]dynamic-only: {rep.dynamic_only}[/red]\n"
-        f"Contract trust: [bold]{trust_pct}%[/bold]  "
-        f"[dim]({rep.trust_confirmed}/{rep.trust_static} {escape(rep.trust_basis)})[/dim]"
+        + "\n".join(escape(line) for line in coverage_lines(rep))
     )
-    if rep.trust_tiers:
-        # Every step from the old exact-string join to the headline, so a jump in
-        # trust is auditable rather than a single opaque number.
+    if rep.identity_tiers:
+        # How the static symbols were joined to the runtime names, from the old exact-string
+        # rule to canonical identity: a jump in confirmed is auditable.
         tiers = " → ".join(
-            f"{_TRUST_TIER_LABELS.get(t.name, t.name)} {round(t.trust * 100)}% "
+            f"{_IDENTITY_TIER_LABELS.get(t.name, t.name)} {round(t.share * 100)}% "
             f"({t.confirmed}/{t.static})"
-            for t in rep.trust_tiers
+            for t in rep.identity_tiers
         )
-        head += f"\n[dim]Trust tiers: {tiers}[/dim]"
-    from pymolt.interfaces.views import impact_focus
+        head += f"\n[dim]Symbol matching: {tiers}[/dim]"
 
     focus = impact_focus(rep)
     if focus is not None:
@@ -560,6 +563,8 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             f"\nImpact focus: [bold]{focus['paths']}[/bold] changed API path(s); on them "
             f"{focus['static_targets']} static, {focus['confirmed']} confirmed, "
             f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only"
+            + (f"; coverage {focus['coverage_pct']}%" if focus.get("coverage_pct") is not None
+               else "")
         )
     if rep.probed:
         head += (f"\nSandbox-probed: [bold]{rep.probed}[/bold] symbol(s) re-invoked under target — "
@@ -624,10 +629,12 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         t = Table(title=f"BLIND — static contacts no trace exercised ({_count(blind)})",
                   header_style="yellow")
         t.add_column("Dependency symbol", style="cyan", overflow="fold", ratio=2)
+        t.add_column("Why", overflow="fold", ratio=1)
         t.add_column("Called from (your code)", overflow="fold", ratio=2)
         t.add_column("File", style="dim", overflow="fold", ratio=1)
         for s in blind:
-            t.add_row(s.target, ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
+            t.add_row(s.target, _BLIND_WHY.get(s.blind_reason or "", "—"),
+                      ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
         t.caption = "candidates for the sandbox (probe in isolation under old vs new)"
         console.print(t)
 
