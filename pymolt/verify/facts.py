@@ -163,6 +163,8 @@ class DiffContext:
     type_relocations: dict[str, str] | None = None
     # Symbols a plan's predicted risks name: an environment difference never softens them.
     predicted_symbols: set[str] | None = None
+    # What the report should say about how the context was built (a ledger left unused).
+    notes: list[str] = field(default_factory=list)
 
 
 class DiffProfile(StrEnum):

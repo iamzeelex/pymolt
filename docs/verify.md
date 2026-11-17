@@ -138,7 +138,8 @@ then compares the two sides.
 A line diff of the source each capture stored decides who edited a call's line:
 - **unedited**: compared strictly, as above;
 - **edited by `pymolt apply`** (its ledger records each edit): strict. The plan claimed a drop-in
-  replacement, so any different outcome fails;
+  replacement, so any different outcome fails. The ledger counts only while the apply run it
+  records is in effect: after a rollback that restored files, edits are judged by hand;
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
   symbol from the plan, or by a one-statement edit. An equal outcome is REWRITTEN equal. A
   different value is a review item, which makes the verdict inconclusive. A new raise fails. A
