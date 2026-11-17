@@ -198,6 +198,10 @@ class Outcome(BaseModel):
     kind: Literal["return", "raise"]
     value: Any = None
     count: int = 1
+    # When the calls that produced this outcome ran (epoch seconds), from the events' ts/dur;
+    # None for a facts-snapshot capture. Not part of the outcome's identity, never reported.
+    ts_min: float | None = Field(default=None, exclude=True)
+    ts_max: float | None = Field(default=None, exclude=True)
 
 
 class CallWarning(BaseModel):
@@ -1239,6 +1243,10 @@ class _Acc:
     ts_max: float | None = None
 
 
+_MAX_CALL_SECONDS = 3600.0
+_EPOCH_MIN = 1e9  # 2001-09-09: a number below it, at any scale, is no clock reading
+
+
 def _call_time(raw: Mapping[str, Any]) -> tuple[float, float] | None:
     """(start, end) of one event's call from its ``ts`` (written at return) and ``dur``."""
     ts, dur = raw.get("ts"), raw.get("dur")
@@ -1246,8 +1254,9 @@ def _call_time(raw: Mapping[str, Any]) -> tuple[float, float] | None:
         return None
     try:
         end = float(ts)
+        # a duration beyond an hour is a broken start (a frame the backend lost), not a call
         start = end - float(dur) if isinstance(dur, int | float) and not isinstance(
-            dur, bool) and dur >= 0 else end
+            dur, bool) and 0 <= dur <= _MAX_CALL_SECONDS else end
     except (OverflowError, ValueError):
         return None
     return start, end
@@ -1329,14 +1338,17 @@ def fold_facts(
             a.defaulted.add(ev["defaulted"])
         okey = _canon([ev["kind"], ev["value"]])
         slot = a.outcomes.get(okey)
+        when = _call_time(raw)
         if slot is None:
             okey = pool.setdefault("o" + okey, okey)
-            a.outcomes[okey] = [ev["kind"], pool.setdefault("w" + okey, ev["value"]),
-                                ev["count"]]
+            slot = a.outcomes[okey] = [ev["kind"], pool.setdefault("w" + okey, ev["value"]),
+                                       ev["count"], None, None]
         else:
             slot[2] += ev["count"]
+        if when is not None:
+            slot[3] = when[0] if slot[3] is None else min(slot[3], when[0])
+            slot[4] = when[1] if slot[4] is None else max(slot[4], when[1])
         a.count += ev["count"]
-        when = _call_time(raw)
         if when is not None:
             a.ts_min = when[0] if a.ts_min is None else min(a.ts_min, when[0])
             a.ts_max = when[1] if a.ts_max is None else max(a.ts_max, when[1])
@@ -1728,8 +1740,9 @@ def _fact_from_acc(a: _Acc) -> Fact:
         file=a.file, func=a.func,
         line=a.line, lines=[a.line] if a.line is not None else [], text=a.text, input=a.input,
         defaulted=None if a.defaulted is None else [list(d) for d in sorted(a.defaulted)],
-        outcomes=[Outcome.model_construct(_OUTCOME_FIELDS_SET, kind=k, value=v, count=c)
-                  for _, (k, v, c) in outcomes],
+        outcomes=[Outcome.model_construct(_OUTCOME_FIELDS_SET, kind=k, value=v, count=c,
+                                          ts_min=t0, ts_max=t1)
+                  for _, (k, v, c, t0, t1) in outcomes],
         count=a.count, where=a.where, first_seen=a.first_seen,
         warnings=_call_warnings(a.warnings), binding=a.binding, attr_of=a.attr_of,
         ts_min=a.ts_min, ts_max=a.ts_max,
@@ -1767,8 +1780,10 @@ def _merge_facts(facts: list[Fact]) -> Fact:
             k = _canon([o.kind, o.value])
             if k in outcomes:
                 outcomes[k][2] += o.count
+                outcomes[k][3] = _tmin(outcomes[k][3], o.ts_min)
+                outcomes[k][4] = _tmax(outcomes[k][4], o.ts_max)
             else:
-                outcomes[k] = [o.kind, o.value, o.count]
+                outcomes[k] = [o.kind, o.value, o.count, o.ts_min, o.ts_max]
         if f.warnings:
             merge_warnings(warns, [w.model_dump() for w in f.warnings])
     merged = head.model_copy(update={
@@ -1776,8 +1791,8 @@ def _merge_facts(facts: list[Fact]) -> Fact:
         "symq": next((f.symq for f in ordered if f.symq), None),
         "lines": sorted(lines),
         "defaulted": None if defaulted is None else [list(d) for d in sorted(defaulted)],
-        "outcomes": [Outcome(kind=k, value=v, count=c)
-                     for _, (k, v, c) in sorted(outcomes.items())],
+        "outcomes": [Outcome(kind=k, value=v, count=c, ts_min=t0, ts_max=t1)
+                     for _, (k, v, c, t0, t1) in sorted(outcomes.items())],
         "count": sum(f.count for f in ordered),
         "warnings": _call_warnings(warns),
         "ts_min": min((f.ts_min for f in ordered if f.ts_min is not None), default=None),
@@ -1787,6 +1802,14 @@ def _merge_facts(facts: list[Fact]) -> Fact:
     if masks:
         _set_masks(merged, masks, _raw_of(head))
     return merged
+
+
+def _tmin(a: float | None, b: float | None) -> float | None:
+    return b if a is None else a if b is None else min(a, b)
+
+
+def _tmax(a: float | None, b: float | None) -> float | None:
+    return b if a is None else a if b is None else max(a, b)
 
 
 def _masks_of(f: Fact) -> frozenset:
@@ -3079,7 +3102,8 @@ _ISO_CLOCK = re.compile(
     r"(Z|[+-]\d{2}:?\d{2})?(?!\d)")
 _EPOCH_CLOCK = re.compile(r"(?<![\d.])(\d{10}|\d{13}|\d{16}|\d{19})(\.\d+)?(?!\d)")
 _EPOCH_SCALES = {10: (1.0, "s"), 13: (1e3, "ms"), 16: (1e6, "us"), 19: (1e9, "ns")}
-_CLOCK_SLACK = 5.0  # seconds around a process's run window
+_CLOCK_SLACK = 5.0  # seconds around a call's own time
+_INPUT_WINDOW_MAX = 10.0  # an input clock value is masked only for a fact whose calls span this
 
 
 def source_kind(symbol: str) -> tuple[str, bool] | None:
@@ -3122,9 +3146,11 @@ def _token_placeholder(token: str) -> str:
     return f"⟨src:{alphabet}:{shape}⟩"
 
 
-def _walk_leaves(value: Any, fn: Callable[[Any], Any]) -> Any:
+def _walk_leaves(value: Any, fn: Callable[[Any], Any],
+                 bytes_fn: Callable[[str], str] | None = None) -> Any:
     """Rebuild ``value`` with ``fn`` applied to every scalar leaf (str, int, float), leaving
-    type names (``__opaque__``, ``__object__``, ...) and booleans/None untouched."""
+    type names (``__opaque__``, ``__object__``, ...) and booleans/None untouched. ``bytes_fn``,
+    when given, rewrites the hex of a ``__bytes__`` rendering instead of ``fn``."""
     if isinstance(value, str):
         return fn(value)
     if isinstance(value, bool) or value is None:
@@ -3132,9 +3158,12 @@ def _walk_leaves(value: Any, fn: Callable[[Any], Any]) -> Any:
     if isinstance(value, int | float):
         return fn(value)
     if isinstance(value, list):
-        return [_walk_leaves(x, fn) for x in value]
+        return [_walk_leaves(x, fn, bytes_fn) for x in value]
     if isinstance(value, dict):
-        return {k: (v if k in _TAG_NAME_KEYS else _walk_leaves(v, fn)) for k, v in value.items()}
+        if bytes_fn is not None and isinstance(value.get("__bytes__"), str):
+            return {**value, "__bytes__": bytes_fn(value["__bytes__"])}
+        return {k: (v if k in _TAG_NAME_KEYS else _walk_leaves(v, fn, bytes_fn))
+                for k, v in value.items()}
     return value
 
 
@@ -3193,6 +3222,8 @@ class _Masker:
     # reading of *that call's* clock within a few seconds of it.
     window: tuple[float, float] | None = None
     untimed: int = 0  # facts with no call time: their clock readings are not masked
+    # the run values a source or clock mask actually replaced: the seeds of propagation
+    replaced: set = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self._roots = re.compile("|".join(
@@ -3201,15 +3232,43 @@ class _Masker:
         self._python = re.compile(rf"(?<![\d.])(?:{'|'.join(pys)})(?![\d.])") if pys else None
         self._long: dict[str, list[str]] = defaultdict(list)    # 8-char prefix -> tokens
         self._short: dict[str, str] = {}
+        # a token's UTF-8 hex inside a ``__bytes__`` rendering (msgpack bytes carrying an id):
+        # 16-hex-digit prefix -> (hex, token)
+        self._hex: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for tok in sorted(self.tokens, key=len, reverse=True):
             if len(tok) >= 8:
                 self._long[tok[:8]].append(tok)
+                h = tok.encode("utf-8", errors="replace").hex()
+                self._hex[h[:16]].append((h, tok))
             else:
                 self._short[tok] = self.tokens[tok]
 
     def _note(self, mechanism: str, example: str) -> None:
         self.counts[mechanism] += 1
         self.examples.setdefault(mechanism, example)
+        if mechanism in ("source", "clock"):
+            self.replaced.add(example)
+
+    def bytes_hex(self, h: str) -> str:
+        """Source tokens hex-encoded inside a ``__bytes__`` rendering, at byte boundaries."""
+        if not self._hex:
+            return h
+        out: list[str] = []
+        i = last = 0
+        while i + 16 <= len(h):
+            hit = next((x for x in self._hex.get(h[i:i + 16], ()) if h.startswith(x[0], i)),
+                       None)
+            if hit is None:
+                i += 2
+                continue
+            out.append(h[last:i])
+            out.append(self.tokens[hit[1]].replace("⟨src:", "⟨src:hex:"))
+            self._note("source", hit[1])
+            i = last = i + len(hit[0])
+        if not out:
+            return h
+        out.append(h[last:])
+        return "".join(out)
 
     def leaf(self, v: Any) -> Any:
         if isinstance(v, str):
@@ -3280,7 +3339,7 @@ class _Masker:
         if not t > 0 or t == float("inf"):
             return None
         for scale, unit in ((1.0, "s"), (1e3, "ms"), (1e6, "us"), (1e9, "ns")):
-            if self._in_window(t / scale):
+            if t / scale >= _EPOCH_MIN and self._in_window(t / scale):
                 return f"⟨clock:{kind}:epoch-{unit}⟩"
         return None
 
@@ -3351,25 +3410,33 @@ def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
     for f in facts:
         before = Counter(masker.counts)
         if f.ts_min is None or f.ts_max is None:
-            masker.window = None
             masker.untimed += 1
-        else:
-            masker.window = (f.ts_min, f.ts_max)
-        inp = _walk_leaves(f.input, masker.leaf)
+        # An input clock value is a reading of this call's clock only when all its calls ran
+        # within a few seconds of each other (a fact repeated across a suite is not).
+        masker.window = (f.ts_min, f.ts_max) if f.ts_min is not None and f.ts_max is not None \
+            and f.ts_max - f.ts_min <= _INPUT_WINDOW_MAX else None
+        inp = _walk_leaves(f.input, masker.leaf, masker.bytes_hex)
         merged: dict[str, list] = {}
         for o in f.outcomes:
-            v = _walk_leaves(o.value, masker.leaf) if o.kind == "return" else o.value
+            # an output clock value: within seconds of the calls that produced THIS outcome
+            masker.window = (o.ts_min, o.ts_max) if o.ts_min is not None \
+                and o.ts_max is not None else None
+            v = _walk_leaves(o.value, masker.leaf, masker.bytes_hex) if o.kind == "return" \
+                else o.value
             k = _canon([o.kind, v])
             if k in merged:
                 merged[k][2] += o.count
+                merged[k][3] = _tmin(merged[k][3], o.ts_min)
+                merged[k][4] = _tmax(merged[k][4], o.ts_max)
             else:
-                merged[k] = [o.kind, v, o.count]
+                merged[k] = [o.kind, v, o.count, o.ts_min, o.ts_max]
         mechs = frozenset(m for m, n in masker.counts.items() if n > before.get(m, 0))
         if not mechs:
             out.append(f)
             continue
         c = f.model_copy(update={"input": inp, "outcomes": [
-            Outcome(kind=k, value=v, count=n) for k, v, n in merged.values()]})
+            Outcome(kind=k, value=v, count=n, ts_min=t0, ts_max=t1)
+            for k, v, n, t0, t1 in merged.values()]})
         _set_masks(c, mechs, f)
         out.append(c)
     return out
@@ -3713,15 +3780,15 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
 
     # 8 Volatile sites: an unedited (symbol, site) called on both sides whose leftovers pair
     # neither by key nor one-to-one (every call carried a fresh input: a port, an id, a timing)
-    # is compared as one group, by type and outcome kind. Not on a sampled capture (there the
+    # is judged as a site: kinds and types over the whole site, members paired by their input
+    # with its volatile values masked, the rest strict. Not on a sampled capture (there the
     # tallies decide presence).
-    volatile_sites = evidenced_sites = 0
+    gstats = _GroupStats()
     if not sampled:
-        groups, old_left, new_left, evidenced_sites = _group_volatile(
+        groups, old_left, new_left, gstats = _group_volatile(
             old_left, new_left, site, old_facts, new_facts,
             (bool(old.dropped_events), bool(new.dropped_events)))
         entries.extend(groups)
-        volatile_sites = len(groups)
 
     _mark_unobservable(old_left, new)
     _mark_vanished(old_left, new_facts, prov, ov)
@@ -3736,7 +3803,8 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
-    variation = _run_variation(entries)
+    _review_masked_input(entries)
+    variation = _run_variation(gstats)
     gated = _gate_unmeasured(entries, variation) if variation else 0
     entries.sort(key=_entry_sort_key)
     warnings = _warnings(old, new)
@@ -3748,7 +3816,8 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         warnings.append(
             f"run-variation: {variation}; no replicate measured run-to-run noise, so "
             f"{gated} value difference(s) at calls whose input is not fully observed, or at "
-            "unpaired sites, are review items, not failures")
+            "unpaired sites, are review items, not failures (capture a baseline replicate to "
+            "settle)")
     for side, masker in (("old", _noise_state().old), ("new", _noise_state().new)):
         if masker is not None and masker.untimed:
             warnings.append(
@@ -3763,17 +3832,11 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         warnings.append(
             f"backend-only:{backend_only}: compiled calls only one side's backend can observe "
             f"({_families(old)} vs {_families(new)}) are reported, not compared")
-    if evidenced_sites:
-        grouped = sum(e.old_count + e.new_count for e in entries
-                      if (e.explained or "").startswith("volatile-site"))
+    if gstats.full or gstats.partial or gstats.unpaired:
         warnings.append(
-            f"volatile-sites:{evidenced_sites}: call sites whose inputs differ only where they "
-            f"are volatile ({grouped} calls) are compared by type and outcome kind as a group; "
-            "a value-only change there is not visible")
-    if volatile_sites > evidenced_sites:
-        warnings.append(
-            f"unpaired-sites:{volatile_sites - evidenced_sites}: call sites whose inputs differ "
-            "between the runs with no visible source of the variation; each is one entry")
+            f"volatile-sites: {gstats.full} fully paired by their input with volatile values "
+            f"masked, {gstats.partial} partly, {gstats.unpaired} not at all; calls that pair no "
+            "other way are one entry per site and kind of result")
     if c_level_excluded:
         warnings.append(
             f"c-level-excluded:{c_level_excluded}: C-level raise facts were not compared — "
@@ -4155,18 +4218,23 @@ def _pair_groups(
 def _group_volatile(
     old_left: list[_V], new_left: list[_V], site_fn: Callable[[_V], tuple],
     old_facts: list[Fact], new_facts: list[Fact], dropped: tuple[bool, bool] = (False, False),
-) -> tuple[list[FactEntry], list[_V], list[_V], int]:
+) -> tuple[list[FactEntry], list[_V], list[_V], "_GroupStats"]:
     """Leftovers at one unedited ``(symbol, site)`` with facts on both sides that no pass could
-    pair (the groups are not one-to-one), with the same input signatures: ONE entry per site,
-    its members collapsed per side the way ``_collapse_widened`` does (inputs widened, returns
-    reduced to their type, raises kept) and compared at type level. A raise or return type on
-    one side only is CHANGED; proportions are not compared. Members are counted, never dropped.
+    pair (not one-to-one), with the same input signatures, are judged together.
 
-    A group is *evidenced* when what keeps its inputs from pairing is volatile (see
-    ``_group_evidence``): then it is the type-level comparison above. Otherwise its inputs
-    simply differ on an unedited line (an untraced upstream change gives the same picture as
-    noise): the entry is ``unpaired-site``, CHANGED, strict unless the unmeasured-noise gate
-    makes it a review item. Returns (entries, old_left, new_left, evidenced count)."""
+    * Their outcome kinds and types are checked over the whole site (inputs widened, returns
+      reduced to their type): a new raise or return type is one CHANGED entry and fails.
+    * Each member's *masked key* is its input with its volatile leaves replaced (see
+      ``_group_evidence``). Members whose masked key occurs on both sides pair by that key and
+      compare their outcome sets by value once masked: equal -> one EQUAL entry at MASKED;
+      different -> one review entry (inputs equal only once volatile values were masked, so
+      the output may derive from them: only a replicate tells).
+    * Members whose masked key occurs on one side only are not explained by volatility: one
+      ``unpaired-site`` entry (strict; a review item when the unmeasured-noise gate is on). On
+      a side that dropped events, a member whose key would be shared once a leaf shaped like
+      the site's volatile values is taken as volatile may have lost its producer: one
+      UNCOMPARABLE ``possibly-dropped-producer`` entry instead.
+    A site whose members all pair by masked key is *fully evidenced*."""
     go: dict[tuple, list[_V]] = defaultdict(list)
     gn: dict[tuple, list[_V]] = defaultdict(list)
     for v in old_left:
@@ -4183,50 +4251,55 @@ def _group_volatile(
         if {_signature(v.fact) for v in olds} != {_signature(v.fact) for v in news}:
             continue  # the input signature changed: structure, not noise; stays strict
         groups.append((olds, news))
-    basis = _group_evidence(groups, old_facts, new_facts, dropped)
-    entries = [_group_entry(olds, news, basis.get(i)) for i, (olds, news) in enumerate(groups)]
+    judged = _group_evidence(groups, old_facts, new_facts)
+    stats = _GroupStats()
+    entries: list[FactEntry] = []
+    for (olds, news), j in zip(groups, judged, strict=True):
+        entries.extend(_group_entries(olds, news, j, dropped, stats))
     grouped = {id(v) for olds, news in groups for v in (*olds, *news)}
     return (entries, [v for v in old_left if id(v) not in grouped],
-            [v for v in new_left if id(v) not in grouped], len(basis))
+            [v for v in new_left if id(v) not in grouped], stats)
 
 
-_FIXPOINT_ROUNDS = 4  # propagation hops: source -> group -> group -> group (then stop)
-_PROPAGATED_MIN = 8   # a propagated value is matched inside a leaf only from 8 characters
+@dataclass
+class _GroupStats:
+    full: int = 0        # every member paired by masked key
+    partial: int = 0     # some did
+    unpaired: int = 0    # none did
+    triggers: list[str] = field(default_factory=list)  # full on source/clock masks, both sides
 
 
-def _output_values(f: Fact) -> set[str]:
-    """String leaves (8+ characters) of a fact's recorded return values: what a volatile fact
-    hands on to the next call (msgpack.packb's bytes are zmq send's input)."""
-    out: set[str] = set()
-
-    def leaf(v: Any) -> Any:
-        if isinstance(v, str) and len(v) >= _PROPAGATED_MIN:
-            out.add(v)
-        return v
-
-    # the merged (canonical) outcomes hold every member's values; the recorded head's too
-    for o in (*f.outcomes, *_raw_of(f).outcomes):
-        if o.kind == "return":
-            _walk_leaves(o.value, leaf)
-    return out
+@dataclass
+class _Judged:
+    keys: list[list[str]]                   # per side, per member: its masked key
+    volatile: list[list[dict]]              # per side, per member: volatile leaf paths
+    mask_backed: bool = False               # every member on both sides has a source/clock mask
 
 
-def _volatile_leaves(v: _V, values: set[str], index: dict[str, list[str]]) -> dict:
-    """The member's input leaf paths that are volatile: masked (the canonical leaf is not the
-    recorded one) or holding a propagated volatile value (equal, or containing one of 8+
-    characters)."""
+_FIXPOINT_ROUNDS = 4  # propagation hops: seed -> group -> group -> group (then stop)
+
+
+def _volatile_leaves(v: _V, seeds: set[str], seed_index: dict[str, list[str]],
+                     whole: set[str]) -> dict[tuple, str]:
+    """The member's volatile input leaves, path -> why: ``mask`` (a source or clock mask
+    replaced part of it), ``environment`` (only an environment mask did), ``seed`` (it holds a
+    run value a mask replaced elsewhere on this side: equal, or containing one of 8+
+    characters), ``propagated`` (it equals, as a whole, an output of a fully evidenced
+    group's member)."""
     canon, raw = _leaf_map(v.fact.input), _leaf_map(_raw_of(v.fact).input)
-    out = {}
+    out: dict[tuple, str] = {}
     for path, c in canon.items():
         r = raw.get(path, c)
-        hit = _canon(c) != _canon(r)
-        if not hit and isinstance(r, str) and values:
-            hit = r in values or any(
-                any(r.startswith(tok, m.start()) for tok in index.get(r[m.start():m.start() + 8],
-                                                                        ()))
-                for m in _ALNUM.finditer(r))
-        if hit:
-            out[path] = True
+        if _canon(c) != _canon(r):
+            out[path] = "mask" if isinstance(c, str) and ("⟨src:" in c or "⟨clock:" in c) \
+                else "environment"
+        elif isinstance(r, str) and (r in seeds or any(
+                any(r.startswith(tok, m.start())
+                    for tok in seed_index.get(r[m.start():m.start() + 8], ()))
+                for m in _ALNUM.finditer(r))):
+            out[path] = "seed"
+        elif _canon(r) in whole:
+            out[path] = "propagated"
     return out
 
 
@@ -4237,71 +4310,250 @@ def _vmask_key(v: _V, volatile: dict) -> str:
 
 
 def _group_evidence(groups: list[tuple[list[_V], list[_V]]], old_facts: list[Fact],
-                    new_facts: list[Fact],
-                    dropped: tuple[bool, bool] = (False, False)) -> dict[int, str]:
-    """Which groups are evidenced, and by what. Per side, the volatile values start as the
-    outputs of facts a source or clock mask touched and grow with the outputs of every newly
-    evidenced group's members, for at most ``_FIXPOINT_ROUNDS`` rounds (a round that evidences
-    nothing stops early). A group is evidenced when, its volatile input leaves replaced by one
-    placeholder, (1) some member's input occurs on both sides and (2) every member whose input
-    does not has at least one volatile leaf. Without any volatile leaf, nothing explains why
-    its inputs differ. On a side that dropped events the producer of a member's input may be
-    one of the lost events, so there (2) is relaxed to "some member has a volatile leaf"; the
-    side that lost nothing must still meet it in full."""
-    values = [set(), set()]
-    for side, facts in enumerate((old_facts, new_facts)):
-        for f in facts:
-            if _masks_of(f) & {"source", "clock"}:  # its input or output held a run's value
-                values[side] |= _output_values(f)
-    basis: dict[int, str] = {}
+                    new_facts: list[Fact]) -> list[_Judged]:
+    """Each group's masked keys, after propagating volatility to a small fixpoint.
+
+    Seeds, per side: the run values a source or clock mask actually replaced (matched inside a
+    leaf too, from 8 characters). A group whose members ALL pair by masked key is fully
+    evidenced, and its members' outputs then propagate as whole values (matched by equality
+    only, never inside a leaf: ``application/json`` never becomes volatile). At most
+    ``_FIXPOINT_ROUNDS`` rounds; a round that fully evidences nothing stops early."""
+    noise = _noise_state()
+    seeds = [set(m.replaced) if m is not None else set() for m in (noise.old, noise.new)]
+    seed_index: list[dict[str, list[str]]] = [defaultdict(list), defaultdict(list)]
+    for side in (0, 1):
+        for tok in seeds[side]:
+            if len(tok) >= 8:
+                seed_index[side][tok[:8]].append(tok)
+    whole: list[set[str]] = [set(), set()]
+    judged: list[_Judged | None] = [None] * len(groups)
+    full: set[int] = set()
     for _round in range(_FIXPOINT_ROUNDS):
-        index = [defaultdict(list), defaultdict(list)]
-        for side in (0, 1):
-            for tok in values[side]:
-                index[side][tok[:8]].append(tok)
         grew = False
         for i, (olds, news) in enumerate(groups):
-            if i in basis:
+            if i in full:
                 continue
-            sides = []
+            keys, vols = [], []
             for side, members in ((0, olds), (1, news)):
-                vol = [_volatile_leaves(v, values[side], index[side]) for v in members]
-                keys = [_vmask_key(v, vl) for v, vl in zip(members, vol, strict=True)]
-                sides.append((vol, keys))
-            shared = set(sides[0][1]) & set(sides[1][1])
-            if not shared:
+                vl = [_volatile_leaves(v, seeds[side], seed_index[side], whole[side])
+                      for v in members]
+                vols.append(vl)
+                keys.append([_vmask_key(v, x) for v, x in zip(members, vl, strict=True)])
+            j = judged[i] = _Judged(keys=keys, volatile=vols)
+            if set(keys[0]) != set(keys[1]):
                 continue
-            if any(not vl and k not in shared
-                   for side, (vol, keys) in enumerate(sides) if not dropped[side]
-                   for vl, k in zip(vol, keys, strict=True)):
-                continue
-            if any(dropped[side] and not any(vol) for side, (vol, _keys) in enumerate(sides)):
-                continue
-            masked = any(_masks_of(v.fact) for v in (*olds, *news))
-            basis[i] = "masks" if masked and _round == 0 else "propagated volatility"
+            full.add(i)
+            j.mask_backed = all(any(why in ("mask", "seed") for why in x.values())
+                                for side_vols in vols for x in side_vols)
             for side, members in ((0, olds), (1, news)):
                 for v in members:
-                    values[side] |= _output_values(v.fact)
+                    for o in (*v.fact.outcomes, *_raw_of(v.fact).outcomes):
+                        if o.kind == "return":
+                            whole[side].update(_whole_values(o.value))
             grew = True
         if not grew:
             break
-    return basis
+    return [j for j in judged if j is not None]
+
+
+_SCALAR_TAGS = ("__bytes__", "__uuid__", "__datetime__", "__decimal__")
+
+
+def _whole_values(value: Any) -> set[str]:
+    """An output as it can reach another call's input leaf, whole: a scalar of 8+ characters
+    (so ``ok`` or ``1`` never propagate), or the scalar inside a one-scalar rendering
+    (``{"__bytes__": hex}`` is seen as the hex leaf ``data.__bytes__``)."""
+    if isinstance(value, dict) and len(value) == 1:
+        tag, inner = next(iter(value.items()))
+        if tag in _SCALAR_TAGS:
+            value = inner
+    if isinstance(value, str) and len(value) >= 8:
+        return {_canon(value)}
+    if isinstance(value, int | float) and not isinstance(value, bool) and len(repr(value)) >= 8:
+        return {_canon(value)}
+    return set()
+
+
+def _shape(v: Any) -> str:
+    return _token_placeholder(v) if isinstance(v, str) else type(v).__name__
+
+
+def _producer_lost(member: int, side: int, j: _Judged, members: list[_V],
+                   other_keys: set[str]) -> bool:
+    """On a side that dropped events: would this member's key be shared if its leaves shaped
+    like the site's volatile values (at the same paths) were volatile? Then the event that
+    made them volatile may be among the lost ones."""
+    shapes: dict[tuple, set[str]] = defaultdict(set)
+    for k, (v, vol) in enumerate(zip(members, j.volatile[side], strict=True)):
+        if k == member:
+            continue
+        raw = _leaf_map(_raw_of(v.fact).input)
+        for path in vol:
+            if path in raw:
+                shapes[path].add(_shape(raw[path]))
+    mine = members[member]
+    raw = _leaf_map(_raw_of(mine.fact).input)
+    extra = {p for p, x in raw.items() if p in shapes and p not in j.volatile[side][member]
+             and _shape(x) in shapes[p]}
+    if not extra:
+        return False
+    vol = {**j.volatile[side][member], **{p: "shape" for p in extra}}
+    return _vmask_key(mine, vol) in other_keys
+
+
+def _group_entries(olds: list[_V], news: list[_V], j: _Judged, dropped: tuple[bool, bool],
+                   stats: _GroupStats) -> list[FactEntry]:
+    sides = (olds, news)
+    of = _merge_facts([_widened_member(v.fact) for v in olds])
+    nf = _merge_facts([_widened_member(v.fact) for v in news])
+    types = compare_outcomes(of.outcomes, nf.outcomes, DiffProfile.SHAPE)
+    shared = set(j.keys[0]) & set(j.keys[1])
+    n_shared = [sum(1 for k in j.keys[s] if k in shared) for s in (0, 1)]
+    if not shared:
+        stats.unpaired += 1
+    elif n_shared == [len(olds), len(news)]:
+        stats.full += 1
+        if j.mask_backed:
+            stats.triggers.append(f"{of.symbol} @ {_site_ref(olds[0].fact).label()}")
+    else:
+        stats.partial += 1
+    label = f"{len(olds)}/{len(news)}"
+    if types.comparison is not Comparison.EQUAL:
+        # a new raise or return type anywhere at the site: one failing entry, whatever the keys
+        category = FactCategory.UNCOMPARABLE \
+            if types.comparison is Comparison.UNCOMPARABLE else FactCategory.CHANGED
+        tag = "volatile-site" if shared else "unpaired-site"
+        return [_site_entry(olds, news, category, types.comparison, ComparisonLevel.TYPE,
+                            [f"{tag}:{label}", "type-changed", *types.notes],
+                            f"{tag}: {label} facts; an outcome kind or type differs over the "
+                            "site", types)]
+    out: list[FactEntry] = []
+    if shared:
+        equal_m, diff_m, first_diff, first_equal = [[], []], [[], []], None, None
+        for key in sorted(shared):
+            ms = [[v for v, k in zip(sides[s], j.keys[s], strict=True) if k == key]
+                  for s in (0, 1)]
+            oo = _merge_facts([v.fact for v in ms[0]]).outcomes
+            no = _merge_facts([v.fact for v in ms[1]]).outcomes
+            # by value: the same set of (masked) outcomes on both sides; a set with several
+            # values does not fall back to type level here
+            cmp = compare_outcomes(oo, no, DiffProfile.EXACT)
+            same = {_canon([o.kind, o.value]) for o in oo} == {_canon([o.kind, o.value])
+                                                                for o in no}
+            if not same and cmp.comparison is Comparison.EQUAL and (len(oo) > 1 or len(no) > 1):
+                cmp = OutcomeComparison(Comparison.CHANGED, ComparisonLevel.MASKED,
+                                        list(cmp.notes))
+            bucket = equal_m if cmp.comparison is Comparison.EQUAL else diff_m
+            for s in (0, 1):
+                bucket[s].extend(ms[s])
+            if bucket is diff_m and first_diff is None:
+                first_diff = (ms, oo, no, cmp)
+            if bucket is equal_m and first_equal is None:
+                first_equal = (ms[0][0], ms[1][0], oo, no)
+        if equal_m[0]:
+            out.append(_site_entry(
+                equal_m[0], equal_m[1], FactCategory.EQUAL, Comparison.EQUAL,
+                ComparisonLevel.MASKED, [f"volatile-site:{len(equal_m[0])}/{len(equal_m[1])}"],
+                f"volatile-site: {len(equal_m[0])} old / {len(equal_m[1])} new facts paired by "
+                "their input with its volatile values masked; outcomes equal once masked",
+                types, sample=first_equal))
+        if diff_m[0]:
+            ms, oo, no, cmp = first_diff
+            e = _site_entry(
+                diff_m[0], diff_m[1], FactCategory.CHANGED, Comparison.CHANGED,
+                ComparisonLevel.MASKED,
+                [f"volatile-site:{len(diff_m[0])}/{len(diff_m[1])}",
+                 "matched-modulo-masked-input"],
+                f"masked-input: {len(diff_m[0])} old / {len(diff_m[1])} new facts paired by "
+                "their input with its volatile values masked; outcomes differ", types,
+                sample=(ms[0][0], ms[1][0], oo, no))
+            e.review = _MASKED_INPUT_REVIEW
+            out.append(e)
+    lost: list[list[_V]] = [[], []]
+    strict: list[list[_V]] = [[], []]
+    for s in (0, 1):
+        other = set(j.keys[1 - s])
+        for k, (v, key) in enumerate(zip(sides[s], j.keys[s], strict=True)):
+            if key in shared:
+                continue
+            if dropped[s] and _producer_lost(k, s, j, sides[s], other):
+                lost[s].append(v)
+            else:
+                strict[s].append(v)
+    for s, name in ((0, "old"), (1, "new")):
+        if lost[s]:
+            e = _site_entry(lost[0] if s == 0 else [], lost[1] if s == 1 else [],
+                            FactCategory.UNCOMPARABLE, Comparison.MISSING, None,
+                            [f"possibly-dropped-producer:{name}"],
+                            f"possibly-dropped: {len(lost[s])} {name} fact(s) whose input "
+                            "would pair if a value shaped like this site's volatile values "
+                            f"were one; the {name} capture dropped events", types)
+            out.append(e)
+    if strict[0] or strict[1]:
+        e = _site_entry(strict[0], strict[1], FactCategory.CHANGED, Comparison.CHANGED,
+                        ComparisonLevel.TYPE,
+                        [f"unpaired-site:{len(strict[0])}/{len(strict[1])}", "types-equal"],
+                        f"unpaired-site: {len(strict[0])} old / {len(strict[1])} new facts "
+                        "whose inputs differ with no visible source of the variation", types,
+                        sample=(strict[0][0] if strict[0] else None,
+                                strict[1][0] if strict[1] else None, None, None))
+        out.append(e)
+    return out
+
+
+_MASKED_INPUT_REVIEW = (
+    "masked input: the value differs and the inputs matched only once volatile values were "
+    "masked, so the output may derive from them; capture a baseline replicate to settle")
+
+
+def _site_entry(olds: list[_V], news: list[_V], category: FactCategory,
+                comparison: Comparison, level: ComparisonLevel | None, notes: list[str],
+                explained: str, types: OutcomeComparison,
+                sample: tuple | None = None) -> FactEntry:
+    """One entry standing for several facts of one site (counted, never dropped)."""
+    members = olds or news
+    ref = members[0].fact
+    of = _merge_facts([_widened_member(v.fact) for v in olds]) if olds else None
+    nf = _merge_facts([_widened_member(v.fact) for v in news]) if news else None
+    so, sn, oo, no = sample or (None, None, None, None)
+    old_out = oo if oo is not None else (of.outcomes if of else None)
+    new_out = no if no is not None else (nf.outcomes if nf else None)
+    notes = list(notes)
+    return FactEntry.model_construct(
+        _ENTRY_FIELDS_SET, category=category, comparison=comparison, level=level,
+        symbol=ref.symbol, new_symbol=None,
+        old_site=_site_ref(olds[0].fact) if olds else None,
+        new_site=_site_ref(news[0].fact) if news else None,
+        input=so.fact.input if so is not None else (dict(_WIDENED) if olds else
+                                                    (sn.fact.input if sn else dict(_WIDENED))),
+        new_input=sn.fact.input if (sn is not None and so is not None) else None,
+        old=_cap(old_out, notes, "old") if old_out is not None else None,
+        new=_cap(new_out, notes, "new") if new_out is not None else None,
+        old_types=types.old_types or (_distinct_types(of.outcomes) if of else None),
+        new_types=types.new_types or (_distinct_types(nf.outcomes) if nf else None),
+        old_defaulted=of.defaulted if of else None, new_defaulted=nf.defaulted if nf else None,
+        drift=False, old_count=sum(v.fact.count for v in olds),
+        new_count=sum(v.fact.count for v in news), notes=notes,
+        old_where=of.where if of else None, new_where=nf.where if nf else None,
+        explained=explained,
+    )
 
 
 UNMEASURED_NOISE = "unmeasured noise"
 _HIDDEN_KEYS = ("__opaque__", "__cycle__", "__shape__", "__nondeterministic__")
 
 
-def _run_variation(entries: list[FactEntry]) -> str:
+def _run_variation(stats: "_GroupStats") -> str:
     """The unmeasured-noise gate's trigger, with its basis (empty when off): at least one
-    evidenced volatile site, i.e. a site whose inputs demonstrably vary between runs. A lone
-    clock reading, substitution or entropy value is not enough."""
-    sites = [e for e in entries if (e.explained or "").startswith("volatile-site")]
+    volatile site whose calls ALL pair by their input once source or clock values are masked,
+    on both sides. Not a site evidenced only by propagation or by the drop allowance, and not a
+    lone clock reading, substitution or entropy value."""
+    sites = stats.triggers
     if not sites:
         return ""
-    shown = ", ".join(f"{e.symbol} @ {e.site.label()}" for e in sites[:5])
+    shown = ", ".join(sites[:5])
     more = f" (+{len(sites) - 5})" if len(sites) > 5 else ""
-    return f"{len(sites)} evidenced volatile site(s): {shown}{more}"
+    return f"{len(sites)} volatile site(s) fully paired on masked run values: {shown}{more}"
 
 
 def _hidden(v: Any) -> bool:
@@ -4345,8 +4597,8 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
                 and e.category is FactCategory.CHANGED and not (e.review or e.noise):
             e.review = (f"{UNMEASURED_NOISE}: the calls at this site have inputs that differ "
                         f"between the runs and no visible source of it, in a workload whose "
-                        f"values vary between runs ({variation}); a second baseline capture "
-                        "measuring run-to-run noise would decide")
+                        f"values vary between runs ({variation}); capture a baseline replicate "
+                        "to settle")
             e.notes.append("unmeasured-noise")
             count += 1
             continue
@@ -4358,18 +4610,33 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
                 or not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
                               _outcome_types_match)):
             continue  # kind or structure changed: strict whatever the noise
-        masked = "matched-modulo-masked-input" in e.notes
-        if not (masked or input_hidden(e.input)):
+        if not input_hidden(e.input):
             continue
-        why = ("its input matched only once volatile values were masked" if masked
-               else "its input is not fully observed")
-        e.review = (f"{UNMEASURED_NOISE}: the value differs and {why}, in a workload whose "
-                    f"values vary between runs ({variation}); a second baseline capture "
-                    "measuring run-to-run noise would decide")
+        e.review = (f"{UNMEASURED_NOISE}: the value differs and its input is not fully "
+                    f"observed, in a workload whose values vary between runs ({variation}); "
+                    "capture a baseline replicate to settle")
         e.notes.append("unmeasured-noise")
-        e.explained = f"unmeasured-noise: {why}"
+        e.explained = "unmeasured-noise: its input is not fully observed"
         count += 1
     return count
+
+
+def _review_masked_input(entries: list[FactEntry]) -> None:
+    """A value difference at an unedited pair whose inputs were equal only once volatile values
+    (source, clock) were masked is not a controlled comparison: the output may derive from the
+    masked values (a timestamp packed into bytes, a session id hashed into a total). A review
+    item, whatever the gate; outcome-kind and type changes stay failures."""
+    for e in entries:
+        if ("matched-modulo-masked-input" not in e.notes or e.category is not FactCategory.CHANGED
+                or e.comparison is not Comparison.CHANGED or e.review or e.noise
+                or e.unverified or e.provenance not in (None, "unedited")
+                or _kinds(e.old) != _kinds(e.new)
+                or not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
+                              _outcome_types_match)):
+            continue
+        e.review = _MASKED_INPUT_REVIEW
+        if not (e.explained or "").startswith("masked-input"):
+            e.explained = "masked-input: the inputs matched only once volatile values were masked"
 
 
 _TRACER_SITE = "/pymolt_trace/"
@@ -4458,25 +4725,37 @@ def _c_call_visibility(fs: FactSet) -> str | None:
     return None
 
 
+BACKEND_UNOBSERVABLE = "backend-unobservable"
+
+
 def _soften_backend(entries: list[FactEntry], old: FactSet, new: FactSet) -> int:
     """A compiled call (``__c_call__``) seen on one side only, when that side's backend sees a
-    superset of the other's: the other side could not have observed it, so it is reported as
-    DRIFT, not DISAPPEARED/APPEARED. The reverse direction stays strict (the wider backend
-    would have seen it). Returns how many entries this explained."""
+    superset of the other's: the other side could not have observed it, so its absence there is
+    no evidence and the comparison is impossible, not failed. Returning only: DRIFT
+    (``backend``). Raising: UNCOMPARABLE (inconclusive), since a raise the other side could not
+    record is neither a change nor noise. Never FAIL. The reverse direction stays strict (the
+    wider backend would have seen it). Returns how many entries this explained."""
     o_vis, n_vis = _c_call_visibility(old), _c_call_visibility(new)
     if {o_vis, n_vis} != {"narrow", "wide"}:
         return 0
     wide_side = FactCategory.APPEARED if n_vis == "wide" else FactCategory.DISAPPEARED
     count = 0
+    wide = _families(new if n_vis == "wide" else old)
     for e in entries:
-        if e.category is wide_side and isinstance(e.input, dict) \
-                and e.input.get("__c_call__") is True \
-                and _returns_only(e.new if wide_side is FactCategory.APPEARED else e.old):
-            e.category, e.review, e.unverified = FactCategory.DRIFT, None, False
+        if e.category is not wide_side or not isinstance(e.input, dict) \
+                or e.input.get("__c_call__") is not True:
+            continue
+        e.review, e.unverified = None, False
+        if _returns_only(e.new if wide_side is FactCategory.APPEARED else e.old):
+            e.category = FactCategory.DRIFT
             e.notes.append("noise: compiled call observable by one backend only")
-            e.explained = (f"backend: only {_families(new if n_vis == 'wide' else old)} "
-                           "observes this compiled call")
-            count += 1
+            e.explained = f"backend: only {wide} observes this compiled call"
+        else:
+            e.category = FactCategory.UNCOMPARABLE
+            e.notes.append(BACKEND_UNOBSERVABLE)
+            e.explained = (f"backend: compiled call observable on one backend only ({wide}), and "
+                           "it raises here: the other side could not record it")
+        count += 1
     return count
 
 
@@ -4503,8 +4782,8 @@ def _soften_dropped(entries: list[FactEntry], old: FactSet, new: FactSet) -> Non
             side = "new"
         elif e.category is FactCategory.APPEARED and o_drop:
             side = "old"
-        elif e.category is FactCategory.CHANGED and (e.explained or "").startswith(
-                "volatile-site"):
+        elif e.category is FactCategory.CHANGED and "type-changed" in e.notes \
+                and (e.explained or "").startswith("volatile-site"):
             if n_drop and _only_missing(e.old, e.new):
                 side = "new"
             elif o_drop and _only_missing(e.new, e.old):
@@ -4544,47 +4823,6 @@ def _widened_member(f: Fact) -> Fact:
                      Outcome(kind="return", value=widen_value(o.value), count=o.count)
                      for o in f.outcomes],
     })
-
-
-def _group_entry(olds: list[_V], news: list[_V], basis: str | None) -> FactEntry:
-    """One entry for a whole group. Evidenced (``basis``): the type-level comparison decides.
-    Not evidenced: CHANGED whatever the types say (the inputs differ and nothing explains it),
-    with the first member of each side kept as the sample input."""
-    of = _merge_facts([_widened_member(v.fact) for v in olds])
-    nf = _merge_facts([_widened_member(v.fact) for v in news])
-    cmp = compare_outcomes(of.outcomes, nf.outcomes, DiffProfile.SHAPE)
-    if cmp.comparison is Comparison.UNCOMPARABLE:
-        category = FactCategory.UNCOMPARABLE
-    elif cmp.comparison is Comparison.EQUAL and basis:
-        category = FactCategory.EQUAL
-    else:
-        category = FactCategory.CHANGED
-    comparison = cmp.comparison if basis or category is FactCategory.UNCOMPARABLE \
-        else Comparison.CHANGED
-    tag = "volatile-site" if basis else "unpaired-site"
-    notes = [f"{tag}:{len(olds)}/{len(news)}", *cmp.notes]
-    if not basis and cmp.comparison is Comparison.EQUAL:
-        notes.append("types-equal")
-    explained = (f"volatile-site: {len(olds)} old / {len(news)} new facts whose inputs differ "
-                 f"only where they are volatile ({basis}); compared by type and outcome kind"
-                 if basis else
-                 f"unpaired-site: {len(olds)} old / {len(news)} new facts whose inputs differ, "
-                 "with no visible source of the variation")
-    return FactEntry.model_construct(
-        _ENTRY_FIELDS_SET, category=category, comparison=comparison,
-        level=ComparisonLevel.TYPE, symbol=of.symbol, new_symbol=None,
-        old_site=_site_ref(olds[0].fact), new_site=_site_ref(news[0].fact),
-        input=olds[0].fact.input if not basis else dict(_WIDENED),
-        new_input=news[0].fact.input if not basis else None,
-        old=_cap(of.outcomes, notes, "old"), new=_cap(nf.outcomes, notes, "new"),
-        old_types=cmp.old_types or _distinct_types(of.outcomes),
-        new_types=cmp.new_types or _distinct_types(nf.outcomes),
-        old_defaulted=of.defaulted, new_defaulted=nf.defaulted, drift=False,
-        old_count=of.count, new_count=nf.count, notes=notes,
-        old_where=of.where, new_where=nf.where,
-        old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
-        explained=explained,
-    )
 
 
 def _is_c_call(v: _V) -> bool:

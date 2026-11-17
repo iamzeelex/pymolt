@@ -328,3 +328,12 @@ def test_unmeasured_noise_reviews_have_their_own_reason():
     assert "1 edited call(s) need review: dep.c" in reasons
     assert any("dropped events" in r for r in reasons)
     assert not any("lost their outcome distribution" in r for r in reasons)
+
+
+def test_backend_unobservable_raises_have_their_own_reason():
+    diff = {"verdict": "inconclusive", "counts": {"uncomparable": 1}, "entries": [
+        {"category": "uncomparable", "comparison": "missing", "symbol": "lib.native.decode",
+         "notes": ["backend-unobservable"]}]}
+    reasons = _fact_diff_reasons(diff)
+    assert any("could not record them" in r for r in reasons)
+    assert not any("lost their outcome distribution" in r for r in reasons)
