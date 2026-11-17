@@ -50,10 +50,56 @@ def test_sequence_truncation_is_marked():
     assert len(out["__list__"]) == nz.MAX_SEQ
 
 
-def test_dicts_are_order_independent():
+def test_dicts_keep_sorted_pairs_and_record_insertion_order_beside_them():
     a = nz.normalize({"x": 1, "y": 2})
     b = nz.normalize({"y": 2, "x": 1})
-    assert a == b  # items are sorted by a stable key
+    assert a == {"__dict__": [["x", 1], ["y", 2]]}  # sorted order: the fact is unchanged
+    # items stay sorted by a stable key; the insertion order rides beside them
+    assert b == {"__dict__": [["x", 1], ["y", 2]], "__order__": [1, 0]}
+
+
+def test_dict_order_is_the_sorted_slot_of_each_inserted_key():
+    out = nz.normalize({"c": 3, "a": 1, "b": 2})
+    assert [p[0] for p in out["__dict__"]] == ["a", "b", "c"]
+    assert out["__order__"] == [2, 0, 1]
+    keys = [out["__dict__"][i][0] for i in out["__order__"]]
+    assert keys == ["c", "a", "b"]
+
+
+def test_dict_order_covers_dict_subclasses_and_nested_dicts():
+    import collections
+    od = collections.OrderedDict([("b", 1), ("a", 2)])
+    assert nz.normalize(od)["__order__"] == [1, 0]
+    dd = collections.defaultdict(int, [("z", 1), ("y", 2)])
+    assert nz.normalize(dd)["__order__"] == [1, 0]
+    nested = nz.normalize([{"q": 1, "p": 2}])
+    assert nested["__list__"][0]["__order__"] == [1, 0]
+
+
+def test_dict_order_only_for_two_to_sixty_four_keys():
+    assert "__order__" not in nz.normalize({"a": 1})
+    wide = dict((str(99 - i), i) for i in range(nz.MAX_ORDER_KEYS + 1))
+    assert "__order__" not in nz.normalize(wide)
+    edge = dict((str(99 - i), i) for i in range(nz.MAX_ORDER_KEYS))
+    assert len(nz.normalize(edge)["__order__"]) == nz.MAX_ORDER_KEYS
+
+
+def test_dict_order_can_be_turned_off_and_then_is_not_declared():
+    saved = nz.DICT_ORDER[0]
+    try:
+        nz.DICT_ORDER[0] = False
+        assert nz.normalize({"b": 1, "a": 2}) == {"__dict__": [["a", 2], ["b", 1]]}
+        assert nz.value_format() == {}
+        nz.DICT_ORDER[0] = True
+        assert nz.value_format() == {"dict_order": 1}
+    finally:
+        nz.DICT_ORDER[0] = saved
+
+
+def test_dict_order_is_never_recorded_under_shape_privacy():
+    assert nz.normalize({"b": 1, "a": 2}, _privacy="shape") == {
+        "__dict__": [[{"__shape__": "str"}, {"__shape__": "int"}],
+                     [{"__shape__": "str"}, {"__shape__": "int"}]]}
 
 
 def test_sets_are_normalized_and_sorted():

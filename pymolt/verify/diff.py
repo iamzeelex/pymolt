@@ -11,9 +11,18 @@ it may use the full host stack. It returns structured data only — formatting l
 import json
 from typing import Any
 
+from pymolt.verify.dict_order import ORDER_MARK, strip
 from pymolt.verify.models import BoundaryDiff
 
 _NONDET = {"__nondeterministic__": True}
+
+
+def _unordered(value: Any, line: str | None = None) -> Any:
+    """``value`` without dict key order (``__order__``): this comparator, like a capture that
+    predates order recording, compares content only (the fact diff judges order)."""
+    if line is not None and ORDER_MARK not in line:
+        return value
+    return strip(value)[0]
 
 
 def _key(qualname: str, inputs: Any) -> str:
@@ -31,8 +40,8 @@ def _fold_jsonl(path: str) -> dict[str, dict]:
             ev = json.loads(line)
             if ev.get("t") not in ("return", "raise"):
                 continue
-            qual, inputs = ev["q"], ev["in"]
-            result = ev.get("result")
+            qual, inputs = ev["q"], _unordered(ev["in"], line)
+            result = _unordered(ev.get("result"), line)
             raised = ev.get("raised")
             key = _key(qual, inputs)
             if key in records:
@@ -59,6 +68,8 @@ def _load(path: str) -> dict[str, dict]:
         if isinstance(data, dict) and "records" in data:
             out: dict[str, dict] = {}
             for r in data["records"]:
+                r = {**r, "inputs": _unordered(r.get("inputs")),
+                     "result": _unordered(r.get("result"))}
                 out[_key(r["qualname"], r["inputs"])] = r
             return out
     return _fold_jsonl(path)

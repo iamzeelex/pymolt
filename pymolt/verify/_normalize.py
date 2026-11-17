@@ -13,6 +13,9 @@ by the boundary tracer (L3) and the golden-master snapshots (L2) so a value comp
 in one is represented identically in the other.
 
 Markers emitted:
+    {"__dict__": [[k, v], ...]}       a dict, its pairs sorted by key (+ "__order__": the
+                                      sorted slot of each key in insertion order, only when
+                                      that order is not the sorted one, for 2..64 keys)
     {"__bytes__": "<hex>"}            bytes, stably encoded
     {"__opaque__": "<typename>"}      non-serializable / too-deep / non-finite float
     {"__cycle__": "<typename>"}       reference cycle broken here
@@ -82,6 +85,20 @@ MAX_SEQ = 200
 MAX_OBJECTS = 64            # generic objects rendered per value: a result is a witness, not a dump
 MAX_OBJECT_DEPTH = 3        # nested generic objects: deeper ones stay type-level
 _BUDGET = [MAX_OBJECTS]
+# Dict key insertion order (value format ``dict_order`` 1): a dict of 2..MAX_ORDER_KEYS keys
+# whose insertion order is not its sorted order carries ``"__order__": [sorted slot of the
+# j-th inserted key, ...]`` next to its (still sorted) ``__dict__``. A dict in sorted order
+# keeps its fact byte for byte; a wider dict records no order ("unobserved" on the host).
+# ``PYMOLT_TRACE_DICT_ORDER=0`` turns it off, and the capture then does not declare it.
+MAX_ORDER_KEYS = 64
+DICT_ORDER = [os.environ.get("PYMOLT_TRACE_DICT_ORDER", "1").strip().lower()
+              not in ("0", "false", "off", "no")]
+VALUE_FORMAT_DICT_ORDER = 1
+
+
+def value_format():
+    """The value format this runtime writes, for the capture metadata."""
+    return {"dict_order": VALUE_FORMAT_DICT_ORDER} if DICT_ORDER[0] else {}
 
 
 def typename(value):
@@ -155,8 +172,21 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None, _objects=True):
             else:
                 nk = {"__opaque__": typename(k)}
             items.append([nk, normalize(value[k], depth + 1, seen, _privacy, _objects)])
-        items.sort(key=_stable_key)
-        return {"__dict__": items}
+        n = len(items)
+        if n < 2 or n > MAX_ORDER_KEYS or not DICT_ORDER[0] or _privacy == "shape":
+            items.sort(key=_stable_key)
+            return {"__dict__": items}
+        # Stable sort of insertion positions: equal renderings keep their insertion order,
+        # exactly as ``items.sort`` does, so the sorted pairs are today's.
+        skeys = [_stable_key(it) for it in items]
+        idx = sorted(range(n), key=skeys.__getitem__)
+        out = {"__dict__": [items[i] for i in idx]}
+        if idx != list(range(n)):
+            pos = [0] * n
+            for s, j in enumerate(idx):
+                pos[j] = s
+            out["__order__"] = pos      # sorted slot of the j-th inserted key
+        return out
 
     if isinstance(value, (set, frozenset)):
         norm = sorted(
@@ -472,7 +502,10 @@ def _render_structure(value, kind, depth, seen, privacy, objects=True):
         out["columns"] = [normalize(c, depth + 1, seen, privacy, objects)
                           for c in value.columns.tolist()[:MAX_SEQ]]
         if with_values:
-            out["values"] = normalize(value.to_dict("list"), depth + 1, seen, privacy, objects)
+            values = normalize(value.to_dict("list"), depth + 1, seen, privacy, objects)
+            if isinstance(values, dict):
+                values.pop("__order__", None)   # ``columns`` already holds the column order
+            out["values"] = values
     else:
         out["dtype"] = str(value.dtype)
         if with_values:

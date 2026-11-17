@@ -75,6 +75,7 @@ import os
 import sys
 import time
 
+from . import _normalize as _nz
 from . import _sinks
 from ._backend import (
     HAS_MONITORING,
@@ -801,6 +802,9 @@ def activate():
         "warnings_capture": "off" if _warnings_disabled() else "on",
         # Stdlib top-level modules recorded like dependencies for this capture (empty: none).
         "stdlib_targets": sorted(stdlib_targets(os.environ.get(ENV_STDLIB, ""))),
+        # What the values carry (``dict_order``: dict key insertion order), so the host
+        # compares order only between captures that recorded it.
+        "value_format": _nz.value_format(),
         # Where this process ran (OS, limits, privilege, ...), read before tracing starts.
         "environment": _safe_environment(),
     })

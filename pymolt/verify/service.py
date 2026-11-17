@@ -63,6 +63,8 @@ from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
+    INPUT_ORDER_CHANGED,
+    ORDER_CHANGED,
     UNMEASURED_NOISE,
     UNPAIRED_SITE,
     find_facts_snapshot,
@@ -3013,12 +3015,25 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     settle = ("the baseline replicate did not settle them (they vary there in another way, or "
               "it did not reach them)" if fact_diff.get("noise_measured")
               else "a baseline replicate would tell run noise from a real change")
+    order_settle = ("the baseline replicate could not tell (too few keys compared, or a pinned "
+                    "hash seed)" if fact_diff.get("noise_measured")
+                    else "a baseline replicate with random hash seeds would tell a hash-seeded "
+                         "order from a deterministic one")
     for prefix, text in classes:
         hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
         reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
         if hit:
             names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
             reasons.append(f"{len(hit)} {text} ({names}); {settle}")
+    for prefix, text in (
+            (ORDER_CHANGED, "returned dict(s) whose key order changed (same keys and values)"),
+            (INPUT_ORDER_CHANGED, "call(s) whose output changed as the dict key order of "
+                                  "their input did (same keys and values)")):
+        hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
+        reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
+        if hit:
+            names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+            reasons.append(f"{len(hit)} {text} ({names}); {order_settle}")
     hit = [e for e in reviews if str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     reviews = [e for e in reviews if not str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     if hit:

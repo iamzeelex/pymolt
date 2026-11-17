@@ -668,6 +668,85 @@ def _digest(text):
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:20]
 
 
+# ── dict key order side records (value format ``dict_order``) ─────────────────────────────
+# A fact is keyed, and its outcomes aggregated, on the ORDER-STRIPPED value: a hash-ordered
+# dict must not turn one input into many facts (and widen its site) or one result into many
+# outcomes. The order rides beside the value as ``{path: permutation}`` (the host's
+# ``dict_order`` paths), merged per fact and per outcome: a path seen with two orders is
+# ``"*"`` ("varies within the run"). The work is done only for a value whose JSON names
+# ``__order__``, i.e. when ``normalize`` actually emitted an order.
+_ORDER_MARK = '"__order__"'
+_ORDER_VARIES = "*"
+_ORDER_DISTINCT_MAX = 4      # distinct order maps counted per fact / outcome
+
+
+def _order_path(path):
+    return json.dumps(path, separators=(",", ":"))
+
+
+def _strip_order(v, path, orders):
+    if isinstance(v, dict):
+        out = {}
+        for k in v:
+            if k == "__order__":
+                orders[_order_path(path)] = v[k]
+                continue
+            path.append(k)
+            out[k] = _strip_order(v[k], path, orders)
+            path.pop()
+        return out
+    if isinstance(v, list):
+        out_list = []
+        for i, x in enumerate(v):
+            path.append(i)
+            out_list.append(_strip_order(x, path, orders))
+            path.pop()
+        return out_list
+    return v
+
+
+def split_order(value):
+    """``(value without __order__, {path: permutation} or None)``."""
+    orders = {}
+    out = _strip_order(value, [], orders)
+    return out, (orders or None)
+
+
+def merge_order(a, b):
+    """Two order maps of one stripped value: equal stays, a path that differs (one side
+    without it: the sorted order) becomes ``"*"``."""
+    if a == b:
+        return a
+    a, b = a or {}, b or {}
+    out = {}
+    for p in set(a) | set(b):
+        x, y = a.get(p), b.get(p)
+        out[p] = x if x == y else _ORDER_VARIES
+    return out
+
+
+class _OrderRecord(object):
+    """The order side record of one fact input or one outcome: the merged map and how many
+    distinct maps were seen (capped)."""
+
+    __slots__ = ("order", "seen")
+
+    def __init__(self, order):
+        self.order = order
+        self.seen = [_canon(order)] if order else [""]
+
+    def add(self, order):
+        if order == self.order or (not order and not self.order):
+            return
+        key = _canon(order) if order else ""
+        if key not in self.seen and len(self.seen) < _ORDER_DISTINCT_MAX:
+            self.seen.append(key)
+        self.order = merge_order(self.order, order)
+
+    def to_json(self):
+        return {"order": self.order, "distinct": len(self.seen)}
+
+
 def _hist_bucket(dur):
     if dur <= 0:
         return 0
@@ -725,7 +804,7 @@ class _Fact(object):
     __slots__ = ("skey", "q", "sym", "symq", "own", "where", "in_json", "widened",
                  "outcomes", "other", "other_types", "other_lost", "count", "bytes",
                  "dur_n", "dur_sum", "dur_min", "dur_max", "first_ts", "last_ts", "seq",
-                 "warnings")
+                 "warnings", "in_order", "out_orders")
 
     def __init__(self, skey, q, sym, symq, own, where, in_json, widened, now, seq):
         self.skey = skey
@@ -750,12 +829,21 @@ class _Fact(object):
         self.last_ts = now
         self.seq = seq
         self.warnings = None     # (category, message) -> count, for its sampled calls
+        self.in_order = None     # _OrderRecord of the input's dict key order (None: sorted)
+        self.out_orders = None   # outcome key -> _OrderRecord of that result's key order
 
     def to_json(self):
         outs = []
+        out_orders = self.out_orders or {}
         for (kind, payload), n in list(self.outcomes.items()):
             if kind == "r":
-                outs.append('{"t":"return","result":' + payload + ',"count":' + str(n) + "}")
+                rec = out_orders.get((kind, payload))
+                extra = ""
+                if rec is not None and rec.order:
+                    extra = ',"order":' + _canon(rec.order) + ',"order_distinct":' + \
+                        str(len(rec.seen))
+                outs.append('{"t":"return","result":' + payload + ',"count":' + str(n)
+                            + extra + "}")
             else:
                 outs.append('{"t":"raise","raised":' + _canon(payload)
                             + (',"binding":true' if kind == "b" else "")
@@ -779,6 +867,9 @@ class _Fact(object):
             head["dur"] = _dur_json(self.dur_n, self.dur_sum, self.dur_min, self.dur_max)
         if self.warnings:
             head["warnings"] = warning_list(self.warnings)
+        if self.in_order is not None and self.in_order.order:
+            head["in_order"] = self.in_order.order
+            head["in_order_distinct"] = len(self.in_order.seen)
         return '{"in":' + self.in_json + ',"outcomes":[' + ",".join(outs) + "]," + \
             _canon(head)[1:]
 
@@ -1047,6 +1138,10 @@ class FactSink(object):
             heavy = key in self._heavy
             result = normalize(result_obj, _privacy=self._privacy, _objects=not heavy)
             payload = _canon(result)
+            out_order = None
+            if _ORDER_MARK in payload:   # key and digest on the order-stripped value
+                result, out_order = split_order(result)
+                payload = _canon(result)
             if not heavy and len(payload) > HEAVY_RESULT_BYTES:
                 # A result this large is rendered per call, and grows the snapshot, for no
                 # extra evidence: from now on this symbol's generic objects stay type-level.
@@ -1056,13 +1151,14 @@ class FactSink(object):
                 next(self._n_oversize)
                 result = {"__opaque__": type_label(result), "__digest__": _digest(payload)}
                 payload = _canon(result)
-            in_json = self._input_json(inputs)
+                out_order = None
+            in_json, in_order = self._input_json_order(inputs)
         except Exception:
             self.note_failure("write_failures")
             self.tally(qualname, sym, site, "return", dur=dur, warnings=warnings)
             return
         self._push(("r", qualname, sym, symq, own, site, in_json, payload, result, dur,
-                    time.time(), warnings or None))
+                    time.time(), warnings or None, in_order, out_order))
 
     def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
                  symq=None, own=None, dur=None, tid=None, warnings=None, binding=False):
@@ -1071,14 +1167,15 @@ class FactSink(object):
                        warnings=warnings)
             return
         try:
-            in_json = self._input_json(inputs)
+            in_json, in_order = self._input_json_order(inputs)
         except Exception:
             self.note_failure("write_failures")
             self.tally(qualname, sym, site, "raise", raised=exc_typename, dur=dur,
                        warnings=warnings)
             return
         self._push(("b" if binding else "x", qualname, sym, symq, own, site, in_json,
-                    str(exc_typename), None, dur, time.time(), warnings or None))
+                    str(exc_typename), None, dur, time.time(), warnings or None, in_order,
+                    None))
 
     def tally(self, qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         """A completed call whose values were not sampled: counted at its (symbol, site),
@@ -1088,11 +1185,21 @@ class FactSink(object):
                     warnings or None))
 
     def _input_json(self, inputs):
+        return self._input_json_order(inputs)[0]
+
+    def _input_json_order(self, inputs):
+        """``(canonical JSON of the order-stripped input, its order map or None)``; an
+        oversize input is a digest of the stripped JSON (no order)."""
         in_json = _canon(inputs)
+        in_order = None
+        if _ORDER_MARK in in_json:
+            stripped, in_order = split_order(inputs)
+            in_json = _canon(stripped)
         if len(in_json) > self._value_bytes:
             next(self._n_oversize)
             in_json = _canon({"__oversize__": len(in_json), "__digest__": _digest(in_json)})
-        return in_json
+            in_order = None
+        return in_json, in_order
 
     def _push(self, item):
         if self._closed:
@@ -1130,7 +1237,18 @@ class FactSink(object):
                 self._c["write_failures"] += 1
 
     def _apply_locked(self, item):
-        okind, q, sym, symq, own, site, in_json, payload, result, dur, now, warns = item
+        if len(item) == 14:
+            (okind, q, sym, symq, own, site, in_json, payload, result, dur, now, warns,
+             in_order, out_order) = item
+        else:   # a call handed over without its order split (none, or not yet split)
+            okind, q, sym, symq, own, site, in_json, payload, result, dur, now, warns = item
+            in_order = out_order = None
+            if in_json is not None and _ORDER_MARK in in_json:
+                stripped, in_order = split_order(json.loads(in_json))
+                in_json = _canon(stripped)
+            if okind == "r" and payload is not None and _ORDER_MARK in payload:
+                result, out_order = split_order(result)
+                payload = _canon(result)
         if site is not None:
             skey = (sym or q, site.get("file"), site.get("line"), site.get("func"))
         else:
@@ -1182,6 +1300,14 @@ class FactSink(object):
             f = self._new_fact_locked(skey, q, sym, symq, own, site, in_json, now)
         f.count += 1
         f.last_ts = now
+        if not f.widened and (in_order is not None or f.in_order is not None):
+            if f.in_order is not None:
+                f.in_order.add(in_order)
+            elif f.count == 1:
+                f.in_order = _OrderRecord(in_order)
+            else:                         # earlier calls were in sorted order
+                f.in_order = _OrderRecord({})
+                f.in_order.add(in_order)
         if warns:
             if f.warnings is None:
                 f.warnings = {}
@@ -1207,10 +1333,25 @@ class FactSink(object):
         n = outcomes.get(okey)
         if n is not None:
             outcomes[okey] = n + 1
+            if okind == "r" and not f.widened and f.out_orders is not None:
+                rec = f.out_orders.get(okey)
+                if rec is not None:
+                    rec.add(out_order)
+                elif out_order is not None:   # sorted until now, another order this time
+                    rec = f.out_orders[okey] = _OrderRecord({})
+                    rec.add(out_order)
+            elif okind == "r" and not f.widened and out_order is not None:
+                f.out_orders = {}
+                rec = f.out_orders[okey] = _OrderRecord({})
+                rec.add(out_order)
         elif len(outcomes) < MAX_OUTCOMES:
             outcomes[okey] = 1
             f.bytes += len(payload)
             self._bytes += len(payload)
+            if okind == "r" and not f.widened and out_order is not None:
+                if f.out_orders is None:
+                    f.out_orders = {}
+                f.out_orders[okey] = _OrderRecord(out_order)
         else:
             c["outcomes_other"] += 1
             f.other += 1
