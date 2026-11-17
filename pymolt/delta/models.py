@@ -27,6 +27,11 @@ Fact kinds:
 - ``DEFAULT``    a parameter's default value changed (``old``/``new`` are reprs);
 - ``DEPRECATED`` the symbol warns: ``deprecated_in_old`` says whether the old version already
                  did; an ``evidence`` entry starting ``deprecated-in-new:`` says the new one does;
+- ``BEHAVIOR``   (python subject) the name stays but what it produces changes: ``changed_in``
+                 is the release, ``behavior`` the structured cause (``cause`` = the
+                 ``knowledge/stdlib_behavior.json`` id, ``effect``, the project ``sites``; for
+                 ``dict-order`` the ``keys`` and the ``old``/``new`` sequences), ``old``/``new``
+                 the two sides in words;
 - ``UNCHANGED``  checked, and nothing above applies.
 
 ``symbol`` is the canonical old name (the spelling a baseline trace records) when the fact is
@@ -44,12 +49,13 @@ from pymolt.adapters.python_runner import RunnerSpec
 
 SCHEMA = "pymolt.delta/1"
 
-FactKind = Literal["REMOVED", "MOVED", "SIGNATURE", "DEFAULT", "DEPRECATED", "UNCHANGED"]
+FactKind = Literal["REMOVED", "MOVED", "SIGNATURE", "DEFAULT", "DEPRECATED", "BEHAVIOR",
+                   "UNCHANGED"]
 Quality = Literal["complete", "partial", "inconclusive"]
 Origin = Literal["contact", "trace", "given"]
 
 KIND_ORDER = {"REMOVED": 0, "MOVED": 1, "SIGNATURE": 2, "DEFAULT": 3, "DEPRECATED": 4,
-              "UNCHANGED": 5}
+              "BEHAVIOR": 5, "UNCHANGED": 6}
 
 
 class RecordedWarning(BaseModel):
@@ -71,7 +77,8 @@ class TouchedSymbol(BaseModel):
     warnings: list[RecordedWarning] = Field(default_factory=list)
 
 
-_FACT_ADDITIONS = ("basis", "removed_in", "deprecated_in", "warns_since", "origin")
+_FACT_ADDITIONS = ("basis", "removed_in", "deprecated_in", "warns_since", "origin", "changed_in",
+                   "behavior")
 
 
 class DeltaFact(BaseModel):
@@ -94,6 +101,9 @@ class DeltaFact(BaseModel):
     warns_since: str | None = None
     # "stdlib" | "site-packages:<dist>" (a third-party shim, e.g. setuptools' distutils).
     origin: str | None = None
+    # BEHAVIOR facts: the release that changed the behaviour, and the structured cause.
+    changed_in: str | None = None
+    behavior: dict[str, Any] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_additions(self, handler: Any) -> dict[str, Any]:
