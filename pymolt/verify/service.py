@@ -60,6 +60,7 @@ from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
+    BACKEND_UNOBSERVABLE,
     UNMEASURED_NOISE,
     find_facts_snapshot,
     iter_snapshot,
@@ -2808,8 +2809,14 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         1 for e in entries
         if any(str(n).startswith("possibly-dropped") for n in e.get("notes") or ())
     )
+    unobservable = sum(1 for e in entries if BACKEND_UNOBSERVABLE in (e.get("notes") or ()))
     uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries - dropped_entries
+        - evicted_entries - dropped_entries - unobservable
+    if unobservable:
+        reasons.append(
+            f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "
+            "the other side's backend could not record them, so they cannot be compared"
+        )
     if dropped_entries:
         reasons.append(
             f"{dropped_entries} call fact(s) are missing on a side that dropped events and "

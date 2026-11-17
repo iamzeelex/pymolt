@@ -3,6 +3,7 @@
 Every rule has two kinds of tests: the noise case it explains and the regression it must not hide.
 Facts are built directly (no trace files): ``fact`` is one dependency call from one site.
 """
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -25,9 +26,10 @@ from pymolt.verify.models import VerificationVerdict
 ROOT = "/proj"
 
 
-def out(*pairs):
-    """``out(("return", 1), ("raise", "ValueError"))`` -> outcomes (count 1 each)."""
-    return [Outcome(kind=k, value=v, count=1) for k, v in pairs]
+def out(*pairs, ts=None):
+    """``out(("return", 1), ("raise", "ValueError"))`` -> outcomes (count 1 each); ``ts``: when
+    the calls producing them ran."""
+    return [Outcome(kind=k, value=v, count=1, ts_min=ts, ts_max=ts) for k, v in pairs]
 
 
 def fact(symbol, bound=None, outcomes=(("return", None),), *, file="app.py", func="main",
@@ -38,7 +40,7 @@ def fact(symbol, bound=None, outcomes=(("return", None),), *, file="app.py", fun
         symbol=symbol, file=file, func=func, line=line, lines=[line],
         text=text if text is not None else f"x = obj.{leaf}(a)",
         input=inp if inp is not None else {"bound": dict(bound or {})},
-        outcomes=out(*outcomes), count=count, first_seen=first, ts_min=ts, ts_max=ts,
+        outcomes=out(*outcomes, ts=ts), count=count, first_seen=first, ts_min=ts, ts_max=ts,
     )
 
 
@@ -101,14 +103,12 @@ def node_uuid(i):
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"node-{i}"))
 
 
-def packs(ids, *, result=lambda i: {"__bytes__": f"93a3{i}"}, first=0, raise_at=None,
-          evidenced=True):
+def packs(ids, *, result=None, first=0, raise_at=None, evidenced=True):
     """One fact per call: each carries its own client id, so no input repeats across runs.
     ``evidenced``: the id embeds a uuid4 value the trace recorded (a visible source of the
-    variation, as locust's ``hostname_uuid4hex`` node ids, whose host part differs between
-    the container and the host); otherwise it is just different. The first message is an
-    ``ack`` (the same on both sides once the id is masked), the others carry their own
-    content."""
+    variation, like locust's ``hostname_uuid4hex`` node ids), and the packed bytes carry it
+    too; once masked, every call is the same ``ack`` on both sides. Otherwise the ids are just
+    different."""
     facts = []
     if evidenced:
         facts.append(fact("uuid.uuid4", {}, tuple(("return", {"__uuid__": node_uuid(i)})
@@ -116,12 +116,16 @@ def packs(ids, *, result=lambda i: {"__bytes__": f"93a3{i}"}, first=0, raise_at=
                           file="locust/runners.py", func="__init__", line=5, text="uuid4()",
                           first=first))
     for k, i in enumerate(ids):
+        hexid = node_uuid(i).replace("-", "")
+        res = result(i) if result else {"__bytes__": ("ack_" + hexid).encode().hex()} \
+            if evidenced else {"__bytes__": f"93a3{i}"}
         outcome = (("raise", raise_at),) if raise_at is not None and k == 0 else \
-            (("return", result(i)),)
+            (("return", res),)
+        # host part: the container's on one side, the laptop's on the other (as locust's
+        # node ids), plus a per-call worker number, so no input repeats or merges
         host = "container" if str(i).startswith("a") else "laptop"
-        node = f"{host}_{node_uuid(i).replace('-', '')}" if evidenced else f"node_{i}"
-        kind = "ack" if k == 0 or not evidenced else f"stats_{i}"
-        facts.append(fact(PACK, {"o": {"__tuple__": [kind, node]}}, outcome,
+        node = f"{host}{k}_{hexid}" if evidenced else f"node_{i}"
+        facts.append(fact(PACK, {"o": {"__tuple__": ["ack", node]}}, outcome,
                           file="locust/rpc/protocol.py", func="serialize", line=14,
                           text=PACK_LINE, first=first + k + 1))
     return facts
@@ -138,10 +142,10 @@ def test_fresh_inputs_at_one_site_compare_as_one_group():
     d = diff_facts(old, new)
     assert not failing(d) and d.verdict is VerificationVerdict.PASS
     e = group_of(d)
-    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.TYPE
+    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.MASKED
     assert (e.old_count, e.new_count) == (3, 2)
     assert e.explained.startswith("volatile-site") and "volatile-site:3/2" in e.notes
-    assert any(w.startswith("volatile-sites:1:") for w in d.warnings)
+    assert any(w.startswith("volatile-sites: 1 fully") for w in d.warnings)
 
 
 def test_a_new_raise_type_in_a_volatile_group_fails():
@@ -207,7 +211,8 @@ def test_a_group_without_a_visible_source_of_variation_stays_strict():
     assert e.explained.startswith("unpaired-site") and (e.old_count, e.new_count) == (2, 3)
     assert e.input == {"bound": {"amount": 100}} and e.new_input == {"bound": {"amount": 300}}
     assert d.verdict is VerificationVerdict.FAIL
-    assert any(w.startswith("unpaired-sites:1:") for w in d.warnings)
+    assert any(w.startswith("volatile-sites: 0 fully") and "1 not at all" in w
+               for w in d.warnings)
 
 
 def test_an_unevidenced_group_is_a_review_item_when_another_site_shows_run_variation():
@@ -218,26 +223,37 @@ def test_an_unevidenced_group_is_a_review_item_when_another_site_shows_run_varia
     assert d.verdict is VerificationVerdict.INCONCLUSIVE
 
 
-def test_volatility_propagates_from_an_evidenced_group_to_the_next_call():
-    # msgpack's bytes (an evidenced group: node ids carry uuid4 values) are zmq send's input.
+def sends(ids, first, data):
     send = "zmq.green.core._Socket.send"
+    return [fact(send, {"data": data(i)}, file="locust/rpc/zmqrpc.py", func="send", line=20,
+                 text="self.socket.send(msg.serialize())", first=first + k)
+            for k, i in enumerate(ids)]
 
-    def packed(i):
-        return {"__bytes__": f"93a3{i}0000aaaa"}
 
-    def sends(ids, first):
-        return [fact(send, {"data": packed(i)}, file="locust/rpc/zmqrpc.py",
-                     func="send", line=20, text="self.socket.send(msg.serialize())",
-                     first=first + k) for k, i in enumerate(ids)]
-    d = diff_facts(fs(*packs(["a1", "a2", "a3"], result=packed),
-                      *sends(["a1", "a2", "a3"], 50)),
-                   fs(*packs(["b1", "b2"], result=packed), *sends(["b1", "b2"], 50)))
-    e = group_of(d, send)
-    assert e.category is FactCategory.EQUAL and "propagated" in e.explained
-    assert not failing(d)
-    # ... and without the evidenced group upstream, the same sends are an unpaired site.
-    d = diff_facts(fs(*sends(["a1", "a2", "a3"], 50)), fs(*sends(["b1", "b2"], 50)))
-    assert group_of(d, send).explained.startswith("unpaired-site") and failing(d)
+SEND = "zmq.green.core._Socket.send"
+
+
+def packed_bytes(i):
+    """Bytes that do not carry the id itself (a digest of the message): no mask reaches
+    them, only propagation from the call that produced them."""
+    return {"__bytes__": hashlib.sha1(f"msg-{i}".encode()).hexdigest()}
+
+
+def test_volatility_propagates_from_a_fully_paired_group_to_the_next_call():
+    # msgpack (a fully paired site: node ids carry uuid4 values) produces zmq send's input.
+    d = diff_facts(fs(*packs(["a1", "a2", "a3"], result=packed_bytes),
+                      *sends(["a1", "a2", "a3"], 50, packed_bytes)),
+                   fs(*packs(["b1", "b2"], result=packed_bytes),
+                      *sends(["b1", "b2"], 50, packed_bytes)))
+    e = group_of(d, SEND)
+    assert e.category is FactCategory.EQUAL and e.explained.startswith("volatile-site")
+    # msgpack's own outputs differ (they digest the id): a review item, not a failure
+    (p,) = [x for x in d.entries if x.symbol == PACK]
+    assert p.review and not p.fails and not failing(d)
+    # ... and without the group upstream, the same sends are an unpaired site.
+    d = diff_facts(fs(*sends(["a1", "a2", "a3"], 50, packed_bytes)),
+                   fs(*sends(["b1", "b2"], 50, packed_bytes)))
+    assert group_of(d, SEND).explained.startswith("unpaired-site") and failing(d)
 
 
 # ── step 3: environment, clock, entropy sources, input substitution ───────────────────────
@@ -251,6 +267,8 @@ def env_fs(*facts, roots=(), python=None, ts=None, **kw):
     for f in facts:
         if ts is not None:
             f.ts_min = f.ts_max = ts
+            for o in f.outcomes:
+                o.ts_min = o.ts_max = ts
     s = fs(*facts, **kw)
     s.env_roots = list(roots)
     s.python_versions = [python] if python else []
@@ -649,7 +667,8 @@ def test_a_hidden_input_value_change_in_a_noisy_workload_is_a_review_item():
     assert e.category is FactCategory.CHANGED and not e.fails and e.inconclusive
     assert e.review.startswith("unmeasured noise") and e.explained.startswith("unmeasured")
     assert d.verdict is VerificationVerdict.INCONCLUSIVE
-    assert any(w.startswith("run-variation: 1 evidenced volatile site") for w in d.warnings)
+    assert any(w.startswith("run-variation: 1 volatile site(s) fully paired") for w in d.warnings)
+    assert "capture a baseline replicate to settle" in e.review
 
 
 def test_the_same_hidden_input_change_fails_when_the_workload_is_quiet():
@@ -684,7 +703,8 @@ def test_inputs_equal_only_once_masked_are_not_a_controlled_comparison():
                       *noisy(tag=tag).facts, ts=when)
     d = diff_facts(side(T_OLD, "cb41dabf", T_OLD, "a"), side(T_NEW, "cb41dac0", T_NEW, "b"))
     (e,) = [e for e in d.entries if e.symbol == "lib.pack"]
-    assert "matched-modulo-masked-input" in e.notes and e.review.startswith("unmeasured")
+    assert "matched-modulo-masked-input" in e.notes and e.review.startswith("masked input")
+    assert "capture a baseline replicate to settle" in e.review
     assert d.verdict is VerificationVerdict.INCONCLUSIVE
 
 
@@ -746,13 +766,16 @@ def test_locust_run6_fails_only_on_its_true_finding_and_platform():
     # gevent.sleep's durations vary with no visible source: one unpaired-site review entry
     (sleep,) = by_symbol["gevent.hub.sleep"]
     assert sleep.explained.startswith("unpaired-site") and sleep.review
-    # msgpack's node ids carry uuid4 values: an evidenced group, which turns the gate on
-    assert any((e.explained or "").startswith("volatile-site") for e in by_symbol[
-        "msgpack.packb"])
+    # zmq send's bytes carry the uuid4 node ids (hex-encoded): every call pairs once they are
+    # masked, on both sides, which is what turns the gate on
+    (send,) = by_symbol["zmq.green.core._Socket.send"]
+    assert send.category is FactCategory.EQUAL and send.explained.startswith("volatile-site")
+    assert any(w.startswith("run-variation: 1 volatile site(s) fully paired") and
+               "zmq.green.core._Socket.send" in w for w in d.warnings)
     # the explained mechanisms, each at least once
     mechs = {(e.explained or "").split(":")[0] for e in d.entries}
-    assert {"volatile-site", "unpaired-site", "input-substitution", "source", "environment",
-            "clock", "attribution", "backend", "possibly-dropped"} <= mechs
+    assert {"volatile-site", "unpaired-site", "masked-input", "input-substitution", "source",
+            "environment", "clock", "attribution", "backend", "possibly-dropped"} <= mechs
     (pv,) = by_symbol["platform.python_version"]
     assert pv.explained.startswith("environment") and not pv.fails
     assert all(not e.fails for e in by_symbol["re.compile"])
@@ -787,7 +810,8 @@ def test_the_gate_warning_names_its_evidence():
     d = diff_facts(noisy(fact(RENDER, TEMPLATE, (("return", "1"),))),
                    noisy(fact(RENDER, TEMPLATE, (("return", "2"),)), tag="b"))
     (w,) = [w for w in d.warnings if w.startswith("run-variation")]
-    assert "1 evidenced volatile site(s): msgpack.packb @ locust/rpc/protocol.py:14" in w
+    assert "1 volatile site(s) fully paired on masked run values: msgpack.packb @ " \
+        "locust/rpc/protocol.py:14" in w
 
 
 def test_a_call_with_no_input_at_all_is_fully_observed():
@@ -814,8 +838,20 @@ def test_a_vanished_constructor_half_stays_strict():
     assert [e.symbol for e in failing(d)] == ["lib.T.__init__"]
 
 
-def test_a_compiled_call_that_raises_on_the_wider_backend_stays_strict():
+def test_a_compiled_call_that_raises_on_the_wider_backend_cannot_be_compared():
+    # setprofile could not record the call at all: its absence is no evidence, the raise is
+    # neither a change nor noise. Never FAIL, never DRIFT.
     old = fs(backends=("setprofile",))
+    new = fs(c_call("lib.native.decode", outcomes=(("raise", "ValueError"),)))
+    d = diff_facts(old, new)
+    (e,) = d.entries
+    assert e.category is FactCategory.UNCOMPARABLE and not e.fails and e.inconclusive
+    assert "backend-unobservable" in e.notes and e.explained.startswith("backend")
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+
+
+def test_a_raising_compiled_call_under_one_backend_family_stays_strict():
+    old = fs(backends=("monitoring",))
     new = fs(c_call("lib.native.decode", outcomes=(("raise", "ValueError"),)))
     assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.APPEARED]
 
@@ -891,30 +927,204 @@ def test_substitution_on_long_leaves_stays_fast():
     assert not failing(d)
 
 
-def test_a_dropping_side_may_hold_members_whose_producer_was_lost():
-    # The new side dropped events: one zmq send's msgpack producer is gone, so its bytes are
-    # not a known volatile value. The group is still evidenced by the rest.
-    send = "zmq.green.core._Socket.send"
-
-    def packed(i):
-        return {"__bytes__": f"93a3{i}0000aaaa"}
-
-    def sends(ids, first):
-        return [fact(send, {"data": packed(i)}, file="locust/rpc/zmqrpc.py", func="send",
-                     line=20, text="self.socket.send(msg.serialize())", first=first + k)
-                for k, i in enumerate(ids)]
-    old = fs(*packs(["a1", "a2", "a3"], result=packed), *sends(["a1", "a2", "a3"], 50))
-    new = fs(*packs(["b1", "b2"], result=packed), *sends(["b1", "b2", "bX", "bY"], 50),
+def test_a_member_whose_producer_may_be_lost_is_not_comparable():
+    # The new side dropped events: one send's msgpack producer is gone, so its bytes are not
+    # a known volatile value; they have the shape of the site's volatile values.
+    old = fs(*packs(["a1", "a2", "a3"], result=packed_bytes),
+             *sends(["a1", "a2", "a3"], 50, packed_bytes))
+    new = fs(*packs(["b1", "b2"], result=packed_bytes),
+             *sends(["b1", "b2", "bX", "bY"], 50, packed_bytes), dropped_events=100)
+    d = diff_facts(old, new)
+    lost = [e for e in d.entries if "possibly-dropped-producer:new" in e.notes]
+    assert len(lost) == 1 and lost[0].category is FactCategory.UNCOMPARABLE
+    assert lost[0].new_count == 2 and not failing(d)
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    # ... a send of another shape is not a lost producer: strict.
+    new = fs(*packs(["b1", "b2"], result=packed_bytes),
+             *sends(["b1", "b2"], 50, packed_bytes),
+             *sends(["static", "other"], 60, lambda i: {"__bytes__": i.encode().hex()}),
              dropped_events=100)
-    assert group_of(diff_facts(old, new), send).explained.startswith("volatile-site")
-    # ... but drops never excuse the side that lost nothing.
-    old = fs(*packs(["a1", "a2", "a3"], result=packed), *sends(["a1", "a2", "aX"], 50),
-             dropped_events=0)
-    new = fs(*packs(["b1", "b2"], result=packed), *sends(["b1", "b2"], 50), dropped_events=100)
-    assert group_of(diff_facts(old, new), send).explained.startswith("unpaired-site")
+    d = diff_facts(old, new)
+    (u,) = [e for e in d.entries if (e.explained or "").startswith("unpaired-site")]
+    assert u.new_count == 2 and u.category is FactCategory.CHANGED
+    assert not any("possibly-dropped-producer" in " ".join(e.notes) for e in d.entries)
+    # ... and drops never excuse the side that lost nothing.
+    old = fs(*packs(["a1", "a2", "a3"], result=packed_bytes),
+             *sends(["a1", "a2", "aX"], 50, packed_bytes))
+    new = fs(*packs(["b1", "b2"], result=packed_bytes), *sends(["b1", "b2"], 50, packed_bytes),
+             dropped_events=100)
+    d = diff_facts(old, new)
+    assert not any("possibly-dropped-producer" in " ".join(e.notes) for e in d.entries)
+    assert any((e.explained or "").startswith("unpaired-site") for e in d.entries)
 
 
 def test_drops_do_not_evidence_a_group_without_volatile_inputs():
     d = diff_facts(fs(*tax([100, 200], 1.2)), fs(*tax([300, 400, 500], 1.3), dropped_events=9))
     (e,) = d.entries
     assert e.explained.startswith("unpaired-site") and e.fails
+
+
+# ── fix round 2: masked-key pairing inside volatile sites, seeds, call windows, gate ──────
+
+def billing(tag, specs):
+    """uuid4 -> lib.digest -> h -> billing.charge(session=h, amount): the session is derived
+    from a run value, but no mask reaches the digest."""
+    facts, k = [], 0
+    for i, amount, total in specs:
+        u = f"{i:08x}-1111-2222-3333-{tag}{i:011x}"
+        h = hashlib.sha1(u.encode()).hexdigest()
+        facts.append(fact("uuid.uuid4", {}, (("return", {"__uuid__": u}),), line=1,
+                          text="u = uuid.uuid4()", first=k))
+        facts.append(fact("lib.digest", {"data": u}, (("return", h),), line=2,
+                          text="h = lib.digest(u)", first=k + 1))
+        facts.append(fact("billing.charge", {"session": h, "amount": amount},
+                          (("return", total),), line=3, text="billing.charge(h, a)",
+                          first=k + 2))
+        k += 3
+    return facts
+
+
+def test_a_total_regression_behind_a_derived_session_is_not_a_pass():
+    old = fs(*billing("a", [(1, 100, "120"), (2, 100, "120"), (3, 100, "120")]))
+    new = fs(*billing("b", [(1, 100, "120"), (2, 100, "150")]))
+    d = diff_facts(old, new)
+    assert d.verdict is not VerificationVerdict.PASS
+    (e,) = [e for e in d.entries if e.symbol == "billing.charge"]
+    assert e.fails or e.review
+
+
+def test_a_new_amount_behind_a_derived_session_is_not_explained():
+    old = fs(*billing("a", [(1, 100, "120"), (2, 100, "120"), (3, 100, "120")]))
+    new = fs(*billing("b", [(1, 100, "120"), (2, 999, "1198")]))
+    d = diff_facts(old, new)
+    assert d.verdict is VerificationVerdict.FAIL
+    assert any(e.symbol == "billing.charge" and e.fails for e in d.entries)
+
+
+def test_a_uuid_keyed_call_with_a_new_amount_fails():
+    def side(tag, amounts):
+        out = []
+        for k, amount in enumerate(amounts):
+            u = f"{k:08x}-1111-2222-3333-{tag}{k:011x}"
+            out += [fact("uuid.uuid4", {}, (("return", {"__uuid__": u}),), line=1,
+                         text="u = uuid.uuid4()", first=2 * k),
+                    fact("billing.charge", {"id": u, "amount": amount}, (("return", "ok"),),
+                         line=2, text="billing.charge(u, a)", first=2 * k + 1)]
+        return out
+    d = diff_facts(fs(*side("a", [100, 100, 100])), fs(*side("b", [100, 999])))
+    assert [e.symbol for e in failing(d)] == ["billing.charge"]
+
+
+def test_a_static_value_on_the_lossy_side_is_no_lost_producer():
+    old = fs(*billing("a", [(1, 100, "120"), (2, 100, "120"), (3, 100, "120")]))
+    new = fs(*billing("b", [(1, 100, "120")]),
+             fact("billing.charge", {"session": "static-session-id", "amount": 999},
+                  (("return", "1198"),), line=3, text="billing.charge(h, a)", first=90),
+             dropped_events=7)
+    d = diff_facts(old, new)
+    assert d.verdict is not VerificationVerdict.PASS
+    assert not any("possibly-dropped-producer" in " ".join(e.notes) for e in d.entries)
+
+
+def test_a_constant_in_a_masked_fact_output_never_becomes_volatile():
+    # api.headers(id=uuid4) returns a dict holding "application/json": a constant, not a run
+    # value. A later call taking that constant (and other amounts) is not explained by it.
+    def side(tag, ns):
+        u = f"00000001-1111-2222-3333-{tag}00000000001"
+        out = [fact("uuid.uuid4", {}, (("return", {"__uuid__": u}),), line=1, text="u()"),
+               fact("api.headers", {"id": u}, (("return", {"__dict__": [
+                   ["ct", "application/json"], ["id", u]]}),), line=2, text="h = api.headers(u)")]
+        out += [fact("lib.post", {"ct": f"application/json; worker={tag}", "n": n}, line=3,
+                     text="lib.post(h, n)", first=10 + k) for k, n in enumerate(ns)]
+        return out
+    # n=1 occurs on both sides; the content type differs only in its worker suffix. Were the
+    # constant a volatile value, every call would read as explained.
+    d = diff_facts(fs(*side("a", [1, 2, 3])), fs(*side("b", [1, 9])))
+    (e,) = [e for e in d.entries if e.symbol == "lib.post"]
+    assert e.explained.startswith("unpaired-site") and e.fails
+
+
+def test_a_clock_value_away_from_its_own_outcome_time_is_not_masked():
+    # auth.expiry("u") is called across a 250 s suite (the fact's window), and returns its
+    # call time + TTL; the TTL shrank from 120 s to 40 s. Within the fact's window, but far
+    # from the call that produced this outcome: not a clock reading, so not masked.
+    def side(ttl, t0):
+        f = fact("auth.expiry", {"user": "u"}, line=3, text="e = auth.expiry(u)")
+        f.outcomes = [Outcome(kind="return", value=int(t0) + ttl, count=1, ts_min=t0,
+                              ts_max=t0)]
+        f.ts_min, f.ts_max = t0, t0 + 250.0
+        return env_fs(f)
+    d = diff_facts(side(120, T_OLD), side(40, T_NEW))
+    assert [e.symbol for e in failing(d)] == ["auth.expiry"]
+
+
+def test_an_input_clock_value_of_a_fact_spanning_the_suite_is_not_masked():
+    def side(t0, result):
+        f = fact("lib.bucket", {"t": int(t0)}, (("return", result),), line=4,
+                 text="b = lib.bucket(t)")
+        f.ts_min, f.ts_max = t0, t0 + 250.0
+        for o in f.outcomes:
+            o.ts_min, o.ts_max = t0, t0 + 250.0
+        return env_fs(f)
+    d = diff_facts(side(T_OLD, "x"), side(T_NEW, "x"))
+    (e,) = d.entries
+    assert "matched-modulo-masked-input" not in e.notes
+    assert "clock" not in (e.explained or "")
+
+
+def test_masked_bytes_compare_after_masking():
+    # msgpack bytes that carry the uuid (hex-encoded) compare equal once masked.
+    d = diff_facts(fs(*packs(["a1", "a2", "a3"])), fs(*packs(["b1", "b2"])))
+    e = group_of(d)
+    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.MASKED
+    assert "⟨src:hex:" in str(e.old)
+
+
+def json_change(total):
+    return fact("requests.Response.json", {"self": {"__opaque__": "requests.Response"}},
+                (("return", {"__dict__": [["total", total]]}),), line=9, text="d = r.json()")
+
+
+def test_the_gate_opens_only_on_a_site_fully_paired_on_masked_values_on_both_sides():
+    # A uuid-keyed site whose calls all pair once the ids are masked: the gate is on, and the
+    # opaque-receiver change is a review item.
+    d = diff_facts(fs(*packs(["a1", "a2", "a3"]), json_change(100)),
+                   fs(*packs(["b1", "b2"]), json_change(90)))
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    (e,) = [e for e in d.entries if e.symbol == "requests.Response.json"]
+    assert "capture a baseline replicate to settle" in e.review
+    # Evidence by propagation only (a digest of the id, no mask on it): no gate, FAIL.
+    d = diff_facts(fs(*billing("a", [(1, 100, "120"), (2, 100, "120"), (3, 100, "120")]),
+                      json_change(100)),
+                   fs(*billing("b", [(1, 100, "120"), (2, 100, "120")]), json_change(90)))
+    assert "requests.Response.json" in [e.symbol for e in failing(d)]
+    assert not any(w.startswith("run-variation") for w in d.warnings)
+    # Evidence only through the drop allowance: no gate either.
+    old = fs(*sends(["a1", "a2", "a3"], 50, packed_bytes), json_change(100))
+    new = fs(*sends(["b1", "b2", "bX", "bY"], 50, packed_bytes), json_change(90),
+             dropped_events=10)
+    d = diff_facts(old, new)
+    assert "requests.Response.json" in [e.symbol for e in failing(d)]
+
+
+def test_a_broken_call_duration_does_not_widen_the_clock_window():
+    # An event whose start was lost carries a duration as long as the epoch: its outcome's
+    # window must not swallow every small number (cpu_percent 6.9 is no clock reading).
+    f_old = fact("psutil.Process.cpu_percent", {"self": {"__opaque__": "psutil.Process"}},
+                 line=7, text="p = proc.cpu_percent()")
+    f_old.outcomes = [Outcome(kind="return", value=11.6, count=1, ts_min=2.0, ts_max=T_OLD)]
+    f_old.ts_min, f_old.ts_max = 2.0, T_OLD
+    f_new = fact("psutil.Process.cpu_percent", {"self": {"__opaque__": "psutil.Process"}},
+                 line=7, text="p = proc.cpu_percent()")
+    f_new.outcomes = [Outcome(kind="return", value=6.9, count=1, ts_min=2.0, ts_max=T_NEW)]
+    f_new.ts_min, f_new.ts_max = 2.0, T_NEW
+    d = diff_facts(env_fs(f_old), env_fs(f_new))
+    assert "clock" not in (d.entries[0].explained or "")
+    assert d.entries[0].old[0].value == 11.6
+
+
+def test_a_call_with_an_implausible_duration_keeps_its_end_time():
+    from pymolt.verify.facts import _call_time
+
+    assert _call_time({"ts": T_OLD, "dur": T_OLD - 2.0}) == (T_OLD, T_OLD)
+    assert _call_time({"ts": T_OLD, "dur": 0.5}) == (T_OLD - 0.5, T_OLD)
