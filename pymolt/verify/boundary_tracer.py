@@ -585,6 +585,145 @@ def record(target, backend="auto", exclude=(), source=None, include_internal=Fal
 _active = None
 
 
+ENVIRONMENT_SCHEMA = 1
+_RLIMITS = ("NOFILE", "NPROC", "STACK", "CORE", "AS", "DATA", "FSIZE", "MEMLOCK", "CPU")
+_CONTAINER_WORDS = (("docker", "docker"), ("kubepods", "kubernetes"), ("containerd", "containerd"),
+                    ("lxc", "lxc"), ("libpod", "podman"))
+
+
+def _read_text(path, limit=65536):
+    with open(path) as fh:
+        return fh.read(limit)
+
+
+def _container_hint():
+    """``docker`` / ``podman`` / ``kubernetes`` / ``lxc`` / ... or None (the host, or unknown)."""
+    try:
+        if os.path.exists("/.dockerenv"):
+            return "docker"
+    except Exception:
+        pass
+    try:
+        if os.path.exists("/run/.containerenv"):
+            return "podman"
+    except Exception:
+        pass
+    name = os.environ.get("container")
+    if name:
+        return str(name)[:40]
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return "kubernetes"
+    try:
+        text = _read_text("/proc/1/cgroup")
+    except Exception:
+        return None
+    for word, label in _CONTAINER_WORDS:
+        if word in text:
+            return label
+    return None
+
+
+def _environment():
+    """The runtime environment this process starts in, recorded before any tracing so the
+    tracer's own reads are never facts and the limits are the starting limits (before the
+    app's own ``setrlimit``). Every field is read on its own and is None when unreadable. No
+    hostname (private, and a container's is its id). Pure stdlib, never imports ``tempfile``
+    (it writes a probe file and imports ``random`` before gevent can patch)."""
+    env = {"schema": ENVIRONMENT_SCHEMA}
+    env["platform"] = sys.platform
+    try:
+        u = os.uname()
+        env["system"], env["release"], env["machine"] = u.sysname, u.release, u.machine
+    except Exception:
+        env["system"] = "Windows" if os.name == "nt" else None
+        env["release"] = None
+        env["machine"] = os.environ.get("PROCESSOR_ARCHITECTURE")
+    try:
+        env["impl"] = sys.implementation.name
+    except Exception:
+        env["impl"] = None
+    try:
+        env["container"] = _container_hint()
+    except Exception:
+        env["container"] = None
+    for key, name in (("uid", "getuid"), ("euid", "geteuid")):
+        try:
+            env[key] = getattr(os, name)()
+        except Exception:
+            env[key] = None
+    env["caps"] = None
+    try:
+        for line in _read_text("/proc/self/status").splitlines():
+            if line.startswith("CapEff:"):
+                env["caps"] = line.split(":", 1)[1].strip()
+                break
+    except Exception:
+        pass
+    try:
+        env["cpus"] = os.cpu_count()
+    except Exception:
+        env["cpus"] = None
+    try:
+        env["affinity"] = len(os.sched_getaffinity(0))
+    except Exception:
+        env["affinity"] = None
+    rlimits = None
+    try:
+        import resource
+        rlimits = {}
+        inf = resource.RLIM_INFINITY
+        for name in _RLIMITS:
+            try:
+                soft, hard = resource.getrlimit(getattr(resource, "RLIMIT_" + name))
+            except Exception:
+                continue
+            rlimits[name] = ["inf" if soft == inf else soft, "inf" if hard == inf else hard]
+    except Exception:
+        pass
+    env["rlimits"] = rlimits
+    env["tmpdir"] = None
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(name)
+        if value:
+            env["tmpdir"] = value
+            break
+    try:
+        env["utc_offset"] = time.localtime().tm_gmtoff
+    except Exception:
+        env["utc_offset"] = None
+    enc = {}
+    try:
+        enc["fs"] = sys.getfilesystemencoding()
+    except Exception:
+        enc["fs"] = None
+    enc["utf8_mode"] = getattr(sys.flags, "utf8_mode", None)
+    enc["locale"] = (os.environ.get("LC_ALL") or os.environ.get("LC_CTYPE")
+                     or os.environ.get("LANG") or None)
+    env["encoding"] = enc
+    seed = None
+    try:
+        raw = os.environ.get("PYTHONHASHSEED")
+        if raw and raw.strip().isdigit() and not sys.flags.ignore_environment:
+            seed = int(raw.strip())
+    except Exception:
+        seed = None
+    try:
+        algorithm = sys.hash_info.algorithm
+    except Exception:
+        algorithm = None
+    # A fixed PYTHONHASHSEED (0 included) makes str hash order the same in every run.
+    env["hash"] = {"seed": seed, "randomized": seed is None and bool(
+        getattr(sys.flags, "hash_randomization", 1)), "algorithm": algorithm}
+    return env
+
+
+def _safe_environment():
+    try:
+        return _environment()
+    except Exception:
+        return None
+
+
 def _float_env(name, default):
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -662,6 +801,8 @@ def activate():
         "warnings_capture": "off" if _warnings_disabled() else "on",
         # Stdlib top-level modules recorded like dependencies for this capture (empty: none).
         "stdlib_targets": sorted(stdlib_targets(os.environ.get(ENV_STDLIB, ""))),
+        # Where this process ran (OS, limits, privilege, ...), read before tracing starts.
+        "environment": _safe_environment(),
     })
     backend = Controller(
         target, sink, mode=mode, prefer=backend_pref, exclude=exclude, source=source,

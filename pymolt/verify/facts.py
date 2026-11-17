@@ -106,6 +106,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_container, to_host
+from pymolt.verify import environment as _env
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -159,6 +160,8 @@ class DiffContext:
     new_contacts: dict[str, dict[int, set[str]]] | None = None
     successors: dict[str, str] | None = None
     type_relocations: dict[str, str] | None = None
+    # Symbols a plan's predicted risks name: an environment difference never softens them.
+    predicted_symbols: set[str] | None = None
 
 
 class DiffProfile(StrEnum):
@@ -322,6 +325,9 @@ class FactSet(BaseModel):
     # ``{normalized distribution name: version}`` the capture's processes loaded (one version
     # across processes; an ambiguous one left out), from the runtime's ``distributions``.
     package_versions: dict[str, str] = Field(default_factory=dict, exclude=True)
+    # The runtime environment record of each process (``boundary_tracer._environment``);
+    # None when any process lacks one (unknown: every environment rule stays strict).
+    environment: list[dict[str, Any]] | None = Field(default=None, exclude=True)
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -479,6 +485,8 @@ class FactDiff(BaseModel):
     no_ledger: bool = False  # edits were judged as hand edits: no apply ledger was available
     # Run-to-run noise measured by a baseline replicate: what it covered (None: not measured).
     noise_measured: dict[str, Any] | None = None
+    # The two captures' runtime environments compared (``environment.stamp``).
+    environment: Any = Field(default=None, exclude=True)
 
     def edited_sites(self) -> dict[str, int]:
         """Edited sites by outcome: equal / representation-only / need review / unverified
@@ -977,7 +985,7 @@ def _merge_dur(acc: list | None, d: Any) -> list | None:
 _PROCESS_KEYS = ("pid", "python", "executable", "mode", "switched_at", "switch_reason",
                  "discovered", "armed", "settled_at", "settle_reason", "handed_over",
                  "incremental_settle", "started_at", "ended_at", "backend", "sample_rate",
-                 "warnings_capture", "distributions")
+                 "warnings_capture", "distributions", "environment")
 
 
 def merge_fact_snapshots(
@@ -1442,6 +1450,8 @@ def load_facts(
     fs.backends = backends
     fs.warnings_capture = _warnings_capture_of(meta, header)
     annotate_capture_meta(fs, meta)
+    if header and not _capture_procs(meta):
+        annotate_value_format(fs, header)  # a snapshot without its sidecar: its own header
     _add_sidecar_tally_warnings(fs, meta, site_text)
     return fs
 
@@ -1480,7 +1490,22 @@ def annotate_capture_meta(fs: FactSet, meta: Mapping[str, Any]) -> FactSet:
                 if isinstance(name, str) and isinstance(version, str) and version:
                     seen.setdefault(_dist_name(name), set()).add(version)
     fs.package_versions = {n: next(iter(v)) for n, v in seen.items() if len(v) == 1}
+    annotate_value_format(fs, meta)
     return fs
+
+
+def _capture_procs(meta: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [p for p in (meta.get("processes") or ()) if isinstance(p, Mapping)] or (
+        [meta] if meta else [])
+
+def annotate_value_format(fs: FactSet, meta: Mapping[str, Any]) -> bool:
+    """Where every process of the capture ran: the ``environment`` record (unknown unless
+    every process has one). Returns whether the metadata said anything about it."""
+    procs = _capture_procs(meta)
+    envs = [p.get("environment") for p in procs]
+    fs.environment = [dict(e) for e in envs] if procs and all(
+        isinstance(e, Mapping) for e in envs) else None
+    return any(e is not None for e in envs)
 
 
 def _dist_name(name: str) -> str:
@@ -3396,6 +3421,9 @@ class _Masker:
     stable: frozenset = frozenset()
     # a differing distribution's version string on this side -> ``⟨ver:<name>⟩``
     versions: dict[str, str] = field(default_factory=dict)
+    # this side's OS name, kernel release, machine and tmpdir -> ``⟨env:<aspect>⟩``, for the
+    # aspects that differ between the two captures' recorded environments
+    env_tokens: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._roots = re.compile("|".join(
@@ -3417,6 +3445,16 @@ class _Masker:
         self._versions = re.compile("|".join(
             rf"(?<![\w.]){re.escape(v)}(?![\w.]|-\w)"
             for v in sorted(self.versions, key=len, reverse=True))) if self.versions else None
+        # tmpdir: path-like, masked like the project root ("environment"); the OS name, kernel
+        # release and machine: "platform", which explains nothing by itself (_judge_platform)
+        self._env = {}
+        for mech, toks in (
+                ("environment", [t for t, ph in self.env_tokens.items() if ph == "⟨env:tmpdir⟩"]),
+                ("platform", [t for t, ph in self.env_tokens.items() if ph != "⟨env:tmpdir⟩"])):
+            if toks:
+                self._env[mech] = re.compile("|".join(
+                    rf"(?<![\w.\-/]){re.escape(t)}(?![\w.\-])"
+                    for t in sorted(toks, key=len, reverse=True)))
         # every start of a token's hex prefix, overlapping ones included (scanned in C)
         self._hex_rx = re.compile("(?=(" + "|".join(re.escape(p) for p in self._hex) + "))") \
             if self._hex else None
@@ -3477,6 +3515,11 @@ class _Masker:
         if self._versions is not None and self._versions.search(s):
             self._note("environment", self._versions.search(s).group())
             s = self._versions.sub(lambda m: self.versions[m.group()], s)
+        for mech, rx in self._env.items():
+            hit = rx.search(s)
+            if hit is not None:
+                self._note(mech, hit.group())
+                s = rx.sub(lambda m: self.env_tokens[m.group()], s)
         return s
 
     def _mask_tokens(self, s: str) -> str:
@@ -3711,7 +3754,8 @@ def clock_candidates(facts: list[Fact]) -> set[str]:
 
 
 def _masker_for(fs: FactSet, facts: list[Fact], stable: frozenset = frozenset(),
-                versions: dict[str, str] | None = None) -> _Masker:
+                versions: dict[str, str] | None = None,
+                env_tokens: dict[str, str] | None = None) -> _Masker:
     seeded = _seeded(facts)
     tokens: dict[str, str] = {}
     numbers: dict[float, str] = {}
@@ -3729,7 +3773,7 @@ def _masker_for(fs: FactSet, facts: list[Fact], stable: frozenset = frozenset(),
                 numbers.setdefault(n, "⟨src:number⟩")
     return _Masker(roots=list(fs.env_roots), pythons=list(fs.python_versions),
                    host_capture=fs.host_capture, tokens=tokens, numbers=numbers, stable=stable,
-                   versions=versions or {})
+                   versions=versions or {}, env_tokens=env_tokens or {})
 
 
 def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
@@ -3738,7 +3782,7 @@ def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
     became identical merge (48 uuid4 values are one masked outcome)."""
     timed = any(f.ts_min is not None for f in facts)
     if not (masker.roots or masker.pythons or timed or masker.tokens or masker.numbers
-            or masker.versions):
+            or masker.versions or masker.env_tokens):
         masker.untimed = len(facts)
         return facts
     out: list[Fact] = []
@@ -3957,8 +4001,9 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     vers = version_masks(old, new)
     # Raw first: a clock-like text recorded identically on both sides is no clock reading.
     stable = frozenset(clock_candidates(old_facts) & clock_candidates(new_facts))
-    noise.old = _masker_for(old, old_facts, stable, vers[0])
-    noise.new = _masker_for(new, new_facts, stable, vers[1])
+    envcmp = _env.compare(old.environment, new.environment)
+    noise.old = _masker_for(old, old_facts, stable, vers[0], _env.tokens(envcmp, 0))
+    noise.new = _masker_for(new, new_facts, stable, vers[1], _env.tokens(envcmp, 1))
     seeded = _seeded(old_facts) or _seeded(new_facts)
     noise.sources = frozenset(
         f.symbol for f in (*old_facts, *new_facts)
@@ -4155,6 +4200,10 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
                             idx[tok[:8]].append(tok)
                     gstats.seed_index[side] = idx
         changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats)
+    protected = _protected_symbols(context)
+    env_readings = _explain_env_readings(pending, envcmp, protected)
+    platform_read, platform_reviews = _judge_platform(pending, envcmp, protected)
+    env_readings += platform_read
 
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_dropped(entries, old, new)
@@ -4162,6 +4211,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _review_masked_input(entries)
     variation = _run_variation(gstats)
     gated = _gate_unmeasured(entries, variation) if variation else 0
+    env_reviews = _judge_environment(entries, envcmp, protected) + platform_reviews
     entries.sort(key=_entry_sort_key)
     warnings = _warnings(old, new)
     if unsampled:
@@ -4209,9 +4259,18 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         warnings.append(
             "definition-spans-unknown: no source snapshots, so an edit to a decorator or a class "
             "body does not make the calls on its definition line edited sites")
+    if env_reviews or env_readings:
+        warnings.append(
+            f"environment-differs: the captures ran in different environments "
+            f"({', '.join(envcmp.differs)}); {env_reviews} difference(s) at calls that read a "
+            f"differing aspect are reviews, {env_readings} value(s) are each side's own "
+            "reading")
     return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger,
                     old_summary=old.summary(),
-                    new_summary=new.summary(), warnings=warnings, unsampled=unsampled)
+                    new_summary=new.summary(), warnings=warnings, unsampled=unsampled,
+                    environment=_env.stamp(envcmp, old.environment, new.environment,
+                                           reviews=env_reviews, explained=env_readings,
+                                           inferred=_env_inference(old, new)))
 
 
 def _site_key(symbol: str, file: str, func: str, line: int | None, text: str | None,
@@ -5207,6 +5266,220 @@ def _kinds_match(a: list[Outcome] | None, b: list[Outcome] | None) -> bool:
     if not ra or not rb:
         return False
     return _cover(ra, rb, _raises_match)
+
+
+# ── runtime environment (``environment`` records) ───────────────────────────────────────
+
+ENVIRONMENT_DIFFERS = "environment differs"
+_READING_ASPECT = {"cpus": "cpus", "uid": "privilege", "euid": "privilege", "system": "os",
+                   "machine": "machine", "release": "release", "rlimit": "rlimit"}
+
+
+def _protected_symbols(context: DiffContext | None) -> set[str]:
+    """Symbols the migration's own knowledge predicts a change at (a plan's delta facts and
+    successors, its predicted risks): an environment difference never softens them."""
+    if context is None:
+        return set()
+    out = set(context.predicted_symbols or ())
+    for old, new in (context.successors or {}).items():
+        out.update((old, new))
+    return out
+
+
+def _env_unedited(e: FactEntry) -> bool:
+    return e.provenance in (None, "unedited") and not e.unverified
+
+
+def _explain_env_readings(pending: list[tuple[_V, _V, FactEntry]], envcmp: Any,
+                          protected: set[str]) -> int:
+    """E2: a value at a curated reader that is each side's OWN recorded reading of an aspect
+    that differs (``os.cpu_count()`` 8 vs 12 with cpus 8 vs 12) is EQUAL at masked level,
+    explained. A value matching neither side's reading stays as it is."""
+    if envcmp is None or envcmp.same:
+        return 0
+    count = 0
+    for o, n, e in pending:
+        if e.comparison is not Comparison.CHANGED or e.category is not FactCategory.CHANGED \
+                or e.review or e.noise or not _env_unedited(e) or o.rewritten_site \
+                or n.rewritten_site or e.symbol in protected or (e.new_symbol or "") in protected:
+            continue
+        kind = _env.reading_kind(e.symbol)
+        aspect = _READING_ASPECT.get(kind or "")
+        if aspect is None or not envcmp.differ(aspect):
+            continue
+        of, nf = o.fact, n.fact
+        if len(of.outcomes) != 1 or len(nf.outcomes) != 1 \
+                or of.outcomes[0].kind != "return" or nf.outcomes[0].kind != "return":
+            continue
+        if not (_env.is_own_reading(e.symbol, of.input, of.outcomes[0].value,
+                                    envcmp.old_envs)
+                and _env.is_own_reading(e.symbol, nf.input, nf.outcomes[0].value,
+                                        envcmp.new_envs)):
+            continue
+        e.category, e.comparison, e.level = (FactCategory.EQUAL, Comparison.EQUAL,
+                                             ComparisonLevel.MASKED)
+        shown = envcmp.describe(envcmp.matching([aspect]))
+        e.explained = f"environment: the value is this side's own {aspect} ({shown})"
+        e.notes.append("environment-reading")
+        count += 1
+    return count
+
+
+def _judge_platform(pending: list[tuple[_V, _V, FactEntry]], envcmp: Any,
+                    protected: set[str]) -> tuple[int, int]:
+    """A pair equal only once each side's OS name, kernel release or machine was masked
+    (``platform`` masks, made only while those aspects differ) is no proof of equal behaviour:
+    a call that returns the platform it ran on looks the same as one whose result changed to
+    another platform's. It stays EQUAL only at a curated reader whose recorded values are each
+    side's own reading (E2); elsewhere it is a review "environment differs" (a strict failure
+    at a symbol the migration's knowledge names). Returns (explained, reviews)."""
+    if envcmp is None or envcmp.same:
+        return 0, 0
+    explained = reviews = 0
+    for o, n, e in pending:
+        of, nf = o.fact, n.fact
+        if "platform" not in (_masks_of(of) | _masks_of(nf)) or e.review or e.noise \
+                or e.comparison is not Comparison.EQUAL:
+            continue
+        ro, rn = _raw_of(of), _raw_of(nf)
+        if compare_outcomes(ro.outcomes, rn.outcomes).comparison is Comparison.EQUAL:
+            continue  # only the input was masked: the outputs are equal as recorded
+        aspects = envcmp.matching(["os", "release", "machine"])
+        kind = _env.reading_kind(e.symbol)
+        if kind in ("system", "machine", "release") and len(ro.outcomes) == 1 \
+                and len(rn.outcomes) == 1 \
+                and _env.is_own_reading(e.symbol, ro.input, ro.outcomes[0].value,
+                                        envcmp.old_envs) \
+                and _env.is_own_reading(e.symbol, rn.input, rn.outcomes[0].value,
+                                        envcmp.new_envs):
+            aspect = _READING_ASPECT[kind]
+            e.level = ComparisonLevel.MASKED
+            e.explained = (f"environment: the value is this side's own {aspect} "
+                           f"({envcmp.describe(envcmp.matching([aspect]))})")
+            e.notes.append("environment-reading")
+            explained += 1
+            continue
+        if e.category in (FactCategory.EQUAL, FactCategory.DRIFT):
+            e.category = FactCategory.CHANGED
+        e.comparison = Comparison.CHANGED
+        e.notes.append("platform-masked")
+        e.explained = ("platform: equal only once each side's own "
+                       f"{'/'.join(a for a in aspects)} was masked")
+        if e.symbol in protected or (e.new_symbol or "") in protected \
+                or not _env_unedited(e):
+            continue  # strict: the migration's knowledge names it, or it is an edited site
+        e.review = (f"{ENVIRONMENT_DIFFERS}: {envcmp.describe(aspects)}; the value differs only "
+                    f"by each side's own {', '.join(aspects)}; capture both sides in the same "
+                    "environment to settle")
+        reviews += 1
+    return explained, reviews
+
+
+def _type_names(t: Any) -> set[str]:
+    """Every type name a type tree holds (``object``/``opaque``/``type`` labels)."""
+    out: set[str] = set()
+    if isinstance(t, dict):
+        for k, v in t.items():
+            if isinstance(v, str) and k in ("object", "opaque", "type", "return", "raise",
+                                            "structure", "dataclass"):
+                out.add(v)
+            else:
+                out |= _type_names(v)
+    elif isinstance(t, list):
+        for x in t:
+            out |= _type_names(x)
+    return out
+
+
+def _platform_tagged(e: FactEntry) -> bool:
+    """The outcome types differ only by a platform-tagged name (``psutil._psosx.pmem`` vs
+    ``psutil._pslinux.pmem``), one-sided attributes of such objects included."""
+    old_t, new_t = _distinct_types(e.old or []), _distinct_types(e.new or [])
+    a = {_env.platform_neutral(x) for x in _type_names(old_t)}
+    b = {_env.platform_neutral(x) for x in _type_names(new_t)}
+    raw_a, raw_b = _type_names(old_t), _type_names(new_t)
+    return raw_a != raw_b and a == b and any("⟨os⟩" in x for x in a)
+
+
+def _raise_types(outcomes: list[Outcome] | None) -> set[str]:
+    return {_raise_name(o.value) for o in outcomes or () if o.kind == "raise"}
+
+
+def _env_change_class(e: FactEntry) -> str | None:
+    """The change classes an environment can cause (B's restriction): a presence change; a
+    kind change whose raise types are all of the environment family (``<unknown>``, OSError
+    and its kin, ValueError, NotImplementedError, AttributeError, ImportError); a
+    platform-tagged type-name difference; a value change at equal types. None otherwise:
+    TypeError, KeyError and other type changes are never softened."""
+    if e.category in (FactCategory.APPEARED, FactCategory.DISAPPEARED):
+        return "presence"
+    if e.comparison is not Comparison.CHANGED:
+        return None
+    if not _kinds_match(e.old, e.new):
+        raises = _raise_types(e.old) | _raise_types(e.new)
+        return "kind" if raises and all(_env.env_raise(r) for r in raises) else None
+    if _platform_tagged(e):
+        return "type"
+    if not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
+                  _outcome_types_match):
+        return None
+    return "value"
+
+
+def _evidence_aspects(e: FactEntry, envcmp: Any) -> set[str]:
+    """Aspects an entry shows it reads: a platform-tagged type name reads ``os``; a
+    PermissionError raised only on the less privileged side reads ``privilege``."""
+    out: set[str] = set()
+    if _platform_tagged(e):
+        out.add("os")
+    po = "PermissionError" in _raise_types(e.old)
+    pn = "PermissionError" in _raise_types(e.new)
+    if po != pn and envcmp.differ("privilege"):
+        new_less = _env.less_privileged(envcmp.new_envs, envcmp.old_envs)
+        old_less = _env.less_privileged(envcmp.old_envs, envcmp.new_envs)
+        if (pn and new_less) or (po and old_less):
+            out.add("privilege")
+    return out
+
+
+def _judge_environment(entries: list[FactEntry], envcmp: Any, protected: set[str]) -> int:
+    """E3/E4: a failing difference at an unedited call that reads an aspect of the environment
+    that differs between the captures (curated reader, or evidence) is a review "environment
+    differs", never noise and never a pass: only a same-environment capture settles it. Not
+    for edited sites, for symbols the migration's knowledge names (``_protected_symbols``),
+    for aspects that do not differ, for an unknown or same environment, or for a change class
+    no environment causes (``_env_change_class``)."""
+    if envcmp is None or envcmp.same:
+        return 0
+    count = 0
+    for e in entries:
+        if not e.fails or not _env_unedited(e):
+            continue
+        if e.symbol in protected or (e.new_symbol or "") in protected:
+            continue
+        aspects = _env.reader_aspects(e.symbol, e.input)
+        if e.new_symbol:
+            aspects |= _env.reader_aspects(e.new_symbol, e.new_input or e.input)
+        aspects |= _evidence_aspects(e, envcmp)
+        differing = envcmp.matching(sorted(aspects))
+        if not differing or _env_change_class(e) is None:
+            continue
+        e.review = (f"{ENVIRONMENT_DIFFERS}: {envcmp.describe(differing)}; {e.symbol} reads "
+                    "it; capture both sides in the same environment to settle")
+        e.notes.append("environment-differs: " + ", ".join(differing))
+        count += 1
+    return count
+
+
+def _env_inference(old: FactSet, new: FactSet) -> str | None:
+    """What the call-site paths already say about where an unrecorded capture ran
+    (informational only: it changes no verdict)."""
+    o, n = bool(old.paths_mapped), bool(new.paths_mapped)
+    if o == n:
+        return None
+    where = {True: "in a container", False: "on the host"}
+    return (f"inferred from call-site paths: the baseline ran {where[o]}, the post-migration "
+            f"capture {where[n]}")
 
 
 def _review_masked_input(entries: list[FactEntry]) -> None:

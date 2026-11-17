@@ -54,6 +54,9 @@ ACTIONS = {
     "masked input": "capture a baseline replicate (pymolt capture baseline --replicate)",
     "input changed": "capture a baseline replicate (pymolt capture baseline --replicate)",
     "unpaired site": "capture a baseline replicate (pymolt capture baseline --replicate)",
+    "environment differs": "capture both sides in the same environment (the post-migration "
+                           "capture in the baseline's container or host, with the target "
+                           "Python)",
     "the value differs on a hand-edited line": "review the hand edit at the call site",
     "not reached": "check that the code around the call still runs under the tests",
     "no longer a dependency call here": "check what the name refers to on that line now",
@@ -239,6 +242,21 @@ def _group(entries: list[FactEntry]) -> dict[tuple, list[FactEntry]]:
     return groups
 
 
+def _environment_stamp(diff: FactDiff, by_class: dict[str, list[FactEntry]]) -> Any:
+    """``quality.environment``: "same", the differing aspects with the reviews and readings
+    they explain, or "not recorded (<side>)" (with an inference from the call-site paths)."""
+    env = diff.environment
+    if env is None:
+        return "not recorded (old, new)"
+    if isinstance(env, dict) and "differs" in env:
+        reviews = sum(1 for e in by_class["review"]
+                      if str(e.review or "").startswith("environment differs"))
+        explained = sum(1 for e in diff.entries
+                        if str(e.explained or "").startswith("environment: the value is"))
+        return {**env, "reviews": reviews, "explained": explained}
+    return env
+
+
 def summarize(diff: FactDiff) -> dict[str, Any]:
     entries = list(diff.entries)
     by_class: dict[str, list[FactEntry]] = defaultdict(list)
@@ -286,7 +304,7 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
         "dropped": {"old": diff.old_summary.dropped_events,
                     "new": diff.new_summary.dropped_events},
         "backends": {"old": diff.old_summary.backends, "new": diff.new_summary.backends},
-        "platforms": "not recorded by the capture",
+        "environment": _environment_stamp(diff, by_class),
         "levels": {k: {"entries": v, "share": round(v / total, 3)}
                    for k, v in sorted(levels.items())},
     }
@@ -384,6 +402,10 @@ def render_text(summary: dict[str, Any], *, explained: bool = False,
     noise_text = noise if isinstance(noise, str) else "measured by a baseline replicate"
     dropped = q.get("dropped") or {}
     shares = ", ".join(f"{k} {v['share']:.0%}" for k, v in (q.get("levels") or {}).items())
+    env = q.get("environment")
+    env_text = env if isinstance(env, str) or env is None else \
+        f"differs ({', '.join(env.get('differs') or ())})"
     out.append(f"Quality: noise {noise_text}; dropped events old {dropped.get('old')} / new "
-               f"{dropped.get('new')}; backends {q.get('backends')}; levels {shares}")
+               f"{dropped.get('new')}; backends {q.get('backends')}; levels {shares}; "
+               f"environment {env_text}")
     return out
