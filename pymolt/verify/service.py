@@ -304,12 +304,12 @@ def _normalize_impact_targets(values: list[str] | tuple[str, ...] | None) -> lis
 
 
 def _applied_plan_impact_targets(project_dir: str | Path) -> list[str]:
-    """Resolve old and replacement API paths from the currently applied plan."""
+    """Resolve old and replacement API paths from the plan whose code is on disk."""
     from pymolt.migration_plan import MigrationPlan
     from pymolt.migration_state import MigrationReceipt
 
     receipt = MigrationReceipt.load(project_dir)
-    if receipt is None or receipt.status != "applied" or not receipt.plan_path:
+    if receipt is None or not receipt.in_effect or not receipt.plan_path:
         return []
     plan = MigrationPlan.load(project_dir, receipt.plan_path)
     if plan is None:
@@ -419,7 +419,7 @@ def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
 
         receipt = MigrationReceipt.load(root)
         plan = (MigrationPlan.load(root, receipt.plan_path)
-                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                if receipt is not None and receipt.in_effect and receipt.plan_path
                 else None)
     except Exception as exc:  # noqa: BLE001 - best effort
         logger.info("stdlib tracing: could not read the apply receipt: %s", exc)
@@ -2062,6 +2062,56 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
     return str(destination)
 
 
+def restore_archived_capture(archived: str | Path, original: str | Path) -> None:
+    """Undo ``archive_existing_capture``: move a recording and its sidecars back."""
+    for src, dst in ((Path(archived), Path(original)),
+                     (_trace_metadata_path(archived), _trace_metadata_path(original)),
+                     (snapshot_path(archived), snapshot_path(original))):
+        if src.is_file():
+            shutil.move(str(src), str(dst))
+    _move_sources(archived, original)
+
+
+def set_aside_post_migration(project_dir: str | Path, state: ContractState,
+                             run_id: str) -> str | None:
+    """Take the post-migration capture out of its slot because a rollback restored the code
+    it recorded. It is kept, never deleted: in ``state.diagnostic_captures``, stamped
+    ``set_aside_by``, with its recording moved to the archive so the next post-migration
+    capture cannot overwrite what the entry points at. Changes ``state`` in place (the caller
+    saves it) and returns where the recording went (None: there was no slot, or the file
+    could not be moved and stays where it was)."""
+    slot = state.post_migration
+    if slot is None:
+        return None
+    archived = archive_existing_capture(project_dir, "post_migration")
+    update: dict = {
+        "validity": CaptureValidity.UNKNOWN,
+        "validity_reason": (f"invalidated by rollback of migration {run_id[:8]}: the code "
+                            "it recorded is no longer on disk"),
+        "set_aside_by": run_id,
+    }
+    if archived is not None:
+        update["trace_path"] = archived
+        if slot.metadata_path:
+            update["metadata_path"] = str(_trace_metadata_path(archived))
+        if slot.sources_path:
+            update["sources_path"] = str(sources_path(archived))
+    state.diagnostic_captures.append(slot.model_copy(update=update))
+    state.post_migration = None
+    return archived
+
+
+def set_aside_capture(state: ContractState) -> ContractSlot | None:
+    """The post-migration capture the last rollback set aside, while no newer one fills the
+    slot (None otherwise)."""
+    if state.post_migration is not None:
+        return None
+    for slot in reversed(state.diagnostic_captures):
+        if slot.set_aside_by:
+            return slot
+    return None
+
+
 def environment_fingerprint(project_dir: str | Path) -> str | None:
     """A short digest of the inputs that define *which world* a capture describes.
 
@@ -2580,14 +2630,15 @@ def build_contract_report_from_state(
     changed across the migration"); only one captured -> that one as trace,
     no diff; neither -> trace=None (today's all-BLIND behavior, unchanged).
     """
+    from pymolt.migration_state import MigrationReceipt
+
     state = load_contract_state(project_dir)
+    receipt = MigrationReceipt.load(project_dir)
 
     if changed_api_paths is None:
         from pymolt.migration_plan import MigrationPlan
-        from pymolt.migration_state import MigrationReceipt
 
-        receipt = MigrationReceipt.load(project_dir)
-        if receipt is not None and receipt.status == "applied" and receipt.plan_path:
+        if receipt is not None and receipt.in_effect and receipt.plan_path:
             applied_plan = MigrationPlan.load(project_dir, receipt.plan_path)
             if applied_plan is not None and applied_plan.impacts:
                 changed_api_paths = applied_plan.impacts
@@ -2672,8 +2723,15 @@ def build_contract_report_from_state(
     )
     if replicate_note:
         report.notes.append(replicate_note)
+    if (receipt is not None and receipt.status == "rolled_back" and receipt.in_effect
+            and any(name == "post-migration" for name, _ in used_slots)):
+        report.notes.append(
+            f"migration run {receipt.run_id[:8]} was rolled back, but it had changed no file: "
+            "the post-migration capture still records the code on disk, and verify still "
+            "reads that run's plan")
     _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
-    _stamp_verdict(report, trace, against, used_slots)
+    _stamp_verdict(report, trace, against, used_slots,
+                   set_aside=set_aside_capture(state) if trace_override is None else None)
     return report
 
 
@@ -2712,7 +2770,7 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
 
         receipt = MigrationReceipt.load(root)
         plan = (MigrationPlan.load(root, receipt.plan_path)
-                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                if receipt is not None and receipt.in_effect and receipt.plan_path
                 else None)
         if plan is not None:
             for impact in plan.impacts:
@@ -2772,7 +2830,7 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
         is_baseline = slot.resolve() == Path(against).resolve()
     candidates = []
     receipt = MigrationReceipt.load(root)
-    if receipt is not None and receipt.status == "applied" and receipt.plan_path:
+    if receipt is not None and receipt.in_effect and receipt.plan_path:
         candidates.append(MigrationPlan.load(root, receipt.plan_path))
     candidates.append(MigrationPlan.load(root))
     bound = [plan for plan in candidates if plan is not None and is_baseline
@@ -2792,10 +2850,21 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
             "plan_id": bound[0].plan_id if bound else None, "notes": notes}
 
 
-def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]) -> str:
-    """Why there is nothing to diff against, naming the side that is actually missing."""
+def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]],
+                         set_aside: ContractSlot | None = None) -> str:
+    """Why there is nothing to diff against, naming the side that is actually missing.
+
+    ``set_aside``: the post-migration capture a rollback took out of its slot. It exists, so
+    "no capture yet" would be false: the reason names it, where its recording is, and how to
+    compare against it anyway."""
     names = {name for name, _ in used_slots}
     if names == {"baseline"}:
+        if set_aside is not None:
+            return (
+                f"no post-migration capture: the one of {set_aside.captured_at} was set aside "
+                f"by the rollback of migration {(set_aside.set_aside_by or '')[:8]}, which "
+                f"restored the code it recorded (kept at {set_aside.trace_path}); apply again "
+                "and capture post-migration, or pass that recording as --post-migration")
         return "no post-migration capture yet (only the baseline is recorded)"
     if names == {"post-migration"}:
         return "no baseline capture"
@@ -2809,8 +2878,13 @@ def _stamp_verdict(
     trace: str | None,
     against: str | None,
     used_slots: list[tuple[str, object]],
+    *,
+    set_aside: ContractSlot | None = None,
 ) -> None:
-    """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty."""
+    """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty.
+
+    ``set_aside``: the post-migration capture a rollback set aside (see
+    ``_missing_side_reason``)."""
     # The verdict's FAIL evidence is the WHOLE surface (``all_*``): an impact filter is a focus
     # for the report, not a limit on what can fail it, or a change nobody predicted could
     # never be found. Coverage (BLIND, dynamic-only, trust, static targets) stays scoped to the
@@ -2836,7 +2910,7 @@ def _stamp_verdict(
                 quality.reason or f"current trace is {quality.validity.value}"
             )
     if against is None:
-        comparability.append(_missing_side_reason(trace, used_slots))
+        comparability.append(_missing_side_reason(trace, used_slots, set_aside))
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
@@ -3098,11 +3172,12 @@ def baseline_setup_unchanged(slot, current_setup: str | None) -> bool:
 
 
 def _applied_migration(project_dir: str | Path):
-    """The receipt of the migration currently applied, or None (none, or rolled back)."""
+    """The receipt of the migration whose code is on disk (applied, or rolled back without
+    restoring a file: ``MigrationReceipt.in_effect``), or None."""
     from pymolt.migration_state import MigrationReceipt
 
     receipt = MigrationReceipt.load(project_dir)
-    if receipt is None or receipt.status != "applied":
+    if receipt is None or not receipt.in_effect:
         return None
     return receipt
 
