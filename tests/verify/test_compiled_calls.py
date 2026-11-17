@@ -4,7 +4,10 @@ Small real C extensions from the stdlib stand in for a compiled dependency: ``_j
 ``math`` / ``_datetime`` are made "the dependency" through a test matcher. Runtime-layer test:
 pure stdlib + pytest, 3.6-compatible syntax.
 """
+import collections.abc
 import datetime
+import gc
+import itertools
 import json
 import math
 import sys
@@ -522,3 +525,382 @@ def test_the_runtime_writer_module_is_never_the_project_nor_a_dependency():
 
     assert never_target(_rawthreads.__name__)
     assert not AppMatcher().matches(_rawthreads.__name__, sys._getframe())
+
+
+# ── callees only some receivers make a dependency's ──────────────────────────
+# Under 3.12 ``d.items()`` is a CALL of the unbound ``dict.items`` with ``d`` as its first
+# argument, and ``m.get(k)`` one of ``Mapping.get`` with ``m``: whether it is a dependency's
+# call depends on the receiver's class, so a call site must not settle (DISABLE) on the
+# callee it saw twice. setprofile has no call-site settling: it is the reference.
+
+RECV_CASES = [(SetProfileBackend, {})]
+if HAS_MONITORING:
+    RECV_CASES += [(MonitoringBackend, {"mode": "discover"}),
+                   (MonitoringBackend, {"mode": "incremental"})]
+RECV_IDS = ["setprofile", "discover", "incremental"][:len(RECV_CASES)]
+
+
+def _run_with(cls, kw, targets, body):
+    sink = MemorySink()
+    be = cls(PrefixMatcher(targets), sink, source=__name__, **kw)
+    be.start()
+    try:
+        body()
+    finally:
+        be.stop()
+    return sink, be
+
+
+def _counts(sink):
+    out = {}
+    for rec in sink.records.values():
+        sym = rec.get("sym") or rec["qualname"]
+        out[sym] = out.get(sym, 0) + rec["count"]
+    return out
+
+
+def _fake_module(name, src):
+    """A module that exists once its classes do, as after an import."""
+    mod = types.ModuleType(name)
+    exec(compile(src, "<" + name + ">", "exec"), mod.__dict__)
+    sys.modules[name] = mod
+    return mod
+
+
+def _summary(d):
+    from operator import itemgetter
+
+    return json.dumps(dict(sorted(d.items(), key=itemgetter(0)))), sum(d.values())
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_a_builtin_method_site_reached_by_plain_receivers_first_sees_dependency_ones(cls, kw):
+    # locust runners.py:1402-1403: the same lines summarise plain dicts and defaultdicts.
+    import collections
+
+    def body():
+        for _ in range(3):
+            _summary({"a": 1, "b": 2})
+        for _ in range(3):
+            dd = collections.defaultdict(int)
+            dd["a"] += 1
+            _summary(dd)
+
+    sink, _be = _run_with(cls, kw, ["collections", "json"], body)
+    counts = _counts(sink)
+    assert counts.get("collections.defaultdict.items") == 3, counts
+    assert counts.get("collections.defaultdict.values") == 3, counts
+    assert counts.get("json.dumps") == 6, counts
+
+
+def _bound_get(d):
+    get = d.get             # a builtin method bound to the receiver, not a descriptor call
+    return get("a")
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_a_bound_builtin_method_site_reached_by_plain_receivers_first_sees_dependency_ones(
+        cls, kw):
+    import collections
+
+    def body():
+        for _ in range(3):
+            _bound_get({"a": 1})
+        for _ in range(3):
+            _bound_get(collections.defaultdict(int, a=1))
+
+    sink, _be = _run_with(cls, kw, ["collections"], body)
+    assert _counts(sink).get("collections.defaultdict.get") == 3, _counts(sink)
+
+
+RECV_SRC = '''
+import collections.abc
+
+class Hdrs(collections.abc.Mapping):
+    def __init__(self, d):
+        self._d = dict(d)
+    def __getitem__(self, k):
+        return self._d[k]
+    def __iter__(self):
+        return iter(self._d)
+    def __len__(self):
+        return len(self._d)
+'''
+
+
+class _OurMapping(collections.abc.Mapping):     # our code's own Mapping
+    def __init__(self, d):
+        self._d = dict(d)
+
+    def __getitem__(self, k):
+        return self._d[k]
+
+    def __iter__(self):
+        return iter(self._d)
+
+    def __len__(self):
+        return len(self._d)
+
+
+def _get_a(m):
+    return m.get("a")
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_a_stdlib_method_site_reached_by_our_receivers_first_sees_dependency_ones(cls, kw):
+    # ``Mapping.get`` is a dependency's call only on a dependency class inheriting it.
+    dep = _fake_module("vfakerecv", RECV_SRC)
+    try:
+        def body():
+            for _ in range(3):
+                _get_a(_OurMapping({"a": 1}))
+            for _ in range(3):
+                _get_a(dep.Hdrs({"a": 1}))
+
+        sink, _be = _run_with(cls, kw, ["vfakerecv"], body)
+    finally:
+        del sys.modules["vfakerecv"]
+    counts = _counts(sink)
+    assert counts.get("vfakerecv.Hdrs.get") == 3, counts
+
+
+def _items(d):
+    return d.items()
+
+
+def _items_hits(targets, mode, body):
+    """How often ``_items``'s ``dict.items`` reached the CALL callback: a settled site stops
+    at 2."""
+    hits = []
+
+    class Counting(MonitoringBackend):
+        def _on_call(self, code, offset, callable_, arg0):
+            if callable_ is dict.items and code is _items.__code__:
+                hits.append(arg0)
+            return MonitoringBackend._on_call(self, code, offset, callable_, arg0)
+
+    _run_with(Counting, {"mode": mode}, targets, body)
+    return len(hits)
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", ["discover", "incremental"])
+def test_a_builtin_method_site_settles_when_no_dependency_class_inherits_it(mode):
+    def body():
+        for _ in range(6):
+            _items({"a": 1})
+
+    assert _items_hits(["json"], mode, body) == 2           # no json class inherits dict.items
+    assert _items_hits(["collections"], mode, body) == 6    # collections.defaultdict does
+
+
+LATE_SRC = '''
+import collections.abc
+
+class LateDict(dict):
+    pass
+
+class LateMap(collections.abc.Mapping):
+    def __init__(self, d):
+        self._d = dict(d)
+    def __getitem__(self, k):
+        return self._d[k]
+    def __iter__(self):
+        return iter(self._d)
+    def __len__(self):
+        return len(self._d)
+'''
+
+
+_UNIQUE = itertools.count()
+
+
+def _unique(prefix):
+    """A module name of its own per test case: an earlier case's classes (garbage not yet
+    collected) are still subclasses of ``dict``, and would make the callee open from the
+    start."""
+    return prefix + str(next(_UNIQUE))
+
+
+def _closed_now(be, callee):
+    """Assert the callee was decided closed (none of the target classes inherits it yet), so
+    a case exercises the re-decision; setprofile has no settling to check."""
+    closed = getattr(be, "_rd_closed", None)
+    if closed is not None:
+        assert id(callee) in closed, "the case must start with a closed callee"
+
+
+def _late(cls, kw, call, callee, plain, make):
+    """``call`` settles on plain receivers while no class of the target exists, then the
+    target module is imported and its class reaches the same site."""
+    name = _unique("vfakelate")
+    sink = MemorySink()
+    be = cls(PrefixMatcher([name]), sink, source=__name__, **kw)
+    be.start()
+    try:
+        for _ in range(3):
+            call(plain())
+        _closed_now(be, callee)
+        mod = _fake_module(name, LATE_SRC)
+        for _ in range(3):
+            call(make(mod))
+    finally:
+        be.stop()
+        sys.modules.pop(name, None)
+        gc.collect()
+    return name, _counts(sink)
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_a_settled_builtin_method_site_reopens_when_an_import_brings_an_heir(cls, kw):
+    name, counts = _late(cls, kw, _items, dict.items, lambda: {"a": 1},
+                         lambda m: m.LateDict(a=1))
+    assert counts.get(name + ".LateDict.items") == 3, counts
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_a_settled_stdlib_method_site_reopens_when_an_import_brings_an_heir(cls, kw):
+    name, counts = _late(cls, kw, _get_a, collections.abc.Mapping.get.__code__,
+                         lambda: _OurMapping({"a": 1}), lambda m: m.LateMap({"a": 1}))
+    assert counts.get(name + ".LateMap.get") == 3, counts
+
+
+def _keys(d):
+    return d.keys()
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_a_class_made_at_run_time_reopens_a_settled_site_once_another_call_shows_it(cls, kw):
+    # No import tells the runtime about it; a call elsewhere with that receiver does.
+    name = _unique("vfakert")
+    sys.modules[name] = types.ModuleType(name)
+    sink = MemorySink()
+    be = cls(PrefixMatcher([name]), sink, source=__name__, **kw)
+    be.start()
+    try:
+        for _ in range(3):
+            _keys({"a": 1})                     # settles: no class of the target inherits it
+        _closed_now(be, dict.keys)
+        made = type("Made", (dict,), {"__module__": name})
+        list(made(a=1).keys())                  # another site: the receiver shows the heir
+        for _ in range(3):
+            _keys(made(a=1))
+    finally:
+        be.stop()
+        del sys.modules[name]
+        gc.collect()
+    assert _counts(sink).get(name + ".Made.keys") == 1 + 3, _counts(sink)
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_an_open_site_answers_each_receiver_class_on_every_call(cls, kw):
+    # The open site's kept answer (plain dict) must not swallow a defaultdict call after it.
+    import collections
+
+    def body():
+        for _ in range(4):
+            _items({"a": 1})
+            _items(collections.defaultdict(int, a=1))
+            _items({"a": 1})
+
+    sink, _be = _run_with(cls, kw, ["collections"], body)
+    assert _counts(sink).get("collections.defaultdict.items") == 4, _counts(sink)
+
+
+KIN_BASE_SRC = '''
+class Base(object):
+    def __new__(cls):
+        return object.__new__(cls)
+'''
+
+
+def _make(c, base):
+    return base.__new__(c)
+
+
+@pytest.mark.parametrize("cls,kw", RECV_CASES, ids=RECV_IDS)
+def test_an_open_site_with_class_receivers_decides_each_class(cls, kw):
+    # ``Base.__new__(c)``: the receiver is the class itself, so every receiver has the same
+    # type (``type``) and the open site's kept answer cannot be keyed by it.
+    base_name, kid_name = _unique("vfakekinbase"), _unique("vfakekin")
+    base = _fake_module(base_name, KIN_BASE_SRC)
+    kid = _fake_module(kid_name, "from " + base_name + " import Base\n"
+                                 "class Kid(Base):\n    pass\n")
+    ours = type("Ours", (base.Base,), {})
+    try:
+        def body():
+            for _ in range(3):
+                _make(ours, base.Base)
+            for _ in range(3):
+                _make(kid.Kid, base.Base)
+
+        sink, _be = _run_with(cls, kw, [kid_name], body)
+    finally:
+        del sys.modules[base_name], sys.modules[kid_name]
+        gc.collect()
+    assert _counts(sink).get(kid_name + ".Kid.__new__") == 3, _counts(sink)
+
+
+WRAPPED_SRC = '''
+import functools
+
+def deco(f):
+    @functools.wraps(f)
+    def wrapper(self):
+        return f(self)
+    return wrapper
+
+class Third(object):
+    @deco
+    def go(self):
+        return 1
+'''
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", ["discover", "incremental"])
+def test_a_method_no_class_holds_under_its_code_name_settles(mode):
+    # ``Third.go`` is the ``wrapper`` code: inherited calls are named by the code's name, so
+    # none can be recorded through it, and its site settles (and is never decided again).
+    name = _unique("vfakewrapped")
+    mod = _fake_module(name, WRAPPED_SRC)
+    obj = mod.Third()
+    hits = []
+
+    class Counting(MonitoringBackend):
+        def _on_call(self, code, offset, callable_, arg0):
+            if callable_ is mod.Third.go:
+                hits.append(1)
+            return MonitoringBackend._on_call(self, code, offset, callable_, arg0)
+
+    def body():
+        for _ in range(6):
+            obj.go()
+
+    try:
+        _sink, be = _run_with(Counting, {"mode": mode}, ["collections"], body)
+    finally:
+        del sys.modules[name]
+    assert len(hits) == 2
+    assert be._rd[id(mod.Third.go.__code__)][1] is False
+    assert id(mod.Third.go.__code__) not in be._rd_closed
+
+
+class _Ours:
+    def ping(self):
+        return 1
+
+
+@needs_monitoring
+@pytest.mark.parametrize("mode", ["discover", "incremental"])
+def test_our_own_methods_settle_and_are_never_decided_again(mode):
+    obj = _Ours()
+
+    def body():
+        for _ in range(5):
+            obj.ping()
+
+    _sink, be = _run_with(MonitoringBackend, {"mode": mode}, ["collections"], body)
+    code = _Ours.ping.__code__
+    assert be._rd[id(code)][1] is False             # no dependency class inherits our code
+    assert id(code) not in be._rd_closed            # so imports never re-decide it
