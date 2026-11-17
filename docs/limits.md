@@ -47,6 +47,11 @@ now returns) still fails, although it may be noise.
   and recorded in full.
 - **Late dunder contacts in long runs (3.12+).** Watching for dunder, property and generator calls
   stops 30 s after the last new contact, so one first used after that is missed.
+- **Values behind a proxy or a lazy object** (werkzeug's `LocalProxy`, Django's `SimpleLazyObject`)
+  are recorded as the proxy's type: reading through it would evaluate it. A dict or list subclass
+  whose own methods compute what they return (werkzeug's `MultiDict`) is recorded from what it
+  stores (every value list). One that keeps its items elsewhere and defines its own `__len__`
+  (werkzeug's `CombinedMultiDict`) is recorded like any object, from its attributes.
 - **Classes made at run time (3.12+).** A dependency class created without an import, whose
   instances reach only a call site that stopped being watched before the class existed, is missed.
 

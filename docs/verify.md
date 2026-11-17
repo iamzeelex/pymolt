@@ -69,6 +69,11 @@ Values are rendered at the most exact level that can be compared:
 - numpy and pandas objects as type, shape and dtypes, with the values only when small;
 - anything else as its type alone.
 
+Recording a value never runs its code, so it cannot change what the program does. A dict, list or set
+subclass is recorded from what it stores, not through its own methods (Flask's session stays
+"not accessed"). A proxy or lazy object (werkzeug's `LocalProxy`, Django's `SimpleLazyObject`) is
+recorded as its own type, without evaluating it.
+
 `--privacy shape` keeps types and structure but drops scalar values.
 
 ### Tracers

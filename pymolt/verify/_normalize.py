@@ -43,12 +43,33 @@ Value renderers (fact model v2), tried before the opaque fallback — values / p
 Rendering is duck-typed and never imports anything: a stdlib type is recognised only if its
 module is already in ``sys.modules`` (no value of it can exist otherwise). It never runs user
 code beyond the allow-listed structures' cheap accessors (``shape``, ``dtype(s)``, ``columns``,
-``tolist()``/``to_dict("list")``) and werkzeug's ``status_code`` property: types are classified
-once per type through raw class namespaces, instance state is read through the type's own
-``__dict__`` slot, stdlib values are formatted through the BASE class methods, and every
+``tolist()``/``to_dict("list")``), werkzeug's ``status_code`` property, the stdlib formatters
+(a datetime's ``tzinfo.utcoffset``) and an ``OrderedDict`` key's ``__hash__``: types are
+classified once per type through raw class namespaces, instance state is read through the type's
+own ``__dict__`` slot, stdlib values are formatted through the BASE class methods, and every
 renderer is guarded (a failure falls back to the opaque marker).
+
+Reading a value must not change it (the recorder would change what it records: Flask's session
+marks itself accessed in ``__getitem__``, which adds ``Vary: Cookie`` to the response). So:
+- the kind of a value is tested on ``type(value)`` with ``issubclass``, never ``isinstance``:
+  ``isinstance`` reads ``value.__class__``, which a proxy (werkzeug ``LocalProxy``, Django
+  ``LazyObject``) answers by resolving, i.e. evaluating, what it stands for. A proxy renders as
+  its own type;
+- a dict / list / tuple / set (or subclass) is read through the BUILTIN base's C slots
+  (``dict.items``, ``list.__getitem__(slice)``, ``set.__iter__``): a subclass's ``keys``,
+  ``__getitem__``, ``__iter__`` or ``__len__`` never runs, so an overriding subclass renders what
+  it stores (``MultiDict``: every value list). ``OrderedDict`` uses its own C ``items`` (its
+  linked order); a ``UserList`` / ``UserDict`` hybrid (Django's ``ErrorList``) its ``data``. A
+  subclass that defines its own ``__len__`` keeps its items elsewhere (werkzeug's
+  ``CombinedMultiDict``, urllib3's header item view): it renders like any object, from its
+  instance state, unless ``_PURE_VIEWS`` names it (its own ``__iter__`` is then iterated);
+- a scalar subclass (``markupsafe.Markup``, ``IntEnum``) becomes an exact copy through the base
+  C slot (the same JSON), so nothing downstream reaches its ``__eq__`` / ``__str__``;
+- dataclass fields and callables' names are read through member descriptors and C getters only:
+  a field shadowed by a property renders as that descriptor's type.
 """
 import binascii
+import itertools
 import json
 import os
 import sys
@@ -75,11 +96,15 @@ class OutcomeMarker(object):
 AMBIGUOUS_OUTCOME = OutcomeMarker("ambiguous:return-or-raise")
 
 _SAFE_SCALARS = (type(None), bool, int, float, str, bytes)
+# By id: hashing a type runs its metaclass ``__hash__`` (or raises, if it defines ``__eq__`` only).
+_SCALAR_IDS = frozenset(id(t) for t in _SAFE_SCALARS)
 
 # Generous limits: the environment is CI/staging where overhead is tolerable. These
 # are a guard against infinite / cyclic structures, not a means of saving cycles.
 MAX_DEPTH = 6
 MAX_SEQ = 200
+_HEAD = slice(0, MAX_SEQ)
+_ALL = slice(None)
 # Generic objects rendered per top-level ``normalize`` call: depth x width alone would let a
 # deep object graph (an ORM session, an app) explode; past this the rest are type-level.
 MAX_OBJECTS = 64            # generic objects rendered per value: a result is a witness, not a dump
@@ -102,7 +127,9 @@ def value_format():
 
 
 def typename(value):
-    """Stable type label, e.g. ``flask.app.Flask`` or ``int``."""
+    """Stable type label, e.g. ``flask.app.Flask`` or ``int``. Read through the metatype, not the
+    C getter: a Cython 3 metatype supplies ``__module__`` (its class dict holds a member
+    descriptor there). A metatype hook is class-level: it cannot touch the value."""
     t = type(value)
     mod = getattr(t, "__module__", "")
     if mod and mod != "builtins":
@@ -123,19 +150,25 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None, _objects=True):
     if _privacy is None:
         _privacy = os.environ.get("PYMOLT_TRACE_PRIVACY", "values").strip().lower()
 
-    if isinstance(value, _SAFE_SCALARS):
+    # ``type()`` + ``issubclass`` only, never ``isinstance`` (it reads ``value.__class__``,
+    # which a proxy answers by evaluating what it stands for).
+    t = type(value)
+    if id(t) in _SCALAR_IDS or issubclass(t, _SAFE_SCALARS):
         if _privacy == "shape":
             return {"__shape__": typename(value)}
-        if isinstance(value, bytes):
+        if id(t) not in _SCALAR_IDS:
+            value = _exact_scalar(value, t)
+            t = type(value)
+        if t is bytes:
             # binascii, not bytes.hex(): the latter is 3.5+ and the runtime must load on 3.4.
             return {"__bytes__": binascii.hexlify(value).decode("ascii")}
-        if isinstance(value, float):
+        if t is float:
             # NaN / +-inf are not JSON-stable and not meaningfully comparable.
             if value != value or value in (float("inf"), float("-inf")):
                 return {"__opaque__": "float-nonfinite"}
         return value
 
-    if isinstance(value, OutcomeMarker):
+    if issubclass(t, OutcomeMarker):
         return {"__opaque__": value.label}
 
     if depth >= MAX_DEPTH:
@@ -146,57 +179,17 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None, _objects=True):
         return {"__cycle__": typename(value)}
     seen = _seen | {vid}
 
-    if (_objects and isinstance(value, tuple) and type(value) is not tuple
-            and _kind_of(type(value))[0] == "namedtuple"):
+    if (_objects and t is not tuple and issubclass(t, tuple)
+            and _kind_of(t)[0] == "namedtuple"):
         try:
-            return _render_namedtuple(value, _kind_of(type(value)), depth, seen, _privacy, _objects)
+            return _render_namedtuple(value, _kind_of(t), depth, seen, _privacy, _objects)
         except Exception:
             pass
 
-    if isinstance(value, (list, tuple)):
-        seq = [
-            normalize(v, depth + 1, seen, _privacy, _objects)
-            for v in list(value)[:MAX_SEQ]
-        ]
-        tag = "tuple" if isinstance(value, tuple) else "list"
-        out = {"__{0}__".format(tag): seq}
-        if len(value) > MAX_SEQ:
-            out["__truncated__"] = True
-        return out
-
-    if isinstance(value, dict):
-        items = []
-        for k in list(value.keys())[:MAX_SEQ]:
-            if isinstance(k, _SAFE_SCALARS):
-                nk = normalize(k, depth + 1, seen, _privacy, _objects)
-            else:
-                nk = {"__opaque__": typename(k)}
-            items.append([nk, normalize(value[k], depth + 1, seen, _privacy, _objects)])
-        n = len(items)
-        if n < 2 or n > MAX_ORDER_KEYS or not DICT_ORDER[0] or _privacy == "shape":
-            items.sort(key=_stable_key)
-            return {"__dict__": items}
-        # Stable sort of insertion positions: equal renderings keep their insertion order,
-        # exactly as ``items.sort`` does, so the sorted pairs are today's.
-        skeys = [_stable_key(it) for it in items]
-        idx = sorted(range(n), key=skeys.__getitem__)
-        out = {"__dict__": [items[i] for i in idx]}
-        if idx != list(range(n)):
-            pos = [0] * n
-            for s, j in enumerate(idx):
-                pos[j] = s
-            out["__order__"] = pos      # sorted slot of the j-th inserted key
-        return out
-
-    if isinstance(value, (set, frozenset)):
-        norm = sorted(
-            (
-                normalize(v, depth + 1, seen, _privacy, _objects)
-                for v in list(value)[:MAX_SEQ]
-            ),
-            key=_stable_key,
-        )
-        return {"__set__": norm}
+    if issubclass(t, _CONTAINER_BASES):
+        out = _render_container(value, t, depth, seen, _privacy, _objects)
+        if out is not None:
+            return out
 
     try:
         rendered = _render(value, depth, seen, _privacy, _objects)
@@ -205,6 +198,172 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None, _objects=True):
     if rendered is not None:
         return rendered
     return {"__opaque__": typename(value)}
+
+
+def _exact_scalar(value, t):
+    """An exact ``str`` / ``int`` / ``float`` / ``bytes`` copy of a scalar subclass instance,
+    through the base type's own C slot: no subclass ``__str__`` / ``__int__`` / ``__bytes__``
+    runs, and the JSON is the same (json already encodes a subclass by its base)."""
+    if issubclass(t, str):
+        return str.__str__(value)
+    if issubclass(t, int):          # bool cannot be subclassed: never reached for it
+        return int.__int__(value)
+    if issubclass(t, float):
+        return float.__float__(value)
+    return bytes.__getitem__(value, _ALL)
+
+
+_CONTAINER_BASES = (list, tuple, dict, set, frozenset)
+_RAW = ("raw",)
+_AS_OBJECT = ("object",)
+_MODES = {}            # id(type) -> (type, mode): a container subclass's read mode, once per type
+# Builtin-container subclasses that keep no items in the builtin storage but whose own iteration
+# is known to be pure: (top-level package, class name) of the class that defines ``__len__``.
+# Its ``__iter__`` (from that class's namespace, never a subclass's) is iterated.
+_PURE_VIEWS = frozenset((
+    ("urllib3", "HTTPHeaderDictItemView"),      # HTTPHeaderDict.items(): a set over the headers
+))
+
+
+def _render_container(value, t, depth, seen, privacy, objects):
+    """A dict / list / tuple / set (or subclass) read without running its code, or None when its
+    builtin storage is not its content (it then renders like any other object).
+
+    The builtin base's C slots read the storage (``list.__getitem__(slice)``, ``dict.items``,
+    ``set.__iter__``): a subclass ``__getitem__`` / ``keys`` / ``__iter__`` / ``__len__`` never
+    runs (Flask's session marks itself accessed in ``__getitem__``)."""
+    if issubclass(t, list):
+        base = list
+    elif issubclass(t, tuple):
+        base = tuple
+    elif issubclass(t, dict):
+        base = dict
+    elif issubclass(t, set):
+        base = set
+    else:
+        base = frozenset
+    mode = _RAW if t is base else _container_mode(t, base)
+    kind = mode[0]
+    if kind == "object":
+        return None
+    if kind == "data":
+        value = _user_data(value, t)
+        if type(value) is not base:
+            return None
+        t = base
+    if base is dict:
+        return _render_dict(value, t, depth, seen, privacy, objects)
+    if kind == "iter":
+        try:
+            elems = list(itertools.islice(mode[1](value), MAX_SEQ + 1))
+        except Exception:
+            return None
+        n = len(elems)
+        del elems[MAX_SEQ:]
+    elif base is set or base is frozenset:
+        elems, n = itertools.islice(base.__iter__(value), MAX_SEQ), 0
+    else:
+        elems, n = base.__getitem__(value, _HEAD), base.__len__(value)
+    norm = [normalize(v, depth + 1, seen, privacy, objects) for v in elems]
+    if base is set or base is frozenset:
+        norm.sort(key=_stable_key)
+        return {"__set__": norm}
+    out = {"__{0}__".format(base.__name__): norm}
+    if n > MAX_SEQ:
+        out["__truncated__"] = True
+    return out
+
+
+def _render_dict(value, t, depth, seen, privacy, objects):
+    items = []
+    for k, v in _dict_items(value, t):
+        if issubclass(type(k), _SAFE_SCALARS):
+            nk = normalize(k, depth + 1, seen, privacy, objects)
+        else:
+            nk = {"__opaque__": typename(k)}
+        items.append([nk, normalize(v, depth + 1, seen, privacy, objects)])
+    n = len(items)
+    if n < 2 or n > MAX_ORDER_KEYS or not DICT_ORDER[0] or privacy == "shape":
+        items.sort(key=_stable_key)
+        return {"__dict__": items}
+    # Stable sort of insertion positions: equal renderings keep their insertion order,
+    # exactly as ``items.sort`` does, so the sorted pairs are today's.
+    skeys = [_stable_key(it) for it in items]
+    idx = sorted(range(n), key=skeys.__getitem__)
+    out = {"__dict__": [items[i] for i in idx]}
+    if idx != list(range(n)):
+        pos = [0] * n
+        for s, j in enumerate(idx):
+            pos[j] = s
+        out["__order__"] = pos      # sorted slot of the j-th inserted key
+    return out
+
+
+def _container_mode(t, base):
+    ent = _MODES.get(id(t))
+    if ent is not None and ent[0] is t:
+        return ent[1]
+    try:
+        mode = _classify_container(t, base)
+    except Exception:
+        mode = _AS_OBJECT
+    if len(_MODES) >= _KINDS_MAX:
+        _MODES.clear()
+    _MODES[id(t)] = (t, mode)   # holds the type: its id cannot be recycled while cached
+    return mode
+
+
+def _classify_container(t, base):
+    """How to read a subclass ``t`` of the builtin container ``base`` without running its code.
+
+    ``("data",)``: a ``collections.UserList`` / ``UserDict`` hybrid (Django's ``ErrorList``),
+    whose items are its ``data``. ``("object",)``: a Python class below ``base`` defines
+    ``__len__``, so the builtin storage is not (all of) its content (werkzeug's
+    ``CombinedMultiDict``, urllib3's header item view are empty there): rendered from its
+    instance state like any object. ``("iter", fn)``: such a class allow-listed in
+    ``_PURE_VIEWS``. ``("raw",)``: the builtin storage (an override of ``__getitem__``, ``keys``
+    or ``__iter__`` alone still stores its items there: Flask's session, ``MultiDict``)."""
+    user = _stdlib_class("collections", "UserList" if base is list else "UserDict")
+    if base is not list and base is not dict:
+        user = None
+    for cls in _TYPE_MRO.__get__(t, type):
+        if cls is base:
+            break
+        if user is not None and cls is user:
+            return ("data",)
+        if not (_TYPE_FLAGS.__get__(cls, type) & _HEAPTYPE):
+            continue                    # a C class (OrderedDict, defaultdict): its storage is used
+        ns = _class_dict(cls)
+        if "__len__" in ns:
+            owner = _TYPE_MODULE.__get__(cls, type)
+            top = owner.split(".", 1)[0] if type(owner) is str else None
+            it = ns.get("__iter__")
+            if ((top, _TYPE_NAME.__get__(cls, type)) in _PURE_VIEWS and base is not dict
+                    and type(it) is types.FunctionType):
+                return ("iter", it)
+            return _AS_OBJECT
+    return _RAW
+
+
+def _dict_items(value, t):
+    """The first ``MAX_SEQ`` (key, value) pairs of a dict (subclass), read without its own
+    methods: ``dict.items`` iterates the stored entries in C, with no ``keys`` /
+    ``__getitem__`` / ``__iter__`` of the subclass and no key hashing. An ``OrderedDict`` uses
+    the C ``OrderedDict.items`` (its linked order, which ``move_to_end`` changes; it hashes each
+    key to fetch its value)."""
+    if t is not dict:
+        od = _stdlib_class("collections", "OrderedDict")
+        if (od is not None and issubclass(t, od) and type(od) is type
+                and not (_TYPE_FLAGS.__get__(od, type) & _HEAPTYPE)):   # the C type
+            return list(itertools.islice(od.items(value), MAX_SEQ))
+    return list(itertools.islice(dict.items(value), MAX_SEQ))
+
+
+def _user_data(value, t):
+    """The ``data`` of a ``UserList`` / ``UserDict`` hybrid, from the instance ``__dict__``."""
+    slot = _dict_slot(_TYPE_MRO.__get__(t, type))
+    state = slot.__get__(value, t) if slot is not None else None
+    return state.get("data") if type(state) is dict else None
 
 
 def normalize_input(value, depth=0, _seen=frozenset(), _privacy=None):
@@ -225,8 +384,10 @@ _TYPE_MODULE = type.__dict__["__module__"]
 _TYPE_NAME = type.__dict__["__name__"]
 _TYPE_QUALNAME = type.__dict__["__qualname__"]
 _TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_FLAGS = type.__dict__["__flags__"]
+_HEAPTYPE = 512                 # Py_TPFLAGS_HEAPTYPE: a class defined in Python
 
-_CALLABLE_TYPES = frozenset((
+_CALLABLE_IDS = frozenset(id(t) for t in (     # by id, like ``_SCALAR_IDS``
     types.FunctionType, types.MethodType, types.BuiltinFunctionType,
     type(str.upper),            # method_descriptor
     type(object.__init__),      # wrapper_descriptor
@@ -269,15 +430,23 @@ def _class_label(cls):
 
 
 def _callable_label(fn):
+    if type(fn) is types.MethodType:
+        # A bound method's names are its function's; reading them on the method would forward
+        # to an arbitrary ``__func__`` object's ``__getattr__``.
+        fn = fn.__func__
+        if id(type(fn)) not in _CALLABLE_IDS or type(fn) is types.MethodType:
+            return None
     mod = getattr(fn, "__module__", None)
     if mod is None:
         owner = getattr(fn, "__objclass__", None)
         if owner is not None:
             mod = _TYPE_MODULE.__get__(owner, type)
-    qual = getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None)
-    if not isinstance(qual, str) or not qual:
+    qual = getattr(fn, "__qualname__", None)
+    if type(qual) is not str or not qual:
+        qual = getattr(fn, "__name__", None)
+    if type(qual) is not str or not qual:
         return None
-    if isinstance(mod, str) and mod and mod != "builtins":
+    if type(mod) is str and mod and mod != "builtins":
         return mod + "." + qual
     return qual
 
@@ -291,7 +460,7 @@ def _classify(t):
     """The renderer kind for type ``t`` (computed once per type)."""
     if issubclass(t, type):
         return ("class",)
-    if t in _CALLABLE_TYPES:
+    if id(t) in _CALLABLE_IDS:
         return ("callable",)
     dt = sys.modules.get("datetime")
     if dt is not None:
@@ -328,7 +497,7 @@ def _classify(t):
                 if getattr(ftype, "name", "_FIELD") in ("_FIELD_CLASSVAR", "_FIELD_INITVAR"):
                     continue
                 names.append(name)
-            return ("dataclass", tuple(names[:MAX_SEQ]), _dict_slot(mro))
+            return ("dataclass", tuple(names[:MAX_SEQ]), _dict_slot(mro), mro)
     for cls in mro:
         owner = _TYPE_MODULE.__get__(cls, type)
         top = owner.split(".", 1)[0] if isinstance(owner, str) else None
@@ -377,8 +546,8 @@ def _object_info(t, mro):
 
     ``fields`` is the declared field list (attrs / pydantic) or None; ``members`` maps public
     ``__slots__`` names to their C member descriptors."""
-    if not (t.__flags__ & 512):    # Py_TPFLAGS_HEAPTYPE: Python-defined classes only; a static
-        return None                # C type (generator, code, frame, ...) stays opaque
+    if not (t.__flags__ & _HEAPTYPE):  # Python-defined classes only; a static C type
+        return None                    # (generator, code, frame, ...) stays opaque
     fields = None
     members = {}
     for cls in mro:
@@ -465,7 +634,7 @@ def _render(value, depth, seen, privacy, objects=True):
 def _render_enum(value):
     state = object.__getattribute__(value, "__dict__")
     name = state.get("_name_")
-    if not isinstance(name, str):
+    if type(name) is not str:
         member = state.get("_value_")      # an unnamed composite Flag: name it by value
         if type(member) is not int:
             return None
@@ -474,20 +643,54 @@ def _render_enum(value):
 
 
 def _render_dataclass(value, kind, depth, seen, privacy, objects=True):
-    slot = kind[2]
-    state = slot.__get__(value, type(value)) if slot is not None else None
+    t = type(value)
+    slot, mro = kind[2], kind[3]
+    state = slot.__get__(value, t) if slot is not None else None
     fields = []
     for name in kind[1]:
         if type(state) is dict and name in state:
             item = state[name]
         else:
-            try:
-                item = object.__getattribute__(value, name)   # __slots__ dataclasses
-            except Exception:
+            item = _class_level_attr(value, t, mro, name)
+            if item is _MISSING:
                 fields.append([name, {"__opaque__": "unset"}])
+                continue
+            if type(item) is _Unread:
+                fields.append([name, {"__opaque__": item.label}])
                 continue
         fields.append([name, normalize(item, depth + 1, seen, privacy, objects)])
     return {"__dataclass__": typename(value), "fields": fields}
+
+
+class _Unread(object):
+    """A class-level descriptor (property, ...) that was not run: ``label`` is its type."""
+
+    __slots__ = ("label",)
+
+    def __init__(self, label):
+        self.label = label
+
+
+def _class_level_attr(value, t, mro, name):
+    """What ``object.__getattribute__(value, name)`` finds for a name missing from the instance
+    ``__dict__``, without running code: a ``__slots__`` member's value, a plain class attribute
+    (a default), an ``_Unread`` for any other descriptor (a property), ``_MISSING`` if unset."""
+    for cls in mro:
+        ns = _class_dict(cls)
+        if name not in ns:
+            continue
+        attr = ns[name]
+        at = type(attr)
+        if at is types.MemberDescriptorType:
+            try:
+                return attr.__get__(value, t)
+            except AttributeError:
+                return _MISSING
+        for c in _TYPE_MRO.__get__(at, type):
+            if "__get__" in _class_dict(c):
+                return _Unread(_class_label(at))
+        return attr
+    return _MISSING
 
 
 def _render_structure(value, kind, depth, seen, privacy, objects=True):
@@ -552,7 +755,7 @@ def _render_object(value, kind, depth, seen, privacy, objects=True):
     attrs = out["attrs"]
     for name, item in found:
         attrs[name] = normalize(item, depth + 1, seen, privacy, objects)
-        if (depth + 1 >= MAX_DEPTH and not isinstance(item, _SAFE_SCALARS)):
+        if (depth + 1 >= MAX_DEPTH and not issubclass(type(item), _SAFE_SCALARS)):
             out["__truncated__"] = True
     return out
 
@@ -560,12 +763,13 @@ def _render_object(value, kind, depth, seen, privacy, objects=True):
 def _render_namedtuple(value, kind, depth, seen, privacy, objects=True):
     out = {"__object__": _class_label(type(value)), "attrs": {}}
     names = kind[1]
-    if len(value) > MAX_SEQ:
+    n = tuple.__len__(value)        # not a subclass ``__len__``
+    if n > MAX_SEQ:
         out["__truncated__"] = True
-    for i, name in enumerate(names[:len(value)]):
+    for i, name in enumerate(names[:n]):
         item = tuple.__getitem__(value, i)
         out["attrs"][name] = normalize(item, depth + 1, seen, privacy, objects)
-        if depth + 1 >= MAX_DEPTH and not isinstance(item, _SAFE_SCALARS):
+        if depth + 1 >= MAX_DEPTH and not issubclass(type(item), _SAFE_SCALARS):
             out["__truncated__"] = True
     return out
 
@@ -581,7 +785,7 @@ def _render_status(value, kind):
     t = type(code)
     if t is bool or not issubclass(t, int):
         return None
-    return {"__structure__": typename(value), "status_code": int(code)}
+    return {"__structure__": typename(value), "status_code": int.__int__(code)}
 
 
 def _stable_key(obj):

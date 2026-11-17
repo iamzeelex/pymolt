@@ -382,7 +382,7 @@ def test_rendering_never_runs_attribute_hooks():
 
     out = nz.normalize(Spy())
     assert list(out) == ["__opaque__"] and out["__opaque__"].endswith(".Spy")
-    assert set(touched) <= {"__class__"}    # isinstance() probes only, no renderer access
+    assert touched == []    # not even ``isinstance``'s ``__class__`` probe (a proxy resolves there)
     assert nz.normalize(Slotted())["__opaque__"].endswith(".Slotted")
 
 
