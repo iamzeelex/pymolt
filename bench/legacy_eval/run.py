@@ -10,6 +10,12 @@ runs the phases of PROTOCOL.md from inside the project dir with `.` as the proje
 
     scan, setup, assess, capture_baseline, target_env, plan, apply, capture_post, verify
 
+A project with a `target_container` block ({image, platform, install, ready_probe}) builds
+its target environment in a second container, `pymolt-bench-<project>-target`, and captures
+post-migration there: both sides then run on the same OS, so a difference is not the host's
+(the locust pilot's setrlimit and psutil findings came from Linux-vs-macOS). Without it the
+target env is a host venv, `.venv-target`. `baseline_runs: 2` records a baseline replicate.
+
 Every command's output goes to <out>/<project>/<phase>.log. Per phase the scorecard records
 the outcome (ok / degraded / failed / not-reached), wall time, rc and key numbers from the
 `--agent` payloads. A phase that runs longer than the timeout is killed and recorded as such.
@@ -163,6 +169,8 @@ class Project:
         self.art = (REPO / cfg["artifact"]).resolve()
         self.out = (out / name).resolve()
         self.container = f"pymolt-bench-{name}"
+        self.tcfg = cfg.get("target_container")  # None: the target env is a host venv
+        self.target_container = f"pymolt-bench-{name}-target" if self.tcfg else None
         self.phase_timeout = cfg.get("phase_timeout_min", defaults["phase_timeout_min"]) * 60
         self.install_timeout = cfg.get("install_timeout_min", defaults["install_timeout_min"]) * 60
         self.rec: dict[str, dict] = {}
@@ -245,10 +253,11 @@ class Project:
                     return False
         return True
 
-    def ensure_container(self) -> bool:
-        lg = self.log("prep")
+    def ensure_container(self, container=None, image=None, platform=None, log=None) -> bool:
+        container = container or self.container
+        lg = log or self.log("prep")
         insp = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", self.container],
+            ["docker", "inspect", "-f", "{{.State.Running}}", container],
             capture_output=True,
             text=True,
         )
@@ -259,14 +268,14 @@ class Project:
                     "run",
                     "-d",
                     "--name",
-                    self.container,
+                    container,
                     "--platform",
-                    self.d["platform"],
+                    platform or self.d["platform"],
                     "-v",
                     f"{self.art}:/work",
                     "-w",
                     "/work",
-                    self.d["image"],
+                    image or self.d["image"],
                     "sleep",
                     "infinity",
                 ],
@@ -278,7 +287,7 @@ class Project:
             return r.ok
         if insp.stdout.strip() != "true":
             return run_proc(
-                ["docker", "start", self.container],
+                ["docker", "start", container],
                 cwd=self.out,
                 env=os.environ,
                 log=lg,
@@ -286,15 +295,16 @@ class Project:
             ).ok
         return True
 
-    def dexec(self, cmd: str, log: Path, timeout, capture=False) -> Result:
+    def dexec(self, cmd: str, log: Path, timeout, capture=False, container=None) -> Result:
+        container = container or self.container
         return run_proc(
-            ["docker", "exec", "-w", "/work", self.container, "sh", "-c", cmd],
+            ["docker", "exec", "-w", "/work", container, "sh", "-c", cmd],
             cwd=self.art,
             env=os.environ,
             log=log,
             timeout_s=timeout,
             capture_stdout=capture,
-            container=self.container,
+            container=container,
         )
 
     def install_baseline(self) -> bool:
@@ -448,6 +458,27 @@ class Project:
             ],
         )
         self.record_capture("capture_baseline", r, un)
+        runs = self.cfg.get("baseline_runs") or 1
+        if runs >= 2 and self.rec["capture_baseline"]["outcome"] != "failed":
+            self.capture_replicate()
+
+    def capture_replicate(self):
+        """A second baseline run (`--replicate`: the baseline's own command again), so verify
+        measures run-to-run noise. Recorded on the capture_baseline phase."""
+        r = self.pm("capture_replicate", ["capture", "baseline", "--replicate", "--project-dir",
+                                          ".", "--agent"])
+        d = (r.json() or {}).get("data", {})
+        rec = self.rec["capture_baseline"]
+        rec["numbers"]["replicate"] = {
+            "accepted": d.get("accepted"), "events": d.get("events"),
+            "dropped": d.get("dropped_events"), "rc": r.rc,
+        }
+        if not d.get("accepted"):
+            rec["numbers"]["replicate"]["reason"] = (
+                str(d.get("validity_reason") or _last_line(self.log("capture_replicate")))[:120])
+        (self.out / "result.json").write_text(json.dumps(self.result(), indent=1))
+        say(self.name, f"capture_replicate rc={r.rc} accepted={d.get('accepted')} "
+                       f"events={d.get('events')}")
 
     def record_capture(self, phase, r: Result, un: Result | None):
         js = r.json() or {}
@@ -478,7 +509,52 @@ class Project:
             outcome = "ok"
         self.record(phase, outcome, r.wall, r.rc, n, timed_out=r.timed_out)
 
+    def target_env_container(self):
+        """Build the target environment in its own container (same OS as the baseline's)."""
+        lg = self.log("target_env")
+        t0 = time.time()
+        tc, cfg = self.target_container, self.tcfg
+        spec = json.dumps(
+            [cfg["install"], self.cfg.get("manifests", {}), cfg["image"]], sort_keys=True
+        )
+        digest = hashlib.sha256(spec.encode()).hexdigest()[:16]
+        if not self.ensure_container(tc, cfg["image"], cfg.get("platform"), lg):
+            self.record(
+                "target_env", "failed", time.time() - t0, note="target container did not start"
+            )
+            return
+        probe = cfg.get("ready_probe")
+        have = self.dexec(f"cat {MARKER} 2>/dev/null", lg, 60, capture=True, container=tc)
+        n = {"container": tc, "image": cfg["image"]}
+        ready = not probe or self.dexec(probe, lg, 120, container=tc).ok
+        if have.stdout.strip() == digest and ready:
+            n["installed"] = "marker"
+            self.record("target_env", "ok", time.time() - t0, 0, n)
+            return
+        last = None
+        for cmd in cfg["install"]:
+            say(self.name, f"target container install: {cmd[:70]}")
+            last = self.dexec(cmd, lg, self.install_timeout, container=tc)
+            if not last.ok:
+                n["failed_step"] = cmd[:80]
+                self.record("target_env", "failed", time.time() - t0, last.rc, n,
+                            timed_out=last.timed_out)
+                return
+        ok = not probe or self.dexec(probe, lg, 120, container=tc).ok
+        if ok:
+            self.dexec(f"echo {digest} > {MARKER}", lg, 60, container=tc)
+        n["ready"] = ok
+        self.record("target_env", "ok" if ok else "failed", time.time() - t0,
+                    last.rc if last else 0, n)
+
+    def target_ready(self) -> bool:
+        if self.target_container:
+            return self.rec.get("target_env", {}).get("outcome") == "ok"
+        return self.target_py.exists()
+
     def phase_target_env(self):
+        if self.target_container:
+            return self.target_env_container()
         lg = self.log("target_env")
         t0 = time.time()
         failed, optional_failed, last = False, False, None
@@ -625,9 +701,12 @@ class Project:
         return r.ok
 
     def phase_capture_post(self):
-        if not self.target_py.exists():
-            self.record("capture_post", "not-reached", note="no target env python")
+        if not self.target_ready():
+            self.record("capture_post", "not-reached", note="no target environment")
             return
+        where = (["--container", self.target_container, "--workdir", "/work"]
+                 if self.target_container else [])
+        python = "python" if self.target_container else str(self.target_py)
         argv = [
             "capture",
             "post-migration",
@@ -635,9 +714,10 @@ class Project:
             "tests",
             "--project-dir",
             ".",
+            *where,
             "--agent",
             "--",
-            *self.pytest_argv(str(self.target_py), post=True),
+            *self.pytest_argv(python, post=True),
         ]
         r = self.pm("capture_post", argv, extra_env=self.cfg.get("post_env"))
         self.record_capture("capture_post", r, None)

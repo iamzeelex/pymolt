@@ -96,7 +96,7 @@ import tokenize
 import uuid
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -106,6 +106,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_container, to_host
+from pymolt.verify import dict_order as _order
+from pymolt.verify import environment as _env
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -159,6 +161,8 @@ class DiffContext:
     new_contacts: dict[str, dict[int, set[str]]] | None = None
     successors: dict[str, str] | None = None
     type_relocations: dict[str, str] | None = None
+    # Symbols a plan's predicted risks name: an environment difference never softens them.
+    predicted_symbols: set[str] | None = None
 
 
 class DiffProfile(StrEnum):
@@ -203,6 +207,10 @@ class Outcome(BaseModel):
     # None for a facts-snapshot capture. Not part of the outcome's identity, never reported.
     ts_min: float | None = Field(default=None, exclude=True)
     ts_max: float | None = Field(default=None, exclude=True)
+    # Dict key insertion order of the value (``dict_order.strip``): ``{path: permutation}``,
+    # ``"*"`` where it varied within the fact. Not part of the outcome's identity, never
+    # reported as a value; None = every dict in sorted order, or order not recorded.
+    order: dict[str, Any] | None = Field(default=None, exclude=True)
 
 
 class CallWarning(BaseModel):
@@ -256,6 +264,8 @@ class Fact(BaseModel):
     # ``ts``/``dur``; None for a facts-snapshot capture, whose facts carry no call time.
     ts_min: float | None = None
     ts_max: float | None = None
+    # Dict key insertion order of the input (see ``Outcome.order``); not part of the key.
+    input_order: dict[str, Any] | None = Field(default=None, exclude=True)
 
     @property
     def site(self) -> tuple[str, str, str | int | None]:
@@ -322,6 +332,12 @@ class FactSet(BaseModel):
     # ``{normalized distribution name: version}`` the capture's processes loaded (one version
     # across processes; an ambiguous one left out), from the runtime's ``distributions``.
     package_versions: dict[str, str] = Field(default_factory=dict, exclude=True)
+    # Every process declared the ``dict_order`` value format: an absent ``__order__`` means
+    # the sorted order. False: order is not recorded, so it is never compared.
+    dict_order: bool = Field(default=False, exclude=True)
+    # The runtime environment record of each process (``boundary_tracer._environment``);
+    # None when any process lacks one (unknown: every environment rule stays strict).
+    environment: list[dict[str, Any]] | None = Field(default=None, exclude=True)
 
     def keyed(self) -> dict[tuple[str, tuple, str], Fact]:
         """Facts keyed by ``(symbol, site, canonical input)`` (merging line-level facts that
@@ -432,6 +448,13 @@ class FactEntry(BaseModel):
     # Run-to-run noise measured by a replicate capture: the difference is real but the baseline
     # itself varies there the same way. Neither failing nor inconclusive.
     noise: str | None = None
+    # A dict key order difference (``_judge_order``): ``{"side": "input"|"output", "path",
+    # "keys", "old": first keys, "new": first keys}`` (+ ``"cause"`` when knowledge cites one).
+    order: dict[str, Any] | None = None
+    # The sorted key sets whose orders were compared and agreed, and the key sets of the order
+    # differences this entry's order class stands for (replicate evidence, per key set).
+    order_agreed: list[tuple[str, ...]] | None = Field(default=None, exclude=True)
+    order_keysets: list[str] | None = Field(default=None, exclude=True)
     # The recorded values behind masked ones (None when no mask changed them): reporting shows
     # both. Kept in memory only (the JSON entries carry the masked, compared values).
     input_raw: Any = Field(default=None, exclude=True)
@@ -479,6 +502,10 @@ class FactDiff(BaseModel):
     no_ledger: bool = False  # edits were judged as hand edits: no apply ledger was available
     # Run-to-run noise measured by a baseline replicate: what it covered (None: not measured).
     noise_measured: dict[str, Any] | None = None
+    # Whether dict key order was compared, and why not (``"compared"`` | ``"not recorded
+    # (old)"`` ...); the two captures' runtime environments compared (``environment.stamp``).
+    dict_order: str | None = Field(default=None, exclude=True)
+    environment: Any = Field(default=None, exclude=True)
 
     def edited_sites(self) -> dict[str, int]:
         """Edited sites by outcome: equal / representation-only / need review / unverified
@@ -626,7 +653,8 @@ class _ReadStats:
     invalid_lines: int = 0
 
 
-def iter_trace_records(path: str | Path, stats: _ReadStats | None = None) -> Iterator[dict]:
+def iter_trace_records(path: str | Path, stats: _ReadStats | None = None, *,
+                       _mark: bool = False) -> Iterator[dict]:
     """Yield raw records from a JSONL event stream or an aggregated ``{"records": [...]}``.
 
     Undecodable JSONL lines (e.g. the last line of a killed process) are skipped and counted
@@ -635,12 +663,12 @@ def iter_trace_records(path: str | Path, stats: _ReadStats | None = None) -> Ite
     stats = stats if stats is not None else _ReadStats()
     p = Path(path)
     if is_facts_snapshot(p):
-        yield from iter_snapshot_records(p)
+        yield from iter_snapshot_records(p, _mark=_mark)
         return
     if _is_blank(p):
         snap = find_facts_snapshot(p)
         if snap is not None:
-            yield from iter_snapshot_records(snap)
+            yield from iter_snapshot_records(snap, _mark=_mark)
             return
     first = ""
     with p.open(encoding="utf-8", errors="replace") as fh:
@@ -679,9 +707,16 @@ def iter_trace_records(path: str | Path, stats: _ReadStats | None = None) -> Ite
                 stats.invalid_lines += 1
                 continue
             if isinstance(ev, dict):
+                if _mark:  # the load fast path: only a line naming ``__order__`` is walked
+                    ev[_LINE_ORDER] = _order.ORDER_MARK in line
                 yield ev
             else:
                 stats.invalid_lines += 1
+
+
+# Set on each record read from a line (JSONL event, snapshot fact): whether the line names
+# ``__order__``. A record without it (aggregated JSON, a test's record) is always walked.
+_LINE_ORDER = "\x00order"
 
 
 def metadata_path(trace_path: str | Path) -> Path:
@@ -747,7 +782,8 @@ def _is_blank(path: Path) -> bool:
 
 
 def iter_snapshot(
-    path: str | Path, kinds: Iterable[str] = ("header", "fact", "tally"),
+    path: str | Path, kinds: Iterable[str] = ("header", "fact", "tally"), *,
+    _mark: bool = False,
 ) -> Iterator[tuple[str, dict]]:
     """Stream a facts snapshot as ``("header", {...})``, ``("fact", {...})``...,
     ``("tally", {...})``...; only the wanted ``kinds`` are parsed.
@@ -786,6 +822,8 @@ def iter_snapshot(
             except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict):
+                if _mark and section == "fact":
+                    obj[_LINE_ORDER] = _order.ORDER_MARK in line
                 yield section, obj
 
 
@@ -826,6 +864,8 @@ def snapshot_fact_records(fact: Mapping[str, Any]) -> Iterator[dict]:
     q = fact.get("q") if isinstance(fact.get("q"), str) and fact.get("q") else None
     sym = fact.get("sym") if isinstance(fact.get("sym"), str) and fact.get("sym") else None
     base: dict[str, Any] = {"v": 2, "q": q or sym or "?", "in": fact.get("in"), "src": "facts"}
+    if _LINE_ORDER in fact:
+        base[_LINE_ORDER] = fact[_LINE_ORDER]
     if sym:
         base["sym"] = sym
         if isinstance(fact.get("symq"), str):
@@ -836,6 +876,8 @@ def snapshot_fact_records(fact: Mapping[str, Any]) -> Iterator[dict]:
         base["where"] = fact["where"]
     if isinstance(fact.get("first_ts"), int | float):
         base["ts"] = fact["first_ts"]
+    if isinstance(fact.get("in_order"), dict) and fact["in_order"]:
+        base["in_order"] = fact["in_order"]   # the input's key order (the facts sink's side record)
     # The fact's warnings ride on its first projected event only (folding sums them).
     pending_warnings = fact.get("warnings") if isinstance(fact.get("warnings"), list) else None
     for rec in _snapshot_outcome_records(fact, base):
@@ -854,7 +896,10 @@ def _snapshot_outcome_records(fact: Mapping[str, Any], base: dict[str, Any]) -> 
             continue
         t = o.get("t")
         if t == "return":
-            yield {**base, "t": "return", "result": o.get("result"), "count": count}
+            rec = {**base, "t": "return", "result": o.get("result"), "count": count}
+            if isinstance(o.get("order"), dict) and o["order"]:
+                rec["order"] = o["order"]
+            yield rec
         elif t == "raise":
             yield {**base, "t": "raise", "raised": str(o.get("raised")), "count": count}
         elif t == "other":
@@ -874,9 +919,9 @@ def _snapshot_outcome_records(fact: Mapping[str, Any], base: dict[str, Any]) -> 
                        "count": count - kept}
 
 
-def iter_snapshot_records(path: str | Path) -> Iterator[dict]:
+def iter_snapshot_records(path: str | Path, *, _mark: bool = False) -> Iterator[dict]:
     """Every fact of a snapshot as counted events, in first-seen order."""
-    for _kind, fact in iter_snapshot(path, kinds=("fact",)):
+    for _kind, fact in iter_snapshot(path, kinds=("fact",), _mark=_mark):
         yield from snapshot_fact_records(fact)
 
 
@@ -912,13 +957,23 @@ class _MergedFact:
     count: int = 0
     dur: list | None = None  # [n, sum, min, max]
     warnings: dict[tuple[str, str], int] | None = None
+    # dict key order side records (merged across snapshots: a differing order is "*")
+    in_order: dict[str, Any] | None = None
+    out_orders: dict[tuple[str, str], dict[str, Any] | None] = field(default_factory=dict)
 
-    def add_outcome(self, kind: str, payload: str, value: Any, n: int) -> None:
+    def add_outcome(self, kind: str, payload: str, value: Any, n: int,
+                    order: dict[str, Any] | None = None) -> None:
         key = (kind, payload)
         if key in self.outcomes:
             self.outcomes[key] += n
+            if kind == "return":
+                prev = self.out_orders.get(key)
+                if prev != order:
+                    self.out_orders[key] = _order.merge(prev, order)
         elif len(self.outcomes) < MAX_OUTCOMES:
             self.outcomes[key] = n
+            if kind == "return":
+                self.out_orders[key] = order
         else:
             self.add_other(kind, type_label(value) if kind == "return" else payload, n)
 
@@ -936,7 +991,9 @@ class _MergedFact:
         outs = []
         for (kind, payload), n in self.outcomes.items():
             if kind == "return":
-                outs.append('{"t":"return","result":' + payload + f',"count":{n}}}')
+                order = self.out_orders.get((kind, payload))
+                extra = f',"order":{_canon(order)}' if order else ""
+                outs.append('{"t":"return","result":' + payload + f',"count":{n}{extra}}}')
             else:
                 outs.append('{"t":"raise","raised":' + _canon(payload) + f',"count":{n}}}')
         if self.other:
@@ -954,8 +1011,26 @@ class _MergedFact:
             head["dur"] = dict(zip(("n", "sum", "min", "max"), self.dur, strict=True))
         if self.warnings:
             head["warnings"] = warning_list(self.warnings)
+        if self.in_order:
+            head["in_order"] = self.in_order
         return '{"in":' + self.in_json + ',"outcomes":[' + ",".join(outs) + "]," + \
             _canon(head)[1:]
+
+
+def _side_order(value: Any) -> dict[str, Any] | None:
+    """A side record's order map as read (``{path: permutation | "*"}``), else None."""
+    if not isinstance(value, dict) or not value:
+        return None
+    out: dict[str, Any] = {}
+    for path, perm in value.items():
+        if not isinstance(path, str):
+            continue
+        if perm == _order.VARIES or (isinstance(perm, list) and all(
+                isinstance(i, int) and not isinstance(i, bool) for i in perm)):
+            out[path] = perm
+        else:
+            out[path] = _order.UNKNOWN
+    return out or None
 
 
 def _merge_dur(acc: list | None, d: Any) -> list | None:
@@ -977,7 +1052,7 @@ def _merge_dur(acc: list | None, d: Any) -> list | None:
 _PROCESS_KEYS = ("pid", "python", "executable", "mode", "switched_at", "switch_reason",
                  "discovered", "armed", "settled_at", "settle_reason", "handed_over",
                  "incremental_settle", "started_at", "ended_at", "backend", "sample_rate",
-                 "warnings_capture", "distributions")
+                 "warnings_capture", "distributions", "value_format", "environment")
 
 
 def merge_fact_snapshots(
@@ -1067,14 +1142,17 @@ def _merge_fact(facts: dict[tuple, _MergedFact], obj: dict) -> None:
     key = (sym or q, w.get("file"), w.get("line"), w.get("func"), in_json)
     f = facts.get(key)
     first, last = obj.get("first_ts"), obj.get("last_ts")
+    in_order = _side_order(obj.get("in_order"))
     if f is None:
         f = facts[key] = _MergedFact(
             q=q, sym=sym, symq=obj.get("symq") if isinstance(obj.get("symq"), str) else None,
             own=obj.get("own") if isinstance(obj.get("own"), str) else None, where=where,
             in_json=in_json, widened=in_json == WIDENED_INPUT or bool(obj.get("widened")),
             first_ts=first if isinstance(first, int | float) else None,
-            last_ts=last if isinstance(last, int | float) else None)
+            last_ts=last if isinstance(last, int | float) else None, in_order=in_order)
     else:
+        if in_order != f.in_order:
+            f.in_order = _order.merge(f.in_order, in_order)
         if isinstance(first, int | float) and (f.first_ts is None or first < f.first_ts):
             f.first_ts = first
         if isinstance(last, int | float) and (f.last_ts is None or last > f.last_ts):
@@ -1088,7 +1166,8 @@ def _merge_fact(facts: dict[tuple, _MergedFact], obj: dict) -> None:
         f.count += n
         t = o.get("t")
         if t == "return":
-            f.add_outcome("return", _canon(o.get("result")), o.get("result"), n)
+            f.add_outcome("return", _canon(o.get("result")), o.get("result"), n,
+                          _side_order(o.get("order")))
         elif t == "raise":
             raised = str(o.get("raised"))
             f.add_outcome("raise", raised, raised, n)
@@ -1267,6 +1346,8 @@ class _Acc:
     attr_of: str | None = None
     ts_min: float | None = None
     ts_max: float | None = None
+    input_order: dict[str, Any] | None = None
+    seen_order: bool = False
 
 
 _MAX_CALL_SECONDS = 3600.0
@@ -1356,6 +1437,11 @@ def fold_facts(
                                 first_seen=index, where=shared_where,
                                 binding=ev["binding"], attr_of=attr_of)
         a.qualnames.add(ev["q"])
+        if a.seen_order:
+            if ev["input_order"] != a.input_order:
+                a.input_order = _order.merge(a.input_order, ev["input_order"])
+        else:
+            a.input_order, a.seen_order = ev["input_order"], True
         if ev["symq"] and a.symq is None:
             a.symq = ev["symq"]
         if ev["defaulted"] is not None:
@@ -1368,9 +1454,11 @@ def fold_facts(
         if slot is None:
             okey = pool.setdefault("o" + okey, okey)
             slot = a.outcomes[okey] = [ev["kind"], pool.setdefault("w" + okey, ev["value"]),
-                                       ev["count"], None, None]
+                                       ev["count"], None, None, ev["order"]]
         else:
             slot[2] += ev["count"]
+            if ev["order"] != slot[5]:
+                slot[5] = _order.merge(slot[5], ev["order"])
         if when is not None:
             slot[3] = when[0] if slot[3] is None else min(slot[3], when[0])
             slot[4] = when[1] if slot[4] is None else max(slot[4], when[1])
@@ -1422,8 +1510,8 @@ def load_facts(
     if site_text is None:
         site_text = load_site_text(base)
     stats = _ReadStats()
-    records = iter_snapshot_records(snap) if jsonl is None and snap is not None else \
-        iter_trace_records(trace_path, stats)
+    records = iter_snapshot_records(snap, _mark=True) if jsonl is None and snap is not None \
+        else iter_trace_records(trace_path, stats, _mark=True)
     runner_source = "explicit" if isinstance(runner, RunnerSpec) else None
     if runner == "auto":
         runner, runner_source = runner_for_trace(base, root)
@@ -1442,6 +1530,8 @@ def load_facts(
     fs.backends = backends
     fs.warnings_capture = _warnings_capture_of(meta, header)
     annotate_capture_meta(fs, meta)
+    if header and not _capture_procs(meta):
+        annotate_value_format(fs, header)  # a snapshot without its sidecar: its own header
     _add_sidecar_tally_warnings(fs, meta, site_text)
     return fs
 
@@ -1480,7 +1570,29 @@ def annotate_capture_meta(fs: FactSet, meta: Mapping[str, Any]) -> FactSet:
                 if isinstance(name, str) and isinstance(version, str) and version:
                     seen.setdefault(_dist_name(name), set()).add(version)
     fs.package_versions = {n: next(iter(v)) for n, v in seen.items() if len(v) == 1}
+    annotate_value_format(fs, meta)
     return fs
+
+
+def _capture_procs(meta: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [p for p in (meta.get("processes") or ()) if isinstance(p, Mapping)] or (
+        [meta] if meta else [])
+
+
+def annotate_value_format(fs: FactSet, meta: Mapping[str, Any]) -> bool:
+    """What every process of the capture declared about its values and where it ran: the
+    ``dict_order`` value format (order is compared only when both captures declare it) and
+    the ``environment`` record (unknown unless every process has one). Returns whether the
+    metadata said anything about either."""
+    procs = _capture_procs(meta)
+    fmts = [p.get("value_format") for p in procs]
+    fs.dict_order = bool(procs) and all(
+        isinstance(f, Mapping) and isinstance(f.get("dict_order"), int)
+        and not isinstance(f.get("dict_order"), bool) and f["dict_order"] >= 1 for f in fmts)
+    envs = [p.get("environment") for p in procs]
+    fs.environment = [dict(e) for e in envs] if procs and all(
+        isinstance(e, Mapping) for e in envs) else None
+    return any(f is not None for f in fmts) or any(e is not None for e in envs)
 
 
 def _dist_name(name: str) -> str:
@@ -1762,6 +1874,18 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     inputs = _objects_to_opaque(inputs)
     if isinstance(inputs, dict) and inputs.get("__c_call__"):
         inputs = {"__c_call__": True}  # a compiled call: no observable arguments (arg0 varies)
+    input_order = order = None
+    if raw.get(_LINE_ORDER) is not False:   # a line naming ``__order__``, or not from a line
+        inputs, input_order = _order.strip(inputs)
+        if kind == "return":
+            value, order = _order.strip(value)
+    # the facts sink keeps the order beside the stripped value (a snapshot's side record)
+    side_in = _side_order(raw.get("in_order"))
+    if side_in:
+        input_order = {**(input_order or {}), **side_in}
+    side_out = _side_order(raw.get("order")) if kind == "return" else None
+    if side_out:
+        order = {**(order or {}), **side_out}
     if kind == "raise":
         value = _raise_name(value)
     v = raw.get("v")
@@ -1772,7 +1896,8 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
             else None, "input": inputs, "defaulted": defaulted, "kind": kind, "value": value,
             "count": count, "where": where, "v": version, "aggregated": aggregated,
             "warnings": warns if isinstance(warns, list) and warns else None,
-            "binding": kind == "raise" and raw.get("binding") is True}
+            "binding": kind == "raise" and raw.get("binding") is True,
+            "input_order": input_order, "order": order}
 
 
 UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise whose type it cannot see
@@ -1801,11 +1926,11 @@ def _fact_from_acc(a: _Acc) -> Fact:
         line=a.line, lines=[a.line] if a.line is not None else [], text=a.text, input=a.input,
         defaulted=None if a.defaulted is None else [list(d) for d in sorted(a.defaulted)],
         outcomes=[Outcome.model_construct(_OUTCOME_FIELDS_SET, kind=k, value=v, count=c,
-                                          ts_min=t0, ts_max=t1)
-                  for _, (k, v, c, t0, t1) in outcomes],
+                                          ts_min=t0, ts_max=t1, order=od)
+                  for _, (k, v, c, t0, t1, od) in outcomes],
         count=a.count, where=a.where, first_seen=a.first_seen,
         warnings=_call_warnings(a.warnings), binding=a.binding, attr_of=a.attr_of,
-        ts_min=a.ts_min, ts_max=a.ts_max,
+        ts_min=a.ts_min, ts_max=a.ts_max, input_order=a.input_order,
     )
 
 
@@ -1842,8 +1967,10 @@ def _merge_facts(facts: list[Fact]) -> Fact:
                 outcomes[k][2] += o.count
                 outcomes[k][3] = _tmin(outcomes[k][3], o.ts_min)
                 outcomes[k][4] = _tmax(outcomes[k][4], o.ts_max)
+                if o.order != outcomes[k][5]:
+                    outcomes[k][5] = _order.merge(outcomes[k][5], o.order)
             else:
-                outcomes[k] = [o.kind, o.value, o.count, o.ts_min, o.ts_max]
+                outcomes[k] = [o.kind, o.value, o.count, o.ts_min, o.ts_max, o.order]
         if f.warnings:
             merge_warnings(warns, [w.model_dump() for w in f.warnings])
     merged = head.model_copy(update={
@@ -1851,8 +1978,9 @@ def _merge_facts(facts: list[Fact]) -> Fact:
         "symq": next((f.symq for f in ordered if f.symq), None),
         "lines": sorted(lines),
         "defaulted": None if defaulted is None else [list(d) for d in sorted(defaulted)],
-        "outcomes": [Outcome(kind=k, value=v, count=c, ts_min=t0, ts_max=t1)
-                     for _, (k, v, c, t0, t1) in sorted(outcomes.items())],
+        "outcomes": [Outcome(kind=k, value=v, count=c, ts_min=t0, ts_max=t1, order=od)
+                     for _, (k, v, c, t0, t1, od) in sorted(outcomes.items())],
+        "input_order": _order.merge_all([f.input_order for f in ordered]),
         "count": sum(f.count for f in ordered),
         "warnings": _call_warnings(warns),
         "ts_min": min((f.ts_min for f in ordered if f.ts_min is not None), default=None),
@@ -3396,6 +3524,9 @@ class _Masker:
     stable: frozenset = frozenset()
     # a differing distribution's version string on this side -> ``⟨ver:<name>⟩``
     versions: dict[str, str] = field(default_factory=dict)
+    # this side's OS name, kernel release, machine and tmpdir -> ``⟨env:<aspect>⟩``, for the
+    # aspects that differ between the two captures' recorded environments
+    env_tokens: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._roots = re.compile("|".join(
@@ -3417,6 +3548,16 @@ class _Masker:
         self._versions = re.compile("|".join(
             rf"(?<![\w.]){re.escape(v)}(?![\w.]|-\w)"
             for v in sorted(self.versions, key=len, reverse=True))) if self.versions else None
+        # tmpdir: path-like, masked like the project root ("environment"); the OS name, kernel
+        # release and machine: "platform", which explains nothing by itself (_judge_platform)
+        self._env = {}
+        for mech, toks in (
+                ("environment", [t for t, ph in self.env_tokens.items() if ph == "⟨env:tmpdir⟩"]),
+                ("platform", [t for t, ph in self.env_tokens.items() if ph != "⟨env:tmpdir⟩"])):
+            if toks:
+                self._env[mech] = re.compile("|".join(
+                    rf"(?<![\w.\-/]){re.escape(t)}(?![\w.\-])"
+                    for t in sorted(toks, key=len, reverse=True)))
         # every start of a token's hex prefix, overlapping ones included (scanned in C)
         self._hex_rx = re.compile("(?=(" + "|".join(re.escape(p) for p in self._hex) + "))") \
             if self._hex else None
@@ -3477,6 +3618,11 @@ class _Masker:
         if self._versions is not None and self._versions.search(s):
             self._note("environment", self._versions.search(s).group())
             s = self._versions.sub(lambda m: self.versions[m.group()], s)
+        for mech, rx in self._env.items():
+            hit = rx.search(s)
+            if hit is not None:
+                self._note(mech, hit.group())
+                s = rx.sub(lambda m: self.env_tokens[m.group()], s)
         return s
 
     def _mask_tokens(self, s: str) -> str:
@@ -3658,7 +3804,8 @@ def _merge_clock_intervals(merged: dict[str, list]) -> dict[str, list]:
             continue
         hull = [(min(a0, b0), max(a1, b1)) for (a0, a1), (b0, b1) in zip(prev_parts[1], parts[1])]
         out[tkey] = [prev[0], _with_intervals(prev[1], hull), prev[2] + slot[2],
-                     _tmin(prev[3], slot[3]), _tmax(prev[4], slot[4])]
+                     _tmin(prev[3], slot[3]), _tmax(prev[4], slot[4]),
+                     prev[5] if prev[5] == slot[5] else _order.merge(prev[5], slot[5])]
     return out
 
 
@@ -3711,7 +3858,8 @@ def clock_candidates(facts: list[Fact]) -> set[str]:
 
 
 def _masker_for(fs: FactSet, facts: list[Fact], stable: frozenset = frozenset(),
-                versions: dict[str, str] | None = None) -> _Masker:
+                versions: dict[str, str] | None = None,
+                env_tokens: dict[str, str] | None = None) -> _Masker:
     seeded = _seeded(facts)
     tokens: dict[str, str] = {}
     numbers: dict[float, str] = {}
@@ -3729,7 +3877,7 @@ def _masker_for(fs: FactSet, facts: list[Fact], stable: frozenset = frozenset(),
                 numbers.setdefault(n, "⟨src:number⟩")
     return _Masker(roots=list(fs.env_roots), pythons=list(fs.python_versions),
                    host_capture=fs.host_capture, tokens=tokens, numbers=numbers, stable=stable,
-                   versions=versions or {})
+                   versions=versions or {}, env_tokens=env_tokens or {})
 
 
 def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
@@ -3738,7 +3886,7 @@ def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
     became identical merge (48 uuid4 values are one masked outcome)."""
     timed = any(f.ts_min is not None for f in facts)
     if not (masker.roots or masker.pythons or timed or masker.tokens or masker.numbers
-            or masker.versions):
+            or masker.versions or masker.env_tokens):
         masker.untimed = len(facts)
         return facts
     out: list[Fact] = []
@@ -3763,8 +3911,10 @@ def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
                 merged[k][2] += o.count
                 merged[k][3] = _tmin(merged[k][3], o.ts_min)
                 merged[k][4] = _tmax(merged[k][4], o.ts_max)
+                if o.order != merged[k][5]:
+                    merged[k][5] = _order.merge(merged[k][5], o.order)
             else:
-                merged[k] = [o.kind, v, o.count, o.ts_min, o.ts_max]
+                merged[k] = [o.kind, v, o.count, o.ts_min, o.ts_max, o.order]
         if masker.counts["clock"] > before.get("clock", 0):
             merged = _merge_clock_intervals(merged)
         mechs = frozenset(m for m, n in masker.counts.items() if n > before.get(m, 0))
@@ -3772,8 +3922,8 @@ def _canonicalise(facts: list[Fact], masker: _Masker) -> list[Fact]:
             out.append(f)
             continue
         c = f.model_copy(update={"input": inp, "outcomes": [
-            Outcome(kind=k, value=v, count=n, ts_min=t0, ts_max=t1)
-            for k, v, n, t0, t1 in merged.values()]})
+            Outcome(kind=k, value=v, count=n, ts_min=t0, ts_max=t1, order=od)
+            for k, v, n, t0, t1, od in merged.values()]})
         _set_masks(c, mechs, f)
         out.append(c)
     return out
@@ -3925,14 +4075,17 @@ class _V:
 
 def diff_facts(
     old: FactSet, new: FactSet, *, profile: DiffProfile | str = DiffProfile.EXACT,
-    context: DiffContext | None = None,
+    context: DiffContext | None = None, order_causes: Sequence["OrderCause"] = (),
 ) -> FactDiff:
-    """Compare two FactSets (baseline -> post-migration). See the module docstring."""
+    """Compare two FactSets (baseline -> post-migration). See the module docstring.
+
+    ``order_causes``: known causes of dict key order changes (``OrderCause``); an order finding
+    that matches one exactly is cited, and from 5 keys on the citation proves determinism."""
     token = _HANDLES.set(_handle_types(old.facts, new.facts))
     reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
     noise = _NOISE.set(_NoiseState())
     try:
-        return _diff_facts(old, new, DiffProfile(profile), context)
+        return _diff_facts(old, new, DiffProfile(profile), context, tuple(order_causes))
     finally:
         _NOISE.reset(noise)
         _TYPE_RELOC.reset(reloc)
@@ -3940,7 +4093,8 @@ def diff_facts(
 
 
 def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
-                context: DiffContext | None = None) -> FactDiff:
+                context: DiffContext | None = None,
+                order_causes: tuple["OrderCause", ...] = ()) -> FactDiff:
     old_facts, new_facts, c_level_excluded = _exclude_c_level(old, new)
     # Finalizers run at GC time, not at a call site the project controls.
     old_facts = [f for f in old_facts if not f.symbol.endswith(".__del__")]
@@ -3957,8 +4111,9 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     vers = version_masks(old, new)
     # Raw first: a clock-like text recorded identically on both sides is no clock reading.
     stable = frozenset(clock_candidates(old_facts) & clock_candidates(new_facts))
-    noise.old = _masker_for(old, old_facts, stable, vers[0])
-    noise.new = _masker_for(new, new_facts, stable, vers[1])
+    envcmp = _env.compare(old.environment, new.environment)
+    noise.old = _masker_for(old, old_facts, stable, vers[0], _env.tokens(envcmp, 0))
+    noise.new = _masker_for(new, new_facts, stable, vers[1], _env.tokens(envcmp, 1))
     seeded = _seeded(old_facts) or _seeded(new_facts)
     noise.sources = frozenset(
         f.symbol for f in (*old_facts, *new_facts)
@@ -3967,8 +4122,10 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     new_facts = _canonicalise(new_facts, noise.new)
     old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
-        old_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in old_facts]
-        new_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in new_facts]
+        old_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})
+                     for f in old_facts]
+        new_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})
+                     for f in new_facts]
 
     old_facts, new_facts = _normalize_scopes(old_facts), _normalize_scopes(new_facts)
     modes = _site_modes(old_facts, new_facts, old.site_tallies, new.site_tallies)
@@ -4155,6 +4312,11 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
                             idx[tok[:8]].append(tok)
                     gstats.seed_index[side] = idx
         changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats)
+    order_stats = _judge_order(pending, old, new, prof, order_causes)
+    protected = _protected_symbols(context)
+    env_readings = _explain_env_readings(pending, envcmp, protected)
+    platform_read, platform_reviews = _judge_platform(pending, envcmp, protected)
+    env_readings += platform_read
 
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_dropped(entries, old, new)
@@ -4162,6 +4324,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _review_masked_input(entries)
     variation = _run_variation(gstats)
     gated = _gate_unmeasured(entries, variation) if variation else 0
+    env_reviews = _judge_environment(entries, envcmp, protected) + platform_reviews
     entries.sort(key=_entry_sort_key)
     warnings = _warnings(old, new)
     if unsampled:
@@ -4209,9 +4372,27 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         warnings.append(
             "definition-spans-unknown: no source snapshots, so an edit to a decorator or a class "
             "body does not make the calls on its definition line edited sites")
+    if order_stats["output"] or order_stats["input"] or order_stats["strict"]:
+        warnings.append(
+            f"dict-order: {order_stats['output']} returned dict(s) and {order_stats['input']} "
+            f"input dict(s) reaching an order-sensitive call changed key order only"
+            + (f", {order_stats['strict']} input order change(s) with an output that differs "
+               "beyond a reordering (strict)" if order_stats["strict"] else "")
+            + (f"; {order_stats['cited']} cited by a known cause" if order_stats["cited"]
+               else ""))
+    if env_reviews or env_readings:
+        warnings.append(
+            f"environment-differs: the captures ran in different environments "
+            f"({', '.join(envcmp.differs)}); {env_reviews} difference(s) at calls that read a "
+            f"differing aspect are reviews, {env_readings} value(s) are each side's own "
+            "reading")
     return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger,
                     old_summary=old.summary(),
-                    new_summary=new.summary(), warnings=warnings, unsampled=unsampled)
+                    new_summary=new.summary(), warnings=warnings, unsampled=unsampled,
+                    dict_order=_order_status(old, new),
+                    environment=_env.stamp(envcmp, old.environment, new.environment,
+                                           reviews=env_reviews, explained=env_readings,
+                                           inferred=_env_inference(old, new)))
 
 
 def _site_key(symbol: str, file: str, func: str, line: int | None, text: str | None,
@@ -4431,7 +4612,7 @@ def _collapse_widened(old_facts: list[Fact], new_facts: list[Fact]) -> tuple[lis
                 out.append(f)
         for members in groups.values():
             reduced = [m.model_copy(update={
-                "input": dict(_WIDENED),
+                "input": dict(_WIDENED), "input_order": None,
                 "outcomes": [o if o.kind == "raise" else
                              Outcome(kind="return", value=widen_value(o.value), count=o.count)
                              for o in m.outcomes],
@@ -4471,6 +4652,7 @@ def diff_traces(
     new_root: str | Path | None = None,
     profile: DiffProfile | str = DiffProfile.EXACT,
     context: DiffContext | None = None,
+    order_causes: Sequence["OrderCause"] = (),
 ) -> FactDiff:
     """Load two traces (each with its own sidecar site_text) and diff them.
 
@@ -4478,7 +4660,7 @@ def diff_traces(
     ran from different checkouts (or a container and the host)."""
     old = load_facts(old_path, root=old_root if old_root is not None else root)
     new = load_facts(new_path, root=new_root if new_root is not None else root)
-    return diff_facts(old, new, profile=profile, context=context)
+    return diff_facts(old, new, profile=profile, context=context, order_causes=order_causes)
 
 
 _PSEUDO_SCOPES = ("<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>", "<lambda>")
@@ -4979,6 +5161,8 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
     for e in entries:
         if "matched-modulo-input" in e.notes or "matched-modulo-masked-input" in e.notes:
             continue  # inputs differ: the input-change and masked-input rules judge those
+        if _order_proved(e):
+            continue  # a dict key order shown deterministic (_judge_order): not run noise
         if (e.category is not FactCategory.CHANGED or e.comparison is not Comparison.CHANGED
                 or e.review or e.noise or e.unverified or e.provenance not in (None, "unedited")
                 or e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED)
@@ -5209,12 +5393,468 @@ def _kinds_match(a: list[Outcome] | None, b: list[Outcome] | None) -> bool:
     return _cover(ra, rb, _raises_match)
 
 
+# ── dict key order (value format ``dict_order``) ─────────────────────────────────────────
+
+ORDER_CHANGED = "order changed"
+INPUT_ORDER_CHANGED = "input order changed"
+ORDER_REVIEWS = (ORDER_CHANGED, INPUT_ORDER_CHANGED)
+ORDER_PROOF_KEYS = 5   # a cited cause proves determinism from this many keys (1/5! < 1/100)
+_ORDER_HINT = ("a dict built from a set of str follows the hash seed; capture a baseline "
+               "replicate (random hash seeds) to settle")
+
+
+@dataclass(frozen=True)
+class OrderCause:
+    """A known cause of a dict key order change (from knowledge, e.g. Python 3.9 putting a
+    TypedDict's base fields first): the key set and the exact old and new key sequences it
+    predicts. An order finding is cited only on an exact match of all three."""
+
+    keys: frozenset[str]
+    old: tuple[str, ...]
+    new: tuple[str, ...]
+    cause: str      # the knowledge id
+    detail: str     # human text
+
+
+def _order_proved(e: FactEntry) -> bool:
+    """An order failure whose determinism ``_judge_order`` showed (a cited knowledge cause of
+    5+ keys, the same pinned hash seed): later review gates must not soften it."""
+    return any(n == "order-cause-cited" or n.startswith("order-controlled") for n in e.notes)
+
+
+def _order_status(old: FactSet, new: FactSet) -> str:
+    missing = [side for side, fs in (("old", old), ("new", new)) if not fs.dict_order]
+    return "compared" if not missing else f"not recorded ({', '.join(missing)})"
+
+
+def _python_minor(versions: list[str]) -> str | None:
+    minors = {".".join(v.split(".")[:2]) for v in versions if v}
+    return minors.pop() if len(minors) == 1 else None
+
+
+def order_controlled(old: FactSet, new: FactSet) -> bool:
+    """Hash order is the same on both sides: the same pinned PYTHONHASHSEED and hash algorithm
+    in every process, and the same Python X.Y (never across a Python move: str hashing and set
+    iteration changed between minors)."""
+    a, b = _env.hash_pinned(old.environment), _env.hash_pinned(new.environment)
+    if a is None or a != b:
+        return False
+    pa, pb = _python_minor(old.python_versions), _python_minor(new.python_versions)
+    return pa is not None and pa == pb
+
+
+def _outcome_pairs(of: Fact, nf: Fact) -> list[tuple[Outcome, Outcome]]:
+    """Returned outcomes matched one-to-one: the single outcome of each side, else by equal
+    (masked) value."""
+    if len(of.outcomes) == 1 and len(nf.outcomes) == 1:
+        a, b = of.outcomes[0], nf.outcomes[0]
+        return [(a, b)] if a.kind == b.kind == "return" else []
+    by_new = {_canon(x.value): x for x in nf.outcomes if x.kind == "return"}
+    return [(x, by_new[_canon(x.value)]) for x in of.outcomes
+            if x.kind == "return" and _canon(x.value) in by_new]
+
+
+def _order_explainable(of: Fact, nf: Fact) -> int | None:
+    """The length of an output that is a byte (or character) permutation of the other side's,
+    when that is the pair's whole output difference; else None."""
+    for a_f, b_f in ((of, nf), (_raw_of(of), _raw_of(nf))):
+        oa = {_canon([x.kind, x.value]): x for x in a_f.outcomes}
+        ob = {_canon([x.kind, x.value]): x for x in b_f.outcomes}
+        only_a = [x for k, x in oa.items() if k not in ob]
+        only_b = [x for k, x in ob.items() if k not in oa]
+        if len(only_a) == 1 and len(only_b) == 1 and only_a[0].kind == only_b[0].kind == "return":
+            n = _order.is_order_explainable(only_a[0].value, only_b[0].value)
+            if n is not None:
+                return n
+    return None
+
+
+def _cite(diffs: list, causes: Sequence[OrderCause]) -> tuple[OrderCause, tuple] | None:
+    for d in diffs:
+        _path, old_seq, new_seq = d
+        old_l = tuple(_order.key_label(k) for k in old_seq)
+        new_l = tuple(_order.key_label(k) for k in new_seq)
+        for c in causes:
+            if frozenset(old_l) == c.keys and old_l == tuple(c.old) and new_l == tuple(c.new):
+                return c, d
+    return None
+
+
+def _order_block(side: str, d: tuple, value: Any, cause: OrderCause | None) -> dict[str, Any]:
+    out = {"side": side, **_order.describe(d[0], d[1], d[2], value)}
+    if cause is not None:
+        out["cause"] = f"{cause.detail} ({cause.cause})"
+    return out
+
+
+def _order_text(d: tuple, value: Any) -> str:
+    return next(_order.iter_diff_labels([d], value))
+
+
+def _judge_order(pending: list[tuple[_V, _V, FactEntry]], old: FactSet, new: FactSet,
+                 prof: DiffProfile, causes: Sequence[OrderCause] = ()) -> Counter:
+    """Dict key order, compared like a value where it is recorded on both sides (both captures
+    declare the ``dict_order`` value format), on pairs compared at exact or masked level, at
+    dict positions present on both sides with the same masked key set (k >= 2). Never at type
+    or kind level and never in volatile-site groups (they are not pairs). The hash seed is a
+    hidden input of every hash-ordered dict, so an unmeasured order difference is a review,
+    never a failure, unless determinism is shown: a pinned identical hash seed (same Python
+    X.Y), a replicate (``replicate.py``: ``equal@order``) or a knowledge cause that matches
+    the key set and both sequences exactly (``OrderCause``, from 5 keys on).
+
+    a. output order only: review ``order changed``;
+    b. input order only, output the same: EQUAL, explained;
+    c. input order only, the output's dicts reordered as the input's: EQUAL at MASKED;
+    d. input order only, the output differs: a review ``input order changed`` when the output
+       is a permutation of the other side's bytes or characters (the only difference an order
+       can explain), else the strict failure stays (its text never says "same complete
+       input"); a kind or type change fails as before;
+    e. the input differs in content too: the existing rules decide, order is detail only.
+    Order that varied within one run (one side's fact saw two orders) is not compared.
+
+    Stated residual (case d): "order-explainable" looks at the output only, not at whether the
+    reordered dict can reach it. A call whose input dict was reordered by hash order AND whose
+    output changed into a permutation of itself for another reason (``"abcdef"`` ->
+    ``"fedcba"``) is a review ``input order changed``: INCONCLUSIVE, never PASS, but not the
+    FAIL it deserves until a replicate (``equal@order``) or a knowledge cause settles it."""
+    stats: Counter = Counter()
+    if prof is DiffProfile.SHAPE or not (old.dict_order and new.dict_order):
+        return stats
+    controlled = order_controlled(old, new)
+    for o, n, e in pending:
+        if e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED) or e.noise \
+                or e.unverified or e.comparison not in (Comparison.EQUAL, Comparison.CHANGED):
+            continue
+        of, nf = o.fact, n.fact
+        cin = _order.compare(of.input, of.input_order, nf.input, nf.input_order)
+        cout = _order.Compared()
+        out_value: dict[str, Any] = {}     # an output difference's path -> the old value
+        for a, b in _outcome_pairs(of, nf):
+            c = _order.compare(a.value, a.order, b.value, b.order)
+            for d in c.diffs:
+                out_value.setdefault(d[0], a.value)
+            cout.extend(c)
+        same_input = o.input_key == n.input_key and "matched-modulo-masked-input" not in e.notes
+        if cin.varies or cout.varies:
+            e.notes.append("order-varies-in-run")
+            stats["varies"] += 1
+        if cin.collisions or cout.collisions:
+            e.notes.append("order-not-comparable: masked keys collide")
+        if cin.agreed or cout.agreed:
+            e.order_agreed = cin.agreed + cout.agreed
+        if e.comparison is Comparison.EQUAL:
+            if cout.diffs:
+                follows = same_input and bool(cin.diffs) and all(
+                    any(d[1] == x[1] and d[2] == x[2] for x in cin.diffs) for d in cout.diffs)
+                if follows:                                                  # c
+                    e.level = ComparisonLevel.MASKED
+                    e.notes.append("order-follows-input")
+                    e.explained = (f"order: the output's key order follows the input's "
+                                   f"({_order_text(cin.diffs[0], of.input)})")
+                    stats["follows"] += 1
+                    continue
+                d = cout.diffs[0]                                            # a
+                cited = _cite(cout.diffs, causes)
+                if cited is not None:
+                    d = cited[1]
+                value = out_value.get(d[0])
+                e.order = _order_block("output", d, value, cited[0] if cited else None)
+                e.order_keysets = sorted({_order.keyset_id(x[1]) for x in cout.diffs})
+                if e.review:          # already a review for another reason: order is detail
+                    e.notes.append("order-changed-detail")
+                    stats["detail"] += 1
+                    continue
+                if e.category is not FactCategory.REWRITTEN:
+                    e.category = FactCategory.CHANGED
+                e.comparison = Comparison.CHANGED
+                e.notes.append("order-changed")
+                more = f" (+{len(cout.diffs) - 1} more)" if len(cout.diffs) > 1 else ""
+                e.explained = f"order: same keys and values, key order {_order_text(d, value)}" \
+                    + more + (f"; cause: {e.order['cause']}" if cited else "")
+                if cited and len(d[1]) >= ORDER_PROOF_KEYS:
+                    e.notes.append("order-cause-cited")
+                    stats["cited"] += 1
+                elif controlled:
+                    e.notes.append("order-controlled: the same pinned hash seed on both sides")
+                else:
+                    e.review = (f"{ORDER_CHANGED}: same keys and values, key order "
+                                f"{_order_text(d, value)}{more}; {_ORDER_HINT}")
+                stats["output"] += 1
+            elif cin.diffs:                                                  # b
+                e.notes.append("input-order-differs")
+                if e.explained is None:
+                    e.explained = (f"order: input key order differs "
+                                   f"{_order_text(cin.diffs[0], of.input)}; the output is the "
+                                   "same")
+                stats["input-neutral"] += 1
+            elif cin.varies or cout.varies:
+                if e.explained is None:
+                    e.explained = "order: varies within one run"
+            continue
+        # CHANGED: the content differs
+        if not cin.diffs:
+            continue
+        d = cin.diffs[0]
+        unedited = e.provenance in (None, "unedited") and not (o.rewritten_site
+                                                              or n.rewritten_site)
+        kinds_ok = _kinds_match(e.old, e.new) and _cover(
+            _distinct_types(e.old or []), _distinct_types(e.new or []), _outcome_types_match)
+        cited = _cite(cin.diffs, causes) if same_input else None
+        if cited is not None:
+            d = cited[1]
+        e.order = _order_block("input", d, of.input, cited[0] if cited else None)
+        e.notes.append("input-order-differs")
+        if not (same_input and unedited and kinds_ok) or e.review \
+                or e.category is not FactCategory.CHANGED:
+            stats["detail"] += 1                                             # e, or strict
+            continue
+        length = _order_explainable(of, nf)
+        if length is None:                                                   # d, strict
+            e.order["output"] = "differs beyond a reordering"
+            stats["strict"] += 1
+            continue
+        e.order["output"] = f"a byte-permutation (len {length})"
+        e.order_keysets = sorted({_order.keyset_id(x[1]) for x in cin.diffs})
+        e.notes.append("input-order-changed")
+        more = f" (+{len(cin.diffs) - 1} more)" if len(cin.diffs) > 1 else ""
+        e.explained = (f"order: the input's dict key order changed (same keys and values) "
+                       f"{_order_text(d, of.input)}{more}; the output is a byte-permutation "
+                       f"(len {length})" + (f"; cause: {e.order['cause']}" if cited else ""))
+        stats["input"] += 1
+        if cited and len(d[1]) >= ORDER_PROOF_KEYS:
+            e.notes.append("order-cause-cited")
+            stats["cited"] += 1
+        elif controlled:
+            e.notes.append("order-controlled: the same pinned hash seed on both sides")
+        else:
+            e.review = (f"{INPUT_ORDER_CHANGED}: the dict key order reaching this call changed "
+                        f"(same keys and values) {_order_text(d, of.input)}{more}; the output "
+                        f"is a byte-permutation (len {length}); {_ORDER_HINT}")
+    return stats
+
+
+# ── runtime environment (``environment`` records) ───────────────────────────────────────
+
+ENVIRONMENT_DIFFERS = "environment differs"
+_READING_ASPECT = {"cpus": "cpus", "uid": "privilege", "euid": "privilege", "system": "os",
+                   "machine": "machine", "release": "release", "rlimit": "rlimit"}
+
+
+def _protected_symbols(context: DiffContext | None) -> set[str]:
+    """Symbols the migration's own knowledge predicts a change at (a plan's delta facts and
+    successors, its predicted risks): an environment difference never softens them."""
+    if context is None:
+        return set()
+    out = set(context.predicted_symbols or ())
+    for old, new in (context.successors or {}).items():
+        out.update((old, new))
+    return out
+
+
+def _env_unedited(e: FactEntry) -> bool:
+    return e.provenance in (None, "unedited") and not e.unverified
+
+
+def _explain_env_readings(pending: list[tuple[_V, _V, FactEntry]], envcmp: Any,
+                          protected: set[str]) -> int:
+    """E2: a value at a curated reader that is each side's OWN recorded reading of an aspect
+    that differs (``os.cpu_count()`` 8 vs 12 with cpus 8 vs 12) is EQUAL at masked level,
+    explained. A value matching neither side's reading stays as it is."""
+    if envcmp is None or envcmp.same:
+        return 0
+    count = 0
+    for o, n, e in pending:
+        if e.comparison is not Comparison.CHANGED or e.category is not FactCategory.CHANGED \
+                or e.review or e.noise or not _env_unedited(e) or o.rewritten_site \
+                or n.rewritten_site or e.symbol in protected or (e.new_symbol or "") in protected:
+            continue
+        kind = _env.reading_kind(e.symbol)
+        aspect = _READING_ASPECT.get(kind or "")
+        if aspect is None or not envcmp.differ(aspect):
+            continue
+        of, nf = o.fact, n.fact
+        if len(of.outcomes) != 1 or len(nf.outcomes) != 1 \
+                or of.outcomes[0].kind != "return" or nf.outcomes[0].kind != "return":
+            continue
+        if not (_env.is_own_reading(e.symbol, of.input, of.outcomes[0].value,
+                                    envcmp.old_envs)
+                and _env.is_own_reading(e.symbol, nf.input, nf.outcomes[0].value,
+                                        envcmp.new_envs)):
+            continue
+        e.category, e.comparison, e.level = (FactCategory.EQUAL, Comparison.EQUAL,
+                                             ComparisonLevel.MASKED)
+        shown = envcmp.describe(envcmp.matching([aspect]))
+        e.explained = f"environment: the value is this side's own {aspect} ({shown})"
+        e.notes.append("environment-reading")
+        count += 1
+    return count
+
+
+def _judge_platform(pending: list[tuple[_V, _V, FactEntry]], envcmp: Any,
+                    protected: set[str]) -> tuple[int, int]:
+    """A pair equal only once each side's OS name, kernel release or machine was masked
+    (``platform`` masks, made only while those aspects differ) is no proof of equal behaviour:
+    a call that returns the platform it ran on looks the same as one whose result changed to
+    another platform's. It stays EQUAL only at a curated reader whose recorded values are each
+    side's own reading (E2); elsewhere it is a review "environment differs" (a strict failure
+    at a symbol the migration's knowledge names). Returns (explained, reviews)."""
+    if envcmp is None or envcmp.same:
+        return 0, 0
+    explained = reviews = 0
+    for o, n, e in pending:
+        of, nf = o.fact, n.fact
+        if "platform" not in (_masks_of(of) | _masks_of(nf)) or e.review or e.noise \
+                or e.comparison is not Comparison.EQUAL:
+            continue
+        ro, rn = _raw_of(of), _raw_of(nf)
+        if compare_outcomes(ro.outcomes, rn.outcomes).comparison is Comparison.EQUAL:
+            continue  # only the input was masked: the outputs are equal as recorded
+        aspects = envcmp.matching(["os", "release", "machine"])
+        kind = _env.reading_kind(e.symbol)
+        if kind in ("system", "machine", "release") and len(ro.outcomes) == 1 \
+                and len(rn.outcomes) == 1 \
+                and _env.is_own_reading(e.symbol, ro.input, ro.outcomes[0].value,
+                                        envcmp.old_envs) \
+                and _env.is_own_reading(e.symbol, rn.input, rn.outcomes[0].value,
+                                        envcmp.new_envs):
+            aspect = _READING_ASPECT[kind]
+            e.level = ComparisonLevel.MASKED
+            e.explained = (f"environment: the value is this side's own {aspect} "
+                           f"({envcmp.describe(envcmp.matching([aspect]))})")
+            e.notes.append("environment-reading")
+            explained += 1
+            continue
+        if e.category in (FactCategory.EQUAL, FactCategory.DRIFT):
+            e.category = FactCategory.CHANGED
+        e.comparison = Comparison.CHANGED
+        e.notes.append("platform-masked")
+        e.explained = ("platform: equal only once each side's own "
+                       f"{'/'.join(a for a in aspects)} was masked")
+        if e.symbol in protected or (e.new_symbol or "") in protected \
+                or not _env_unedited(e):
+            continue  # strict: the migration's knowledge names it, or it is an edited site
+        e.review = (f"{ENVIRONMENT_DIFFERS}: {envcmp.describe(aspects)}; the value differs only "
+                    f"by each side's own {', '.join(aspects)}; capture both sides in the same "
+                    "environment to settle")
+        reviews += 1
+    return explained, reviews
+
+
+def _type_names(t: Any) -> set[str]:
+    """Every type name a type tree holds (``object``/``opaque``/``type`` labels)."""
+    out: set[str] = set()
+    if isinstance(t, dict):
+        for k, v in t.items():
+            if isinstance(v, str) and k in ("object", "opaque", "type", "return", "raise",
+                                            "structure", "dataclass"):
+                out.add(v)
+            else:
+                out |= _type_names(v)
+    elif isinstance(t, list):
+        for x in t:
+            out |= _type_names(x)
+    return out
+
+
+def _platform_tagged(e: FactEntry) -> bool:
+    """The outcome types differ only by a platform-tagged name (``psutil._psosx.pmem`` vs
+    ``psutil._pslinux.pmem``), one-sided attributes of such objects included."""
+    old_t, new_t = _distinct_types(e.old or []), _distinct_types(e.new or [])
+    a = {_env.platform_neutral(x) for x in _type_names(old_t)}
+    b = {_env.platform_neutral(x) for x in _type_names(new_t)}
+    raw_a, raw_b = _type_names(old_t), _type_names(new_t)
+    return raw_a != raw_b and a == b and any("⟨os⟩" in x for x in a)
+
+
+def _raise_types(outcomes: list[Outcome] | None) -> set[str]:
+    return {_raise_name(o.value) for o in outcomes or () if o.kind == "raise"}
+
+
+def _env_change_class(e: FactEntry) -> str | None:
+    """The change classes an environment can cause (B's restriction): a presence change; a
+    kind change whose raise types are all of the environment family (``<unknown>``, OSError
+    and its kin, ValueError, NotImplementedError, AttributeError, ImportError); a
+    platform-tagged type-name difference; a value change at equal types. None otherwise:
+    TypeError, KeyError and other type changes are never softened."""
+    if e.category in (FactCategory.APPEARED, FactCategory.DISAPPEARED):
+        return "presence"
+    if e.comparison is not Comparison.CHANGED:
+        return None
+    if not _kinds_match(e.old, e.new):
+        raises = _raise_types(e.old) | _raise_types(e.new)
+        return "kind" if raises and all(_env.env_raise(r) for r in raises) else None
+    if _platform_tagged(e):
+        return "type"
+    if not _cover(_distinct_types(e.old or []), _distinct_types(e.new or []),
+                  _outcome_types_match):
+        return None
+    return "value"
+
+
+def _evidence_aspects(e: FactEntry, envcmp: Any) -> set[str]:
+    """Aspects an entry shows it reads: a platform-tagged type name reads ``os``; a
+    PermissionError raised only on the less privileged side reads ``privilege``."""
+    out: set[str] = set()
+    if _platform_tagged(e):
+        out.add("os")
+    po = "PermissionError" in _raise_types(e.old)
+    pn = "PermissionError" in _raise_types(e.new)
+    if po != pn and envcmp.differ("privilege"):
+        new_less = _env.less_privileged(envcmp.new_envs, envcmp.old_envs)
+        old_less = _env.less_privileged(envcmp.old_envs, envcmp.new_envs)
+        if (pn and new_less) or (po and old_less):
+            out.add("privilege")
+    return out
+
+
+def _judge_environment(entries: list[FactEntry], envcmp: Any, protected: set[str]) -> int:
+    """E3/E4: a failing difference at an unedited call that reads an aspect of the environment
+    that differs between the captures (curated reader, or evidence) is a review "environment
+    differs", never noise and never a pass: only a same-environment capture settles it. Not
+    for edited sites, for symbols the migration's knowledge names (``_protected_symbols``),
+    for aspects that do not differ, for an unknown or same environment, or for a change class
+    no environment causes (``_env_change_class``)."""
+    if envcmp is None or envcmp.same:
+        return 0
+    count = 0
+    for e in entries:
+        if not e.fails or not _env_unedited(e):
+            continue
+        if e.symbol in protected or (e.new_symbol or "") in protected:
+            continue
+        aspects = _env.reader_aspects(e.symbol, e.input)
+        if e.new_symbol:
+            aspects |= _env.reader_aspects(e.new_symbol, e.new_input or e.input)
+        aspects |= _evidence_aspects(e, envcmp)
+        differing = envcmp.matching(sorted(aspects))
+        if not differing or _env_change_class(e) is None:
+            continue
+        e.review = (f"{ENVIRONMENT_DIFFERS}: {envcmp.describe(differing)}; {e.symbol} reads "
+                    "it; capture both sides in the same environment to settle")
+        e.notes.append("environment-differs: " + ", ".join(differing))
+        count += 1
+    return count
+
+
+def _env_inference(old: FactSet, new: FactSet) -> str | None:
+    """What the call-site paths already say about where an unrecorded capture ran
+    (informational only: it changes no verdict)."""
+    o, n = bool(old.paths_mapped), bool(new.paths_mapped)
+    if o == n:
+        return None
+    where = {True: "in a container", False: "on the host"}
+    return (f"inferred from call-site paths: the baseline ran {where[o]}, the post-migration "
+            f"capture {where[n]}")
+
+
 def _review_masked_input(entries: list[FactEntry]) -> None:
     """A value difference at an unedited pair whose inputs were equal only once volatile values
     (source, clock) were masked is not a controlled comparison: the output may derive from the
     masked values (a timestamp packed into bytes, a session id hashed into a total). A review
     item, whatever the gate; outcome-kind and type changes stay failures."""
     for e in entries:
+        if _order_proved(e):
+            continue
         if ("matched-modulo-masked-input" not in e.notes or e.category is not FactCategory.CHANGED
                 or e.comparison is not Comparison.CHANGED or e.review or e.noise
                 or e.unverified or e.provenance not in (None, "unedited")
@@ -5406,7 +6046,7 @@ def _signature(f: Fact) -> tuple:
 
 def _widened_member(f: Fact) -> Fact:
     return f.model_copy(update={
-        "input": dict(_WIDENED),
+        "input": dict(_WIDENED), "input_order": None,
         "outcomes": [o if o.kind == "raise" else
                      Outcome(kind="return", value=widen_value(o.value), count=o.count)
                      for o in f.outcomes],

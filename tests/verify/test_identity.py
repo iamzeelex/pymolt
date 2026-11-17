@@ -281,6 +281,73 @@ def test_wrapper_with_two_function_cells_is_not_unwrapped(dep, identity_path):
         assert (ev["sym"], ev["symq"]) == (MOD + ".wrapper", "fallback")
 
 
+MEMO_SRC = '''
+import functools
+
+def memoize(fun):
+    @functools.wraps(fun)
+    def wrapper(self):
+        return fun(self)
+    return wrapper
+
+def on_event(callback):
+    def handler(event, extra):
+        return callback(event)
+    return handler
+
+def cb(event):
+    return event
+
+class Base:
+    def ping(self):
+        return 0
+
+class P(Base):
+    @memoize
+    def memory_info(self):
+        return 1
+
+    @memoize
+    def cpu_times(self):
+        return 2
+
+    def ping(self):
+        return super().ping()
+
+handler = on_event(cb)
+'''
+
+
+@pytest.fixture
+def memo():
+    yield _module(MOD, MEMO_SRC)
+    sys.modules.pop(MOD, None)
+
+
+def test_signature_preserving_wrapper_is_attributed_to_its_inner_function(memo, identity_path):
+    p = memo.P()
+
+    def body():
+        for _ in range(3):
+            p.memory_info()
+            p.cpu_times()
+
+    sink, _ = _trace(body)
+    syms = [(e["sym"], e["symq"]) for e in sink.events]
+    assert syms == [(MOD + ".P.memory_info", "unwrapped"), (MOD + ".P.cpu_times", "unwrapped")] * 3
+    assert all(e["in"]["bound"] == {"self": e["in"]["bound"]["self"]} for e in sink.events)
+
+
+def test_a_closure_with_another_signature_is_not_unwrapped(memo, identity_path):
+    ev = _trace(lambda: memo.handler(1, 2))[0].events[0]
+    assert ev["symq"] != "unwrapped" and ev["sym"] != MOD + ".cb"
+
+
+def test_a_super_cell_is_never_taken_for_a_wrapped_function(memo, identity_path):
+    sink, _ = _trace(lambda: memo.P().ping())
+    assert (sink.events[0]["sym"], sink.events[0]["symq"]) == (MOD + ".P.ping", None)
+
+
 def _our_function(x, y=1):
     return x
 

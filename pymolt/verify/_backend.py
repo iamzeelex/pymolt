@@ -74,6 +74,7 @@ from ._identity import (
     receiver_owner,
     sink_identity_fields,
     wrapper_call,
+    wraps_inner,
 )
 from ._normalize import AMBIGUOUS_OUTCOME, OutcomeMarker
 from ._rawthreads import allocate_lock, get_ident, stack_key
@@ -1333,7 +1334,7 @@ class FrameBackend(TraceBackend):
                 # Generic decorator wrapper: attribute the call to the single wrapped
                 # dependency function (its arguments are bound to ITS signature below).
                 inner = self._identity.wrapped_inner(loc, ci.cells)
-                if inner is not None:
+                if wraps_inner(ci, inner):
                     return ci, inner.sym, SYMQ_UNWRAPPED, loc, inner
             if ci.via_recv:
                 # A factory-made method (``cls.mean = mean``): name it after the class the
