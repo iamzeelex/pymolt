@@ -85,8 +85,11 @@ now returns) still fails, although it may be noise.
 | Same service at 200 requests/s | p99 latency ×1.01; output about 2 MB per day |
 | Your code calling a Cython function in a hot loop, 3.12 | 13–16 µs per call, every call recorded |
 
-The service numbers are from one load-gate run on 2026-11-15. The tracer has changed since, and
-they have not been re-measured cleanly ([bench/load/RESULTS.md](../bench/load/RESULTS.md)).
+The service numbers are from one load-gate run on 2026-11-15, with 16.8% saturated loss. Later
+runs measured 18.9% (wave G) and about 20% on a busy host (2026-11-17), against a gate of 20%. A
+clean re-measure on a quiet host is still owed ([bench/load/RESULTS.md](../bench/load/RESULTS.md)).
+The cost of capturing a loaded service on Python 3.6–3.11 (`setprofile`, then targeted wrappers)
+has not been measured.
 
 In long runs, pymolt records the structure of arguments and results by default, not their values.
 It records them for the first 32 calls at each call site and for 10% of the rest, and it counts
