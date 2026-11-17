@@ -1598,7 +1598,9 @@ class FactSink(object):
                 facts = list(self._facts.values())
                 tallies = list(self._tallies.values())
                 metadata = dict(self._metadata)
-            for key in ("facts", "tallies"):
+            # ``executed`` (the project's lines that ran) lives in the sidecar only: it can be
+            # large, and a snapshot is rewritten at every flush.
+            for key in ("facts", "tallies", "executed"):
                 metadata.pop(key, None)
             header = {"schema": SNAPSHOT_SCHEMA}
             header.update(metadata)

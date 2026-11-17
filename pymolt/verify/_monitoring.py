@@ -60,6 +60,15 @@ Late contacts (incremental)
     made after the window, and code of ours with no LINE events (imported after the settle
     through a line that ran before, reached only from dependency code).
 
+Executed lines (discover and incremental)
+    The same LINE events record which lines of ours ran (``executed`` in the sidecar, the
+    host's coverage): discover arms a code object of ours at its first PY_START (DISABLEd at
+    once, as before), incremental arms it as above, module bodies included. Each line costs
+    one callback, at its first run. A code object that gets no LINE events (``_LINE_BIG`` on
+    3.12, the ``_LINED_MAX`` cap, or reached only once it was running) is recorded at function
+    granularity when it starts: its lines are unknown one by one, not "not run". Watch mode sees
+    no code of ours start and records nothing; the discover -> watch switch ends the record.
+
 Receiver-dependent call sites (discover and incremental)
     Under 3.12 ``d.items()`` is a CALL of the unbound ``dict.items`` with ``d`` as its first
     argument, and ``m.get(k)`` one of the stdlib ``Mapping.get``: the call is a dependency's
@@ -501,7 +510,14 @@ class MonitoringBackend(FrameBackend):
         # the settle a line's first run re-opens tool B (``_on_line``) until quiet again.
         self.reopen = float(reopen or 0.0) if mode == INCREMENTAL else 0.0
         self._lines_on = self.reopen > 0 and self.near is not None
-        self._lined = {}            # id(code) -> [code, set of its lines that ran | None]
+        # Executed lines of ours (``_backend.executed_metadata``), in discover and incremental
+        # mode (watch mode sees no code of ours start): the same LINE events, each line
+        # DISABLEd at its first run. Discover arms a code object at its first PY_START,
+        # incremental from its module body's first run under tool B (or a call of ours).
+        self._exec_lines = self.executed and self.mode in (DISCOVER, INCREMENTAL)
+        # id(code) -> [code, set of its lines that ran | None, LINE events armed on it]
+        self._lined = {}
+        self._lined_final = None    # ``_lined`` as ``stop`` left it (the executed record)
         self.reopened = 0           # times tool B was re-opened after the settle
         self.reopen_seconds = 0.0   # seconds it was on after the settle
         self._opened_at = None      # monotonic: when it was last re-opened
@@ -529,6 +545,8 @@ class MonitoringBackend(FrameBackend):
             raise RuntimeError("sys.monitoring is unavailable (Python < 3.12)")
         tool = _acquire_tool_id(mon)
         tool2 = None
+        self._lined_final = None
+        self._exec_until = None
         try:
             if self.mode == INCREMENTAL:
                 try:
@@ -547,8 +565,8 @@ class MonitoringBackend(FrameBackend):
             mon.register_callback(tool, ev.RAISE, self._raise_callback())
             if tool2 is not None:
                 mon.register_callback(tool2, ev.PY_START, self._on_implicit)
-                if self._lines_on:
-                    mon.register_callback(tool, ev.LINE, self._on_line)
+            if self._lines_on or self._exec_lines:
+                mon.register_callback(tool, ev.LINE, self._on_line)
             self._tool = tool
             self._tool2 = tool2
             _USED_IDS.add(tool)
@@ -611,7 +629,7 @@ class MonitoringBackend(FrameBackend):
         if tool2 is not None:
             self._release(tool2, local_events=False)
         self._release(tool)
-        self._lined = {}
+        self._lined_final, self._lined = self._lined, {}
         self._pending.clear()
         self._cstack.clear()
         self._lastcall.clear()
@@ -676,6 +694,10 @@ class MonitoringBackend(FrameBackend):
         for code in codes:
             self._watch_code(code)
         self._set_global()          # only now: drop the global PY_START (unless prefixes)
+        if self._watch_prefix is None and self._exec_until is None:
+            # Code of ours first run from now on starts unseen: the executed record ends here
+            # (lines of code that started before keep their LINE events).
+            self._exec_until = time.time()
         self.switched = True
         return True
 
@@ -739,19 +761,21 @@ class MonitoringBackend(FrameBackend):
             self._arm_local(code, ev.PY_START | ev.PY_RETURN)
 
     def _arm_local(self, code, events):
+        """Add ``events`` to tool A's local events on ``code``; False if they could not be."""
         tool = self._tool
         if tool is None:
-            return
+            return False
         with self._local_lock:
             cur = self._local.get(id(code))
             merged = events | (cur[1] if cur is not None else 0)
             if cur is not None and cur[1] == merged:
-                return
+                return True
             try:
                 self._mon.set_local_events(tool, code, merged)
             except Exception:
-                return
+                return False
             self._local[id(code)] = (code, merged)
+        return True
 
     def _on_new_code(self, code, ent):
         if self.mode == WATCH:
@@ -793,6 +817,8 @@ class MonitoringBackend(FrameBackend):
                                             and code.co_name != "__del__"))
             if not hit:
                 disable = self._mon.DISABLE
+        if not hit and self._exec_lines and self.mode != INCREMENTAL and self._code_is_near(frame):
+            self._exec_start(code)      # one of ours starts, its first PY_START (discover)
         # [code, in_target, module, is_module_body, identity, generator marker, DISABLE|None]
         ent = [code, hit, module, body, None, generator_marker(code), disable]
         callee[id(code)] = ent
@@ -948,15 +974,23 @@ class MonitoringBackend(FrameBackend):
         return True
 
     # ── incremental: late contacts (a line of ours that first runs post-settle) ─
-    def _arm_lines(self, code):
+    def _arm_lines(self, code, running=False):
         """LINE events on ``code`` (ours) and every code object nested in it: a function of
         ours that has not run yet is covered from its module's (or enclosing function's)
         first run. Each line is DISABLEd at its first run, so the lines that already ran
-        cost nothing. A module body gets none itself (it runs once, at import, and a late
-        import is seen through the line of ours that runs it), nor, on 3.12, a very large
-        code object (``_LINE_BIG``)."""
+        cost nothing. A module body gets them only for the executed record (it runs once, at
+        import; a late import is seen through the line of ours that runs it, so its own lines
+        never re-open tool B); on 3.12 a very large code object (``_LINE_BIG``) gets none.
+
+        ``running``: ``code`` is running already (a call of ours reached it before any LINE
+        event did), so its earlier lines were not seen: the executed record keeps it at
+        function granularity too."""
         lined = self._lined
         line = self._mon.events.LINE
+        if running:
+            ent = lined.get(id(code))
+            if self._exec_lines and (ent is None or ent[0] is not code or not ent[2]):
+                self._exec_started(code)
         stack = [code]
         while stack:
             c = stack.pop()
@@ -965,17 +999,42 @@ class MonitoringBackend(FrameBackend):
                 continue
             if len(lined) >= _LINED_MAX:
                 self.note = "late-lines-capped: code objects past the cap get no LINE events"
+                if self._exec_lines:
+                    self._exec_capped = True    # code of ours past the cap: not recorded
                 return
-            lined[id(c)] = [c, None]    # holds the code: its id cannot be reused
-            if c.co_name == "<module>":
+            ent = lined[id(c)] = [c, None, False]   # holds the code: its id cannot be reused
+            if c.co_name == "<module>" and not self._exec_lines:
                 pass
             elif _LINE_SLOW and len(c.co_code) > _LINE_BIG:
                 self.note = "late-lines-skipped: very large code objects get no LINE events (3.12)"
             else:
-                self._arm_local(c, line)
+                ent[2] = self._arm_local(c, line)
             for const in c.co_consts:
                 if type(const) is _CODE:
                     stack.append(const)
+
+    def _exec_start(self, code):
+        """Discover mode: a code object of ours starts for the first time (its first PY_START):
+        LINE events on it alone (its nested code objects start, and are armed, themselves).
+        A code that cannot have them (``_LINE_BIG`` on 3.12, the ``_LINED_MAX`` cap) is
+        recorded at function granularity instead: it started."""
+        lined = self._lined
+        ent = lined.get(id(code))
+        if ent is not None and ent[0] is code:
+            if not ent[2]:
+                self._exec_started(code)
+            return
+        if len(lined) >= _LINED_MAX:
+            self.note = "late-lines-capped: code objects past the cap get no LINE events"
+            self._exec_started(code)
+            return
+        ent = lined[id(code)] = [code, None, False]
+        if _LINE_SLOW and len(code.co_code) > _LINE_BIG:
+            self.note = "late-lines-skipped: very large code objects get no LINE events (3.12)"
+        else:
+            ent[2] = self._arm_local(code, self._mon.events.LINE)
+        if not ent[2]:
+            self._exec_started(code)
 
     def _on_line(self, code, line):
         """A line of ours runs for the first time (LINE of tool A, DISABLEd here at once).
@@ -991,13 +1050,35 @@ class MonitoringBackend(FrameBackend):
             elif line in seen:
                 return self._mon.DISABLE    # ran before: ``restart_events`` re-armed it
             seen.add(line)
-            if self.settled_at is not None:
+            if (self.settled_at is not None and self._lines_on
+                    and code.co_name != "<module>"):
                 self.last_fresh_at = _monotonic()
                 if not self._b_active:
                     self._reopen()
         except Exception:
             pass
         return self._mon.DISABLE
+
+    # ── executed project code (``_backend.executed_metadata``) ──────────────────
+    executed_granularity = "line"
+
+    def executed_observed(self):
+        return self._exec_lines
+
+    def executed_files(self):
+        out = FrameBackend.executed_files(self)
+        lined = self._lined if self._lined_final is None else self._lined_final
+        for c, seen, _armed in list(lined.values()):
+            if not seen:
+                continue
+            name = c.co_filename
+            if not name or name[0] == "<":
+                continue
+            ent = out.get(name)
+            if ent is None:
+                ent = out[name] = (set(), set())
+            ent[0].update(line for line in seen if line > 0)   # 0: a module's RESUME
+        return out
 
     def _reopen(self):
         """Tool B's global PY_START on again (its DISABLEd locations are re-enabled with it:
@@ -1052,10 +1133,11 @@ class MonitoringBackend(FrameBackend):
                 return None
             if len(self._sites) >= _SITES_MAX:
                 self._sites.clear()
-            if self._lines_on:
+            if self._lines_on or self._exec_lines:
                 ent = self._lined.get(id(code))
                 if ent is None or ent[0] is not code:
-                    self._arm_lines(code)   # ours, started before tool B could see it
+                    # ours, started before tool B could see it: running already
+                    self._arm_lines(code, running=True)
             self._discover_callable(callable_, arg0)
             self._sites[key] = [code, target, 1, False]
         except Exception:
@@ -1630,7 +1712,8 @@ class MonitoringBackend(FrameBackend):
                 self._deps.clear()
             ent = (code, dep, module)
             self._deps[id(code)] = ent
-            if not dep and self._lines_on and self._function_is_near(code, func):
+            if (not dep and (self._lines_on or self._exec_lines)
+                    and self._function_is_near(code, func)):
                 self._arm_lines(code)       # a function of ours our code calls
         if not ent[1] or (self._b_active and self._b_owns(code, func.__globals__, ent[2])):
             return
@@ -1681,8 +1764,12 @@ class MonitoringBackend(FrameBackend):
             hit = (id(code) in self._impact_codes
                    or (prefix is not None and bool(prefix.matches(module, frame)))
                    or self._target_module(module, frame))
-        if not hit and self._lines_on and self._code_is_near(frame):
+        if not hit and (self._lines_on or self._exec_lines) and self._code_is_near(frame):
             self._arm_lines(code)       # our code (a module body: every function in it)
+            if self._exec_lines:
+                ent = self._lined.get(id(code))
+                if ent is not None and ent[0] is code and not ent[2]:
+                    self._exec_started(code)    # it starts now, with no LINE events
         if len(self._implicit) >= _CODE_CACHE_MAX:
             self._implicit.clear()
         ent = [code, hit, module, body, None, generator_marker(code),
