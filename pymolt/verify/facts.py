@@ -2025,7 +2025,10 @@ def _type_label(t: Any) -> str | None:
     if isinstance(t, str):
         return t
     if isinstance(t, dict):
-        for k in ("structure", "dataclass", "opaque", "cycle", "enum"):
+        # ``object``: a structural rendering names its type like an opaque one does, so an
+        # ``__opaque__`` T on one side (3.8 renders static types opaque) meets an ``__object__``
+        # T on the other (3.12 renders them as heap types) at type level.
+        for k in ("structure", "dataclass", "opaque", "cycle", "enum", "object"):
             if k in t:
                 return str(t[k])
         for k in ("list", "tuple", "set", "dict"):
