@@ -773,7 +773,9 @@ def predict_python_risks(
     high       the same with absence from data only (no target interpreter), or a base
                presence resting only on an import statement; a SyntaxError whose base compile
                was not observed
-    medium     present on the target only through a third-party shim; under a broad ``except``
+    medium     present on the target only through a third-party shim; under a broad ``except``;
+               a site a BEHAVIOR fact names (code that iterates what the target orders
+               differently, e.g. a layered TypedDict's ``__annotations__`` on 3.9+)
     low        deprecated but present on the target; removed after the target; a SyntaxWarning
     listed     guarded fallbacks, version-dead branches, absent on the base too
     =========  ==============================================================================
@@ -905,6 +907,8 @@ def predict_python_risks(
             evidence=evidence, scope="python", reached_at=reached, guard=guard,
             fix=_fix_kind(fact)))
 
+    _behavior_risks(out, facts, base, target)
+
     for finding in compile_findings or ():
         file, line = finding.get("file"), finding.get("line")
         kind = str(finding.get("kind") or "SyntaxError")
@@ -953,6 +957,40 @@ def predict_python_risks(
     out.risks.sort(key=lambda r: (r.fixed_by_plan, TIER_ORDER[r.tier], r.site.file,
                                   r.site.line or 0, r.symbol))
     return out
+
+
+def _behavior_risks(out: PredictionReport, facts: Iterable[Mapping[str, Any]],
+                    base: str | None, target: str | None) -> None:
+    """A MEDIUM risk at every site a BEHAVIOR fact names: the code there still runs, but what
+    it builds changes (a dict's key order); it matters only where that reaches bytes or text,
+    so it is never rated higher."""
+    for fact in facts:
+        if fact.get("kind") != "BEHAVIOR":
+            continue
+        cause = fact.get("behavior") if isinstance(fact.get("behavior"), Mapping) else {}
+        name = str(cause.get("class") or fact.get("symbol") or "?").rsplit(".", 1)[-1]
+        changed_in = fact.get("changed_in") or "?"
+        old, new = cause.get("old") or [], cause.get("new") or []
+        for site in cause.get("sites") or ():
+            file, line = site.get("file"), site.get("line")
+            if not isinstance(file, str):
+                continue
+            risk_site = RiskSite(file=file, func="", line=line if isinstance(line, int) else None)
+            how = str(site.get("how") or "iteration")
+            evidence = [_fact_label("python", fact),
+                        f"behavior: {cause.get('cause') or '?'} ({cause.get('effect') or '?'})",
+                        f"order on Python {base}: {', '.join(old)}",
+                        f"order on Python {target}: {', '.join(new)}",
+                        f"site: {file}:{line} ({how})",
+                        "medium: the order matters only where it reaches bytes or text",
+                        *(e for e in fact.get("evidence") or () if str(e).startswith("hint: "))]
+            out.risks.append(PredictedRisk(
+                id=_risk_id(str(fact.get("symbol")), risk_site), tier=RiskTier.MEDIUM,
+                symbol=str(fact.get("symbol")), package="python", site=risk_site,
+                basis="static", scope="python", reached_at="call", fact=dict(fact),
+                facts=[dict(fact)], evidence=evidence, fix=_fix_kind(fact),
+                reason=(f"Python {changed_in} puts {name}'s base fields first (Python {base}: "
+                        f"its own fields first); the {how} here changes key order")))
 
 
 def python_runtime_facts(baseline: FactSet | Iterable[Fact], root: str | Path | None = None

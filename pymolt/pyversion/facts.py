@@ -12,8 +12,11 @@
 Fact kinds: absent on the target and present on the base is ``MOVED`` (with ``successor``) when
 the curated successor is the same object and the module still exists, else ``REMOVED`` (with the
 curated hint in ``evidence``); present but deprecated is ``DEPRECATED``; absent on both sides
-is an ``UNCHANGED`` fact whose evidence says so (pre-existing). Never fabricates: with no target
-interpreter the facts rest on data alone and the quality says why.
+is an ``UNCHANGED`` fact whose evidence says so (pre-existing). A curated behaviour change
+(``knowledge/stdlib_behavior.json``) that a static detector finds in the project's own code is
+a ``BEHAVIOR`` fact (``behavior_facts``: the TypedDict annotation order of 3.9, with the
+iteration sites). Never fabricates: with no target interpreter the facts rest on data alone and
+the quality says why.
 """
 
 from __future__ import annotations
@@ -133,6 +136,7 @@ def python_delta(
     stamp = _call(data, "data_stamp") or "knowledge:stdlib_lifetimes"
     report.sides = {"old": stamp, "new": stamp}
 
+    behavior = behavior_facts(root, base_python, target_python, report)
     static = {s for s in (getattr(site, "spelling", None) for site in sites or ()) if s}
     observed = {s for s in runtime_symbols or () if s} - static
     spellings = sorted(static | observed)
@@ -140,6 +144,7 @@ def python_delta(
         report.quality = "complete"
         report.sides = {}
         report.notes.append("no stdlib spellings in the project's sites: nothing to check")
+        report.facts.extend(behavior)
         return report
 
     candidates: dict[str, list[str]] = {sp: _successor_candidates(data, sp) for sp in spellings}
@@ -199,6 +204,7 @@ def python_delta(
         for sp in spellings:
             if sp not in have and states[sp]["state"] == "present":
                 report.facts.extend(_signature_facts(sp, base_probe, new_probe))
+    report.facts.extend(behavior)
 
     problems = []
     if not target_probed:
@@ -210,6 +216,43 @@ def python_delta(
     if problems:
         report.notes.append("; ".join(problems))
     return report
+
+
+def behavior_facts(project_dir: str | Path, base_python: str | None,
+                   target_python: str | None, report: DeltaReport | None = None
+                   ) -> list[DeltaFact]:
+    """BEHAVIOR facts: project code whose output a curated Python behaviour change
+    (``knowledge/stdlib_behavior.json``) alters between the base and the target, from the
+    static detectors in :mod:`pymolt.pyversion.behavior`. One fact per affected class; the
+    detector's notes (a TypedDict iterated in order whose order was not predicted, and why)
+    go to ``report.notes``. Never raises: a failed detector is a note."""
+    try:
+        from pymolt.knowledge import stdlib_behavior
+        from pymolt.pyversion.behavior import scan_order_causes
+
+        entries = {e.id: e for e in stdlib_behavior()}
+        causes, notes = scan_order_causes(project_dir, base_python, target_python)
+    except Exception as exc:  # noqa: BLE001 - the delta stands without behaviour facts
+        if report is not None:
+            report.notes.append(f"behaviour detectors failed: {type(exc).__name__}: {exc}")
+        return []
+    if report is not None:
+        report.notes.extend(notes)
+    out: list[DeltaFact] = []
+    for cause in causes:
+        entry = entries.get(cause["cause"])
+        if entry is None or not entry.applies(base_python or "", target_python or ""):
+            continue
+        sites = [f"site: {s['file']}:{s['line']} ({s['how']})" for s in cause["sites"]]
+        out.append(DeltaFact(
+            symbol=f"{cause['class']}.__annotations__", kind="BEHAVIOR",
+            old=", ".join(cause["old"]), new=", ".join(cause["new"]),
+            evidence=[f"behavior: {entry.id} (changed in Python {entry.changed_in}, "
+                      f"{entry.effect})", cause["detail"], *sites, f"hint: {entry.hint}",
+                      "fix: advisory", f"knowledge: stdlib_behavior {entry.id} ({entry.date})"],
+            basis={"old": "knowledge", "new": "knowledge"}, changed_in=entry.changed_in,
+            behavior={**cause, "effect": entry.effect, "detector": entry.detector}))
+    return out
 
 
 def _final_shape(probe, spelling: str) -> list | None:

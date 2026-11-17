@@ -39,6 +39,7 @@ _FILES = (
     "probe_contexts",
     "stdlib_changes",
     "stdlib_lifetimes",
+    "stdlib_behavior",
     "environment_readers",
 )
 
@@ -261,6 +262,56 @@ def stdlib_lifetimes() -> dict[str, Any]:
     except ValueError as exc:
         raise KnowledgeError(f"stdlib_lifetimes.json: {exc}") from exc
     return data
+
+
+def _minor_tuple(value: str | None) -> tuple[int, int] | None:
+    try:
+        release = Version(str(value)).release
+    except InvalidVersion:
+        return None
+    return (release[0], release[1] if len(release) > 1 else 0) if release else None
+
+
+class StdlibBehaviorEntry(_Entry):
+    """One curated Python behaviour change that keeps every name in place
+    (``stdlib_behavior.json``): what changed in ``changed_in``, its effect class, and the
+    static detector (``pymolt.pyversion.behavior``) that finds affected project code."""
+
+    symbols: list[str]
+    changed_in: str
+    effect: Literal["dict-order", "hash-order"]
+    detector: str | None = None
+    detail: str
+    old: str = ""
+    new: str = ""
+    hint: str = ""
+    notes: list[str] = Field(default_factory=list)
+
+    def applies(self, base_python: str, target_python: str) -> bool:
+        """True when the move crosses the change: ``base < changed_in <= target`` (minors)."""
+        base, changed, target = (_minor_tuple(v) for v in (base_python, self.changed_in,
+                                                            target_python))
+        return None not in (base, changed, target) and base < changed <= target
+
+
+@cache
+def stdlib_behavior() -> tuple[StdlibBehaviorEntry, ...]:
+    """The curated Python behaviour changes, validated (unique ids, a parseable
+    ``changed_in``)."""
+    try:
+        entries = tuple(StdlibBehaviorEntry.model_validate(e)
+                        for e in _load("stdlib_behavior")["entries"])
+    except ValueError as exc:
+        raise KnowledgeError(f"stdlib_behavior.json: {exc}") from exc
+    seen: set[str] = set()
+    for entry in entries:
+        if entry.id in seen:
+            raise KnowledgeError(f"stdlib_behavior.json: duplicate id {entry.id!r}")
+        if _minor_tuple(entry.changed_in) is None:
+            raise KnowledgeError(f"stdlib_behavior.json: {entry.id}: changed_in "
+                                 f"{entry.changed_in!r} is not a version")
+        seen.add(entry.id)
+    return entries
 
 
 class EnvironmentReaderEntry(_Entry):
