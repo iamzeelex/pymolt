@@ -264,6 +264,10 @@ class MigrationPlan(BaseModel):
 class MigrationRunState(BaseModel):
     run_id: str
     status: Literal["prepared", "applied", "failed", "rolled_back"]
+    # The plan this run applies (None: the run's id is the plan's, as for every first run) and
+    # which application of it this is: a plan applied again after a rollback is a new run.
+    plan_id: str | None = None
+    attempt: int = 1
     prepared_at: str
     applied_at: str | None = None
     rolled_back_at: str | None = None
@@ -530,6 +534,19 @@ def _save_run_state(run_dir: Path, state: MigrationRunState) -> Path:
     return _atomic_json(run_dir / "state.json", state.model_dump(mode="json"))
 
 
+def _plan_runs(root: Path, plan_id: str) -> list[MigrationRunState]:
+    """Every run of ``plan_id``, oldest first. The first run is kept under the plan's own id;
+    each application after a rollback is a run of its own."""
+    base = root / ".pymolt" / "migrations"
+    runs: list[MigrationRunState] = []
+    for child in sorted(base.iterdir()) if base.is_dir() else ():
+        state = _load_run_state(child / "state.json")
+        if state is not None and state.run_id == child.name \
+                and (state.plan_id or state.run_id) == plan_id:
+            runs.append(state)
+    return sorted(runs, key=lambda item: (item.attempt, item.prepared_at))
+
+
 def apply_migration_plan(
     project_dir: str | Path,
     plan: MigrationPlan,
@@ -588,13 +605,20 @@ def _apply_migration_plan_unlocked(
     )
 
     root = Path(project_dir).resolve()
-    run_dir = _run_dir(root, plan.plan_id)
-    existing = _load_run_state(run_dir / "state.json")
+    _validate_run_id(plan.plan_id)
+    runs = _plan_runs(root, plan.plan_id)
+    existing = runs[-1] if runs else None
+    # The run this apply records: the plan's first, an interrupted one retried, or, after a
+    # rollback, a new run of the same plan.
+    run_id, attempt = plan.plan_id, 1
+    if existing is not None:
+        run_id, attempt = existing.run_id, existing.attempt
+    run_dir = _run_dir(root, run_id)
     if existing and existing.status in {"prepared", "failed"}:
         frozen = MigrationPlan.load(root, run_dir / "plan.json")
         if frozen is None or frozen.model_dump() != plan.model_dump():
             raise MigrationConflictError(
-                f"interrupted run {plan.plan_id[:8]} does not match this plan"
+                f"interrupted run {run_id[:8]} does not match this plan"
             )
         _recover_interrupted_apply(root, frozen)
     if existing and existing.status == "applied":
@@ -649,11 +673,15 @@ def _apply_migration_plan_unlocked(
             )
 
     if existing and existing.status == "rolled_back":
-        raise MigrationConflictError(f"plan {plan.plan_id[:8]} is already rolled back")
+        # Every planned file is back at its planned original (checked above): apply the
+        # reviewed plan again as a new run, with no new plan.
+        run_id, attempt = uuid.uuid4().hex, existing.attempt + 1
+        run_dir = _run_dir(root, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     frozen_plan_path = plan.save(root, run_dir / "plan.json")
     state = MigrationRunState(
-        run_id=plan.plan_id, status="prepared", prepared_at=_now()
+        run_id=run_id, status="prepared", prepared_at=_now(),
+        plan_id=None if run_id == plan.plan_id else plan.plan_id, attempt=attempt,
     )
     _save_run_state(run_dir, state)
 
@@ -676,9 +704,10 @@ def _apply_migration_plan_unlocked(
         raise
 
     applied_at = _now()
-    _write_apply_ledger(root, plan, applied_at)
+    _write_apply_ledger(root, plan, run_id, applied_at)
     receipt = MigrationReceipt(
-        run_id=plan.plan_id,
+        run_id=run_id,
+        plan_id=plan.plan_id,
         applied_at=applied_at,
         target_python=plan.target_python,
         source_manifest=plan.source_manifest,
@@ -749,7 +778,8 @@ def _already_applied(root: Path, plan: MigrationPlan, state: MigrationRunState):
     if receipt is None or receipt.run_id != state.run_id:
         # A later run's receipt is the saved one: describe this run from its frozen plan.
         receipt = MigrationReceipt(
-            run_id=state.run_id, applied_at=state.applied_at or state.prepared_at,
+            run_id=state.run_id, plan_id=plan.plan_id,
+            applied_at=state.applied_at or state.prepared_at,
             target_python=plan.target_python, source_manifest=plan.source_manifest,
             target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
                                   if plan.target_manifest_path else None),
@@ -764,7 +794,7 @@ def _already_applied(root: Path, plan: MigrationPlan, state: MigrationRunState):
     return receipt
 
 
-def _write_apply_ledger(root: Path, plan: MigrationPlan, applied_at: str) -> None:
+def _write_apply_ledger(root: Path, plan: MigrationPlan, run_id: str, applied_at: str) -> None:
     """Record what apply wrote, from the files as they are now. Never fails the apply."""
     from pymolt.apply_ledger import write_ledger
 
@@ -774,7 +804,7 @@ def _write_apply_ledger(root: Path, plan: MigrationPlan, applied_at: str) -> Non
             written = _project_file(root, change.path).read_text(encoding="utf-8")
             files.append((change.path, change.old_source, written, change.recipes,
                           change.claims))
-        write_ledger(root, plan.plan_id, applied_at, files)
+        write_ledger(root, run_id, applied_at, files)
     except Exception:  # noqa: BLE001 - provenance is best effort; the migration stands
         logger.warning("could not write the apply ledger", exc_info=True)
 
@@ -797,7 +827,8 @@ def _rollback_migration_unlocked(
     run_id: str | None = None,
     force: bool = False,
 ):
-    """Atomically restore every source frozen in an applied migration plan."""
+    """Atomically restore every source frozen in an applied migration plan. Returns
+    ``(plan, rolled_back_at, run_id)``."""
     from pymolt.codemods.apply import write_previews
     from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.service import (
@@ -903,4 +934,4 @@ def _rollback_migration_unlocked(
         except OSError:
             pass
         raise
-    return plan, rolled_back_at
+    return plan, rolled_back_at, effective_run_id

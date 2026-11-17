@@ -863,16 +863,19 @@ def apply_plan_cmd(
         typer.echo(json.dumps({**receipt.model_dump(mode="json"), "outcome": receipt.outcome},
                               indent=2))
         return
+    plan_label = f"[bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]"
+    if receipt.run_id != migration_plan.plan_id:
+        plan_label += f" as run [bold cyan]{receipt.run_id[:8]}[/bold cyan]"
     if receipt.outcome == "already_applied":
         console.print(Panel(
-            f"Plan [bold cyan]{receipt.run_id[:8]}[/bold cyan] is already applied "
+            f"Plan {plan_label} is already applied "
             f"(at {receipt.applied_at}): its {len(receipt.files_changed)} file(s) still hold "
             "the plan's changes. [bold]Nothing was written.[/bold]",
             title="Already applied", border_style="green", expand=False,
         ))
     elif not receipt.files_changed:
         console.print(Panel(
-            f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]: "
+            f"Applied plan {plan_label}: "
             "[bold]it changed no file[/bold] (0 files, 0 rewrite sites).\n"
             "No call site needed a rewrite; the dependency moves still need testing: "
             "capture and verify decide.",
@@ -880,7 +883,7 @@ def apply_plan_cmd(
         ))
     else:
         console.print(Panel(
-            f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]\n"
+            f"Applied plan {plan_label}\n"
             f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
             f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
             f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
@@ -914,7 +917,7 @@ def rollback(
 
     project_path = require_project_dir(project_dir, json_output=json_output)
     try:
-        migration_plan, rolled_back_at = rollback_migration(
+        migration_plan, rolled_back_at, rolled_run = rollback_migration(
             project_path, run_id=run_id, force=force
         )
     except MigrationConflictError as exc:
@@ -940,10 +943,11 @@ def rollback(
     post, post_trace = None, None
     if contract.post_migration is not None:
         post, post_trace = "kept", contract.post_migration.trace_path
-    elif aside is not None and aside.set_aside_by == migration_plan.plan_id:
+    elif aside is not None and aside.set_aside_by == rolled_run:
         post, post_trace = "set_aside", aside.trace_path
     payload = {
-        "run_id": migration_plan.plan_id,
+        "run_id": rolled_run,
+        "plan_id": migration_plan.plan_id,
         "rolled_back_at": rolled_back_at,
         "files_restored": len(migration_plan.changes),
         "post_migration_capture": post,
@@ -957,7 +961,7 @@ def rollback(
         "set_aside": f"\nPost-migration capture: set aside, kept at {post_trace}",
     }.get(post or "", "")
     console.print(Panel(
-        f"Rolled back run [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]\n"
+        f"Rolled back run [bold cyan]{rolled_run[:8]}[/bold cyan]\n"
         f"Files restored: [bold]{len(migration_plan.changes)}[/bold]{escape(post_line)}",
         title="Migration rolled back", border_style="yellow", expand=False,
     ))

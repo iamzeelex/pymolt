@@ -105,8 +105,16 @@ def test_plan_apply_rollback_cli_lifecycle(tmp_path, monkeypatch):
     receipt = MigrationReceipt.load(tmp_path)
     assert receipt is not None and receipt.status == "rolled_back"
     status = build_status(tmp_path)
-    assert status.phase("plan").state == "stale"
-    assert status.next_command == "pymolt plan ."
+    # The reviewed plan still describes the restored files: apply runs it again, no new plan.
+    assert status.phase("plan").state == "done"
+    assert "apply runs it again" in status.phase("plan").detail
+    assert status.next_command == "pymolt apply ."
+
+    reapplied = runner.invoke(app, ["apply", str(tmp_path)])
+
+    assert reapplied.exit_code == 0, reapplied.output
+    assert "Migration applied" in reapplied.output and " as run " in reapplied.output
+    assert "werkzeug.utils" in source_path.read_text(encoding="utf-8")
 
 
 def test_apply_again_says_the_plan_is_already_applied(tmp_path, monkeypatch):

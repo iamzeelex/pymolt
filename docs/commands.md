@@ -109,7 +109,8 @@ the evidence. Details are in [verify.md](verify.md).
 
 ### `pymolt rollback [dir]`
 Restores the files the last `apply` changed. It refuses to discard edits made after the apply unless
-given `--force`. `--run-id` picks an earlier apply. When it restored files, the post-migration
+given `--force`. `--run-id` picks an earlier apply. The plan stays valid: while its files are back at
+the planned originals, `apply` runs it again as a new run, with the same checks. When it restored files, the post-migration
 capture is set aside in the archive. When it restored none, the capture still describes the code
 and is kept.
 
