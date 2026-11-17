@@ -205,7 +205,9 @@ class TestProgression:
         save(post.trace_path, "post-migration")
         assert _state(build_status(tmp_path), "report") == "done"
 
-    def test_post_capture_without_receipt_is_stale(self, tmp_path):
+    def test_post_capture_without_receipt_is_a_migration_by_hand(self, tmp_path):
+        """plan and apply are optional: a post-migration capture since the baseline, with no
+        apply run, records a migration made by hand."""
         _manifest(tmp_path)
         _configure(tmp_path)
         (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
@@ -214,9 +216,10 @@ class TestProgression:
 
         status = build_status(tmp_path)
 
-        assert _state(status, "migration") == "todo"
-        assert _state(status, "post-migration") == "stale"
-        assert status.next_command == "pymolt plan ."
+        assert _state(status, "migration") == "done"
+        assert "made by hand" in status.phase("migration").detail
+        assert _state(status, "post-migration") == "done"
+        assert status.next_command == "pymolt verify ."
 
 
 class TestWorseThanNotDone:
@@ -287,6 +290,86 @@ class TestManualMigration:
         assert baseline.state == "done"
         assert "taken as the migration's starting point" in baseline.detail
         assert "capture baseline" not in status.next_command
+
+
+    def _hand_project(self, project):
+        _manifest(project)
+        _configure(project)
+        (project / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        (project / "app.py").write_text("import json\n", encoding="utf-8")
+        return _capture(project, "baseline")
+
+    def test_code_edited_since_the_baseline_points_at_the_post_migration_capture(self,
+                                                                                tmp_path):
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "done"
+        assert "1 file(s) changed since the baseline" in status.phase("migration").detail
+        assert "optional" in status.phase("plan").detail
+        assert status.next_command.startswith("pymolt capture post-migration")
+
+    def test_pins_bumped_with_no_code_change_are_a_migration_too(self, tmp_path):
+        self._hand_project(tmp_path)
+        _manifest(tmp_path, "flask==3.0.0\n")
+
+        status = build_status(tmp_path)
+
+        assert "pins changed since the baseline" in status.phase("migration").detail
+        assert status.next_command.startswith("pymolt capture post-migration")
+
+    def test_nothing_changed_since_the_baseline_still_points_at_plan(self, tmp_path):
+        self._hand_project(tmp_path)
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "todo"
+        assert status.next_command == "pymolt plan ."
+
+    def test_a_valid_saved_plan_still_points_at_apply(self, tmp_path):
+        self._hand_project(tmp_path)
+        _plan(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # unrelated edit\n", encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "todo"
+        assert status.next_command == "pymolt apply ."
+
+    def test_a_verdict_completes_a_migration_by_hand(self, tmp_path):
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+        _capture(tmp_path, "post_migration")
+
+        def verdict(value):
+            build_unified_verification(
+                ContractReport(root=str(tmp_path), verdict=value), run_id=None,
+            ).save(tmp_path)
+            return build_status(tmp_path)
+
+        passed = verdict(VerificationVerdict.PASS)
+        assert _state(passed, "report") == "done"
+        assert passed.next_command is None and "PASS" in passed.next_reason
+        failed = verdict(VerificationVerdict.FAIL)
+        assert failed.next_command is None             # no apply run to roll back
+        assert "nothing to roll back" in failed.next_reason
+
+    def test_a_post_capture_older_than_the_baseline_is_stale(self, tmp_path):
+        from pymolt.verify.models import ContractState
+
+        baseline = self._hand_project(tmp_path)
+        post = _capture(tmp_path, "post_migration")
+        state = ContractState.load(tmp_path / ".pymolt" / "contract_state.json")
+        state.post_migration = post.model_copy(update={"captured_at": "2020-01-01T00:00:00+00:00"})
+        state.save(tmp_path / ".pymolt" / "contract_state.json")
+        assert baseline.captured_at > "2020"
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "post-migration") == "stale"
+        assert "before the migration" in status.phase("post-migration").detail
 
 
 class TestBaselineAfterAMigration:
