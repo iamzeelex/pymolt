@@ -378,11 +378,19 @@ class FactEntry(BaseModel):
     provenance: str | None = None
     review: str | None = None       # a difference a person must look at: INCONCLUSIVE, not FAIL
     unverified: bool = False        # an edited site nothing could be paired with: counted only
+    # Why an entry that is not a plain exact comparison came out as it did: ``<mechanism>:
+    # <detail>`` (``volatile-site``, ``environment``, ``clock``, ``source``,
+    # ``input-substitution``, ``attribution``, ``backend``, ``possibly-dropped``, ...). Reporting
+    # groups by the mechanism; it never changes the verdict by itself.
+    explained: str | None = None
+    # Run-to-run noise measured by a replicate capture: the difference is real but the baseline
+    # itself varies there the same way. Neither failing nor inconclusive.
+    noise: str | None = None
 
     @computed_field
     @property
     def fails(self) -> bool:
-        if self.review or self.unverified:
+        if self.review or self.unverified or self.noise:
             return False
         if self.category in (FactCategory.CHANGED, FactCategory.DISAPPEARED,
                              FactCategory.APPEARED):
@@ -391,7 +399,7 @@ class FactEntry(BaseModel):
 
     @property
     def inconclusive(self) -> bool:
-        if self.unverified:
+        if self.unverified or self.noise:
             return False
         if self.review:
             return True
@@ -516,6 +524,8 @@ class FactDiff(BaseModel):
         """
         out = BoundaryDiff()
         for e in self.entries:
+            if e.noise:
+                continue  # measured run-to-run noise: not a boundary change
             if e.category is FactCategory.DISAPPEARED:
                 out.disappeared.append(_legacy_record(e, old_side=True))
             elif e.category is FactCategory.APPEARED:
@@ -3058,6 +3068,16 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     old_left = [v for v in old_left if id(v) not in paired]
     new_left = [v for v in new_left if id(v) not in paired]
 
+    # 8 Volatile sites: an unedited (symbol, site) called on both sides whose leftovers pair
+    # neither by key nor one-to-one (every call carried a fresh input: a port, an id, a timing)
+    # is compared as one group, by type and outcome kind. Not on a sampled capture (there the
+    # tallies decide presence).
+    volatile_sites = 0
+    if not sampled:
+        groups, old_left, new_left = _group_volatile(old_left, new_left, site)
+        entries.extend(groups)
+        volatile_sites = len(groups)
+
     _mark_unobservable(old_left, new)
     _mark_vanished(old_left, new_facts, prov, ov)
     for v in old_left:
@@ -3075,6 +3095,13 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         warnings.append(
             f"unsampled:{unsampled}: value facts seen on one side only, at call sites both "
             "sides' tallies show were called but not fully sampled; not compared")
+    if volatile_sites:
+        grouped = sum(e.old_count + e.new_count for e in entries
+                      if (e.explained or "").startswith("volatile-site"))
+        warnings.append(
+            f"volatile-sites:{volatile_sites}: call sites whose every call had a fresh input "
+            f"({grouped} calls) are compared by type and outcome kind as a group; a value-only "
+            "change there is not visible")
     if c_level_excluded:
         warnings.append(
             f"c-level-excluded:{c_level_excluded}: C-level raise facts were not compared — "
@@ -3451,6 +3478,92 @@ def _pair_groups(
             paired.update((id(o), id(n)))
     return (pairs, [v for v in old_left if id(v) not in paired],
             [v for v in new_left if id(v) not in paired])
+
+
+def _group_volatile(
+    old_left: list[_V], new_left: list[_V], site_fn: Callable[[_V], tuple],
+) -> tuple[list[FactEntry], list[_V], list[_V]]:
+    """Leftovers at one unedited ``(symbol, site)`` with facts on both sides that no pass could
+    pair (the groups are not one-to-one): one entry per site, its members collapsed per side
+    the way ``_collapse_widened`` does (inputs widened, returns reduced to their type, raises
+    kept) and compared at type level. A raise type on one side only is CHANGED; proportions are
+    not compared. Members are counted (``old_count``/``new_count``), never dropped."""
+    go: dict[tuple, list[_V]] = defaultdict(list)
+    gn: dict[tuple, list[_V]] = defaultdict(list)
+    for v in old_left:
+        if not v.rewritten_site:
+            go[(v.fact.symbol, site_fn(v))].append(v)
+    for v in new_left:
+        if not v.rewritten_site:
+            gn[(v.fact.symbol, site_fn(v))].append(v)
+    entries: list[FactEntry] = []
+    grouped: set[int] = set()
+    for key, olds in go.items():
+        news = gn.get(key)
+        if not news or (len(olds) == 1 and len(news) == 1):
+            continue
+        if {_signature(v.fact) for v in olds} != {_signature(v.fact) for v in news}:
+            continue  # the input signature changed: structure, not noise; stays strict
+        entries.append(_group_entry(olds, news))
+        grouped.update(id(v) for v in (*olds, *news))
+    return (entries, [v for v in old_left if id(v) not in grouped],
+            [v for v in new_left if id(v) not in grouped])
+
+
+def _signature(f: Fact) -> tuple:
+    """The input's structure without its values: bound parameter names, positional arity, and
+    keyword names (a compiled call's constant marker counts as its own signature)."""
+    inputs = f.input
+    if not isinstance(inputs, dict):
+        return ("<value>",)
+    if inputs.get("__c_call__") is True:
+        return ("<c_call>",)
+    bound = inputs.get("bound")
+    names = tuple(sorted(bound)) if isinstance(bound, dict) else ()
+    kwargs = inputs.get("kwargs")
+    keys = tuple(sorted(str(p[0]) for p in _pairs(kwargs.get("__dict__")))) \
+        if isinstance(kwargs, dict) else ()
+    varargs = inputs.get("varargs")
+    arity = len(varargs["__tuple__"]) if isinstance(varargs, dict) and isinstance(
+        varargs.get("__tuple__"), list) else 0
+    return (names, keys, arity)
+
+
+def _widened_member(f: Fact) -> Fact:
+    return f.model_copy(update={
+        "input": dict(_WIDENED),
+        "outcomes": [o if o.kind == "raise" else
+                     Outcome(kind="return", value=widen_value(o.value), count=o.count)
+                     for o in f.outcomes],
+    })
+
+
+def _group_entry(olds: list[_V], news: list[_V]) -> FactEntry:
+    of = _merge_facts([_widened_member(v.fact) for v in olds])
+    nf = _merge_facts([_widened_member(v.fact) for v in news])
+    cmp = compare_outcomes(of.outcomes, nf.outcomes, DiffProfile.SHAPE)
+    if cmp.comparison is Comparison.EQUAL:
+        category = FactCategory.EQUAL
+    elif cmp.comparison is Comparison.UNCOMPARABLE:
+        category = FactCategory.UNCOMPARABLE
+    else:
+        category = FactCategory.CHANGED
+    notes = [f"volatile-site:{len(olds)}/{len(news)}", *cmp.notes]
+    return FactEntry.model_construct(
+        _ENTRY_FIELDS_SET, category=category, comparison=cmp.comparison,
+        level=ComparisonLevel.TYPE, symbol=of.symbol, new_symbol=None,
+        old_site=_site_ref(olds[0].fact), new_site=_site_ref(news[0].fact),
+        input=dict(_WIDENED), new_input=None,
+        old=_cap(of.outcomes, notes, "old"), new=_cap(nf.outcomes, notes, "new"),
+        old_types=cmp.old_types or _distinct_types(of.outcomes),
+        new_types=cmp.new_types or _distinct_types(nf.outcomes),
+        old_defaulted=of.defaulted, new_defaulted=nf.defaulted, drift=False,
+        old_count=of.count, new_count=nf.count, notes=notes,
+        old_where=of.where, new_where=nf.where,
+        old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
+        explained=(f"volatile-site: {len(olds)} old / {len(news)} new facts, every call a "
+                   "fresh input; compared by type and outcome kind"),
+    )
 
 
 def _is_c_call(v: _V) -> bool:
