@@ -514,6 +514,7 @@ def preview_codemods(
     on_file: ProgressSink = None,
     auto_apply_only: bool = False,
     online: bool = False,
+    on_downgraded: Callable[[list[str]], None] | None = None,
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], list[FilePreview]]:
     """
     Fetch patterns/rules for `migrations` and compute per-file before/after
@@ -533,8 +534,9 @@ def preview_codemods(
     over the fetched recipe set the moment it is known (before the walk starts,
     so an interface can show what is about to be applied), and `on_file`
     reports every file the walk scans. ``on_impacts`` exposes the structured
-    API-change paths for persistence in the local migration plan. All four are
-    pure observers — none of
+    API-change paths for persistence in the local migration plan, and
+    ``on_downgraded`` the summaries of the rules the provider downgraded (the plan
+    lists them for a person). All five are pure observers — none of
     them changes what is returned.
 
     The provider is local unless `base_url` names a configured Axiom endpoint.
@@ -542,10 +544,12 @@ def preview_codemods(
     """
     client = client or codemod_provider(root, base_url, online=online)
     bundles = client.fetch_bundle(migrations, progress=progress)
-    by_pkg, rules_flat, patterns_flat, _downgraded = _split_bundles(bundles)
+    by_pkg, rules_flat, patterns_flat, downgraded = _split_bundles(bundles)
 
     if on_recipes:
         on_recipes(by_pkg)
+    if on_downgraded:
+        on_downgraded(list(downgraded))
     if on_impacts:
         on_impacts({name: bundle.impacts for name, bundle in bundles.items()})
     if progress:
@@ -644,12 +648,13 @@ def build_migration_plan(
     impacts: dict[str, list[ApiImpact]] = {}
     by_pkg: dict[str, list[CodemodPattern] | list[CodemodRule]] = {}
     previews: list[FilePreview] = []
+    downgraded: list[str] = []
     provider = codemod_provider(root, base_url, online=online)
     if migrations:
         by_pkg, previews = preview_codemods(
             root, migrations, client=provider, progress=progress,
             on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
-            auto_apply_only=True,
+            auto_apply_only=True, on_downgraded=downgraded.extend,
         )
     # The local provider's delta reports feed the plan's risk prediction as-is, so the
     # facts are computed once; a remote provider has none and prediction computes them.
@@ -681,5 +686,6 @@ def build_migration_plan(
         delta_reports=delta_reports,
         python_move=python_move,
         python_stage=python_stage,
+        downgraded=downgraded,
     )
     return plan, previews, source_desc, by_pkg

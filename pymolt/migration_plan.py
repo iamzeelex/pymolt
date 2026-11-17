@@ -190,6 +190,18 @@ class PlannedAdvisory(BaseModel):
     reason: str
 
 
+class PlannedManualItem(BaseModel):
+    """Work the plan leaves to a person: a curated rule that matched a file but is not
+    verified, so apply does not write it (``path`` set, ``lines`` where it would rewrite), or
+    a rule the provider downgraded that matched no site (``path`` None)."""
+
+    path: str | None = None
+    lines: list[int] = Field(default_factory=list)
+    sites: int = 0
+    rule: str
+    reason: str
+
+
 class PlannedApiImpact(ApiImpact):
     package: str
 
@@ -224,6 +236,8 @@ class MigrationPlan(BaseModel):
     files_scanned: int = 0
     changes: list[PlannedFileChange] = Field(default_factory=list)
     advisories: list[PlannedAdvisory] = Field(default_factory=list)
+    # Rules that are not applied and need a person (see ``PlannedManualItem``).
+    manual: list[PlannedManualItem] = Field(default_factory=list)
     # Predicted risks per call site (baseline facts x the migrations' delta facts), each
     # marked fixed by this plan or not; None when there was no baseline to predict from.
     risks: PredictionReport | None = None
@@ -292,12 +306,15 @@ def create_migration_plan(
     predict: bool = True,
     python_move: tuple[str, str] | None = None,
     python_stage=None,
+    downgraded: list[str] | None = None,
 ) -> MigrationPlan:
     """Freeze a locally verified preview into an exact, portable project plan.
 
     With a baseline capture (and ``predict``), the plan also stores its predicted risks:
     the baseline's facts joined with ``delta_reports`` (the migrations' ``pymolt.delta/1``
-    reports; computed offline with ``pymolt.delta.compute_deltas`` when not given)."""
+    reports; computed offline with ``pymolt.delta.compute_deltas`` when not given).
+    ``downgraded``: the provider's summaries of the rules it downgraded, which become manual
+    items with the blocked matches of the previews."""
     from pymolt.verify.service import (
         environment_fingerprint,
         environment_setup_fingerprint,
@@ -341,6 +358,8 @@ def create_migration_plan(
     advisories: list[PlannedAdvisory] = []
     for preview in previews:
         relative = _relative_project_file(root, preview.path)
+        # A blocked rule changed nothing, so it is neither a recipe of the change nor a claim.
+        applied = preview.applied_recipes()
         if preview.old_source != preview.new_source:
             changes.append(PlannedFileChange(
                 path=relative,
@@ -349,11 +368,8 @@ def create_migration_plan(
                 old_source=preview.old_source,
                 new_source=preview.new_source,
                 sites=preview.sites,
-                recipes=[
-                    recipe_key(item)
-                    for item in [*preview.rules, *preview.patterns]
-                ],
-                claims={recipe_key(item): claim for item in [*preview.rules, *preview.patterns]
+                recipes=[recipe_key(item) for item in applied],
+                claims={recipe_key(item): claim for item in applied
                         if (claim := claim_for(item))},
                 runs_on_base=_runs_on_base(preview),
             ))
@@ -365,6 +381,8 @@ def create_migration_plan(
                 severity=advisory.severity,
                 reason=advisory.reason,
             ))
+
+    manual = _manual_items(root, previews, downgraded or [])
 
     risks = None
     if predict and baseline_path is not None:
@@ -400,11 +418,50 @@ def create_migration_plan(
         files_scanned=files_scanned,
         changes=changes,
         advisories=advisories,
+        manual=manual,
         risks=risks,
         type_relocations=type_relocations,
         python=python,
         compile_findings=compile_findings,
     )
+
+
+def _knowledge_id(rule) -> str | None:
+    """The curated knowledge entry a rule came from (its ``pymolt knowledge ID (...)``)."""
+    for line in getattr(rule, "evidence", None) or ():
+        if str(line).startswith("pymolt knowledge "):
+            return str(line).split()[2]
+    return None
+
+
+def _manual_items(root: Path, previews: list[FilePreview],
+                  downgraded: list[str]) -> list[PlannedManualItem]:
+    """The blocked matches of ``previews``, one item per rule and file, then each downgraded
+    rule that matched nowhere. A blocked match carries the downgrade's reason when the
+    provider gave one (``ID: match → rewrite (reason)``)."""
+    reasons: dict[str, str] = {}
+    for label in downgraded:
+        head, sep, tail = label.partition(": ")
+        if sep and tail.endswith(")") and " (" in tail:
+            reasons[head] = tail[tail.rindex(" (") + 2:-1]
+    items: list[PlannedManualItem] = []
+    matched: set[str] = set()
+    for preview in previews:
+        for block in preview.blocked:
+            entry = _knowledge_id(block.rule)
+            if entry:
+                matched.add(entry)
+            why = reasons.get(entry or "") or "it is not verified"
+            items.append(PlannedManualItem(
+                path=_relative_project_file(root, preview.path), lines=block.lines,
+                sites=block.sites, rule=recipe_key(block.rule),
+                reason=f"not applied: {why}; rewrite these sites by hand or leave them"))
+    for label in downgraded:
+        if label.partition(": ")[0] not in matched:
+            items.append(PlannedManualItem(
+                rule=label, reason="downgraded, so never applied; it matched no site in "
+                                   "the shape it rewrites: check other calls by hand"))
+    return items
 
 
 def _runs_on_base(preview) -> bool | None:

@@ -151,7 +151,7 @@ def _changes(root: Path, previews: list[Any]) -> list[dict[str, Any]]:
         except ValueError:
             continue
         out.append({"path": rel, "old_source": p.old_source, "new_source": p.new_source,
-                    "recipes": [recipe_key(i) for i in [*p.rules, *p.patterns]]})
+                    "recipes": [recipe_key(i) for i in p.applied_recipes()]})
     return out
 
 

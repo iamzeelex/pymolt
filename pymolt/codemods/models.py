@@ -154,6 +154,15 @@ class PreviewProgress:
 ProgressSink = Callable[[PreviewProgress], None] | None
 
 
+class BlockedRewrite(BaseModel):
+    """A rule that matched in a file but was not adopted: it is not verified, and only verified
+    rules are applied automatically. ``lines``: the 1-based lines its rewrite would change."""
+
+    rule: CodemodRule
+    sites: int
+    lines: list[int] = Field(default_factory=list)
+
+
 class FilePreview(BaseModel):
     """Before/after for one file — the unit the engineer reviews and decides on."""
 
@@ -170,3 +179,14 @@ class FilePreview(BaseModel):
     """Advisories raised on this file. A file with advisories but no rewrite
     (old_source == new_source, sites == 0) still yields a preview — the
     manual-review card."""
+    blocked: list[BlockedRewrite] = Field(default_factory=list)
+    """Rules that matched here but were not adopted (``verified_only``): they changed
+    nothing, and the plan lists them for a person. Their keys are not among the recipes
+    that changed the file (``applied_recipes``)."""
+
+    def applied_recipes(self) -> list[CodemodPattern | CodemodRule]:
+        """The patterns and rules that changed this file or advised on it: ``rules`` and
+        ``patterns`` without the blocked ones."""
+        blocked = {recipe_key(b.rule) for b in self.blocked}
+        return [item for item in [*self.rules, *self.patterns]
+                if recipe_key(item) not in blocked]

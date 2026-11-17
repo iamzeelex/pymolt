@@ -36,9 +36,14 @@ def ledger_path(project_dir: str | Path) -> Path:
 
 
 def claim_for(item: Any) -> str | None:
-    """The claim a codemod pattern or rule makes about its edit (None: it makes none)."""
+    """The claim a codemod pattern or rule makes about its edit (None: it makes none). A rule
+    (it has a ``match``) that is not verified makes none, whatever its evidence says: its
+    golden pair did not pass, so nothing vouches that its edit keeps the behaviour."""
     if getattr(item, "scope", "dependency") == "python":
         return "python-fixer"
+    if getattr(item, "match", None) is not None and getattr(item, "confidence", None) != \
+            "verified":
+        return None
     evidence = [str(e) for e in getattr(item, "evidence", None) or ()]
     if any(e.startswith("pymolt.delta MOVED") for e in evidence):
         return "same-object"
