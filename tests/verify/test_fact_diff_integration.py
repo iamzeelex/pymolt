@@ -310,3 +310,30 @@ def test_unverified_edited_sites_never_block_pass_but_review_items_do():
     paired = {"verdict": "inconclusive", "counts": {"rewritten": 1}, "entries": [
         {"category": "rewritten", "comparison": "missing", "symbol": "dep.a"}]}
     assert "could not be paired" in _fact_diff_reasons(paired)[0]
+
+
+def test_unmeasured_noise_reviews_have_their_own_reason():
+    from pymolt.verify.facts import UNMEASURED_NOISE
+
+    diff = {"verdict": "inconclusive", "counts": {"changed": 2, "uncomparable": 1}, "entries": [
+        {"category": "changed", "comparison": "changed", "symbol": "jinja2.Template.render",
+         "review": f"{UNMEASURED_NOISE}: the value differs and its input is not fully observed"},
+        {"category": "changed", "comparison": "changed", "symbol": "dep.c",
+         "review": "the value differs on a hand-edited line: review"},
+        {"category": "uncomparable", "comparison": "missing", "symbol": "json.dumps",
+         "notes": ["possibly-dropped:new"]}]}
+    reasons = _fact_diff_reasons(diff)
+    assert reasons[0].startswith("1 value difference(s) may be run-to-run noise")
+    assert "jinja2.Template.render" in reasons[0]
+    assert "1 edited call(s) need review: dep.c" in reasons
+    assert any("dropped events" in r for r in reasons)
+    assert not any("lost their outcome distribution" in r for r in reasons)
+
+
+def test_backend_unobservable_raises_have_their_own_reason():
+    diff = {"verdict": "inconclusive", "counts": {"uncomparable": 1}, "entries": [
+        {"category": "uncomparable", "comparison": "missing", "symbol": "lib.native.decode",
+         "notes": ["backend-unobservable"]}]}
+    reasons = _fact_diff_reasons(diff)
+    assert any("could not record them" in r for r in reasons)
+    assert not any("lost their outcome distribution" in r for r in reasons)

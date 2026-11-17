@@ -60,6 +60,10 @@ from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
+    BACKEND_UNOBSERVABLE,
+    INPUT_CHANGED,
+    UNMEASURED_NOISE,
+    UNPAIRED_SITE,
     find_facts_snapshot,
     iter_snapshot,
     iter_trace_records,
@@ -1293,6 +1297,23 @@ def _anchor_slot_path(root: Path, value: str | None) -> str | None:
     return str(anchored)
 
 
+def slot_path(project_dir: str | Path, value: str | None) -> str | None:
+    """A slot's stored path as an absolute one: a relative path is the project's (slots are
+    saved project-relative), never the current directory's."""
+    if not value:
+        return value
+    path = Path(value)
+    return str(path if path.is_absolute() else Path(os.path.abspath(project_dir)) / path)
+
+
+def same_slot_path(project_dir: str | Path, a: str | None, b: str | None) -> bool:
+    """Two stored paths name the same file (one may be absolute, the other relative)."""
+    if not a or not b:
+        return a == b
+    return os.path.realpath(slot_path(project_dir, a)) == os.path.realpath(
+        slot_path(project_dir, b))
+
+
 def load_contract_state(project_dir: str | Path) -> ContractState:
     """The current capture state, or a fresh empty one if none is persisted yet.
 
@@ -1301,9 +1322,10 @@ def load_contract_state(project_dir: str | Path) -> ContractState:
     """
     state = ContractState.load(_state_path(project_dir)) or ContractState()
     root = Path(os.path.abspath(project_dir))
-    for slot in (state.baseline, state.post_migration, *state.diagnostic_captures):
+    for slot in (state.baseline, state.post_migration, state.baseline_replicate,
+                 *state.diagnostic_captures):
         if slot is not None:
-            for field in ("trace_path", "metadata_path", "command_log"):
+            for field in ("trace_path", "metadata_path", "command_log", "sources_path"):
                 setattr(slot, field, _anchor_slot_path(root, getattr(slot, field)))
     return state
 
@@ -1609,9 +1631,15 @@ def capture_named_trace(
     an explicit comma list replaces it, and the caller's own variable wins. An explicit
     ``target`` (not ``"all"``) gets no automatic stdlib modules unless ``stdlib`` is given.
     What was traced is stamped on the slot.
+
+    ``when="baseline_replicate"`` records the baseline's command a second time into its own
+    slot (see ``capture_baseline_replicate``, which checks it may); it runs in the baseline's
+    environment, and replacing the baseline archives it.
     """
-    if when not in ("baseline", "post_migration"):
-        raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
+    if when not in ("baseline", "post_migration", REPLICATE):
+        raise ValueError(
+            f"when must be 'baseline', 'post_migration' or {REPLICATE!r}, got {when!r}")
+    env_when = "baseline" if when == REPLICATE else when
     if mode not in (CaptureMode.TEST_SUITE, CaptureMode.LIVE_COMMAND):
         raise ValueError(
             f"capture_named_trace handles TEST_SUITE/LIVE_COMMAND only, got {mode!r} "
@@ -1644,7 +1672,7 @@ def capture_named_trace(
     # An explicit --target stays exactly what the caller named: the stdlib modules are added
     # automatically only for the default target ("all"), or when ``stdlib`` is given too.
     trace_stdlib = ([] if stdlib is None and target != "all"
-                    else _resolve_stdlib_option(project_dir, when, stdlib))
+                    else _resolve_stdlib_option(project_dir, env_when, stdlib))
     # Validate before creating staging paths or spawning the target.
     trace_env(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
@@ -1658,7 +1686,7 @@ def capture_named_trace(
     env_note = None
     command_prefix = None
     if container is None:
-        resolved = resolve_capture_env(project_dir, when)
+        resolved = resolve_capture_env(project_dir, env_when)
         container = resolved["container"]
         command_prefix = resolved["command_prefix"]
         if workdir is None:
@@ -1714,7 +1742,7 @@ def capture_named_trace(
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
         _record_sampling(staged_path, sample_rate, sampling_source)
         _record_site_text(staged_path, project_dir, runner_spec)
-        _record_sources_for(staged_path, project_dir, when, runner_spec)
+        _record_sources_for(staged_path, project_dir, env_when, runner_spec)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
@@ -1828,13 +1856,130 @@ def capture_named_trace(
         instrumentation_skipped=result.instrumentation_skipped,
         activation_failures=getattr(result, "activation_failures", []),
         red=_red_stamp(result) if validity is CaptureValidity.VALID else None,
+        replicate_of=(state.baseline.captured_at if when == REPLICATE and state.baseline
+                      else None),
     )
     if validity is CaptureValidity.VALID:
         setattr(state, when, slot)
+        if when == "baseline" and state.baseline_replicate is not None:
+            # A replicate measures the noise of the baseline it re-ran: a new baseline makes
+            # it stale. Archived, not deleted.
+            archive_existing_capture(project_dir, REPLICATE)
+            state.baseline_replicate = None
     else:
         state.diagnostic_captures.append(slot)
     state.save(_state_path(project_dir))
     return slot
+
+
+REPLICATE = "baseline_replicate"
+
+
+def sources_changed(project_dir: str | Path, snapshot: str | Path | None) -> list[str] | None:
+    """The files of a capture's source snapshot whose bytes differ now (or that are gone);
+    None when the snapshot is missing or unreadable."""
+    data = _read_snapshot(slot_path(project_dir, str(snapshot) if snapshot else None))
+    if data is None:
+        return None
+    root = Path(project_dir)
+    changed: list[str] = []
+    for rel, entry in sorted(data["files"].items()):
+        try:
+            digest = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+        except OSError:
+            changed.append(rel)
+            continue
+        if not isinstance(entry, dict) or digest != entry.get("sha256"):
+            changed.append(rel)
+    return changed
+
+
+def capture_baseline_replicate(
+    project_dir: str | Path, *, cancel_event: threading.Event | None = None,
+    accept_failing: bool = False, command: list[str] | None = None,
+) -> ContractSlot:
+    """Run the baseline's command a second time, on the same code in the same environment,
+    into the ``baseline_replicate`` slot: whatever differs between the two runs is run-to-run
+    noise (``verify.replicate``), which ``pymolt verify`` then tells apart from the migration.
+
+    Everything is taken from the baseline slot: command, mode, target, privacy, sample rate,
+    tracer backend, stdlib modules, container. Refused (``ValueError``, before anything runs)
+    without a valid baseline pymolt ran itself, when ``command`` differs from the baseline's,
+    when the environment fingerprint moved, or when any file of the baseline's source snapshot
+    changed (or the baseline has none, so this cannot be checked). Settings a slot does not
+    record (``--exclude``, ``--source``) take their defaults."""
+    project_dir = Path(os.path.abspath(project_dir))
+    base = load_contract_state(project_dir).baseline
+    if base is None or base.validity is not CaptureValidity.VALID:
+        raise ValueError("no valid baseline to replicate: capture the baseline first")
+    if base.mode not in (CaptureMode.TEST_SUITE, CaptureMode.LIVE_COMMAND) or not base.command:
+        raise ValueError(
+            "the baseline was recorded by attaching to a process pymolt did not run, so pymolt "
+            "cannot run it again")
+    if command and list(command) != list(base.command):
+        raise ValueError(
+            "a replicate runs the baseline's own command; omit the command (the baseline ran: "
+            f"{' '.join(base.command)})")
+    now = environment_fingerprint(project_dir)
+    if base.env_fingerprint is None or now != base.env_fingerprint:
+        raise ValueError(
+            "the environment changed since the baseline (its fingerprint differs): a replicate "
+            "must run where the baseline ran")
+    changed = sources_changed(project_dir, base.sources_path)
+    if changed is None:
+        raise ValueError(
+            "the baseline has no source snapshot, so a replicate cannot be checked to run the "
+            "same code: capture the baseline again")
+    if changed:
+        raise ValueError(
+            f"the project's code changed since the baseline ({', '.join(changed[:5])}"
+            f"{f' and {len(changed) - 5} more' if len(changed) > 5 else ''}): a replicate must "
+            "run the same code")
+    container = base.runner.name if base.runner is not None and base.runner.kind == "container" \
+        else None
+    workdir = base.runner.workdir if container else None
+    return capture_named_trace(
+        project_dir, REPLICATE, base.mode, command=list(base.command), target=base.target,
+        backend=base.backend or "auto", container=container, workdir=workdir,
+        cancel_event=cancel_event, privacy=base.privacy_profile, sample_rate=base.sample_rate,
+        accept_failing=accept_failing or base.red is not None,
+        stdlib=",".join(base.traced_stdlib) if base.traced_stdlib else "none",
+        impact_targets=list(base.impact_targets) or None,
+    )
+
+
+def usable_replicate(project_dir: str | Path, state: ContractState | None = None,
+                     ) -> tuple[ContractSlot | None, str | None]:
+    """The baseline replicate when it can measure the baseline's noise, else ``(None, why)``
+    (``(None, None)``: there is none). It must re-run the current baseline (``replicate_of``),
+    with the same command, target, mode, privacy, sample rate, stdlib modules and environment
+    fingerprint, on the same code (the two source snapshots agree), and be valid."""
+    state = state or load_contract_state(project_dir)
+    base, rep = state.baseline, state.baseline_replicate
+    if rep is None:
+        return None, None
+    if base is None:
+        return None, "baseline replicate ignored: there is no baseline"
+    rep_trace = slot_path(project_dir, rep.trace_path)
+    if rep.validity is not CaptureValidity.VALID or not rep_trace or not Path(rep_trace).is_file():
+        return None, "baseline replicate ignored: it is not a valid capture"
+    if rep.replicate_of != base.captured_at:
+        return None, ("baseline replicate ignored: it re-ran an earlier baseline "
+                      f"({rep.replicate_of}), not the current one ({base.captured_at})")
+    for name in ("command", "target", "mode", "privacy_profile", "sample_rate",
+                 "env_fingerprint", "traced_stdlib"):
+        if getattr(rep, name) != getattr(base, name):
+            return None, f"baseline replicate ignored: its {name.replace('_', ' ')} differs"
+    a = _read_snapshot(slot_path(project_dir, base.sources_path))
+    b = _read_snapshot(slot_path(project_dir, rep.sources_path))
+    if a is None or b is None:
+        return None, "baseline replicate ignored: a source snapshot is missing"
+    differ = sorted(f for f in a["files"].keys() & b["files"].keys()
+                    if (a["files"][f] or {}).get("sha256") != (b["files"][f] or {}).get("sha256"))
+    if differ:
+        return None, ("baseline replicate ignored: the code differs between the two runs "
+                      f"({', '.join(differ[:3])})")
+    return rep.model_copy(update={"trace_path": rep_trace}), None
 
 
 def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
@@ -1850,7 +1995,7 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
     existing = getattr(load_contract_state(project_dir), when, None)
     if existing is None:
         return None
-    current = Path(existing.trace_path)
+    current = Path(slot_path(project_dir, existing.trace_path) or "")
     if not current.is_file():
         return None
 
@@ -2209,7 +2354,8 @@ def _record_sources_for(trace_path: str | Path, project_dir: str | Path, when: s
 def _baseline_fact_files(project_dir: str | Path) -> list[str]:
     """The files that had facts in the baseline capture (from its snapshot; [] if none)."""
     baseline = load_contract_state(project_dir).baseline
-    data = _read_snapshot(baseline.sources_path) if baseline is not None else None
+    data = (_read_snapshot(slot_path(project_dir, baseline.sources_path))
+            if baseline is not None else None)
     return list(data.get("fact_files") or ()) if data else []
 
 
@@ -2442,6 +2588,34 @@ def build_contract_report_from_state(
         elif state.baseline is not None:
             trace = _slot_trace(state.baseline)
             used_slots.append(("baseline", state.baseline))
+    elif against is None and state.baseline is not None:
+        # An explicit post-migration recording: the "before" side is still the baseline slot.
+        against = _slot_trace(state.baseline)
+    # The baseline slot's recording on the "before" side, however verify got its path (the CLI
+    # fills ``--baseline`` from the slot): its own loss counters and freshness are evidence.
+    if (against and state.baseline is not None
+            and not any(name == "baseline" for name, _ in used_slots)
+            and same_slot_path(project_dir, against, state.baseline.trace_path)):
+        used_slots.append(("baseline", state.baseline))
+
+    noise_profile, replicate_note = None, None
+    # The replicate measures the BASELINE's noise: it applies whenever the "before" side is the
+    # baseline slot's recording, whether verify took it from the slot or was handed its path
+    # (``--post-migration PATH`` alone fills ``--baseline`` from the slot), whatever the
+    # "after" side is.
+    if trace and against and state.baseline is not None and same_slot_path(
+            project_dir, against, state.baseline.trace_path):
+        replicate, replicate_note = usable_replicate(project_dir, state)
+        if replicate is not None and state.baseline is not None:
+            try:
+                from pymolt.verify.replicate import load_or_build_profile
+
+                noise_profile = (load_or_build_profile(
+                    project_dir, against, state.baseline.captured_at,
+                    replicate.trace_path, replicate.captured_at),
+                    f"the baseline replicate of {replicate.captured_at}")
+            except (OSError, ValueError) as exc:
+                replicate_note = f"baseline replicate ignored: it could not be read ({exc})"
 
     predictions = None
     if trace and against:
@@ -2463,8 +2637,11 @@ def build_contract_report_from_state(
         predictions=predictions,
         diff_context=build_diff_context(project_dir, trace, against) if trace and against
         else None,
+        noise_profile=noise_profile,
     )
-    _stamp_staleness(project_dir, report, used_slots)
+    if replicate_note:
+        report.notes.append(replicate_note)
+    _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
     _stamp_verdict(report, trace, against, used_slots)
     return report
 
@@ -2562,7 +2739,7 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
         candidates.append(MigrationPlan.load(root, receipt.plan_path))
     candidates.append(MigrationPlan.load(root))
     bound = [plan for plan in candidates if plan is not None and is_baseline
-             and plan.baseline_trace_path == baseline.trace_path
+             and same_slot_path(root, plan.baseline_trace_path, baseline.trace_path)
              and plan.baseline_captured_at == baseline.captured_at]
     for plan in bound:
         if plan.risks is not None and plan.risks.status != "unavailable":
@@ -2608,7 +2785,8 @@ def _stamp_verdict(
     whole_counts = report.all_diff if report.all_diff is not None else report.diff
     for warning in (whole_diff or {}).get("warnings") or ():
         # Snapshot caps that lower the comparison level without blocking PASS.
-        if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:")):
+        if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:",
+                                    "volatile-sites:")):
             if warning not in report.notes:
                 report.notes.append(str(warning))
     comparability: list[str] = []
@@ -2789,6 +2967,23 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
     # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
     entries = [e for e in entries if not e.get("unverified")]
     reviews = [e for e in entries if e.get("review")]
+    classes = (
+        (UNMEASURED_NOISE, "value difference(s) may be run-to-run noise: their input is not "
+                           "fully observed and the workload varies between runs"),
+        ("masked input", "value difference(s) where the inputs matched only once volatile "
+                         "values were masked"),
+        (INPUT_CHANGED, "call(s) whose input changed with no visible cause"),
+        (UNPAIRED_SITE, "call site(s) whose inputs changed with no visible cause"),
+    )
+    settle = ("the baseline replicate did not settle them (they vary there in another way, or "
+              "it did not reach them)" if fact_diff.get("noise_measured")
+              else "a baseline replicate would tell run noise from a real change")
+    for prefix, text in classes:
+        hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
+        reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
+        if hit:
+            names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+            reasons.append(f"{len(hit)} {text} ({names}); {settle}")
     if reviews:
         names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
         reasons.append(f"{len(reviews)} edited call(s) need review: {names}")
@@ -2805,8 +3000,23 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         1 for e in entries
         if any(str(n).startswith("possibly-evicted") for n in e.get("notes") or ())
     )
+    dropped_entries = sum(
+        1 for e in entries
+        if any(str(n).startswith("possibly-dropped") for n in e.get("notes") or ())
+    )
+    unobservable = sum(1 for e in entries if BACKEND_UNOBSERVABLE in (e.get("notes") or ()))
     uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries
+        - evicted_entries - dropped_entries - unobservable
+    if unobservable:
+        reasons.append(
+            f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "
+            "the other side's backend could not record them, so they cannot be compared"
+        )
+    if dropped_entries:
+        reasons.append(
+            f"{dropped_entries} call fact(s) are missing on a side that dropped events and "
+            "cannot be compared"
+        )
     if evicted_entries:
         reasons.append(
             f"{evicted_entries} call fact(s) are missing on a side that evicted facts and "
@@ -2838,7 +3048,8 @@ def _applied_migration(project_dir: str | Path):
     return receipt
 
 
-def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots) -> None:
+def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots, *,
+                     before_side: bool = False) -> None:
     """Mark the report when a capture does not describe the world it stands for.
 
     A verdict built on a capture taken against a different manifest still *looks*
@@ -2872,9 +3083,12 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
         return
 
     names = {name for name, _ in used_slots}
+    # The baseline is the "before" side of a diff: against a post-migration slot, or against
+    # an explicit post-migration recording (``before_side``).
+    before = "post-migration" in names or before_side
     run: str | None = None  # the applied migration's short id, when there is one
     start: str | None = None
-    if "baseline" in names and "post-migration" in names:
+    if "baseline" in names and before:
         migration = _applied_migration(project_dir)
         if migration is not None:
             run = migration.run_id[:8]
@@ -2890,7 +3104,7 @@ def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots
         fingerprint = getattr(slot, "env_fingerprint", None)
         if fingerprint is None:
             unstamped.append(name)
-        elif name == "baseline" and "post-migration" in names:
+        elif name == "baseline" and before:
             if start is not None:
                 if fingerprint != start:
                     stale_start.append(name)

@@ -452,7 +452,10 @@ def test_json_form_is_stable_and_self_describing(tmp_path):
     for doc in (first, second):  # first_seen differs; only the summaries mention sources
         doc.pop("old"), doc.pop("new")
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
-    assert first["schema"] == "pymolt.fact-diff/1" and first["verdict"] == "fail"
+    # /2 (verify noise, reporting): the ``summary`` of findings comes first; entries follow
+    assert first["schema"] == "pymolt.fact-diff/2" and first["verdict"] == "fail"
+    assert next(iter(k for k in first if k != "schema")) == "summary"
+    assert first["summary"]["failing"][0]["symbol"] in ("lib.f", "lib.g")
     assert [e["category"] for e in first["entries"]] == ["changed", "disappeared"]
     changed = first["entries"][0]
     assert changed["symbol"] == "lib.f" and changed["fails"] is True
@@ -1072,7 +1075,11 @@ def test_relocated_symbol_at_same_site_pairs(tmp_path):
     new = [rv("lib.engine.create.create_engine", {"bound": {"u": 1, "future": True}},
               result=5)]
     d = diff_sites(tmp_path, old, new)
-    assert only(d, FactCategory.EQUAL).new_symbol == "lib.engine.create.create_engine"
+    # paired across the relocation; ``future=True`` is an explicit argument (not reported as
+    # defaulted), so the input reaching the call changed: a review item, not a pass
+    (e,) = d.entries
+    assert e.new_symbol == "lib.engine.create.create_engine"
+    assert e.review.startswith("input changed") and not e.fails
 
 
 def test_unrelated_symbol_at_same_site_is_not_paired(tmp_path):
