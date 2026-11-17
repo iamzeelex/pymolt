@@ -1000,11 +1000,26 @@ def _findings_data(summary: dict) -> dict:
     }
 
 
+def saved_verdict_note(compared, saved_path) -> str | None:
+    """What saving a verdict meant, when it is not the usual verdict on the two captures.
+
+    ``compared`` is the report's ``ComparedRecordings``; ``saved_path`` None means it was not
+    saved (its baseline side was another recording)."""
+    if saved_path is None:
+        return "Not saved: the baseline side is a recording other than the baseline capture."
+    if compared is not None and compared.after is not None and compared.after_capture is None:
+        return (f"Saved, but `pymolt status` does not count it as the migration's verdict: the "
+                f"post-migration side is {compared.after}, not the post-migration capture.")
+    return None
+
+
 def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | None) -> dict:
     """``UnifiedVerificationReport`` -> view.
 
-    ``saved_path`` is where the verdict was saved (None: compared recordings other
-    than the captures, so nothing was saved and the full report is written instead).
+    ``saved_path`` is where the verdict was saved (None: its baseline side was a recording
+    other than the baseline capture, so nothing was saved and the full report is written
+    instead). ``data.compared_recordings`` names the two recordings and which capture each
+    one is (``data.compared`` says whether anything was compared at all).
     """
     rep = unified.contract
     full_path = (str(saved_path) if saved_path is not None
@@ -1016,6 +1031,8 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "verdict": verdict,
         "reasons": list(unified.reasons),
         "saved_path": str(saved_path) if saved_path is not None else None,
+        "compared_recordings": (rep.compared.model_dump(mode="json")
+                                if getattr(rep, "compared", None) is not None else None),
         "baseline_stale": rep.baseline_stale,
         "static_targets": rep.static_targets,
         "confirmed": rep.confirmed,
@@ -1088,8 +1105,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
                      f"{cal['miss']} miss, {cal['not_exercised']} not exercised; "
                      f"{cal['unpredicted_total']} change(s) nobody predicted "
                      "(data.calibration).")
-    if saved_path is None:
-        lines.append("Not saved: compared recordings other than the captures.")
+    note = saved_verdict_note(getattr(rep, "compared", None), saved_path)
+    if note:
+        lines.append(note)
 
     if not data["compared"]:
         hint = ("Only one side is recorded, so nothing was compared: change the code, then "

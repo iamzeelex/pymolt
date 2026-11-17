@@ -86,7 +86,7 @@ from pymolt.verify.models import (
     TraceArtifactQuality,
     VerificationVerdict,
 )
-from pymolt.verify.report import ContractReport, build_contract_report
+from pymolt.verify.report import ComparedRecordings, ContractReport, build_contract_report
 
 logger = logging.getLogger(__name__)
 
@@ -2672,9 +2672,27 @@ def build_contract_report_from_state(
     )
     if replicate_note:
         report.notes.append(replicate_note)
+    report.compared = _compared_recordings(project_dir, state, trace, against)
     _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
     _stamp_verdict(report, trace, against, used_slots)
     return report
+
+
+def _compared_recordings(project_dir: str | Path, state: ContractState, trace: str | None,
+                         against: str | None) -> ComparedRecordings:
+    """Which recordings a report compared, and which capture each one is (by path: a
+    recording named on the command line that is a capture's own file is that capture)."""
+    def capture(path: str | None, *names: str) -> str | None:
+        for name in names:
+            slot = getattr(state, name.replace("-", "_"))
+            if path and slot is not None and same_slot_path(project_dir, path, slot.trace_path):
+                return name
+        return None
+
+    return ComparedRecordings(
+        after=trace, after_capture=capture(trace, "post-migration", "baseline"),
+        before=against, before_capture=capture(against, "baseline"),
+    )
 
 
 def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path):
