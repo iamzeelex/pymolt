@@ -20,8 +20,9 @@ low        DEPRECATED in the old version without a recorded warning at the site,
 
 One risk per (site, symbol) at its strongest tier; ``fact`` is the delta fact that decided
 it (None when the warning alone did), ``facts`` every delta fact that matched, ``evidence``
-the reasons in words. ``fixed_by_plan`` says a planned codemod rewrites the site (the line
-changes and the symbol's name leaves it).
+the reasons in words. ``fixed_by_plan`` says a planned codemod rewrites the site: the line
+changes and the symbol's name leaves it, or the import that binds the name the site reads now
+binds another target (an import move; the site's line stays).
 
 ``calibrate`` scores the predictions against the post-migration fact diff, using the
 entries at the risk's site for the risk's own symbol (a line can hold several calls; a
@@ -212,6 +213,205 @@ def planned_rewrites(changes: Iterable[Any]) -> dict[str, list[_Block]]:
                     start=i1 + 1, end=i2, old_text="\n".join(old_lines[i1:i2]),
                     new_text="\n".join(new_lines[j1:j2]), recipes=recipes))
     return dict(out)
+
+
+class _Rebind(BaseModel):
+    """A module-level name the plan's import rewrite binds to another target. ``gone``: what it
+    no longer names (``pandas.util.testing.assert_frame_equal``); ``uses``: every place the old
+    file reads that import binding, as ``(first line, last line, function)`` of the expression
+    the read heads (``assert_frame_equal(a, b)``), the import statement itself included.
+    ``function`` is the innermost ``def``/``class`` name, or the module's leaf at module
+    level, as static contacts name their caller."""
+
+    name: str
+    gone: list[str]
+    block: _Block
+    uses: list[tuple[int, int, str]] = Field(default_factory=list)
+
+
+def _module_leaf(path: str) -> str:
+    p = Path(path)
+    return p.parent.name if p.stem == "__init__" else p.stem
+
+
+def _import_targets(node: Any, name: str) -> set[str]:
+    """What an ``import`` / ``from ... import`` statement binds ``name`` to (absolute imports
+    only: a relative one names the project's own code)."""
+    import libcst as cst
+    from libcst.helpers import get_full_name_for_node
+
+    out: set[str] = set()
+    if isinstance(node, cst.ImportFrom):
+        if node.relative or node.module is None or isinstance(node.names, cst.ImportStar):
+            return out
+        module = get_full_name_for_node(node.module)
+        for alias in node.names:
+            bound = alias.asname.name.value if alias.asname else get_full_name_for_node(
+                alias.name)
+            if bound == name and module:
+                out.add(f"{module}.{get_full_name_for_node(alias.name)}")
+    elif isinstance(node, cst.Import):
+        for alias in node.names:
+            dotted = get_full_name_for_node(alias.name) or ""
+            if alias.asname is not None:
+                if alias.asname.name.value == name:
+                    out.add(dotted)
+            elif dotted.split(".")[0] == name:
+                out.add(name)
+    return out
+
+
+def _import_bindings(source: str) -> tuple[Any, dict[str, list[Any]]] | None:
+    """``(metadata wrapper, {name: [Assignment]})`` of the module scope's names bound only
+    by imports. A name also bound by anything else is left out: which binding a read sees
+    is then decided at run time. None when the source does not parse."""
+    import libcst as cst
+    from libcst.metadata import (
+        Assignment,
+        GlobalScope,
+        MetadataWrapper,
+        ParentNodeProvider,
+        PositionProvider,
+        ScopeProvider,
+    )
+
+    try:
+        wrapper = MetadataWrapper(cst.parse_module(source))
+        scopes = wrapper.resolve(ScopeProvider)
+        wrapper.resolve(ParentNodeProvider)
+        wrapper.resolve(PositionProvider)
+    except Exception:  # noqa: BLE001 - an unparseable file credits nothing
+        return None
+    module_scope = next((s for s in scopes.values() if isinstance(s, GlobalScope)), None)
+    if module_scope is None:
+        return None
+    bindings: dict[str, list[Any]] = defaultdict(list)
+    other: set[str] = set()
+    for assignment in module_scope.assignments:
+        if isinstance(assignment, Assignment) and isinstance(
+                assignment.node, cst.Import | cst.ImportFrom):
+            bindings[assignment.name].append(assignment)
+        else:
+            other.add(assignment.name)
+    return wrapper, {n: a for n, a in bindings.items() if n not in other}
+
+
+def _rebinds_for(path: str, old: str, new: str, block_for) -> list[_Rebind]:
+    """The names a planned change of one file binds to new import targets (see ``_Rebind``)."""
+    import libcst as cst
+    from libcst.metadata import ParentNodeProvider, PositionProvider
+
+    before, after = _import_bindings(old), _import_bindings(new)
+    if before is None or after is None:
+        return []
+    wrapper, old_bound = before
+    _new_wrapper, new_bound = after
+    parents = wrapper.resolve(ParentNodeProvider)
+    positions = wrapper.resolve(PositionProvider)
+    module_leaf = _module_leaf(path)
+
+    def targets(assignments) -> set[str]:
+        return {t for a in assignments for t in _import_targets(a.node, a.name)}
+
+    def statement(node):
+        while node is not None and not isinstance(node, cst.SimpleStatementLine):
+            node = parents.get(node)
+        return node
+
+    def owner(node) -> str:
+        while node is not None:
+            node = parents.get(node)
+            if isinstance(node, cst.FunctionDef | cst.ClassDef):
+                return node.name.value
+        return module_leaf
+
+    def head(node):
+        """The outermost expression ``node`` heads: ``x`` in ``x.y.z(...)``."""
+        while True:
+            parent = parents.get(node)
+            if isinstance(parent, cst.Attribute) and parent.value is node:
+                node = parent
+            elif isinstance(parent, cst.Call) and parent.func is node:
+                node = parent
+            else:
+                return node
+
+    out: list[_Rebind] = []
+    for name in sorted(old_bound.keys() & new_bound.keys()):
+        gone = sorted(targets(old_bound[name]) - targets(new_bound[name]))
+        if not gone:
+            continue
+        uses: list[tuple[int, int, str]] = []
+        lines: set[int] = set()
+        for assignment in old_bound[name]:
+            stmt = statement(assignment.node)
+            if stmt is not None:
+                pos = positions[stmt]
+                uses.append((pos.start.line, pos.end.line, owner(stmt)))
+                lines.update(range(pos.start.line, pos.end.line + 1))
+            for access in assignment.references:
+                # A read every one of whose bindings is an import of this name.
+                if not all(r in old_bound[name] for r in access.referents):
+                    continue
+                pos = positions.get(head(access.node))
+                if pos is not None:
+                    uses.append((pos.start.line, pos.end.line, owner(access.node)))
+        block = block_for(lines)
+        if block is not None:
+            out.append(_Rebind(name=name, gone=gone, block=block, uses=sorted(set(uses))))
+    return out
+
+
+def planned_rebinds(changes: Iterable[Any],
+                    rewrites: Mapping[str, list[_Block]]) -> dict[str, list[_Rebind]]:
+    """Per (project-relative) file of a plan's frozen changes, the module-level names whose
+    import the plan rewrites to bind another target (``from a.b import f`` -> ``from a.c
+    import f``). ``rewrites``: ``planned_rewrites(changes)``, whose blocks hold the imports."""
+    out: dict[str, list[_Rebind]] = {}
+    for change in changes or ():
+        path = _attr(change, "path")
+        old, new = _attr(change, "old_source"), _attr(change, "new_source")
+        if not isinstance(path, str) or not isinstance(old, str) or not isinstance(new, str):
+            continue
+        file = Path(path).as_posix()
+        blocks = rewrites.get(file) or ()
+
+        def block_for(lines: set[int], blocks=blocks) -> _Block | None:
+            return next((b for b in blocks if any(b.start <= ln <= b.end for ln in lines)),
+                        None)
+
+        found = _rebinds_for(file, old, new, block_for)
+        if found:
+            out[file] = found
+    return out
+
+
+def _risk_spellings(risk: Any) -> set[str]:
+    """The names a risk's symbol is known by: its own, and that of each delta fact it matched
+    (the public spelling an import names)."""
+    names = {risk.symbol}
+    for fact in [risk.fact, *(risk.facts or ())]:
+        if isinstance(fact, Mapping) and isinstance(fact.get("symbol"), str):
+            names.add(fact["symbol"])
+    return names
+
+
+def _rebind_fix_for(risk: Any, rebinds: Mapping[str, list[_Rebind]]) -> _Block | None:
+    """The planned import rewrite that fixes this site without touching its line: the site
+    reads a name whose import now binds another target, and its symbol was reached through
+    the old one. Binding-aware: a traced site counts when an expression on its line reads that
+    import binding (not a local of the same name); a static site, when its function does."""
+    site = risk.site
+    spellings = _risk_spellings(risk)
+    for rebind in rebinds.get(site.file) or ():
+        if not any(s == g or s.startswith(g + ".") for s in spellings for g in rebind.gone):
+            continue
+        if site.line is not None:
+            if any(first <= site.line <= last for first, last, _ in rebind.uses):
+                return rebind.block
+        elif any(func == site.func for _, _, func in rebind.uses):
+            return rebind.block
+    return None
 
 
 def _leaf(symbol: str) -> str:
@@ -531,8 +731,9 @@ def predict_risks(
     if index and static_contacts is not None:
         _add_static_risks(report, index, matched_facts, static_contacts, root)
 
+    rebinds = planned_rebinds(changes or (), rewrites) if rewrites else {}
     for risk in report.risks:
-        block = _fix_for(risk.site, risk.symbol, rewrites)
+        block = _fix_for(risk.site, risk.symbol, rewrites) or _rebind_fix_for(risk, rebinds)
         if block is not None:
             risk.fixed_by_plan = True
             risk.fixed_by = list(block.recipes)

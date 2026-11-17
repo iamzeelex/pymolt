@@ -689,3 +689,73 @@ def test_a_module_import_the_plan_drops_counts_as_fixed():
     assert _import_removed(RiskSite(file="t.py", func="", line=1), "imp", kept) is None
     assert _import_removed(RiskSite(file="t.py", func="", line=1), "imp.reload",
                            rewrites) is None
+
+
+# ── import moves: the call line stays, the name it reads is rebound ──────────
+
+IO = ROOT + "/toyapp/io.py"
+SAFE_JOIN = "flask.helpers.safe_join"
+MOVED_SAFE_JOIN = {"symbol": SAFE_JOIN, "kind": "MOVED", "successor": "werkzeug.utils.safe_join",
+                   "evidence": ["existence"]}
+IO_OLD = ("from flask.helpers import safe_join\n"     # 1
+          "\n"
+          "\n"
+          "def serve(path):\n"                         # 4
+          "    return safe_join(\n"                    # 5
+          "        '/srv', path)\n"                    # 6
+          "\n"
+          "\n"
+          "def other(safe_join):\n"                    # 9
+          "    return safe_join('/x')\n")              # 10
+IO_CHANGES = [{"path": "toyapp/io.py", "old_source": IO_OLD,
+               "new_source": IO_OLD.replace("from flask.helpers", "from werkzeug.utils", 1),
+               "recipes": ["rewrite-import:flask.helpers.safe_join→werkzeug.utils.safe_join"]}]
+
+
+def _io_baseline():
+    return fold_facts([
+        _ev(SAFE_JOIN, 6, "serve", file=IO, result="/srv/x"),
+        _ev(SAFE_JOIN, 10, "other", file=IO, result="/x"),
+    ], root=ROOT, site_text={f"{IO}:6": "'/srv', path)", f"{IO}:10": "return safe_join('/x')"},
+        source="baseline.jsonl")
+
+
+def test_an_import_move_fixes_the_sites_that_read_the_rebound_name():
+    report = predict_risks(_io_baseline(), [_delta(MOVED_SAFE_JOIN, package="flask")],
+                           changes=IO_CHANGES, root=ROOT)
+
+    served = _risk(report, SAFE_JOIN, 6)      # the call spans lines 5-6; it reads the import
+    assert served.fixed_by_plan
+    assert served.fixed_by == IO_CHANGES[0]["recipes"]
+    assert any(e.startswith("plan: rewrites toyapp/io.py:1") for e in served.evidence)
+    # ``other`` reads its parameter, not the import: the rewrite does not reach it.
+    assert not _risk(report, SAFE_JOIN, 10).fixed_by_plan
+
+
+def test_an_import_move_fixes_static_sites_in_functions_that_read_it():
+    contacts = [{"target": SAFE_JOIN, "file": IO, "caller": "toyapp.io.serve"},
+                {"target": SAFE_JOIN, "file": IO, "caller": "toyapp.io.other"}]
+    report = predict_risks(fold_facts([], root=ROOT, source="b.jsonl"),
+                           [_delta(MOVED_SAFE_JOIN, package="flask")],
+                           static_contacts=contacts, changes=IO_CHANGES, root=ROOT)
+
+    by_func = {r.site.func: r.fixed_by_plan for r in report.risks}
+    assert by_func == {"serve": True, "other": False}
+
+
+def test_a_name_also_bound_by_an_assignment_is_not_credited():
+    old = IO_OLD + "\nsafe_join = wrap(safe_join)\n"
+    changes = [{**IO_CHANGES[0], "old_source": old,
+                "new_source": old.replace("from flask.helpers", "from werkzeug.utils", 1)}]
+    report = predict_risks(_io_baseline(), [_delta(MOVED_SAFE_JOIN, package="flask")],
+                           changes=changes, root=ROOT)
+
+    assert not any(r.fixed_by_plan for r in report.risks)
+
+
+def test_an_import_the_plan_leaves_bound_to_the_same_target_credits_nothing():
+    changes = [{**IO_CHANGES[0], "new_source": IO_OLD.replace("'/srv'", "'/var'")}]
+    report = predict_risks(_io_baseline(), [_delta(MOVED_SAFE_JOIN, package="flask")],
+                           changes=changes, root=ROOT)
+
+    assert not _risk(report, SAFE_JOIN, 10).fixed_by_plan

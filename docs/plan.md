@@ -97,7 +97,9 @@ absence known only from data is at most `high`.
 
 A default the call passes explicitly never applies, so it is not a risk.
 
-Each risk is marked "fixed by the plan" or "needs attention". After the post-migration capture,
+Each risk is marked "fixed by the plan" or "needs attention". A site is fixed when the plan rewrites
+its line, or rewrites the import that binds the name the site reads (an import move). A site that
+reads a name of the same spelling bound otherwise, such as a parameter, is not. After the post-migration capture,
 `verify` scores every prediction as hit, prevented by the plan, miss or not exercised (see
 [verify.md](verify.md#predicted-risks)).
 
