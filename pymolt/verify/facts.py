@@ -556,6 +556,8 @@ class FactDiff(BaseModel):
             elif e.inconclusive:
                 if any(n.startswith("possibly-evicted") for n in e.notes):
                     reason = "evicted"
+                elif any(n.startswith("possibly-dropped") for n in e.notes):
+                    reason = "dropped"
                 elif e.comparison is Comparison.MISSING:
                     reason = "rewritten-unpaired"
                 else:
@@ -3436,6 +3438,12 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     # Finalizers run at GC time, not at a call site the project controls.
     old_facts = [f for f in old_facts if not f.symbol.endswith(".__del__")]
     new_facts = [f for f in new_facts if not f.symbol.endswith(".__del__")]
+    # A call site inside pymolt's own injected runtime is the tracer observing itself (a
+    # tracer bug), never the project's call: not compared, counted.
+    n_before = len(old_facts) + len(new_facts)
+    old_facts = [f for f in old_facts if _TRACER_SITE not in f.file]
+    new_facts = [f for f in new_facts if _TRACER_SITE not in f.file]
+    tracer_self = n_before - len(old_facts) - len(new_facts)
     # Volatile positions (environment identity, clock readings, entropy-source values) are
     # masked per side before anything is keyed or compared.
     noise = _NOISE.get()
@@ -3500,8 +3508,17 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             same_call = (modes.get(o.fact.file) == "text"
                          and (o.fact.file, o.fact.func) == (n.fact.file, n.fact.func)
                          and o.site_value != n.site_value)
+            # Both lines unedited per the source snapshots: the interpreter attributed the same
+            # call to another line of the same code (3.8 puts a ``with`` block's ``__exit__`` on
+            # its last line, 3.12 on the ``with`` line). Not a rewrite.
+            moved = same_call and bool(prov.maps) and not (o.rewritten_site or n.rewritten_site)
             e = _pair_entry(o, n, prof, modes, input_changed=input_changed,
-                            rewritten="same-call" if same_call else None)
+                            rewritten="same-call" if same_call and not moved else None)
+            if moved:
+                e.notes.append("attribution-moved")
+                e.explained = e.explained or (
+                    "attribution: the same call on unedited code, attributed to another line "
+                    f"({o.site_value!s:.40} -> {n.site_value!s:.40})")
             entries.append(e)
             pending.append((o, n, e))
 
@@ -3543,6 +3560,20 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             old_left, new_left,
             lambda v: (site(v), v.fact.symbol.split(".")[0], v.fact.symbol.rsplit(".", 1)[-1]))
         pair_pass(pairs, input_changed=True)
+
+    # 5q The same call spelled and placed differently by the interpreter: a closure is
+    # ``pkg.mod.decorator`` before 3.11 (no ``co_qualname``) and ``pkg.mod.C.m.<locals>.decorator``
+    # after; a decorator's application is on the ``def`` line in 3.8 and on the ``@`` line in
+    # 3.12. Same file and function, same input, one-to-one only.
+    pairs, old_left, new_left = _pair_qualname_equivalent(old_left, new_left)
+    for o, n in pairs:
+        e = _pair_entry(o, n, prof, modes, rewritten=None)
+        e.notes.append("attribution-moved")
+        e.explained = e.explained or (
+            f"attribution: {o.fact.symbol} -> {n.fact.symbol}, the interpreter names the closure "
+            "and attributes its call differently")
+        entries.append(e)
+        pending.append((o, n, e))
 
     # 6 Anchored pairing on edited lines (same symbol, ledger / plan symbol, one-statement
     # edit); never positional across different symbols.
@@ -3594,8 +3625,10 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         entries.append(_single_entry(v, old_side=False, prov=prov))
     _judge_pairs(pending, old_left, new_left, prov)
     _apply_noise(entries, prov, {f.symbol.split('.')[0] for f in old_facts})
+    backend_only = _soften_backend(entries, old, new)
 
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
+    _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
     entries.sort(key=_entry_sort_key)
     warnings = _warnings(old, new)
@@ -3603,6 +3636,14 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         warnings.append(
             f"unsampled:{unsampled}: value facts seen on one side only, at call sites both "
             "sides' tallies show were called but not fully sampled; not compared")
+    if tracer_self:
+        warnings.append(
+            f"tracer-self:{tracer_self}: facts whose call site is inside pymolt's own injected "
+            "runtime (the tracer observing itself) were not compared")
+    if backend_only:
+        warnings.append(
+            f"backend-only:{backend_only}: compiled calls only one side's backend can observe "
+            f"({_families(old)} vs {_families(new)}) are reported, not compared")
     if volatile_sites:
         grouped = sum(e.old_count + e.new_count for e in entries
                       if (e.explained or "").startswith("volatile-site"))
@@ -4018,6 +4059,119 @@ def _group_volatile(
             [v for v in new_left if id(v) not in grouped])
 
 
+_TRACER_SITE = "/pymolt_trace/"
+
+
+def _qualname_equivalent(a: str, b: str) -> bool:
+    """``pkg.mod.leaf`` (a closure named by ``co_name``, before 3.11) and
+    ``pkg.mod.<qualname>.<locals>.leaf`` (by ``co_qualname``): the same function."""
+    if a == b:
+        return False
+    short, long_ = sorted((a, b), key=len)
+    if ".<locals>." not in long_ or "." not in short:
+        return False
+    ps, ls = short.rsplit(".", 1)
+    pl, ll = long_.rsplit(".", 1)
+    return ls == ll and (pl == ps or pl.startswith(ps + "."))
+
+
+def _pair_qualname_equivalent(
+    old_left: list[_V], new_left: list[_V],
+) -> tuple[list[tuple[_V, _V]], list[_V], list[_V]]:
+    go: dict[tuple, list[_V]] = defaultdict(list)
+    gn: dict[tuple, list[_V]] = defaultdict(list)
+    for side, views in ((go, old_left), (gn, new_left)):
+        for v in views:
+            side[(v.fact.file, v.fact.func, v.core_key,
+                  v.fact.symbol.rsplit(".", 1)[-1])].append(v)
+    pairs: list[tuple[_V, _V]] = []
+    paired: set[int] = set()
+    for key, olds in go.items():
+        news = gn.get(key)
+        if not news or len(olds) != 1 or len(news) != 1:
+            continue
+        o, n = olds[0], news[0]
+        if _qualname_equivalent(o.fact.symbol, n.fact.symbol):
+            pairs.append((o, n))
+            paired.update((id(o), id(n)))
+    return (pairs, [v for v in old_left if id(v) not in paired],
+            [v for v in new_left if id(v) not in paired])
+
+
+_NARROW_C_BACKENDS = frozenset({"setprofile", "hybrid"})
+
+
+def _c_call_visibility(fs: FactSet) -> str | None:
+    """``narrow``: setprofile sees compiled calls of builtin functions only (no method
+    descriptors, type calls or Cython methods); ``wide``: sys.monitoring sees every call."""
+    if not fs.backends:
+        return None
+    if all(b in _NARROW_C_BACKENDS for b in fs.backends):
+        return "narrow"
+    if "monitoring" in fs.backends and not _NARROW_C_BACKENDS.intersection(fs.backends):
+        return "wide"
+    return None
+
+
+def _soften_backend(entries: list[FactEntry], old: FactSet, new: FactSet) -> int:
+    """A compiled call (``__c_call__``) seen on one side only, when that side's backend sees a
+    superset of the other's: the other side could not have observed it, so it is reported as
+    DRIFT, not DISAPPEARED/APPEARED. The reverse direction stays strict (the wider backend
+    would have seen it). Returns how many entries this explained."""
+    o_vis, n_vis = _c_call_visibility(old), _c_call_visibility(new)
+    if {o_vis, n_vis} != {"narrow", "wide"}:
+        return 0
+    wide_side = FactCategory.APPEARED if n_vis == "wide" else FactCategory.DISAPPEARED
+    count = 0
+    for e in entries:
+        if e.category is wide_side and isinstance(e.input, dict) \
+                and e.input.get("__c_call__") is True:
+            e.category, e.review, e.unverified = FactCategory.DRIFT, None, False
+            e.notes.append("noise: compiled call observable by one backend only")
+            e.explained = (f"backend: only {_families(new if n_vis == 'wide' else old)} "
+                           "observes this compiled call")
+            count += 1
+    return count
+
+
+def _only_missing(present: list[Outcome] | None, lacking: list[Outcome] | None) -> bool:
+    """Every outcome type of the ``lacking`` side also occurs on the ``present`` side: the
+    difference is outcomes missing on one side, nothing new there."""
+    xs, ys = _distinct_types(present or []), _distinct_types(lacking or [])
+    return all(any(_outcome_types_match(y, x) for x in xs) for y in ys)
+
+
+def _soften_dropped(entries: list[FactEntry], old: FactSet, new: FactSet) -> None:
+    """The mirror of ``_soften_evicted`` for a runtime that dropped events: a fact missing on a
+    side that dropped events (the counter is global, so any fact there may be the lost one),
+    or a volatile group whose only difference is outcomes missing on that side, is UNCOMPARABLE
+    (``possibly-dropped:<side>``): inconclusive, never a pass, never a failure."""
+    o_drop, n_drop = bool(old.dropped_events), bool(new.dropped_events)
+    if not (o_drop or n_drop):
+        return
+    for e in entries:
+        if "absent-from-tallies" in e.notes:
+            continue
+        side = None
+        if e.category is FactCategory.DISAPPEARED and n_drop:
+            side = "new"
+        elif e.category is FactCategory.APPEARED and o_drop:
+            side = "old"
+        elif e.category is FactCategory.CHANGED and (e.explained or "").startswith(
+                "volatile-site"):
+            if n_drop and _only_missing(e.old, e.new):
+                side = "new"
+            elif o_drop and _only_missing(e.new, e.old):
+                side = "old"
+        if side is None:
+            continue
+        lost = (new if side == "new" else old).dropped_events
+        e.category = FactCategory.UNCOMPARABLE
+        e.notes.append(f"possibly-dropped:{side}")
+        e.explained = (f"possibly-dropped: the {side} capture dropped {lost} event(s); this "
+                       "fact may be one of them")
+
+
 def _signature(f: Fact) -> tuple:
     """The input's structure without its values: bound parameter names, positional arity, and
     keyword names (a compiled call's constant marker counts as its own signature)."""
@@ -4370,15 +4524,48 @@ def _implicit_call_reason(e: FactEntry) -> str | None:
             return "decorator wrapper internals: not named on this line"
         if leaf.startswith("__") and leaf.endswith("__"):
             return "implicit protocol call: not named on this line"
+        if _self_only_input(e.input) and _returns_only(e.old or e.new):
+            # A property read by code that is not the project's (an io finalizer reading
+            # ``closed``) attributed to the nearest project line.
+            return "implicit attribute read: not named on this line"
         return None  # an alias (f = dep.func; f()) can hide a real regression: stays strict
     if not match.group(1) and not leaf.startswith("__init"):
         return "attribute access routed through a descriptor"
     return None
 
 
+def _self_only_input(inputs: Any) -> bool:
+    if not isinstance(inputs, dict):
+        return False
+    bound = inputs.get("bound")
+    # a receiver and nothing else: an empty binding is a bare call (``f = dep.func; f()``)
+    if not isinstance(bound, dict) or not bound or not set(bound) <= {"self", "cls"}:
+        return False
+    return all(inputs.get(k) in (None, [], {}, {"__tuple__": []}, {"__dict__": []})
+               for k in ("args", "varargs", "kwargs")) and not inputs.get("defaulted")
+
+
+def _returns_only(outcomes: list[Outcome] | None) -> bool:
+    return bool(outcomes) and all(o.kind == "return" for o in outcomes)
+
+
+def _constructor_halves(entries: list[FactEntry]) -> set[tuple]:
+    """(type, file, line text) of every constructor half (``T.__new__``/``T.__init__``) that
+    paired: its call site is known to construct T on both sides."""
+    out = set()
+    for e in entries:
+        parts = e.symbol.rsplit(".", 1)
+        if len(parts) == 2 and parts[1] in ("__new__", "__init__") and e.old_site \
+                and e.new_site:
+            out.add((parts[0], e.old_site.file, e.old_site.text or e.old_site.line))
+            out.add((parts[0], e.new_site.file, e.new_site.text or e.new_site.line))
+    return out
+
+
 def _apply_noise(entries: list[FactEntry], prov: _Provenance,
                  old_packages: set[str]) -> None:
     """Import machinery and implicit class-creation hooks are never verdict drivers."""
+    halves = _constructor_halves(entries) if prov.ctx is not None else set()
     for e in entries:
         if e.category in (FactCategory.EQUAL, FactCategory.DRIFT):
             continue
@@ -4398,10 +4585,18 @@ def _apply_noise(entries: list[FactEntry], prov: _Provenance,
         if (reason is None and prov.ctx is not None
                 and e.category in (FactCategory.DISAPPEARED, FactCategory.APPEARED)):
             reason = _implicit_call_reason(e)
+            parts = e.symbol.rsplit(".", 1)
+            if reason is None and len(parts) == 2 and parts[1] in ("__new__", "__init__") \
+                    and _returns_only(e.old or e.new):
+                site = e.site
+                if (parts[0], site.file, site.text or site.line) in halves:
+                    reason = (f"constructor protocol: the other half of {parts[0]}(...) paired "
+                              "at this site")
         if reason is None:
             continue
         e.category, e.review, e.unverified = FactCategory.DRIFT, None, False
         e.notes.append(f"noise: {reason}")
+        e.explained = e.explained or f"implicit: {reason}"
 
 
 def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> FactEntry:
