@@ -24,6 +24,15 @@ raises is reported as a ``return`` with ``arg=None``; the frame's last opcode te
 apart (``frame_outcome``), but the exception TYPE is not observable, so a setprofile raise is
 ``"<unknown>"``. The monitoring backend reports the type.
 
+Compiled (C / Cython) dependency callables called from our code are recorded too, as
+``in = {"__c_call__": true}`` (+ ``arg0`` under sys.monitoring) with an unobserved result
+(``C_RETURN_UNOBSERVED``) or a raise. setprofile sees ``builtin_function_or_method`` and
+method descriptors through ``c_call`` / ``c_return`` / ``c_exception``, but NOT Cython
+functions (``cython_function_or_method``: not an exact ``PyCFunction``) nor class
+instantiation, and it cannot see a call that fails while BINDING its arguments (no frame, no
+event): both are sys.monitoring-only (``CALL`` + ``C_RETURN`` / ``C_RAISE`` / ``RAISE``), and
+for Cython functions below 3.12 ``SetProfileBackend`` wraps them (see ``_wrap.CompiledWrap``).
+
 Generators, coroutines and async generators are recorded ONCE per call, by every backend: at
 the generator's first start (when its arguments are still exactly what the caller passed),
 as a ``return`` whose result is the generator kind (it normalizes exactly like the generator
@@ -46,6 +55,7 @@ only a ``warn()`` walks it. ``warnings.warn`` is wrapped, not replaced: the orig
 runs, with ``stacklevel`` shifted by the one frame the wrapper adds, so the filters, the
 "once"/"default" registries and the reported file/line are exactly what they were.
 """
+import builtins
 import functools
 import inspect
 import os
@@ -254,6 +264,49 @@ def _stdlib_roots():
     return tuple(os.path.normpath(r) + os.sep for r in roots if r)
 
 
+ENV_STDLIB = "PYMOLT_TRACE_STDLIB"   # comma list of stdlib top-level modules to treat as targets
+
+# Test-runner packages are never a boundary target: a project's tests call them (monkeypatch,
+# fixtures, hooks) and their inputs (tmp paths, node ids) change every run. They come back only
+# when ``PYMOLT_TRACE_TARGET`` names one of them (naming any lifts the exclusion for the whole
+# family; the target prefixes themselves still decide which modules match).
+TEST_RUNNER_PACKAGES = frozenset((
+    "_pytest", "pytest", "pluggy", "py", "iniconfig", "_hypothesis_pytestplugin", "xdist"))
+
+# Where a stdlib module's callables report their ``__module__`` from, when it is not the
+# module's own name (``os.path.join`` is ``posixpath.join``). A leading underscore is tried too
+# (``datetime`` -> ``_datetime``, ``asyncio`` -> ``_asyncio``).
+_STDLIB_ALIASES = {
+    "os": ("posix", "nt", "posixpath", "ntpath", "genericpath"),
+}
+
+
+def stdlib_targets(raw=None):
+    """The stdlib top-level modules ``PYMOLT_TRACE_STDLIB`` (or ``raw``) asks to be recorded
+    like dependencies: a frozenset of top-level names, empty when unset (nothing changes)."""
+    if raw is None:
+        raw = os.environ.get(ENV_STDLIB, "")
+    if not isinstance(raw, str):
+        raw = ",".join(str(r) for r in raw)
+    return frozenset(p.strip().split(".", 1)[0] for p in raw.split(",") if p.strip())
+
+
+def _stdlib_hit_names(targets):
+    """Every top-level module name that counts as one of the stdlib ``targets``."""
+    names = set(targets)
+    for name in targets:
+        names.add("_" + name)
+        names.update(_STDLIB_ALIASES.get(name, ()))
+    return frozenset(names)
+
+
+def _runner_exclusions(explicit_tops):
+    """The test-runner packages to exclude, none of them when the target names one."""
+    if any(t in TEST_RUNNER_PACKAGES for t in explicit_tops):
+        return ()
+    return tuple(sorted(TEST_RUNNER_PACKAGES))
+
+
 class AnyMatcher(object):
     """Matches when any of its matchers does (the discover target widened by impact targets)."""
 
@@ -268,17 +321,24 @@ class AnyMatcher(object):
 
 
 class PrefixMatcher(object):
-    """Match modules under one or more explicit top-level prefixes (minus excludes)."""
+    """Match modules under one or more explicit top-level prefixes (minus excludes), plus the
+    stdlib modules ``PYMOLT_TRACE_STDLIB`` names (``stdlib`` overrides the environment)."""
 
-    def __init__(self, prefixes, exclude=()):
+    def __init__(self, prefixes, exclude=(), stdlib=None):
         self.prefixes = tuple(p for p in prefixes if p)
-        self.exclude = tuple(exclude)
+        tops = [p.split(".", 1)[0] for p in self.prefixes]
+        self.exclude = tuple(exclude) + _runner_exclusions(tops)
+        self.stdlib = stdlib_targets() if stdlib is None else stdlib_targets(stdlib)
+        self._stdlib_names = _stdlib_hit_names(self.stdlib)
 
     def matches(self, module, frame=None):
         if not module:
             return False
-        if module.split(".", 1)[0] in self.exclude:
+        top = module.split(".", 1)[0]
+        if top in self.exclude:
             return False
+        if top in self._stdlib_names:
+            return True
         for p in self.prefixes:
             if module == p or module.startswith(p + "."):
                 return True
@@ -303,16 +363,22 @@ class SitePackagesMatcher(object):
     Decisions are cached per module name to keep the hot path to a dict lookup.
     """
 
-    def __init__(self, exclude=()):
-        self.exclude = tuple(exclude)
+    def __init__(self, exclude=(), stdlib=None):
+        self.exclude = tuple(exclude) + _runner_exclusions(())
+        self.stdlib = stdlib_targets() if stdlib is None else stdlib_targets(stdlib)
+        self._stdlib_names = _stdlib_hit_names(self.stdlib)
         self._roots = _site_roots()
         self._cache = {}
 
     def matches(self, module, frame=None):
-        if not module or not self._roots:
+        if not module:
             return False
         top = module.split(".", 1)[0]
-        if top in self.exclude or top in _BUILTIN_MODULES:
+        if top in self.exclude:
+            return False
+        if top in self._stdlib_names:
+            return True   # a stdlib module this capture asked to record (PYMOLT_TRACE_STDLIB)
+        if not self._roots or top in _BUILTIN_MODULES:
             return False  # C builtins (builtins, posix, ...) are never a dependency
         cached = self._cache.get(module)
         if cached is not None:
@@ -373,6 +439,8 @@ class AppMatcher(object):
     def matches(self, module, frame=None):
         if not module:
             return False
+        if module in _SELF_MODULES:
+            return False   # the injected runtime is not the project
         if self.source:
             return any(module == p or module.startswith(p + ".") for p in self.source)
         top = module.split(".", 1)[0]
@@ -488,6 +556,106 @@ def sink_tally(sink):
     def positional(qualname, sym, site, kind, raised=None, dur=None, warnings=None):
         return fn(qualname, sym, site, kind)
     return positional
+
+
+def sink_binding(sink):
+    """True if the sink's ``on_raise`` accepts ``binding`` (a raise while binding arguments)."""
+    fn = getattr(sink, "on_raise", None)
+    if fn is None:
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except Exception:
+        return False
+    return "binding" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+
+
+# ── compiled (C / Cython) callables ──────────────────────────────────────────
+# A compiled callable has no Python frame: the setprofile ``c_call`` events and the
+# sys.monitoring ``CALL`` / ``C_RETURN`` / ``C_RAISE`` events are what sees it. Neither
+# delivers the RESULT or the exception type, nor the arguments (monitoring gives ``arg0``), so
+# the event is ``in = {"__c_call__": true[, "arg0": ...]}`` and a return's result is this
+# marker (undecidable to the diff, like any outcome the runtime cannot classify).
+C_RETURN_UNOBSERVED = OutcomeMarker("unobserved:c-return")
+NO_ARG = object()
+_C_CALL_TYPES = tuple(getattr(types, n) for n in (
+    "BuiltinFunctionType", "MethodDescriptorType", "WrapperDescriptorType",
+    "MethodWrapperType", "ClassMethodDescriptorType") if hasattr(types, n))
+_C_TYPE_NAMES = frozenset(("cython_function_or_method", "fused_cython_function"))
+_HEAPTYPE = 1 << 9
+
+
+def is_compiled_callable(obj):
+    """True for a C / Cython callable object (not a Python function, class or method)."""
+    t = type(obj)
+    return t in _C_CALL_TYPES or t.__name__ in _C_TYPE_NAMES
+
+
+def mro_lookup(cls, name):
+    """The raw class-dict value ``name`` resolves to on ``cls`` (None if absent)."""
+    for owner in cls.__mro__:
+        value = owner.__dict__.get(name, NO_ARG)
+        if value is not NO_ARG:
+            return value
+    return None
+
+
+def same_c_callable(a, b):
+    """True if two events name the same compiled callable. The profile hook is handed a
+    freshly made bound builtin method at ``c_call`` and again at ``c_return``: same
+    ``__self__`` and name, not the same object."""
+    if a is b:
+        return True
+    try:
+        me = getattr(a, "__self__", NO_ARG)
+        return (me is not NO_ARG and me is getattr(b, "__self__", None)
+                and getattr(a, "__name__", None) == getattr(b, "__name__", 0))
+    except Exception:
+        return False
+
+
+def c_identity(obj):
+    """``(module, qualname)`` of a compiled callable, or None when it cannot be named.
+
+    The module is the callable's own ``__module__``; most method descriptors have none, so it
+    comes from what owns them: the module a function is bound to, the class a classmethod is
+    bound to, the type of the instance a bound method belongs to, or ``__objclass__``."""
+    qual = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
+    if not isinstance(qual, str) or not qual:
+        return None
+    module = getattr(obj, "__module__", None)
+    if not (isinstance(module, str) and module):
+        module = None
+        owner = getattr(obj, "__self__", None)
+        if owner is None:
+            owner = getattr(obj, "__objclass__", None)
+            if owner is not None:
+                module = getattr(owner, "__module__", None)
+        elif isinstance(owner, types.ModuleType):
+            module = owner.__name__
+        elif isinstance(owner, type):
+            module = owner.__module__
+        else:
+            # A method bound to an instance is named after the instance's class (a dependency
+            # subclass of a builtin: ``dep.MyDict.get``, not ``dep.dict.get``).
+            module = type(owner).__module__
+            name = getattr(obj, "__name__", None)
+            if isinstance(name, str) and name:
+                qual = type(owner).__qualname__ + "." + name
+    if not (isinstance(module, str) and module):
+        return None
+    return module, qual
+
+
+# The import machinery is never a boundary (``PYMOLT_TRACE_STDLIB=importlib`` included): its
+# frames are what runs while a dependency is being imported, not a contact with it.
+_IMPORT_MACHINERY = ("importlib._bootstrap", "_frozen_importlib")
+
+
+def never_target(module):
+    """True for a module that is never a dependency boundary (this runtime, the import
+    machinery)."""
+    return module in _SELF_MODULES or module.startswith(_IMPORT_MACHINERY)
 
 
 class TraceBackend(object):
@@ -639,13 +807,14 @@ _SELF_MODULES = frozenset(_SELF_PKG + "." + n for n in (
 
 
 def privacy_normalizer():
-    """``normalize`` bound to the privacy profile read ONCE (per backend), not per value:
+    """``normalize_input`` (call inputs: generic objects stay opaque; results use ``normalize``)
+    bound to the privacy profile read ONCE (per backend), not per value:
     ``normalize``'s own ``os.environ`` lookup was ~2/3 of the cost of normalizing a scalar.
     It resolves ``_normalize.normalize`` per call, so a patched normalize is still used."""
     privacy = os.environ.get("PYMOLT_TRACE_PRIVACY", "values").strip().lower()
 
     def norm(value):
-        return _nz.normalize(value, _privacy=privacy)
+        return _nz.normalize_input(value, _privacy=privacy)
     return norm
 
 
@@ -653,13 +822,19 @@ def privacy_normalizer():
 # The categories that announce an API change; the message is capped (a hint, not a dump).
 WARN_CATEGORIES = (DeprecationWarning, PendingDeprecationWarning, FutureWarning)
 WARN_MESSAGE_MAX = 300
+# Never recorded, whatever points where: nondeterministic (garbage collection decides when a
+# ResourceWarning fires) or about the import machinery, not about how a call was made.
+WARN_UNRELATED = tuple(c for c in (ResourceWarning, ImportWarning, BytesWarning,
+                                   getattr(builtins, "EncodingWarning", None)) if c)
 ENV_WARNINGS = "PYMOLT_TRACE_WARNINGS"   # "0" / "off": do not wrap ``warnings.warn``
 _WARN_DEPTH = 256           # frames walked from the warn() caller to the call in flight
+_C_STACK_MAX = 256          # compiled calls in flight per thread (a lost completion never grows it)
 _WARNED_MAX = 10000         # per backend: accumulators awaiting their call's completion
 
 _warn_lock = threading.Lock()
 _warn_owners = [()]         # [tuple of backends capturing], read lock-free by the hook
 _warn_saved = [None, None]  # [the original warnings.warn, our wrapper] while installed
+_warn_refronted = {}       # name -> (original, wrapper) of simplefilter & co. while installed
 _category_labels = {}
 
 
@@ -674,12 +849,15 @@ def _category_label(category):
     return label
 
 
-def warning_key(message, category=None):
+def warning_key(message, category=None, broad=False):
     """``(category label, message)`` of a deprecation-family warning, else None.
 
     Mirrors ``warnings.warn``'s own reading (a ``Warning`` instance gives its class; no
     category means ``UserWarning``) without running user code: a Warning instance's text is
-    its single string argument, a non-string message is named by its type."""
+    its single string argument, a non-string message is named by its type.
+
+    ``broad=True`` also keys a warning of any other category (bar ``WARN_UNRELATED``); the
+    caller then decides whether it is a notice to the project (see ``_capture_warning``)."""
     if isinstance(message, Warning):
         category = type(message)
         args = getattr(message, "args", ())
@@ -689,17 +867,63 @@ def warning_key(message, category=None):
     else:
         return None
     if not issubclass(category, WARN_CATEGORIES):
-        return None
+        if not broad or not issubclass(category, Warning) or issubclass(category, WARN_UNRELATED):
+            return None
+    return _warning_key_of(category, text)
+
+
+def _warning_key_of(category, text):
     if len(text) > WARN_MESSAGE_MAX:
         text = text[:WARN_MESSAGE_MAX]
     return (_category_label(category), text)
 
 
-def _capture_warning(owners, message, category, frame):
-    """Attribute one warning to the innermost recorded call in flight (across backends)."""
-    key = warning_key(message, category)
-    if key is None:
-        return
+def _points_into_project(owners, frame):
+    """Whether ``frame`` (where a warning says it was issued) is the project's own code: the
+    dependency addressed its caller. Judged by each owner's near-side matcher; an owner with no
+    near side (``include_internal``) accepts any."""
+    if frame is None:
+        return False
+    try:
+        name = frame.f_globals.get("__name__")
+    except Exception:
+        return False
+    for owner in owners:
+        near = getattr(owner, "near", None)
+        if near is None or near.matches(name, frame):
+            return True
+    return False
+
+
+def _capture_warning(owners, message, category, frame, attributed=None, text=None):
+    """Attribute one warning to the innermost recorded call in flight (across backends).
+
+    What is recorded (the family rule): every deprecation-family warning
+    (``DeprecationWarning``, ``PendingDeprecationWarning``, ``FutureWarning`` and subclasses),
+    and a warning of ANY other category (bar ``WARN_UNRELATED``) whose own location, the frame
+    ``stacklevel`` makes it point at (``attributed``), is the project's code. The second half is
+    "the dependency is telling its caller something": PyYAML 5.4's ``YAMLLoadWarning`` is a
+    ``RuntimeWarning``, issued by ``load_warning()`` with ``stacklevel=3`` to name the project's
+    ``yaml.load(s)`` line, and a family-only rule missed it. A warning that points at the
+    dependency itself (a ``UserWarning`` about its own internals) stays out, as does one issued
+    by the project's code (the walk to the call in flight stops there).
+
+    ``text`` is the message already read by the caller (the C-level observer has only that)."""
+    if text is not None:
+        if not (isinstance(category, type) and issubclass(category, Warning)):
+            return
+        if issubclass(category, WARN_CATEGORIES):
+            key = _warning_key_of(category, text)
+        elif issubclass(category, WARN_UNRELATED) or not _points_into_project(owners, attributed):
+            return
+        else:
+            key = _warning_key_of(category, text)
+    else:
+        key = warning_key(message, category)
+        if key is None:
+            key = warning_key(message, category, broad=True)
+            if key is None or not _points_into_project(owners, attributed):
+                return
     best = None
     for owner in owners:
         hit = owner._warning_frame(frame)
@@ -707,6 +931,19 @@ def _capture_warning(owners, message, category, frame):
             best = (hit[0], hit[1], owner)
     if best is not None:
         best[2]._add_warning(best[1], key)
+
+
+def _attributed_frame(caller, stacklevel):
+    """The frame ``warnings.warn(..., stacklevel)`` issued from ``caller`` points at."""
+    try:
+        level = stacklevel if stacklevel > 1 else 1
+    except Exception:
+        return caller
+    frame = caller
+    while level > 1 and frame is not None and frame.f_back is not None:
+        frame = frame.f_back
+        level -= 1
+    return frame
 
 
 def _forward_stacklevel(stacklevel, kwargs, caller, c_impl=True):
@@ -741,14 +978,23 @@ def _make_warn_hook(original):
         owners = _warn_owners[0]
         if owners:
             try:
-                _capture_warning(owners, message, category, caller)
+                _capture_warning(owners, message, category, caller,
+                                 _attributed_frame(caller, stacklevel))
+                _front_observer()
             except Exception:
                 pass  # capture must never change what warn() does
         try:
             level = _forward_stacklevel(stacklevel, kwargs, caller, c_impl)
         except Exception:
             level = stacklevel  # a bad stacklevel: let the original raise its own error
-        return original(message, category, level, source, **kwargs)
+        # The observer filter sees this warning again when the original reaches the filters:
+        # it is already recorded, so it stays out of the way until the original returns.
+        previous = getattr(_obs_state, "skip", False)
+        _obs_state.skip = True
+        try:
+            return original(message, category, level, source, **kwargs)
+        finally:
+            _obs_state.skip = previous
 
     try:
         functools.update_wrapper(warn, original)
@@ -758,6 +1004,101 @@ def _make_warn_hook(original):
     return warn
 
 
+# ── the observer filter: warnings raised from C ──────────────────────────────
+# ``warnings.warn`` is wrapped above, but C code warns through ``PyErr_WarnEx`` straight into
+# the interpreter's filter loop (``datetime.utcnow()`` on 3.12). The loop calls, for every
+# filter in ``warnings.filters`` until one matches, ``msg.match(text)``, ``issubclass(category,
+# cat)`` and ``mod.match(module)``. The observer is a filter at the FRONT of the list whose three
+# parts are probes: ``match(text)`` keeps the text, the category's ``__subclasscheck__`` receives
+# the category (and records the warning with the text), and the filter NEVER matches (the
+# category check answers False). It therefore changes nothing the program can see: no action
+# is taken on its behalf, every filter after it decides exactly as before, ``once`` /
+# ``default`` / ``module`` registries are the interpreter's own, ``error`` still raises, and
+# ``catch_warnings(record=True)`` logs what it always logged. Nothing is re-applied because
+# nothing was intercepted. (The alternative, an ``always`` filter plus a ``showwarning`` hook,
+# would take the decision over and have to re-implement it, and ``catch_warnings(record=True)``
+# swaps ``showwarning`` out from under it.)
+_obs_state = threading.local()   # .text: the message the loop is testing; .skip: warn() is recorded
+
+
+class _ObserverText(object):
+    def match(self, text):
+        try:
+            _obs_state.text = text
+        except Exception:
+            pass
+        return True
+
+
+def _observe(category):
+    owners = _warn_owners[0]
+    text = getattr(_obs_state, "text", None)
+    _obs_state.text = None
+    if not owners or text is None or getattr(_obs_state, "skip", False):
+        return
+    if not isinstance(category, type):
+        return
+    frame = sys._getframe(2)         # 0 _observe, 1 __subclasscheck__, 2 what the C code ran in
+    own = getattr(sys.modules.get("warnings"), "__file__", None)
+    while frame is not None and own and frame.f_code.co_filename == own:
+        frame = frame.f_back         # the pure-Python warnings module, when C is not in use
+    if frame is None:
+        return
+    _capture_warning(owners, None, category, frame, frame, text=str(text))
+
+
+class _ObserverMeta(type):
+    def __subclasscheck__(cls, sub):
+        try:
+            _observe(sub)
+        except Exception:
+            pass      # recording must never change (or raise from) the program's own warning
+        return False
+
+
+_ObserverCategory = _ObserverMeta("PymoltWarningObserver", (Warning,), {})
+_OBSERVER_FILTER = ("ignore", _ObserverText(), _ObserverCategory, None, 0)
+
+
+def _front_observer():
+    """Keep the observer first in ``warnings.filters`` (cheap when it is: one identity test)."""
+    import warnings
+    flt = warnings.filters
+    if flt and flt[0] is _OBSERVER_FILTER:
+        return
+    flt[:] = [_OBSERVER_FILTER] + [f for f in flt if f is not _OBSERVER_FILTER]
+
+
+def _remove_observer():
+    import warnings
+    flt = warnings.filters
+    if any(f is _OBSERVER_FILTER for f in flt):
+        flt[:] = [f for f in flt if f is not _OBSERVER_FILTER]
+
+
+def _make_refront(original):
+    """``simplefilter`` & co. insert at the front: put the observer back there afterwards, so a
+    program's ``warnings.simplefilter("ignore")`` does not hide C-level warnings from it."""
+    def refront(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        finally:
+            if _warn_owners[0]:
+                try:
+                    _front_observer()
+                except Exception:
+                    pass
+    try:
+        functools.update_wrapper(refront, original)
+    except Exception:
+        pass
+    refront.__pymolt_warn_hook__ = True
+    return refront
+
+
+_REFRONT_FUNCTIONS = ("simplefilter", "filterwarnings", "resetwarnings")
+
+
 def _warnings_disabled():
     raw = os.environ.get(ENV_WARNINGS, "1").strip().lower()
     return raw in ("0", "false", "no", "off")
@@ -765,8 +1106,9 @@ def _warnings_disabled():
 
 def install_warning_capture(owner):
     """Start attributing warnings to ``owner``'s calls in flight (idempotent). The first
-    owner wraps ``warnings.warn``. ``owner`` provides ``_warning_frame(frame)`` ->
-    ``(depth, frame) | None`` and ``_add_warning(frame, key)``."""
+    owner wraps ``warnings.warn`` and puts the observer filter first in ``warnings.filters``.
+    ``owner`` provides ``_warning_frame(frame)`` -> ``(depth, frame) | None`` and
+    ``_add_warning(frame, key)``."""
     if _warnings_disabled():
         return False
     try:
@@ -782,12 +1124,23 @@ def install_warning_capture(owner):
             hook = _make_warn_hook(original)
             warnings.warn = hook
             _warn_saved[0], _warn_saved[1] = original, hook
+            for name in _REFRONT_FUNCTIONS:
+                fn = getattr(warnings, name, None)
+                if fn is not None:
+                    wrapped = _make_refront(fn)
+                    setattr(warnings, name, wrapped)
+                    _warn_refronted[name] = (fn, wrapped)
+        try:
+            _front_observer()
+        except Exception:
+            pass
     return True
 
 
 def remove_warning_capture(owner):
-    """Stop attributing warnings to ``owner``. The last owner restores ``warnings.warn``,
-    unless something wrapped our wrapper since (it then stays, as a pass-through)."""
+    """Stop attributing warnings to ``owner``. The last owner restores ``warnings.warn`` (and
+    ``simplefilter`` & co.) and takes the observer filter out, unless something wrapped our
+    wrapper since (it then stays, as a pass-through)."""
     with _warn_lock:
         _warn_owners[0] = tuple(o for o in _warn_owners[0] if o is not owner)
         if _warn_owners[0] or _warn_saved[1] is None:
@@ -797,6 +1150,11 @@ def remove_warning_capture(owner):
             if warnings.warn is _warn_saved[1]:
                 warnings.warn = _warn_saved[0]
                 _warn_saved[0] = _warn_saved[1] = None
+            for name, (fn, wrapped) in list(_warn_refronted.items()):
+                if getattr(warnings, name, None) is wrapped:
+                    setattr(warnings, name, fn)
+                del _warn_refronted[name]
+            _remove_observer()
         except Exception:
             pass
 
@@ -869,10 +1227,15 @@ class FrameBackend(TraceBackend):
         # identifies the duplicate exactly. Off (0.0) otherwise: holding frames costs memory.
         self._dedupe_until = 0.0
         self._last_start = {}       # tid -> frame of the last recorded start
+        self._ccache = {}           # id(callable) -> (callable, sym | None): compiled decisions
+        self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
+        self._bind_kw = sink_binding(sink)
+        self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
+        self._inh_codes = {}        # id(code) -> code: stdlib code armed for inherited-method calls
 
     def _target_module(self, module, frame):
         """Far-side decision for a module (cached per code by the callers)."""
-        if module in _SELF_MODULES:
+        if never_target(module):
             return False
         return bool(self._in_target(module, frame))
 
@@ -1010,7 +1373,7 @@ class FrameBackend(TraceBackend):
             return sym, symq, None, {"unbound": True}
         return sym, symq, own, inputs
 
-    def _record(self, frame, ent):
+    def _record(self, frame, ent, override=None):
         """Record one boundary call at its start (the near-side check already passed).
 
         A function call becomes a pending entry completed by its return/raise event; a
@@ -1025,6 +1388,8 @@ class FrameBackend(TraceBackend):
                 self._dedupe_until = 0.0
                 self._last_start = {}
         ci, sym, symq, loc, inner = self._call_identity(frame, ent)
+        if override is not None and override != sym:
+            sym, symq = override, None      # an inherited method, named after the receiver
         site = self._site(frame.f_back)
         # Sampling before any normalize: an unsampled call never pays for its values. The
         # key (symbol, call site) lets a novelty-first sink admit each new one first.
@@ -1060,7 +1425,7 @@ class FrameBackend(TraceBackend):
         pending[id(frame)] = (code, ci.q, inputs, site, sym, symq, own, _now(), tid, sampled)
         return True
 
-    def _finish(self, info, outcome, value, warns=None):
+    def _finish(self, info, outcome, value, warns=None, binding=False):
         """Complete a recorded call: ``on_return``/``on_raise`` if sampled, else ``tally``.
         ``value`` is the result (return), the raised type label (raise) or ignored
         (ambiguous); ``warns`` the warnings attributed to the call while it ran."""
@@ -1086,10 +1451,123 @@ class FrameBackend(TraceBackend):
         if warns and self._warn_kw:
             kw["warnings"] = warns
         if outcome == OUTCOME_RAISE:
+            if binding and self._bind_kw:
+                kw["binding"] = True
             self.sink.on_raise(info[1], info[2], value, info[3], **kw)
             return
         result = value if outcome == OUTCOME_RETURN else AMBIGUOUS_OUTCOME
         self.sink.on_return(info[1], info[2], result, info[3], **kw)
+
+    # ── inherited methods ──────────────────────────────────────────────────────
+    # A dependency class inherits methods from the stdlib (``HTTPHeaderDict.get`` is
+    # ``Mapping.get``); the callee's code lives outside every target, yet the CALL from our
+    # code is a boundary contact. It is recorded when the receiver's class is a target class
+    # and resolves the method to that very code, named after the receiver's class.
+    def _inherited_sym(self, code, recv):
+        """``<receiver class module>.<qualname>.<method>`` for non-target ``code`` called on
+        ``recv``, or None. Decided once per (code, receiver class)."""
+        t = recv if isinstance(recv, type) else type(recv)
+        key = (id(code), id(t))
+        ent = self._inh.get(key)
+        if ent is not None and ent[0] is code and ent[1] is t:
+            return ent[2]
+        sym = None
+        try:
+            module = t.__module__
+            if (isinstance(module, str) and module and module != "builtins"
+                    and not never_target(module) and self._in_target(module)
+                    and code.co_name != "__del__"):
+                value = mro_lookup(t, code.co_name)
+                if isinstance(value, (staticmethod, classmethod)):
+                    value = value.__func__
+                if getattr(value, "__code__", None) is code:
+                    sym = module + "." + t.__qualname__ + "." + code.co_name
+        except Exception:
+            sym = None
+        if len(self._inh) >= _CODE_CACHE_MAX:
+            self._inh.clear()
+        self._inh[key] = (code, t, sym)
+        return sym
+
+    def _inherited_descriptor_sym(self, desc, recv):
+        """The same for a builtin method descriptor (``dict.get``) called on ``recv``, an
+        instance of a dependency subclass of its class."""
+        t = type(recv)
+        key = (id(desc), id(t))
+        ent = self._inh.get(key)
+        if ent is not None and ent[0] is desc and ent[1] is t:
+            return ent[2]
+        sym = None
+        try:
+            module = t.__module__
+            if (isinstance(module, str) and module and module != "builtins"
+                    and not never_target(module) and self._in_target(module)
+                    and desc.__name__ != "__del__" and mro_lookup(t, desc.__name__) is desc):
+                sym = module + "." + t.__qualname__ + "." + desc.__name__
+        except Exception:
+            sym = None
+        if len(self._inh) >= _CODE_CACHE_MAX:
+            self._inh.clear()
+        self._inh[key] = (desc, t, sym)
+        return sym
+
+    # ── compiled calls ─────────────────────────────────────────────────────────
+    def _c_sym(self, obj):
+        """The ``module.qualname`` a compiled callable is recorded under, or None when it is
+        not a dependency's (builtins, the stdlib and anything the matcher rejects). Decided
+        once per callable object (the entry holds it, so its id cannot be recycled)."""
+        ent = self._ccache.get(id(obj))
+        if ent is not None and ent[0] is obj:
+            return ent[1]
+        sym = None
+        try:
+            ident = c_identity(obj)
+            if ident is not None:
+                module = ident[0]
+                if (module != "builtins" and not never_target(module)
+                        and self._in_target(module)):
+                    sym = module + "." + ident[1]
+        except Exception:
+            sym = None
+        if len(self._ccache) >= _CODE_CACHE_MAX:
+            self._ccache.clear()
+        self._ccache[id(obj)] = (obj, sym)
+        return sym
+
+    def _c_start(self, frame, sym, arg0=NO_ARG):
+        """Begin one compiled call made from ``frame`` (the near-side check passed): the
+        pending record, in the shape ``_finish`` completes."""
+        site = self._site(frame)
+        admit = self._admit
+        if admit is None:
+            sampled = True
+        elif self._admit_key:
+            sampled = bool(admit(key=(sym, site["file"], site["line"])))
+        else:
+            sampled = bool(admit())
+        inputs = None
+        if sampled:
+            inputs = {"__c_call__": True}
+            if arg0 is not NO_ARG:
+                try:
+                    inputs["arg0"] = self._normalize(arg0)
+                except Exception:
+                    inputs["arg0"] = {"__opaque__": "unrenderable"}
+        if sym not in self.observed_syms:
+            with self._obs_lock:
+                if sym not in self.observed_syms:
+                    self.observed_syms.add(sym)
+                    now = _monotonic()
+                    if self.first_seen_at is None:
+                        self.first_seen_at = now
+                    self.last_new_at = now
+        return (None, sym, inputs, site, sym, None, None, _now(), _get_ident(), sampled)
+
+    def _binding_failure(self, frame, sym, symq=None):
+        """Record a call that failed while binding its arguments: the callee never started."""
+        info = (None, sym, {"__c_call__": True}, self._site(frame), sym, symq, None, None,
+                _get_ident(), True)
+        self._finish(info, OUTCOME_RAISE, "TypeError", binding=True)
 
     # ── discovery bookkeeping ──────────────────────────────────────────────────
     def _observe(self, code, sym, ent):
@@ -1129,6 +1607,8 @@ class SetProfileBackend(FrameBackend):
         self._lock = threading.Lock()
         self.c_event_count = 0  # classified internal C traffic, intentionally not persisted
         self.skip_wrapped = False  # hybrid: skip calls a WrapBackend wrapper already records
+        self.compiled_wrap = True  # wrap the Cython functions of dependency modules (see start)
+        self._compiled = None
         self._retired = False
         self._stopped = False
         self._start_tid = None
@@ -1142,8 +1622,13 @@ class SetProfileBackend(FrameBackend):
             if len(self._callee) >= _CODE_CACHE_MAX:
                 self._callee.clear()
             module = frame.f_globals.get("__name__", "") or ""
-            ent = [code, self._target_module(module, frame), module,
-                   code.co_name == "<module>", None, generator_marker(code)]
+            body = code.co_name == "<module>"
+            # [.., generator marker, may be an inherited method]: a non-target method (first
+            # parameter self/cls) can still be a dependency class's inherited method.
+            ent = [code, self._target_module(module, frame) and code.co_name != "__del__",
+                   module, body, None, generator_marker(code),
+                   (not body and code.co_argcount > 0 and not never_target(module)
+                    and code.co_varnames[0] in ("self", "cls"))]
             self._callee[id(code)] = ent
         return ent
 
@@ -1176,8 +1661,19 @@ class SetProfileBackend(FrameBackend):
                         return self._hook
                 else:
                     ent = self._callee_entry(frame)
-                if not ent[1] or ent[3]:
-                    return self._hook  # not a dependency, or a module body (import, not a contact)
+                override = None
+                if not ent[1]:
+                    if not ent[6] or self._retired:
+                        return self._hook  # not a dependency
+                    back = frame.f_back
+                    if not self._caller_is_near(back):
+                        return self._hook
+                    override = self._inherited_sym(frame.f_code, frame.f_locals.get(
+                        frame.f_code.co_varnames[0]))
+                    if override is None:
+                        return self._hook  # not a dependency class's inherited method
+                elif ent[3]:
+                    return self._hook  # a module body (import, not a contact)
                 if ent[5] is not None and not first_start(frame):
                     return self._hook  # a generator resuming: not a call
                 back = frame.f_back
@@ -1185,7 +1681,7 @@ class SetProfileBackend(FrameBackend):
                     return self._hook  # hybrid: a WrapBackend wrapper already recorded this call
                 if not self._caller_is_near(back):  # caller = our code?
                     return self._hook  # internal dep<->dep traffic, not our boundary
-                if self._record(frame, ent):
+                if self._record(frame, ent, override):
                     tid = _get_ident()
                     self._inflight[tid] = self._inflight.get(tid, 0) + 1
             elif event == "return":
@@ -1199,17 +1695,35 @@ class SetProfileBackend(FrameBackend):
             elif self._retired:
                 pass
             elif event == "c_call":
-                # Routine C traffic. Explicitly classified so the hook never falls into the
-                # Python-frame path or crashes; intentionally not persisted.
+                # A C callable of a dependency, called from our code (``c_call``'s frame is the
+                # CALLER). Everything else is routine C traffic, classified and not persisted.
                 if self._c_caller_ok(frame):
                     self.c_event_count += 1
+                    sym = self._c_sym(arg)
+                    if sym is not None and not (self.skip_wrapped and self._from_wrapper(frame)):
+                        tid = _get_ident()
+                        stack = self._cstack.get(tid)
+                        if stack is None:
+                            stack = self._cstack[tid] = []
+                        elif len(stack) >= _C_STACK_MAX:
+                            del stack[:]
+                        stack.append((arg, frame, self._c_start(frame, sym)))
+            elif event == "c_return":
+                stack = self._cstack.get(_get_ident())
+                if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
+                    self._finish(stack.pop()[2], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
             elif event == "c_exception":
-                # The C-level raise signal: a C callable the dependency invoked raised. The
-                # CALLEE has to be the traced dependency: gating only on the caller recorded
+                # A C callable raised. The exception TYPE is not observable from a profile
+                # hook (as for a Python raise), so the raise is untyped.
+                stack = self._cstack.get(_get_ident())
+                if stack and stack[-1][1] is frame and same_c_callable(stack[-1][0], arg):
+                    self._finish(stack.pop()[2], OUTCOME_RAISE, UNTYPED_RAISE)
+                    return self._hook
+                # No matching c_call (the hook started mid-call): the legacy raise-only fact.
+                # The CALLEE has to be the traced dependency: gating only on the caller recorded
                 # every C raise our code provoked anywhere (`_io.BufferedReader.seek` during an
                 # import) as a contact of a dependency it never touched. Callables with no
-                # `__module__` — most builtin method descriptors — cannot be attributed at
-                # all, and an unattributable call is not a contract.
+                # `__module__` cannot be attributed at all.
                 if not self._c_caller_ok(frame):
                     return self._hook
                 cmod = getattr(arg, "__module__", "") or ""
@@ -1222,7 +1736,6 @@ class SetProfileBackend(FrameBackend):
                 if self._tid_kw:
                     kw["tid"] = _get_ident()
                 self.sink.on_raise(cq, {"c_level": True}, "Exception", self._site(frame), **kw)
-            # "c_return" carries nothing we persist: fall through.
         except Exception:
             pass  # the hook must never break the traced program
         return self._hook
@@ -1250,6 +1763,14 @@ class SetProfileBackend(FrameBackend):
         sys.setprofile(self._hook)
         threading.setprofile(self._hook)  # catch threads spawned after start
         install_warning_capture(self)
+        if self.compiled_wrap:
+            try:
+                from ._wrap import CompiledWrap
+                self._compiled = CompiledWrap(self.sink, self.matcher)
+                self._compiled.near = self.near
+                self._compiled.start()
+            except Exception:
+                self._compiled = None
 
     def retire(self):
         """Stop recording new calls (discover -> watch). Calls in flight still complete; each
@@ -1268,6 +1789,7 @@ class SetProfileBackend(FrameBackend):
         """Keep recording, but only into ``prefixes`` (watch mode's ``module.*`` targets)."""
         self.matcher = PrefixMatcher(list(prefixes), self._exclude)
         self._callee = {}
+        self._ccache = {}
 
     def stop(self):
         self._retired = self._stopped = True  # hooks in other threads remove themselves
@@ -1275,8 +1797,15 @@ class SetProfileBackend(FrameBackend):
             sys.setprofile(self._prev)
         threading.setprofile(None)
         remove_warning_capture(self)
+        if self._compiled is not None:
+            try:
+                self._compiled.stop()
+            except Exception:
+                pass
+            self._compiled = None
         self._pending.clear()
         self._inflight.clear()
+        self._cstack.clear()
         self._warned.clear()
 
 

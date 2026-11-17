@@ -32,6 +32,11 @@ Value renderers (fact model v2), tried before the opaque fallback — values / p
                         {"__structure__": type, "shape", "dtype"|"dtypes"+"columns",
                          "values" (only when size <= 200; never under shape)}
     int ``status_code`` {"__structure__": type, "status_code": n}  (same under shape)
+    generic object      {"__object__": "mod.Qual", "attrs": {name: value, ...}}
+                        (+ "__truncated__"): public instance ``__dict__`` entries, ``__slots__``
+                        member descriptors, attrs / pydantic v1+v2 fields and namedtuple
+                        fields; reads state only, never a property, ``__getattr__``,
+                        ``__repr__`` or ``__eq__``
 Rendering is duck-typed and never imports anything: a stdlib type is recognised only if its
 module is already in ``sys.modules`` (no value of it can exist otherwise). It never runs user
 code beyond the allow-listed structures' cheap accessors (``shape``, ``dtype(s)``, ``columns``,
@@ -72,6 +77,11 @@ _SAFE_SCALARS = (type(None), bool, int, float, str, bytes)
 # are a guard against infinite / cyclic structures, not a means of saving cycles.
 MAX_DEPTH = 6
 MAX_SEQ = 200
+# Generic objects rendered per top-level ``normalize`` call: depth x width alone would let a
+# deep object graph (an ORM session, an app) explode; past this the rest are type-level.
+MAX_OBJECTS = 64            # generic objects rendered per value: a result is a witness, not a dump
+MAX_OBJECT_DEPTH = 3        # nested generic objects: deeper ones stay type-level
+_BUDGET = [MAX_OBJECTS]
 
 
 def typename(value):
@@ -83,13 +93,16 @@ def typename(value):
     return t.__qualname__
 
 
-def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
+def normalize(value, depth=0, _seen=frozenset(), _privacy=None, _objects=True):
     # type: (Any, int, frozenset) -> Any
     """Reduce ``value`` to a deterministic JSON-compatible structure.
 
     Cycles are broken via ``id()`` tracking in ``_seen``. Anything not safely
     representable becomes ``{"__opaque__": typename}`` — never a raw repr.
+    ``_objects=False`` turns the generic object / namedtuple renderer off (see ``normalize_input``).
     """
+    if depth == 0:
+        _BUDGET[0] = MAX_OBJECTS
     if _privacy is None:
         _privacy = os.environ.get("PYMOLT_TRACE_PRIVACY", "values").strip().lower()
 
@@ -116,9 +129,16 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
         return {"__cycle__": typename(value)}
     seen = _seen | {vid}
 
+    if (_objects and isinstance(value, tuple) and type(value) is not tuple
+            and _kind_of(type(value))[0] == "namedtuple"):
+        try:
+            return _render_namedtuple(value, _kind_of(type(value)), depth, seen, _privacy, _objects)
+        except Exception:
+            pass
+
     if isinstance(value, (list, tuple)):
         seq = [
-            normalize(v, depth + 1, seen, _privacy)
+            normalize(v, depth + 1, seen, _privacy, _objects)
             for v in list(value)[:MAX_SEQ]
         ]
         tag = "tuple" if isinstance(value, tuple) else "list"
@@ -131,17 +151,17 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
         items = []
         for k in list(value.keys())[:MAX_SEQ]:
             if isinstance(k, _SAFE_SCALARS):
-                nk = normalize(k, depth + 1, seen, _privacy)
+                nk = normalize(k, depth + 1, seen, _privacy, _objects)
             else:
                 nk = {"__opaque__": typename(k)}
-            items.append([nk, normalize(value[k], depth + 1, seen, _privacy)])
+            items.append([nk, normalize(value[k], depth + 1, seen, _privacy, _objects)])
         items.sort(key=_stable_key)
         return {"__dict__": items}
 
     if isinstance(value, (set, frozenset)):
         norm = sorted(
             (
-                normalize(v, depth + 1, seen, _privacy)
+                normalize(v, depth + 1, seen, _privacy, _objects)
                 for v in list(value)[:MAX_SEQ]
             ),
             key=_stable_key,
@@ -149,12 +169,19 @@ def normalize(value, depth=0, _seen=frozenset(), _privacy=None):
         return {"__set__": norm}
 
     try:
-        rendered = _render(value, depth, seen, _privacy)
+        rendered = _render(value, depth, seen, _privacy, _objects)
     except Exception:
         rendered = None
     if rendered is not None:
         return rendered
     return {"__opaque__": typename(value)}
+
+
+def normalize_input(value, depth=0, _seen=frozenset(), _privacy=None):
+    """``normalize`` for recorded call INPUTS: generic library objects stay type-level
+    (``__opaque__`` / ``status_code``) — no structural object or namedtuple rendering, which
+    costs time per call and ties fact keys to library internals. Everything else is identical."""
+    return normalize(value, depth, _seen, _privacy, False)
 
 
 # ── value renderers ──────────────────────────────────────────────────────────
@@ -257,6 +284,11 @@ def _classify(t):
     if enum_cls is not None and issubclass(t, enum_cls):
         return ("enum",)
     mro = _TYPE_MRO.__get__(t, type)
+    if issubclass(t, tuple) and t is not tuple:
+        for cls in mro:
+            names = _class_dict(cls).get("_fields")
+            if type(names) is tuple and all(type(n) is str for n in names):
+                return ("namedtuple", names[:MAX_SEQ])
     for cls in mro:
         fields = _class_dict(cls).get("__dataclass_fields__")
         if fields is not None:
@@ -285,11 +317,54 @@ def _classify(t):
                     return ("status_prop", fget)
                 return _OPAQUE
             slot = _dict_slot(mro)
-            return ("status_attr", attr, slot) if slot is not None else _OPAQUE
+            if slot is not None:
+                return ("status_attr", attr, slot, _object_info(t, mro))
+            break
+    info = _object_info(t, mro)
+    if info is None:
+        return _OPAQUE
+    slot = info[1]
+    return ("status_attr", _MISSING, slot, info) if slot is not None else info
+
+
+def _field_names(ns):
+    """Field names declared by a class namespace for attrs / pydantic v2 / pydantic v1, or None."""
+    attrs = ns.get("__attrs_attrs__")
+    if type(attrs) is tuple:
+        names = [getattr(a, "name", None) for a in attrs]
+        if all(type(n) is str for n in names):
+            return names
+    for key in ("__pydantic_fields__", "__fields__"):
+        fields = ns.get(key)
+        if type(fields) is dict:
+            names = [n for n in fields if type(n) is str]
+            return names
+    return None
+
+
+def _object_info(t, mro):
+    """``("object", dict_slot, fields, members)`` for a generic instance, or None.
+
+    ``fields`` is the declared field list (attrs / pydantic) or None; ``members`` maps public
+    ``__slots__`` names to their C member descriptors."""
+    if not (t.__flags__ & 512):    # Py_TPFLAGS_HEAPTYPE: Python-defined classes only; a static
+        return None                # C type (generator, code, frame, ...) stays opaque
+    fields = None
+    members = {}
+    for cls in mro:
+        ns = _class_dict(cls)
+        if fields is None:
+            fields = _field_names(ns)
+        for name, desc in list(ns.items()):
+            if (type(desc) is types.MemberDescriptorType and type(name) is str
+                    and name not in members):
+                members[name] = desc
     slot = _dict_slot(mro)
-    if slot is not None:
-        return ("status_attr", _MISSING, slot)
-    return _OPAQUE
+    if slot is None and not members:
+        return None
+    if fields is not None:
+        fields = tuple(fields[:MAX_SEQ])
+    return ("object", slot, fields, members)
 
 
 def _dict_slot(mro):
@@ -319,7 +394,7 @@ def _kind_of(t):
     return kind
 
 
-def _render(value, depth, seen, privacy):
+def _render(value, depth, seen, privacy, objects=True):
     """Typed rendering of a known non-container value, or None (-> opaque)."""
     kind = _kind_of(type(value))
     k = kind[0]
@@ -342,10 +417,19 @@ def _render(value, depth, seen, privacy):
     if k == "enum":
         return _render_enum(value)
     if k == "dataclass":
-        return _render_dataclass(value, kind, depth, seen, privacy)
+        return _render_dataclass(value, kind, depth, seen, privacy, objects)
     if k == "structure":
-        return _render_structure(value, kind[1], depth, seen, privacy)
-    return _render_status(value, kind)
+        return _render_structure(value, kind[1], depth, seen, privacy, objects)
+    if k == "object":
+        if not objects or depth >= MAX_OBJECT_DEPTH:
+            return None
+        return _render_object(value, kind, depth, seen, privacy, objects)
+    if k == "status_attr" or k == "status_prop":
+        out = _render_status(value, kind)
+        if out is None and objects and k == "status_attr" and kind[3] is not None:
+            return _render_object(value, kind[3], depth, seen, privacy, objects)
+        return out
+    return None
 
 
 def _render_enum(value):
@@ -359,7 +443,7 @@ def _render_enum(value):
     return {"__enum__": typename(value) + "." + name}
 
 
-def _render_dataclass(value, kind, depth, seen, privacy):
+def _render_dataclass(value, kind, depth, seen, privacy, objects=True):
     slot = kind[2]
     state = slot.__get__(value, type(value)) if slot is not None else None
     fields = []
@@ -372,11 +456,11 @@ def _render_dataclass(value, kind, depth, seen, privacy):
             except Exception:
                 fields.append([name, {"__opaque__": "unset"}])
                 continue
-        fields.append([name, normalize(item, depth + 1, seen, privacy)])
+        fields.append([name, normalize(item, depth + 1, seen, privacy, objects)])
     return {"__dataclass__": typename(value), "fields": fields}
 
 
-def _render_structure(value, kind, depth, seen, privacy):
+def _render_structure(value, kind, depth, seen, privacy, objects=True):
     dims = [int(n) for n in value.shape]
     out = {"__structure__": typename(value), "shape": dims}
     size = 1
@@ -385,14 +469,71 @@ def _render_structure(value, kind, depth, seen, privacy):
     with_values = privacy != "shape" and size <= MAX_STRUCTURE_VALUES
     if kind == "frame":
         out["dtypes"] = [str(d) for d in value.dtypes.tolist()[:MAX_SEQ]]
-        out["columns"] = [normalize(c, depth + 1, seen, privacy)
+        out["columns"] = [normalize(c, depth + 1, seen, privacy, objects)
                           for c in value.columns.tolist()[:MAX_SEQ]]
         if with_values:
-            out["values"] = normalize(value.to_dict("list"), depth + 1, seen, privacy)
+            out["values"] = normalize(value.to_dict("list"), depth + 1, seen, privacy, objects)
     else:
         out["dtype"] = str(value.dtype)
         if with_values:
-            out["values"] = normalize(value.tolist(), depth + 1, seen, privacy)
+            out["values"] = normalize(value.tolist(), depth + 1, seen, privacy, objects)
+    return out
+
+
+def _render_object(value, kind, depth, seen, privacy, objects=True):
+    """Structural rendering of an instance from its raw state — no user code runs."""
+    t = type(value)
+    out = {"__object__": _class_label(t), "attrs": {}}
+    if _BUDGET[0] <= 0:
+        out["__truncated__"] = True
+        return out
+    _BUDGET[0] -= 1
+    slot, fields, members = kind[1], kind[2], kind[3]
+    state = slot.__get__(value, t) if slot is not None else None
+    if type(state) is not dict:
+        state = {}
+    found = []
+    if fields is not None:
+        names = list(fields)
+    else:
+        names = [n for n in state if type(n) is str and not n.startswith("_")]
+        names.extend(n for n in members if not n.startswith("_") and n not in state)
+        names.sort()
+    if len(names) > MAX_SEQ:
+        names = names[:MAX_SEQ]
+        out["__truncated__"] = True
+    for name in names:
+        if name in state:
+            item = state[name]
+        else:
+            desc = members.get(name)
+            if desc is None:
+                continue
+            try:
+                item = desc.__get__(value, t)
+            except AttributeError:
+                continue            # unset slot
+        found.append((name, item))
+    if fields is None and not found:
+        return None                 # nothing observable: stays an opaque, type-level value
+    attrs = out["attrs"]
+    for name, item in found:
+        attrs[name] = normalize(item, depth + 1, seen, privacy, objects)
+        if (depth + 1 >= MAX_DEPTH and not isinstance(item, _SAFE_SCALARS)):
+            out["__truncated__"] = True
+    return out
+
+
+def _render_namedtuple(value, kind, depth, seen, privacy, objects=True):
+    out = {"__object__": _class_label(type(value)), "attrs": {}}
+    names = kind[1]
+    if len(value) > MAX_SEQ:
+        out["__truncated__"] = True
+    for i, name in enumerate(names[:len(value)]):
+        item = tuple.__getitem__(value, i)
+        out["attrs"][name] = normalize(item, depth + 1, seen, privacy, objects)
+        if depth + 1 >= MAX_DEPTH and not isinstance(item, _SAFE_SCALARS):
+            out["__truncated__"] = True
     return out
 
 

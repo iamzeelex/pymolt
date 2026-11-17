@@ -32,6 +32,7 @@ Nothing here prompts or prints — that's the callers' job. Bad input raises
 from __future__ import annotations
 
 import glob
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -42,15 +43,18 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
 from pymolt.verify.coverage import run_coverage_json
@@ -58,6 +62,8 @@ from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     find_facts_snapshot,
     iter_snapshot,
+    iter_trace_records,
+    load_site_text,
     merge_fact_snapshots,
     project_snapshot,
     read_snapshot_header,
@@ -122,11 +128,17 @@ class TraceCaptureResult(BaseModel):
     activation_failures: list[dict] = Field(default_factory=list)
     # Facts sink (phase 2): the merged per-process snapshots, ``<out_path>.facts.json``.
     facts_path: str | None = None
+    # Stdlib top-level modules traced as dependencies (PYMOLT_TRACE_STDLIB); empty = none.
+    trace_stdlib: list[str] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Capture — inject the watcher, run a command, merge the JSONL it writes.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+STDLIB_ENV = "PYMOLT_TRACE_STDLIB"
+_STDLIB_OFF = {"none", "off", "0"}
 
 
 def trace_env(
@@ -145,6 +157,7 @@ def trace_env(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """The PYMOLT_TRACE_* variables that drive the watcher (shared by local + container).
 
@@ -158,7 +171,11 @@ def trace_env(
     environment (unset = the watcher's targeted capture), unless ``widen_targets``: then the
     default mode stays and the targets are armed on top of it (what a post-migration capture
     needs to diff against a full baseline). The facts sink's tunables are forwarded when
-    set, so a container capture honours them too."""
+    set, so a container capture honours them too.
+
+    ``trace_stdlib`` are stdlib top-level modules to treat as dependencies for this capture
+    (``PYMOLT_TRACE_STDLIB``, comma-separated); the caller's own ``PYMOLT_TRACE_STDLIB`` wins
+    and is forwarded (so a container capture honours it); ``none`` there disables it."""
     if privacy not in {"values", "shape"}:
         raise ValueError("privacy must be 'values' or 'shape'")
     if not 0 < sample_rate <= 1:
@@ -203,6 +220,12 @@ def trace_env(
     for key in _FORWARDED_TUNABLES:
         if os.environ.get(key):
             env[key] = os.environ[key]
+    user_stdlib = (os.environ.get(STDLIB_ENV) or "").strip()
+    if user_stdlib:
+        if user_stdlib.lower() not in _STDLIB_OFF:
+            env[STDLIB_ENV] = user_stdlib
+    elif trace_stdlib:
+        env[STDLIB_ENV] = ",".join(trace_stdlib)
     return env
 
 
@@ -292,6 +315,223 @@ def _applied_plan_impact_targets(project_dir: str | Path) -> list[str]:
     return paths
 
 
+def _effective_stdlib(trace_stdlib: list[str] | None) -> list[str]:
+    """The stdlib modules a capture really traced: the caller's own variable wins."""
+    user = (os.environ.get(STDLIB_ENV) or "").strip()
+    if user:
+        if user.lower() in _STDLIB_OFF:
+            return []
+        return sorted({m.strip() for m in user.split(",") if m.strip()})
+    return sorted(set(trace_stdlib or ()))
+
+
+def _is_python_move(project_dir: str | Path) -> bool:
+    """True when setup's base and target Python differ in major.minor."""
+    config = EnvConfig.load(Path(project_dir) / ENV_CONFIG_PATH)
+    if config is None or not config.base_python or not config.target_python:
+        return False
+
+    def _mm(version: str) -> tuple[str, ...] | None:
+        parts = version.strip().split(".")
+        return tuple(parts[:2]) if len(parts) >= 2 and parts[0].isdigit() else None
+
+    base, target = _mm(config.base_python), _mm(config.target_python)
+    return base is not None and target is not None and base != target
+
+
+def _stdlib_top(name: str) -> str | None:
+    top = name.split(".")[0]
+    return top if top in sys.stdlib_module_names and top != "__future__" else None
+
+
+def _stdlib_modules_on_lines(source: str, lines: set[int]) -> set[str]:
+    """Stdlib top-level modules imported on, or used by name on, the given 1-based lines."""
+    import ast
+
+    if not lines:
+        return set()
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    bound: dict[str, str] = {}  # local name -> stdlib top-level module
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = _stdlib_top(alias.name)
+                if top:
+                    bound[(alias.asname or alias.name).split(".")[0]] = top
+                    if node.lineno in lines:
+                        found.add(top)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            top = _stdlib_top(node.module)
+            if top:
+                for alias in node.names:
+                    bound[alias.asname or alias.name] = top
+                if node.lineno in lines:
+                    found.add(top)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.lineno in lines and node.id in bound:
+            found.add(bound[node.id])
+    return found
+
+
+def _changed_lines(old: str, new: str) -> set[int]:
+    """1-based line numbers of ``new`` that differ from ``old`` (replaced or inserted)."""
+    import difflib
+
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
+    changed: set[int] = set()
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "insert"):
+            changed.update(range(j1 + 1, j2 + 1))
+    return changed
+
+
+def _read_project_text(root: Path, rel: str) -> str | None:
+    try:
+        return (root / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
+    """Stdlib modules imported on lines that changed since the baseline.
+
+    Where an apply receipt exists the plan's frozen ``old_source`` is the baseline text of
+    every file the plan touched. Any other file is compared best effort against the baseline
+    trace's recorded site text: a recorded call line that no longer reads the same marks the
+    nearby line that now reads most like it as edited."""
+    root = Path(os.path.abspath(project_dir))
+    found: set[str] = set()
+    covered: set[str] = set()
+    try:
+        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import MigrationReceipt
+
+        receipt = MigrationReceipt.load(root)
+        plan = (MigrationPlan.load(root, receipt.plan_path)
+                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                else None)
+    except Exception as exc:  # noqa: BLE001 - best effort
+        logger.info("stdlib tracing: could not read the apply receipt: %s", exc)
+        plan = None
+    for change in (plan.changes if plan is not None else ()):
+        current = _read_project_text(root, change.path)
+        covered.add(change.path)
+        if current is not None:
+            found |= _stdlib_modules_on_lines(current, _changed_lines(change.old_source, current))
+    baseline = load_contract_state(root).baseline
+    if baseline is None:
+        return found
+    wanted: dict[str, set[int]] = {}
+    for key, text in load_site_text(baseline.trace_path).items():
+        file, _, line = key.rpartition(":")
+        if not line.isdigit():
+            continue
+        rel = os.path.relpath(file, root) if os.path.isabs(file) else file
+        if rel in covered or rel.startswith(".."):
+            continue
+        current = _read_project_text(root, rel)
+        if current is None:
+            continue
+        lines = [entry.strip()[:240] for entry in current.splitlines()]
+        if text in lines:
+            continue
+        # The recorded line was edited: find where it went (edits shift line numbers) as
+        # the nearby current line that reads most like it.
+        import difflib
+
+        origin = int(line)
+        best = max(
+            (i for i in range(len(lines)) if abs(i + 1 - origin) <= 40),
+            key=lambda i: (difflib.SequenceMatcher(None, text, lines[i]).ratio(),
+                           -abs(i + 1 - origin)),
+            default=None,
+        )
+        if best is not None and difflib.SequenceMatcher(None, text, lines[best]).ratio() >= 0.5:
+            wanted.setdefault(rel, set()).add(best + 1)
+    for rel, numbers in wanted.items():
+        current = _read_project_text(root, rel)
+        if current is not None:
+            found |= _stdlib_modules_on_lines(current, numbers)
+    return found
+
+
+# Stdlib modules never worth tracing during a Python move: they cannot change behaviour in
+# a way a call trace would show, or they only add noise (volume, or recursion into pymolt's
+# own recording).
+_STDLIB_NOT_TRACED = frozenset({
+    "__future__",  # compiler directives: imports bind no callable and nothing is ever called
+    "typing",      # annotations and aliases; its calls (cast, TypeVar, NewType) are identity-like
+                   # and appear on every class and function definition
+    "abc",         # ABCMeta machinery runs at every class definition, not at the project's calls
+    "builtins",    # the interpreter's own names; they are never "imported" behaviour
+    "warnings",    # the runtime's warning observer already records them; tracing the call
+                   # would record the recorder
+})
+_IMPORT_LINE = re.compile(
+    r"^\s*(?:import\s+([\w., \t]+?)\s*(?:[#;].*)?$|from\s+([A-Za-z_]\w*)[\w.]*\s+import\b)")
+
+
+def project_stdlib_imports(project_dir: str | Path) -> set[str]:
+    """Every stdlib top-level module the project's own files import (any depth, any syntax:
+    a line scan, so a Python 2 file counts too). Relative imports are the project's."""
+    from pymolt.core import stdlib as stdlib_data
+    from pymolt.verify.contact_map import _source_files
+
+    root = Path(os.path.abspath(project_dir))
+    found: set[str] = set()
+    for path in _source_files(root)[0]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = _IMPORT_LINE.match(line)
+            if not m:
+                continue
+            names = (m.group(2),) if m.group(2) else (
+                part.split(" as ")[0].strip().split(".")[0] for part in m.group(1).split(","))
+            found.update(n for n in names if n and stdlib_data.is_stdlib(n))
+    return found - _STDLIB_NOT_TRACED
+
+
+def stdlib_trace_modules(project_dir: str | Path, when: str) -> list[str]:
+    """Stdlib top-level modules to trace for a capture of a Python-version move.
+
+    ``[]`` for a capture that is not part of a move. Baseline: every stdlib module the
+    project imports (``project_stdlib_imports``) plus those of its ``stdlib_sites`` (the
+    contact map), less ``_STDLIB_NOT_TRACED``. Post-migration: the same set plus the stdlib
+    modules imported on lines the applied plan or the user changed since the baseline
+    (``shutil`` after ``click.get_terminal_size`` became ``shutil.get_terminal_size``)."""
+    if not _is_python_move(project_dir):
+        return []
+    from pymolt.verify.contact_map import build_contact_map
+
+    modules = {site.module for site in build_contact_map(project_dir).stdlib_sites if site.module}
+    modules |= project_stdlib_imports(project_dir)
+    if when == "post_migration":
+        modules |= _edited_stdlib_modules(project_dir)
+    return sorted(modules - _STDLIB_NOT_TRACED)
+
+
+def _resolve_stdlib_option(project_dir: Path, when: str, stdlib: str | None) -> list[str]:
+    """``stdlib``: None = computed, ``"none"`` = off, else an explicit comma list."""
+    if stdlib is not None:
+        if stdlib.strip().lower() in _STDLIB_OFF:
+            return []
+        return sorted({m.strip() for m in stdlib.split(",") if m.strip()})
+    if (os.environ.get(STDLIB_ENV) or "").strip():
+        return []  # the caller's own variable wins; trace_env forwards it
+    try:
+        return stdlib_trace_modules(project_dir, when)
+    except Exception as exc:  # noqa: BLE001 - never fail a capture over this
+        logger.warning("could not compute the stdlib modules to trace: %s", exc)
+        return []
+
+
 def _capture_identity(supplied: str | None, env_name: str) -> str | None:
     value = supplied if supplied is not None else os.environ.get(env_name)
     return value or None
@@ -366,6 +606,7 @@ def capture_trace_local(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | None = None,
 ) -> tuple[list[str], int | None]:
     """Inject the watcher into a locally-run command via PYTHONPATH + env.
 
@@ -399,6 +640,7 @@ def capture_trace_local(
         impact_targets, deployment_id, request_id, correlation_id,
         sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
         sample_first=sample_first, widen_targets=widen_targets,
+        trace_stdlib=trace_stdlib,
     ))
 
     log_file = None
@@ -467,6 +709,7 @@ def capture_trace_in_container(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | None = None,
 ) -> tuple[list[str], int]:
     """Inject the watcher into an ALREADY-RUNNING container via `docker cp` + `docker exec`.
 
@@ -488,6 +731,7 @@ def capture_trace_in_container(
         impact_targets, deployment_id, request_id, correlation_id,
         sink=sink or TEST_SINK, trace_mode=trace_mode or TEST_TRACE_MODE,
         sample_first=sample_first, widen_targets=widen_targets,
+        trace_stdlib=trace_stdlib,
     ).items():
         exec_args += ["-e", f"{key}={val}"]
     if workdir:
@@ -624,9 +868,12 @@ def _merge_traces(produced: list[str], out_path: Path) -> int:
 
 
 def _sink_kwargs(sink: str | None, trace_mode: str | None,
-                 sample_first: int | None = None, widen_targets: bool = False) -> dict:
+                 sample_first: int | None = None, widen_targets: bool = False,
+                 trace_stdlib: list[str] | None = None) -> dict:
     """Only pass the phase-2 keywords when set (test doubles predate them)."""
     out: dict = {}
+    if trace_stdlib:
+        out["trace_stdlib"] = list(trace_stdlib)
     if widen_targets:
         out["widen_targets"] = True
     if sink is not None:
@@ -864,6 +1111,7 @@ def capture_trace(
     trace_mode: str | None = None,
     sample_first: int | None = None,
     widen_targets: bool = False,
+    trace_stdlib: list[str] | None = None,
 ) -> TraceCaptureResult:
     """Run ``command`` with the watcher injected; merge produced JSONL into ``out_path``.
 
@@ -902,7 +1150,7 @@ def capture_trace(
                 container, workdir, exclude, source, include_internal,
                 privacy, sample_rate, impact_targets,
                 deployment_id, request_id, correlation_id,
-                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets),
+                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
             )
         else:
             # Keep the log next to the durable trace artifact (out_path), not the
@@ -916,7 +1164,7 @@ def capture_trace(
                 impact_targets=impact_targets, deployment_id=deployment_id,
                 request_id=request_id, correlation_id=correlation_id,
                 interrupted=interrupted,
-                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets),
+                **_sink_kwargs(sink, trace_mode, sample_first, widen_targets, trace_stdlib),
             )
             command_log = str(log_path) if log_path.exists() else None
 
@@ -960,6 +1208,7 @@ def capture_trace(
             instrumentation_skipped=runtime["instrumentation_skipped"],
             activation_failures=activation_failures,
             facts_path=facts["path"] if facts else None,
+            trace_stdlib=_effective_stdlib(trace_stdlib),
         )
         metadata = {
             "schema_version": 1,
@@ -973,6 +1222,7 @@ def capture_trace(
                                    else LONG_RUN_SAMPLE_FIRST) if sample_rate < 1 else 0},
             "backend": effective_backend,
             "impact_targets": impact_targets,
+            "trace_stdlib": result.trace_stdlib,
             "events": events,
             "events_seen": events_seen,
             "runtime_metadata_complete": metadata_complete,
@@ -1316,6 +1566,7 @@ def capture_named_trace(
     request_id: str | None = None,
     correlation_id: str | None = None,
     accept_failing: bool = False,
+    stdlib: str | None = None,
 ) -> ContractSlot:
     """Capture a trace and persist it as the named slot (``"baseline"`` or
     ``"post_migration"``). For ``mode in (TEST_SUITE, LIVE_COMMAND)`` — pymolt
@@ -1340,6 +1591,13 @@ def capture_named_trace(
     Never prompts; raises ``ValueError`` on bad input (unknown ``when``, no
     ``command``, or an unsupported ``mode`` for this function — see
     ``start_attached_capture`` for ``LIVE_ATTACH``).
+
+    During a Python-version move (setup's base and target differ in major.minor) the stdlib
+    modules the project's stdlib sites touch are traced as dependencies
+    (``PYMOLT_TRACE_STDLIB``, see ``stdlib_trace_modules``); ``stdlib="none"`` turns that off,
+    an explicit comma list replaces it, and the caller's own variable wins. An explicit
+    ``target`` (not ``"all"``) gets no automatic stdlib modules unless ``stdlib`` is given.
+    What was traced is stamped on the slot.
     """
     if when not in ("baseline", "post_migration"):
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
@@ -1372,6 +1630,10 @@ def capture_named_trace(
         impact_targets = _applied_plan_impact_targets(project_dir)
         widen_targets = bool(impact_targets)
     normalized_targets = _normalize_impact_targets(impact_targets)
+    # An explicit --target stays exactly what the caller named: the stdlib modules are added
+    # automatically only for the default target ("all"), or when ``stdlib`` is given too.
+    trace_stdlib = ([] if stdlib is None and target != "all"
+                    else _resolve_stdlib_option(project_dir, when, stdlib))
     # Validate before creating staging paths or spawning the target.
     trace_env(
         target, backend, exclude, source, include_internal, privacy, sample_rate,
@@ -1426,6 +1688,8 @@ def capture_named_trace(
             capture_kwargs["impact_targets"] = normalized_targets
         if widen_targets:
             capture_kwargs["widen_targets"] = True
+        if trace_stdlib:
+            capture_kwargs["trace_stdlib"] = trace_stdlib
         if deployment_id is not None:
             capture_kwargs["deployment_id"] = deployment_id
         if request_id is not None:
@@ -1439,6 +1703,7 @@ def capture_named_trace(
         result = capture_trace(target, command, staged_path, backend, **capture_kwargs)
         _record_sampling(staged_path, sample_rate, sampling_source)
         _record_site_text(staged_path, project_dir, runner_spec)
+        _record_sources_for(staged_path, project_dir, when, runner_spec)
     except BaseException:
         # A timeout/start failure may happen after the command log or a partial
         # trace was created.  They were never committed, so do not leave them
@@ -1473,6 +1738,7 @@ def capture_named_trace(
         try:
             result.metadata_path = _move_trace_metadata(staged_path, diagnostic)
             result.facts_path = _move_facts_snapshot(staged_path, diagnostic)
+            _move_sources(staged_path, diagnostic)
         except OSError as exc:
             logger.warning("could not move diagnostic trace metadata: %s", exc)
         if result.command_log:
@@ -1504,6 +1770,7 @@ def capture_named_trace(
         try:
             result.metadata_path = _move_trace_metadata(staged_path, out_path)
             result.facts_path = _move_facts_snapshot(staged_path, out_path)
+            _move_sources(staged_path, out_path)
         except OSError as exc:
             logger.warning("could not promote trace metadata: %s", exc)
         if result.command_log:
@@ -1538,7 +1805,9 @@ def capture_named_trace(
         correlation_id=result.correlation_id,
         backend=result.backend,
         impact_targets=result.impact_targets,
+        traced_stdlib=getattr(result, "trace_stdlib", None) or _effective_stdlib(trace_stdlib),
         metadata_path=result.metadata_path,
+        sources_path=_existing(sources_path(result.out_path)),
         events_seen=result.events_seen,
         dropped_events=result.dropped_events,
         sampling_dropped=result.sampling_dropped,
@@ -1602,6 +1871,7 @@ def archive_existing_capture(project_dir: str | Path, when: str) -> str | None:
             shutil.move(str(current_snapshot), str(snapshot_path(destination)))
         except OSError as exc:
             logger.warning("could not archive previous %s facts snapshot: %s", when, exc)
+    _move_sources(current, destination)
     return str(destination)
 
 
@@ -1700,6 +1970,7 @@ def start_attached_capture(
         target, backend, "", "", False, privacy, sample_rate,
         impact_targets, deployment_id, request_id, correlation_id,
         sink=LONG_RUN_SINK, trace_mode=LONG_RUN_TRACE_MODE,
+        trace_stdlib=_resolve_stdlib_option(project_dir, when, None),
     )
     bundle_dir = project_dir / ".pymolt" / "contract_bundle"
     out_path = pending_attach_path(project_dir, when)
@@ -1743,6 +2014,192 @@ def poll_attached_capture(out_path: str | Path) -> int:
 
 
 _PROJECTED = '"src": "facts"'  # how project_snapshot marks its lines
+
+
+SOURCES_SCHEMA = "pymolt.sources/1"
+SOURCES_MAX_BYTES = 1_000_000
+SOURCES_TOTAL_BUDGET = 32_000_000  # raw bytes of text in one snapshot's whole-tree part
+_NOT_PROJECT_DIRS = frozenset({"site-packages", ".pymolt", ".venv", "venv", ".tox", ".git",
+                               "node_modules", "__pycache__"})
+
+
+def _existing(path: Path) -> str | None:
+    return str(path) if path.is_file() else None
+
+
+def sources_path(trace_path: str | Path) -> Path:
+    """Where a capture keeps its source snapshot: ``<trace>.sources.json.gz``."""
+    return Path(str(trace_path) + ".sources.json.gz")
+
+
+def _move_sources(source: str | Path, destination: str | Path) -> None:
+    src, dst = sources_path(source), sources_path(destination)
+    if not src.is_file():
+        return
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
+    except OSError as exc:
+        logger.warning("could not move the source snapshot %s: %s", src, exc)
+
+
+def _read_snapshot(path: str | Path | None) -> dict | None:
+    if not path:
+        return None
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) and isinstance(data.get("files"), dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def record_sources(
+    trace_path: str | Path, project_dir: str | Path, runner=None, *,
+    extra_files: Iterable[str] = (), whole_tree: bool = False,
+) -> str | None:
+    """Snapshot the text and sha256 of project files, gzipped next to the trace.
+
+    The files are those with a fact in the trace (``fact_files``), plus ``extra_files``
+    (a post-migration capture passes the baseline's, so a file whose calls all vanished, or
+    that only gained calls, has text on both sides), plus, with ``whole_tree`` (a baseline),
+    every other project ``.py`` file under the root up to ``SOURCES_TOTAL_BUDGET`` bytes
+    (facts first, then the rest smallest first; what was left out is recorded). Files are read
+    on the host after the run (a container path maps through ``to_host``) and keyed by the
+    project-relative path. Over ``SOURCES_MAX_BYTES``, unreadable, outside the project, or
+    inside a virtualenv / site-packages: skipped (the last two silently). A file in neither
+    snapshot stays unknown. Format::
+
+        {"schema": "pymolt.sources/1", "root": ..., "fact_files": [...],
+         "files": {"app/x.py": {"sha256": ..., "text": ...}},
+         "skipped": [{"file": ..., "reason": ...}], "left_out": [...], "left_out_total": N}
+
+    Returns the sidecar path, or None when it could not be written (never raises)."""
+    root = os.path.realpath(str(project_dir))
+    seen: set[str] = set()
+    try:
+        for rec in iter_trace_records(trace_path):
+            where = rec.get("where")
+            file = where.get("file") if isinstance(where, dict) else None
+            if isinstance(file, str) and file:
+                seen.add(file)
+    except OSError:
+        return None
+
+    def relative(file: str) -> tuple[str, str] | None:
+        path = file if os.path.isabs(file) else os.path.join(root, file)
+        if runner is not None and os.path.isabs(file):
+            real = os.path.realpath(path)
+            if real != root and not real.startswith(root + os.sep):
+                path = to_host(runner, file) or path
+        real = os.path.realpath(path)
+        if real != root and not real.startswith(root + os.sep):
+            return None                     # not a project file: the runtime's or a dependency's
+        rel = Path(os.path.relpath(real, root)).as_posix()
+        if _NOT_PROJECT_DIRS & set(rel.split("/")[:-1]):
+            return None
+        return rel, real
+
+    fact_files: dict[str, str] = {}
+    for file in sorted(seen):
+        found = relative(file)
+        if found:
+            fact_files[found[0]] = found[1]
+    wanted = dict(fact_files)
+    for file in sorted(extra_files):
+        found = relative(file)
+        if found:
+            wanted.setdefault(found[0], found[1])
+    rest: list[tuple[int, str, str]] = []
+    if whole_tree:
+        from pymolt.verify.contact_map import _source_files
+
+        for path in _source_files(Path(root))[0]:
+            found = relative(str(path))
+            if found and found[0] not in wanted:
+                try:
+                    rest.append((os.path.getsize(found[1]), found[0], found[1]))
+                except OSError:
+                    continue
+        rest.sort()
+
+    files: dict[str, dict[str, str]] = {}
+    skipped: list[dict[str, str]] = []
+    left_out: list[str] = []
+    total = 0
+
+    def take(rel: str, real: str, budgeted: bool) -> None:
+        nonlocal total
+        try:
+            raw = Path(real).read_bytes()
+        except OSError as exc:
+            skipped.append({"file": rel, "reason": f"unreadable: {exc.__class__.__name__}"})
+            return
+        if len(raw) > SOURCES_MAX_BYTES:
+            skipped.append({"file": rel, "reason": f"over {SOURCES_MAX_BYTES} bytes ({len(raw)})"})
+            return
+        if budgeted and total + len(raw) > SOURCES_TOTAL_BUDGET:
+            left_out.append(rel)
+            return
+        total += len(raw)
+        files[rel] = {"sha256": hashlib.sha256(raw).hexdigest(),
+                      "text": raw.decode("utf-8", errors="replace")}
+
+    for rel, real in wanted.items():
+        take(rel, real, False)
+    for _size, rel, real in rest:
+        take(rel, real, True)
+    out = sources_path(trace_path)
+    pending = out.with_name(f".{out.name}.{uuid.uuid4().hex}.pending")
+    try:
+        with gzip.open(pending, "wt", encoding="utf-8", compresslevel=6) as fh:
+            json.dump({"schema": SOURCES_SCHEMA, "root": root,
+                       "fact_files": sorted(fact_files), "files": files, "skipped": skipped,
+                       "left_out": left_out[:500], "left_out_total": len(left_out)}, fh)
+        os.replace(pending, out)
+    except OSError as exc:
+        logger.warning("could not write the source snapshot for %s: %s", trace_path, exc)
+        try:
+            pending.unlink()
+        except OSError:
+            pass
+        return None
+    return str(out)
+
+
+def load_sources(path: str | Path | None) -> dict[str, str] | None:
+    """``{relative path: text}`` from a source snapshot; None when absent or unreadable
+    (an older capture: callers fall back to line-text rules). A file not in the result is
+    unknown, not empty."""
+    data = _read_snapshot(path)
+    if data is None:
+        return None
+    try:
+        return {k: v["text"] for k, v in data["files"].items()}
+    except (KeyError, TypeError):
+        return None
+
+
+def _record_sources_for(trace_path: str | Path, project_dir: str | Path, when: str,
+                        runner=None) -> None:
+    """The snapshot of one slot: a baseline stores the whole tree (within budget); a
+    post-migration capture stores its own fact files plus the baseline's, so every file that
+    had facts on either side has text on both."""
+    try:
+        if when == "baseline":
+            record_sources(trace_path, project_dir, runner, whole_tree=True)
+        else:
+            record_sources(trace_path, project_dir, runner,
+                           extra_files=_baseline_fact_files(project_dir))
+    except Exception as exc:  # noqa: BLE001 - never fail a capture over provenance
+        logger.warning("could not record the source snapshot for %s: %s", trace_path, exc)
+
+
+def _baseline_fact_files(project_dir: str | Path) -> list[str]:
+    """The files that had facts in the baseline capture (from its snapshot; [] if none)."""
+    baseline = load_contract_state(project_dir).baseline
+    data = _read_snapshot(baseline.sources_path) if baseline is not None else None
+    return list(data.get("fact_files") or ()) if data else []
 
 
 def _record_site_text(trace_path: str | Path, project_dir: str | Path, runner=None) -> None:
@@ -1803,6 +2260,7 @@ def finalize_attached_capture(
     _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
     _record_site_text(out_path, project_dir)
+    _record_sources_for(out_path, project_dir, when)
     metadata = _read_trace_metadata(out_path)
     ran_with = metadata.get("sample_rate")
     if isinstance(ran_with, int | float) and not isinstance(ran_with, bool) and 0 < ran_with <= 1:
@@ -1861,6 +2319,7 @@ def finalize_attached_capture(
         try:
             metadata_path = _move_trace_metadata(out_path, final_path)
             _move_facts_snapshot(out_path, final_path)
+            _move_sources(out_path, final_path)
         except OSError as exc:
             logger.warning("could not promote attached trace metadata: %s", exc)
             metadata_path = None
@@ -1872,6 +2331,7 @@ def finalize_attached_capture(
         try:
             metadata_path = _move_trace_metadata(out_path, diagnostic)
             _move_facts_snapshot(out_path, diagnostic)
+            _move_sources(out_path, diagnostic)
         except OSError as exc:
             logger.warning("could not move attached diagnostic metadata: %s", exc)
             metadata_path = None
@@ -1891,6 +2351,7 @@ def finalize_attached_capture(
         backend=metadata.get("backend"),
         impact_targets=normalized_targets,
         metadata_path=metadata_path,
+        sources_path=_existing(sources_path(committed_path)),
         events_seen=events_seen,
         dropped_events=dropped_events,
         sampling_dropped=(
@@ -1989,10 +2450,80 @@ def build_contract_report_from_state(
         comparator_profile=comparator_profile,
         custom_comparator=custom_comparator,
         predictions=predictions,
+        diff_context=build_diff_context(project_dir, trace, against) if trace and against
+        else None,
     )
     _stamp_staleness(project_dir, report, used_slots)
     _stamp_verdict(report, trace, against, used_slots)
     return report
+
+
+def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path):
+    """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
+
+    Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
+    diff then falls back to line-text rules); the apply ledger from ``.pymolt/apply_ledger.json``;
+    the static contact maps are built from the snapshots; ``successors`` (old -> new symbol)
+    from the applied plan's impacts, its risks' delta facts and the ledger; and
+    ``type_relocations`` from the plan when it carries them. Never raises: a part that
+    cannot be built is left None."""
+    from pymolt.apply_ledger import ledger_path, load_ledger
+    from pymolt.verify.contact_map import contacts_by_line
+    from pymolt.verify.facts import DiffContext
+
+    root = Path(os.path.abspath(project_dir))
+    ctx = DiffContext()
+    ctx.old_sources = load_sources(sources_path(against))
+    ctx.new_sources = load_sources(sources_path(trace))
+    if ledger_path(root).is_file():
+        ctx.edits = load_ledger(root)
+    for side, sources in (("old", ctx.old_sources), ("new", ctx.new_sources)):
+        if sources:
+            try:
+                setattr(ctx, f"{side}_contacts", contacts_by_line(sources, root))
+            except Exception as exc:  # noqa: BLE001 - the diff degrades without contacts
+                logger.warning("could not build the %s contact map: %s", side, exc)
+    successors: dict[str, str] = {}
+    for entry in ctx.edits or ():
+        if entry.get("old_symbol") and entry.get("new_symbol"):
+            successors.setdefault(entry["old_symbol"], entry["new_symbol"])
+    try:
+        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import MigrationReceipt
+
+        receipt = MigrationReceipt.load(root)
+        plan = (MigrationPlan.load(root, receipt.plan_path)
+                if receipt is not None and receipt.status == "applied" and receipt.plan_path
+                else None)
+        if plan is not None:
+            for impact in plan.impacts:
+                if impact.replacement_path:
+                    successors.setdefault(impact.path, impact.replacement_path)
+            for risk in plan.risks.risks if plan.risks is not None else ():
+                for fact in [risk.fact, *risk.facts]:
+                    if fact and fact.get("symbol") and fact.get("successor"):
+                        successors.setdefault(fact["symbol"], fact["successor"])
+            relocations = getattr(plan, "type_relocations", None)
+            if relocations:
+                ctx.type_relocations = _relocation_map(relocations)
+    except Exception as exc:  # noqa: BLE001 - provenance is best effort
+        logger.warning("could not read the applied plan for the diff context: %s", exc)
+    ctx.successors = successors or None
+    return ctx
+
+
+def _relocation_map(relocations: object) -> dict[str, str] | None:
+    """The plan's ``type_relocations`` ([{"old", "new", "via"}, ...], as dicts or models) as an
+    old type -> new type map. An entry without both names is skipped."""
+    if isinstance(relocations, Mapping):
+        return {str(k): str(v) for k, v in relocations.items()} or None
+    out: dict[str, str] = {}
+    for item in relocations if isinstance(relocations, Iterable) else ():
+        old = item.get("old") if isinstance(item, Mapping) else getattr(item, "old", None)
+        new = item.get("new") if isinstance(item, Mapping) else getattr(item, "new", None)
+        if old and new:
+            out[str(old)] = str(new)
+    return out or None
 
 
 def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> dict:
@@ -2055,7 +2586,16 @@ def _stamp_verdict(
     used_slots: list[tuple[str, object]],
 ) -> None:
     """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty."""
-    for warning in (report.fact_diff or {}).get("warnings") or ():
+    # The verdict's FAIL evidence is the WHOLE surface (``all_*``): an impact filter is a focus
+    # for the report, not a limit on what can fail it, or a change nobody predicted could
+    # never be found. Coverage (BLIND, dynamic-only, trust, static targets) stays scoped to the
+    # impacted surface below: "what the migration touches was exercised" is the meaningful
+    # claim there, and the whole-surface BLIND count would drown it.
+    whole_diff = report.all_fact_diff or report.fact_diff
+    whole_clean = report.all_diff_clean if report.all_diff_clean is not None \
+        else report.diff_clean
+    whole_counts = report.all_diff if report.all_diff is not None else report.diff
+    for warning in (whole_diff or {}).get("warnings") or ():
         # Snapshot caps that lower the comparison level without blocking PASS.
         if str(warning).startswith(("widened:", "outcomes-capped:", "unsampled:")):
             if warning not in report.notes:
@@ -2129,7 +2669,7 @@ def _stamp_verdict(
         if baseline.sample_rate != post.sample_rate:
             comparability.append("baseline and post-migration used different sample rates")
         if (baseline.sample_rate < 1 or post.sample_rate < 1) and not _tallies_complete(
-                report.fact_diff):
+                whole_diff):
             comparability.append(
                 "sampled captures cannot prove that unmatched interactions disappeared"
             )
@@ -2146,20 +2686,26 @@ def _stamp_verdict(
         report.verdict = VerificationVerdict.INCONCLUSIVE
         report.verdict_reasons = list(dict.fromkeys(comparability))
         return
-    if report.diff_clean is False or report.probe_changed:
+    if whole_clean is False or report.probe_changed:
         report.verdict = VerificationVerdict.FAIL
-        if report.diff_clean is False:
+        if whole_clean is False:
             report.verdict_reasons.append("behavioral boundary changes were detected")
+            if report.unpredicted_changes:
+                n = len(report.unpredicted_changes)
+                names = ", ".join(sorted({str(e.get("symbol")) for e in
+                                          report.unpredicted_changes})[:5])
+                report.verdict_reasons.append(
+                    f"{n} behaviour change(s) outside the plan's predicted impacts: {names}")
         if report.probe_changed:
             report.verdict_reasons.append("sandbox replay changed behavior")
         return
 
     reasons: list[str] = []
-    if report.diff is None:
+    if whole_counts is None:
         reasons.append("no before/after diff was produced")
-    elif report.diff.get("skipped_opaque", 0):
+    elif whole_counts.get("skipped_opaque", 0):
         reasons.append("some boundary interactions were opaque or nondeterministic")
-    reasons.extend(_fact_diff_reasons(report.fact_diff))
+    reasons.extend(_fact_diff_reasons(whole_diff))
     if report.blind:
         reasons.append(f"{report.blind} static dependency symbol(s) were not exercised")
     if report.dynamic_only:
@@ -2228,6 +2774,14 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
             )
     if not any(counts.values()):
         reasons.append("no comparable call facts were recorded on both sides")
+    # An unverified edited site is counted in the summary but never blocks PASS; a review
+    # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
+    entries = [e for e in entries if not e.get("unverified")]
+    reviews = [e for e in entries if e.get("review")]
+    if reviews:
+        names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
+        reasons.append(f"{len(reviews)} edited call(s) need review: {names}")
+    entries = [e for e in entries if not e.get("review")]
     unpaired = sum(
         1 for e in entries
         if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
@@ -2252,6 +2806,7 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
             f"{uncomparable} call fact(s) lost their outcome distribution and cannot be compared"
         )
     return reasons or ["the fact diff could not establish equivalence"]
+
 
 
 def baseline_setup_unchanged(slot, current_setup: str | None) -> bool:

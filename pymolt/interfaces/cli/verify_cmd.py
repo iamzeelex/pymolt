@@ -108,6 +108,11 @@ def capture_cmd(
         None, "--impact-targets",
         help="Dependency symbols to focus on (post-migration default: the applied plan's)",
     ),
+    stdlib: str | None = typer.Option(
+        None, "--stdlib",
+        help="Stdlib modules to trace (comma list), or 'none' to disable. Default: during a "
+             "Python move, every stdlib module your project imports; not applied when "
+             "--target names dependencies unless --stdlib is given too"),
     deployment_id: str | None = typer.Option(
         None, "--deployment-id", help="Deployment id to store with the capture (stage/canary)"),
     request_id: str | None = typer.Option(
@@ -235,6 +240,7 @@ def capture_cmd(
         container=container, workdir=workdir, exclude=exclude, source=source,
         privacy=effective_privacy, sample_rate=sample_rate,
         accept_failing=accept_failing,
+        stdlib=stdlib,
         impact_targets=(
             [item.strip() for item in impact_targets.split(",") if item.strip()]
             if impact_targets else None
@@ -333,7 +339,8 @@ def _fmt_site(site: dict | None) -> str:
     return f"{where} {site.get('func')}()" if site.get("func") else where
 
 
-def _render_fact_changes(fact_diff: dict | None) -> None:
+def _render_fact_changes(fact_diff: dict | None,
+                         title: str = "Behaviour diff — call facts that are not equal") -> None:
     """Every non-equal call fact: what was called, where, and old -> new outcome."""
     if not fact_diff:
         return
@@ -343,8 +350,7 @@ def _render_fact_changes(fact_diff: dict | None) -> None:
     order = list(_FACT_LABEL)
     entries.sort(key=lambda e: (not e.get("fails"), order.index(e.get("category", "equal"))
                                 if e.get("category") in order else len(order)))
-    t = Table(title=f"Behaviour diff — call facts that are not equal ({len(entries)})",
-              header_style="bold")
+    t = Table(title=f"{title} ({len(entries)})", header_style="bold")
     t.add_column("Change", no_wrap=True)
     t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
     t.add_column("Call site (your code)", overflow="fold", ratio=2)
@@ -478,11 +484,18 @@ def _render_contract_report(rep) -> None:
                  for name, count in source.items() if count]
         detail = ", ".join(parts) if parts else "nothing moved"
         head += f"\nVersion diff: {verdict}  [dim]({detail})[/dim]"
+        whole = rep.all_fact_diff or rep.fact_diff or {}
+        if (whole.get("edited_sites") or {}).get("sites") and whole.get("edited_summary"):
+            head += f"\n{escape(whole['edited_summary'])}"
     head = f"VERDICT: [bold {border}]{rep.verdict.value.upper()}[/bold {border}]\n" + head
     if rep.verdict_reasons:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
     _render_fact_changes(rep.fact_diff)
+    if rep.unpredicted_changes:
+        _render_fact_changes(
+            {"entries": rep.unpredicted_changes},
+            title="Behaviour changes outside the plan's predicted impacts")
     _render_calibration(getattr(rep, "calibration", None))
 
     visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols

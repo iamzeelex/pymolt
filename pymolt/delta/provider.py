@@ -76,9 +76,14 @@ def _impact(fact: DeltaFact, report: DeltaReport) -> ApiImpact:
 
 
 def _pattern(fact: DeltaFact) -> CodemodPattern | None:
-    """A same-signature move/rename of an importable spelling, else None."""
+    """A same-signature move/rename of an importable (module-level) spelling, else None.
+
+    A DEPRECATED fact qualifies when its successor was verified on the new side and the
+    signatures match (``force_text`` -> ``force_str``). Method renames (``.dict()`` ->
+    ``.model_dump()``) are never importable spellings, so they stay hints: rewriting them needs
+    the receiver's type, which the codemods do not have."""
     successor = fact.successor
-    if not successor or fact.kind not in ("MOVED", "REMOVED"):
+    if not successor or fact.kind not in ("MOVED", "REMOVED", "DEPRECATED"):
         return None
     if not fact.detail.get("successor_importable") or not fact.detail.get(
         "successor_same_signature"

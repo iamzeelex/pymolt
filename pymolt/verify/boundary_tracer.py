@@ -39,6 +39,11 @@ Watcher environment:
                         in the metadata). Unset: auto, except that impact targets alone keep the
                         targeted capture they always meant (wrappers for exact symbols, no
                         process-wide hook).
+  PYMOLT_TRACE_STDLIB   comma list of stdlib top-level modules (``asyncio,collections,datetime``)
+                        recorded like dependency targets: calls into them from the project's
+                        code become facts (metadata ``stdlib_targets``). Unset: the stdlib is not
+                        recorded. Test-runner packages (``_pytest``, ``pluggy`` ...) are never
+                        targets unless PYMOLT_TRACE_TARGET names them.
   PYMOLT_TRACE_INCREMENTAL  "0" makes 3.12+ auto use discover -> watch instead (default "1")
   PYMOLT_TRACE_INCREMENTAL_SETTLE  seconds without a newly armed code after which incremental
                         mode frees its second tool (the global PY_START for dunders, properties
@@ -81,6 +86,7 @@ from ._backend import (
     build_matcher,
     loaded_distributions,
     select_backend,
+    stdlib_targets,
 )
 from ._sinks import JsonlSink, MemorySink
 
@@ -88,6 +94,7 @@ ENV_TARGET = "PYMOLT_TRACE_TARGET"
 ENV_OUT = "PYMOLT_TRACE_OUT"
 ENV_BACKEND = "PYMOLT_TRACE_BACKEND"
 ENV_EXCLUDE = "PYMOLT_TRACE_EXCLUDE"
+ENV_STDLIB = "PYMOLT_TRACE_STDLIB"
 ENV_SOURCE = "PYMOLT_TRACE_SOURCE"
 ENV_INTERNAL = "PYMOLT_TRACE_INTERNAL"
 ENV_IMPACT_TARGETS = "PYMOLT_TRACE_IMPACT_TARGETS"
@@ -648,6 +655,8 @@ def activate():
         # Whether deprecation-family warnings are attributed to calls: "no warnings on a
         # fact" means "none issued" only when this is "on".
         "warnings_capture": "off" if _warnings_disabled() else "on",
+        # Stdlib top-level modules recorded like dependencies for this capture (empty: none).
+        "stdlib_targets": sorted(stdlib_targets(os.environ.get(ENV_STDLIB, ""))),
     })
     backend = Controller(
         target, sink, mode=mode, prefer=backend_pref, exclude=exclude, source=source,

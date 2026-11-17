@@ -27,6 +27,15 @@ zipped in first-seen order):
    changed, the call did not), "line-moved" in line mode (v1: code above shifted)
 4. same site and input, different symbol ("identity-changed": the library moved/re-wrapped it)
 5. same symbol and input, different function/file ("site-moved")
+5c. same site, a *relocated* symbol (same top-level package and last name segment, e.g.
+   ``sqlalchemy.engine.create_engine`` -> ``sqlalchemy.engine.create.create_engine``), any input
+5b. same symbol and site, *different input* ("matched-modulo-input": a keyword renamed, an
+   argument changed: the call is the same, what it was given is not); one-to-one groups only,
+   outcomes compared. A binding failure (``"binding": true`` raise: the call died before the
+   callee's frame started) pairs earlier, with the other side's normal call at the same
+   symbol and site (or function), so "now raises TypeError while binding its arguments" is a
+   CHANGED outcome, never a DISAPPEARED call. A compiled call (``in: {"__c_call__": true}``)
+   carries no arguments: its input is constant, so it matches by symbol and site alone
 6. REWRITTEN by position: within a ``(file, func)`` whose line texts changed on both sides,
    leftover calls at the changed lines pair in first-seen order; outcomes compared, symbol and
    input ignored
@@ -37,7 +46,12 @@ A pair's outcomes are compared at ``exact`` level when both sides are single, fu
 values; at ``type`` level (``outcome_type``) when either side carries a type-only marker
 (``__opaque__``/``__cycle__``/``__shape__``/truncation/a value-less ``__structure__``), when a
 side is nondeterministic (more than one distinct outcome and the sets are not identical) or when
-``profile="shape"``. An aggregated record whose result collapsed to ``__nondeterministic__``
+``profile="shape"``. Type names compare relocation-aware: the same top-level package and the
+same last name segment (``sqlalchemy.ext.declarative.api.Base`` vs ``sqlalchemy.orm.decl_api.Base``)
+is equal at type level with a "relocated" note (``__type__``, ``__opaque__``, ``__object__``).
+``__object__`` renderings (``{"__object__": T, "attrs": {...}}``) compare attribute by attribute
+at exact level when both sides are complete, by type name at type level when either is
+truncated. An aggregated record whose result collapsed to ``__nondeterministic__``
 lost its distribution and is UNCOMPARABLE (inconclusive, never a pass).
 
 Facts snapshots (phase 2, ``FactSink``): a capture whose processes aggregated in-process
@@ -52,14 +66,20 @@ appeared fact the evicting side may have dropped is UNCOMPARABLE instead of fail
 widened facts (``"in": {"__widened__": true}``) compare their whole (symbol, site) group at
 type level on both sides.
 """
+import ast
+import difflib
 import io
 import json
 import logging
 import os
+import re
+import sys
 import tokenize
 import uuid
+import warnings
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -100,6 +120,27 @@ _NUMERIC = ("int", "float")  # one kind at type level (PEP 484 numeric promotion
 
 
 # ── models ────────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class DiffContext:
+    """What verify knows about the edit that separates the two captures (all optional).
+
+    ``old_sources`` / ``new_sources``: project-relative path -> file text at each capture.
+    ``edits``: apply-ledger entries ``{"file", "old_lines": [a, b], "new_lines": [c, d],
+    "kind", "rule", "claim", "old_symbol", "new_symbol"}`` (1-based, inclusive).
+    ``old_contacts`` / ``new_contacts``: file -> line -> static dependency symbols.
+    ``successors``: old symbol -> new symbol (the plan's deltas). ``type_relocations``: old
+    type name -> new type name. Without a context the diff falls back to line-text rules and
+    reads the post side's source from ``FactSet.root``."""
+
+    old_sources: dict[str, str] | None = None
+    new_sources: dict[str, str] | None = None
+    edits: list[dict] | None = None
+    old_contacts: dict[str, dict[int, set[str]]] | None = None
+    new_contacts: dict[str, dict[int, set[str]]] | None = None
+    successors: dict[str, str] | None = None
+    type_relocations: dict[str, str] | None = None
 
 
 class DiffProfile(StrEnum):
@@ -180,6 +221,8 @@ class Fact(BaseModel):
     count: int = 0
     where: dict[str, Any] | None = None  # first-seen call site as recorded (absolute file)
     first_seen: int = 0              # event/record index: call order for positional pairing
+    binding: bool = False            # the call raised while binding its arguments (never ran)
+    attr_of: str | None = None       # module ``__getattr__`` (PEP 562): the original symbol
     # Deprecation-family warnings its (sampled) calls issued, merged across occurrences.
     warnings: list[CallWarning] = Field(default_factory=list)
 
@@ -331,10 +374,16 @@ class FactEntry(BaseModel):
     new_warnings: list[CallWarning] | None = None
     old_where: dict[str, Any] | None = Field(default=None, exclude=True)
     new_where: dict[str, Any] | None = Field(default=None, exclude=True)
+    # Edit provenance (only with a ``DiffContext``): unedited / ledger / hand / downstream.
+    provenance: str | None = None
+    review: str | None = None       # a difference a person must look at: INCONCLUSIVE, not FAIL
+    unverified: bool = False        # an edited site nothing could be paired with: counted only
 
     @computed_field
     @property
     def fails(self) -> bool:
+        if self.review or self.unverified:
+            return False
         if self.category in (FactCategory.CHANGED, FactCategory.DISAPPEARED,
                              FactCategory.APPEARED):
             return True
@@ -342,6 +391,10 @@ class FactEntry(BaseModel):
 
     @property
     def inconclusive(self) -> bool:
+        if self.unverified:
+            return False
+        if self.review:
+            return True
         return self.comparison in (Comparison.UNCOMPARABLE, Comparison.MISSING) and (
             self.category in (FactCategory.UNCOMPARABLE, FactCategory.REWRITTEN))
 
@@ -363,6 +416,36 @@ class FactDiff(BaseModel):
     # Value facts seen on one side only, at a call site both sides' complete tallies show
     # was called, by a side that did not sample every call there: not compared, not failing.
     unsampled: int = 0
+    no_ledger: bool = False  # edits were judged as hand edits: no apply ledger was available
+
+    def edited_sites(self) -> dict[str, int]:
+        """Edited sites by outcome: equal / representation-only / need review / unverified
+        (plus ``failed`` for a ledger or hand edit that changed behaviour)."""
+        out = {"sites": 0, "equal": 0, "representation_only": 0, "review": 0,
+               "unverified": 0, "failed": 0}
+        for e in self.entries:
+            if e.provenance not in ("ledger", "hand", "downstream"):
+                continue
+            out["sites"] += 1
+            if e.unverified:
+                out["unverified"] += 1
+            elif e.review:
+                out["review"] += 1
+            elif e.category is FactCategory.DRIFT and "representation changed" in e.notes:
+                out["representation_only"] += 1
+            elif e.fails:
+                out["failed"] += 1
+            else:
+                out["equal"] += 1
+        return out
+
+    def edited_summary(self) -> str:
+        """``N edited sites: a equal, b representation-only, c need review, d unverified``."""
+        e = self.edited_sites()
+        line = (f"{e['sites']} edited sites: {e['equal']} equal, {e['representation_only']} "
+                f"representation-only, {e['review']} need review, {e['unverified']} unverified")
+        line += f", {e['failed']} failed" if e["failed"] else ""
+        return line + ("; no apply ledger: edits judged as hand edits" if self.no_ledger else "")
 
     def counts(self) -> dict[str, int]:
         out = {c.value: 0 for c in FactCategory}
@@ -415,6 +498,8 @@ class FactDiff(BaseModel):
             "incomplete": self.incomplete,
             "counts": self.counts(),
             "unsampled": self.unsampled,
+            "edited_sites": self.edited_sites(),
+            "edited_summary": self.edited_summary(),
             "warnings": list(self.warnings),
             "old": self.old_summary.model_dump(mode="json"),
             "new": self.new_summary.model_dump(mode="json"),
@@ -1102,6 +1187,8 @@ class _Acc:
     outcomes: dict[str, list] = field(default_factory=dict)  # canon -> [kind, value, count]
     count: int = 0
     warnings: dict[tuple[str, str], int] | None = None
+    binding: bool = False
+    attr_of: str | None = None
 
 
 def fold_facts(
@@ -1153,9 +1240,13 @@ def fold_facts(
             if rel is None:
                 rel = rel_cache[abs_file] = _site_path(fs, abs_file)
         symbol = ev["sym"] or ev["q"]
+        attr_of = None
+        accessed = _module_getattr_name(symbol, ev["input"])
+        if accessed is not None:  # ``mod.__getattr__(name)`` is the attribute access ``mod.name``
+            attr_of, symbol = symbol, f"{symbol[:-len('__getattr__')]}{accessed}"
         ikey = _canon(ev["input"])
         ikey = pool.setdefault("i" + ikey, ikey)
-        key = (symbol, rel, func, line, ikey)
+        key = (symbol, rel, func, line, ikey, ev["binding"])
         a = acc.get(key)
         if a is None:
             text = site_text.get(f"{abs_file}:{line}") if abs_file and line is not None else None
@@ -1165,7 +1256,8 @@ def fold_facts(
                 shared_where = where_pool[wkey] = dict(where)
             a = acc[key] = _Acc(symbol=symbol, file=rel, func=func, line=line, text=text,
                                 input=pool.setdefault("v" + ikey, ev["input"]),
-                                first_seen=index, where=shared_where)
+                                first_seen=index, where=shared_where,
+                                binding=ev["binding"], attr_of=attr_of)
         a.qualnames.add(ev["q"])
         if ev["symq"] and a.symq is None:
             a.symq = ev["symq"]
@@ -1415,6 +1507,33 @@ def _receiver_marker(value: Any) -> dict[str, str]:
     return {"__opaque__": type(value).__name__ if value is not None else "?"}
 
 
+def _module_getattr_name(symbol: str, inputs: Any) -> str | None:
+    """The attribute name of a module-level ``__getattr__(name)`` call (no receiver), else None."""
+    if not symbol.endswith(".__getattr__") or not isinstance(inputs, dict):
+        return None
+    bound = inputs.get("bound")
+    if not isinstance(bound, dict) or "self" in bound or "cls" in bound:
+        return None
+    name = bound.get("name")
+    if not isinstance(name, str) or not name.isidentifier():
+        return None
+    # A class's ``__getattr__`` has a receiver; here the owner must look like a module path.
+    owner = symbol[:-len(".__getattr__")].split(".")
+    return name if owner and not owner[-1][:1].isupper() else None
+
+
+def _objects_to_opaque(value: Any) -> Any:
+    """``{"__object__": T, ...}`` -> ``{"__opaque__": T}`` anywhere in an input: a structural
+    object is output evidence; keyed as an input it would make every call a new fact."""
+    if isinstance(value, dict):
+        if isinstance(value.get("__object__"), str):
+            return {"__opaque__": value["__object__"]}
+        return {k: _objects_to_opaque(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_objects_to_opaque(v) for v in value]
+    return value
+
+
 def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     """One JSONL event or one aggregated record -> a uniform event dict (None = not a call)."""
     if not isinstance(raw, Mapping):
@@ -1454,6 +1573,9 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         inputs = {k: v for k, v in inputs.items() if k != "defaulted"}
         if (sym or q).endswith(".__init__"):
             inputs = _constructor_inputs(inputs)
+    inputs = _objects_to_opaque(inputs)
+    if isinstance(inputs, dict) and inputs.get("__c_call__"):
+        inputs = {"__c_call__": True}  # a compiled call: no observable arguments (arg0 varies)
     if kind == "raise":
         value = _raise_name(value)
     v = raw.get("v")
@@ -1463,7 +1585,8 @@ def _normalize_record(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     return {"q": q, "sym": sym, "symq": raw.get("symq") if isinstance(raw.get("symq"), str)
             else None, "input": inputs, "defaulted": defaulted, "kind": kind, "value": value,
             "count": count, "where": where, "v": version, "aggregated": aggregated,
-            "warnings": warns if isinstance(warns, list) and warns else None}
+            "warnings": warns if isinstance(warns, list) and warns else None,
+            "binding": kind == "raise" and raw.get("binding") is True}
 
 
 UNTYPED_RAISE = "<unknown>"  # setprofile below 3.12: a raise whose type it cannot see
@@ -1494,7 +1617,7 @@ def _fact_from_acc(a: _Acc) -> Fact:
         outcomes=[Outcome.model_construct(_OUTCOME_FIELDS_SET, kind=k, value=v, count=c)
                   for _, (k, v, c) in outcomes],
         count=a.count, where=a.where, first_seen=a.first_seen,
-        warnings=_call_warnings(a.warnings),
+        warnings=_call_warnings(a.warnings), binding=a.binding, attr_of=a.attr_of,
     )
 
 
@@ -1605,6 +1728,11 @@ def value_type(value: Any) -> Any:
         return {"enum": str(value["__enum__"]).rpartition(".")[0]}
     if "__type__" in value:
         return {"type": value["__type__"]}
+    if "__object__" in value:
+        out = {"object": str(value["__object__"])}
+        if not value.get("__truncated__"):  # a truncated object lost attributes: name only
+            out["attrs"] = {str(n): value_type(v) for n, v in _attr_items(value)}
+        return out
     if "__callable__" in value:
         return {"callable": value["__callable__"]}
     if "__list__" in value:
@@ -1657,6 +1785,8 @@ def types_match(a: Any, b: Any) -> bool:
         return True
     if a in _NUMERIC and b in _NUMERIC:
         return True
+    if _is_unobserved_type(a) or _is_unobserved_type(b):
+        return True  # an unobserved C return stands for any return value
     if isinstance(a, dict) and ("nondeterministic" in a or "ambiguous" in a):
         return True
     if isinstance(b, dict) and ("nondeterministic" in b or "ambiguous" in b):
@@ -1677,11 +1807,39 @@ def types_match(a: Any, b: Any) -> bool:
     if "dict" in a and "dict" in b:
         da, db = a["dict"], b["dict"]
         return da.keys() == db.keys() and all(types_match(da[k], db[k]) for k in da)
+    if "type" in a and "type" in b:
+        return _same_type_name(a["type"], b["type"])
+    if "callable" in a and "callable" in b:
+        return _same_closure(a["callable"], b["callable"])
+    if "object" in a and "object" in b:
+        if not _same_type_name(a["object"], b["object"]):
+            return False
+        if "attrs" not in a or "attrs" not in b:
+            return True
+        if _type_key(a["object"]) in _HANDLES.get() or _type_key(b["object"]) in _HANDLES.get():
+            return True  # a handle: its state is observed through the calls made on it
+        # attributes present on both sides; one-sided attributes are additive, not a change
+        return all(types_match(a["attrs"][k], b["attrs"][k])
+                   for k in a["attrs"].keys() & b["attrs"].keys())
     if "dataclass" in a and "dataclass" in b:
         fa, fb = a.get("fields", {}), b.get("fields", {})
         return (a["dataclass"] == b["dataclass"] and fa.keys() == fb.keys()
                 and all(types_match(fa[k], fb[k]) for k in fa))
     return False
+
+
+UNOBSERVED_RETURN = "unobserved:c-return"
+
+
+def _is_unobserved_type(t: Any) -> bool:
+    return isinstance(t, dict) and t.get("opaque") == UNOBSERVED_RETURN
+
+
+def _is_unobserved(o: Outcome) -> bool:
+    """A compiled call's return the backend could not see (``__c_call__`` events): a marker,
+    not data."""
+    return (o.kind == "return" and isinstance(o.value, dict)
+            and o.value.get("__opaque__") == UNOBSERVED_RETURN)
 
 
 def _named_match(named: dict, other: Any) -> bool:
@@ -1690,7 +1848,176 @@ def _named_match(named: dict, other: Any) -> bool:
         other_name = other.get("opaque", other.get("cycle"))
     else:
         other_name = _type_label(other)
-    return other_name == name or (name, other_name) in _LABEL_ALIASES
+    return other_name == name or (name, other_name) in _LABEL_ALIASES or (
+        isinstance(other_name, str) and _same_type_name(name, other_name))
+
+
+# Relocations noticed while comparing one pair of outcome distributions (see compare_outcomes).
+@dataclass
+class _Evidence:
+    relocated: list[tuple[str, str]] = field(default_factory=list)
+    drift: list[str] = field(default_factory=list)   # additive / absent-vs-empty attribute notes
+    type_only: bool = False                         # something compared by type name only
+    closures: list[tuple[str, str]] = field(default_factory=list)
+
+
+_EVIDENCE: ContextVar[_Evidence | None] = ContextVar("pymolt_evidence", default=None)
+# (top-level package, last name segment) of every type that is the receiver of an operation-like
+# traced call on either side: a *handle*, whose state is observed through those calls.
+_HANDLES: ContextVar[frozenset] = ContextVar("pymolt_handles", default=frozenset())
+UNOBSERVABLE_NOTE = "the replacement on this line was not observable"
+HANDLE_NOTE = "state of a handle differs; calls on it compare separately"
+_SENTINEL_RE = re.compile(
+    r"unset|missing|not_?set|no_?default|undefined|nothing|sentinel|no_?value|not_?given")
+
+
+def _type_key(name: Any) -> tuple[str, str] | None:
+    if not isinstance(name, str) or not name:
+        return None
+    return (name.split(".")[0], name.rsplit(".", 1)[-1])
+
+
+def _receiver_type(inputs: Any) -> str | None:
+    bound = inputs.get("bound") if isinstance(inputs, dict) else None
+    recv = bound.get("self") if isinstance(bound, dict) else None
+    if isinstance(recv, dict):
+        for key in ("__opaque__", "__structure__", "__object__", "__type__"):
+            if isinstance(recv.get(key), str):
+                return recv[key]
+    return None
+
+
+def _is_operation(f: Fact) -> bool:
+    """A call that binds something beyond its receiver, or has defaulted parameters: more than
+    a property read (``Result.output`` binds only ``self`` and defaults nothing)."""
+    inputs = f.input
+    if not isinstance(inputs, dict):
+        return False
+    bound = inputs.get("bound")
+    if isinstance(bound, dict) and any(k not in ("self", "cls") for k in bound):
+        return True
+    if any(d for d in (f.defaulted or ())):
+        return True
+    return any(inputs.get(k) not in (None, [], {}, {"__tuple__": []}, {"__dict__": []})
+               for k in ("args", "varargs", "kwargs"))
+
+
+def _handle_types(*sides: list[Fact]) -> frozenset:
+    out = set()
+    for facts in sides:
+        for f in facts:
+            if _is_operation(f):
+                key = _type_key(_receiver_type(f.input))
+                if key:
+                    out.add(key)
+    return frozenset(out)
+
+
+def _is_sentinel(v: Any) -> bool:
+    if not isinstance(v, dict):
+        return False
+    for tag in ("__enum__", "__opaque__", "__object__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            parts = name.lower().replace("-", "_").split(".")
+            tail = parts[-1].strip("_")
+            return bool(_SENTINEL_RE.search("".join(parts[-2:]).replace("__", "_"))
+                        or tail == "default")
+    return False
+
+
+def _closure_leaf(name: Any) -> str | None:
+    if isinstance(name, str) and "<locals>." in name:
+        return name.rsplit("<locals>.", 1)[1]
+    return None
+
+
+def _same_type_name(a: Any, b: Any) -> bool:
+    """Equal type names, or one class moved within its package: the same top-level package and
+    the same last name segment (``sqlalchemy.ext.declarative.api.Base`` ->
+    ``sqlalchemy.orm.decl_api.Base``). A relocation is recorded for the comparison's note."""
+    if a == b:
+        return True
+    if isinstance(a, str) and isinstance(b, str) and _reloc_equiv(a, b):
+        ev = _EVIDENCE.get()
+        if ev is not None and (a, b) not in ev.relocated:
+            ev.relocated.append((a, b))
+        return True
+    if not (isinstance(a, str) and isinstance(b, str)) or "." not in a or "." not in b:
+        return False
+    if a.split(".")[0] != b.split(".")[0] or a.rsplit(".", 1)[1] != b.rsplit(".", 1)[1]:
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None and (a, b) not in ev.relocated:
+        ev.relocated.append((a, b))
+    return True
+
+
+_EMPTY_TAGS = ("__list__", "__tuple__", "__set__", "__dict__", "__bytes__")
+
+
+def _is_empty_value(v: Any) -> bool:
+    if v in ("", [], {}):
+        return v is not None
+    return isinstance(v, dict) and len(v) == 1 and any(
+        k in v and v[k] in ("", []) for k in _EMPTY_TAGS)
+
+
+def _attrs_match(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Attributes present on both sides compare (None vs an empty value of the same family and
+    an attribute on one side only are drift, not a change); a nested object compares by type."""
+    ev = _EVIDENCE.get()
+    xs, ys = dict(_attr_items(a)), dict(_attr_items(b))
+    for name in sorted(xs.keys() ^ ys.keys()):
+        if ev is not None:
+            ev.drift.append(f"attribute {'removed' if name in xs else 'added'}: {name}")
+    return all(_attr_value_match(name, xs[name], ys[name]) for name in xs.keys() & ys.keys())
+
+
+def _attr_value_match(name: str, x: Any, y: Any) -> bool:
+    ev = _EVIDENCE.get()
+    if _canon(x) == _canon(y):
+        return True
+    if (x is None and _is_empty_value(y)) or (y is None and _is_empty_value(x)):
+        if ev is not None:
+            ev.drift.append(f"absent vs empty: {name}")
+        return True
+    if _is_sentinel(x) != _is_sentinel(y):
+        if ev is not None:
+            ev.drift.append(f"sentinel resolved: {name}")
+        return True
+    if isinstance(x, list) and isinstance(y, list):
+        return len(x) == len(y) and all(_attr_value_match(name, p, q) for p, q in zip(x, y))
+    if isinstance(x, dict) and isinstance(y, dict):
+        if "__object__" in x and "__object__" in y:
+            if ev is not None:
+                ev.type_only = True
+            return _same_type_name(x["__object__"], y["__object__"])
+        for tag in ("__list__", "__tuple__", "__set__"):
+            if tag in x and tag in y and isinstance(x[tag], list) and isinstance(y[tag], list):
+                return len(x[tag]) == len(y[tag]) and all(
+                    _attr_value_match(name, p, q) for p, q in zip(x[tag], y[tag]))
+    return _values_match(x, y)
+
+
+def _same_closure(a: Any, b: Any) -> bool:
+    """Two ``<locals>`` closures with the same leaf name and different enclosing functions
+    (a decorator factory renamed): equal at type level, with a note."""
+    la, lb = _closure_leaf(a), _closure_leaf(b)
+    if la is None or la != lb:
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        ev.type_only = True
+        ev.closures.append((a, b))
+    return True
+
+
+def _attr_items(value: Mapping[str, Any]) -> list[tuple[str, Any]]:
+    attrs = value.get("attrs")
+    if not isinstance(attrs, dict):
+        return []
+    return [(str(k), attrs[k]) for k in sorted(attrs, key=str)]
 
 
 def _type_label(t: Any) -> str | None:
@@ -1740,19 +2067,43 @@ class OutcomeComparison:
     notes: list[str] = field(default_factory=list)
     old_types: list[Any] | None = None
     new_types: list[Any] | None = None
+    drift: bool = False  # equal, but an attribute was added/removed or went absent <-> empty
 
 
 def compare_outcomes(
     old: list[Outcome], new: list[Outcome], profile: DiffProfile | str = DiffProfile.EXACT,
 ) -> OutcomeComparison:
-    """Compare two outcome distributions (the support, not the counts)."""
-    profile = DiffProfile(profile)
+    """Compare two outcome distributions (the support, not the counts). Equal only because a
+    class moved within its package is equal at type level, with a ``relocated`` note."""
+    ev = _Evidence()
+    token = _EVIDENCE.set(ev)
+    try:
+        cmp = _compare_outcomes(old, new, DiffProfile(profile))
+    finally:
+        _EVIDENCE.reset(token)
+    if cmp.comparison is Comparison.EQUAL and ev.drift:
+        cmp.drift = True
+        cmp.notes.extend(dict.fromkeys(ev.drift))
+    if (ev.relocated or ev.type_only) and cmp.comparison is Comparison.EQUAL:
+        cmp.notes.extend(f"relocated: {a} -> {b}" for a, b in ev.relocated)
+        cmp.notes.extend(f"closure: {a} -> {b}" for a, b in ev.closures)
+        if cmp.level is not ComparisonLevel.TYPE:
+            cmp.level = ComparisonLevel.TYPE
+            cmp.old_types, cmp.new_types = _distinct_types(old), _distinct_types(new)
+    return cmp
+
+
+def _compare_outcomes(
+    old: list[Outcome], new: list[Outcome], profile: DiffProfile,
+) -> OutcomeComparison:
     if any(_is_unrecorded(o) for o in (*old, *new)):
         return OutcomeComparison(Comparison.UNCOMPARABLE, None, ["nondeterministic-unrecorded"])
     o_keys = {_canon([o.kind, o.value]) for o in old}
     n_keys = {_canon([o.kind, o.value]) for o in new}
     nondet = len(o_keys) > 1 or len(n_keys) > 1
     notes = ["nondeterministic"] if nondet else []
+    if any(_is_unobserved(o) for o in (*old, *new)):
+        notes.append("c-return unobserved")
     # A raise recorded without its type (setprofile below 3.12) can only be compared as "a
     # raise": against a typed raise on the other side that is a type-level comparison.
     untyped = o_keys != n_keys and any(_is_untyped_raise(o) for o in (*old, *new))
@@ -1796,6 +2147,8 @@ def _distinct_types(outcomes: list[Outcome]) -> list[Any]:
 
 
 def _outcomes_match(a: Outcome, b: Outcome) -> bool:
+    if _is_unobserved(a) or _is_unobserved(b):
+        return a.kind == "return" and b.kind == "return"
     if _is_ambiguous(a) or _is_ambiguous(b):
         return _ambiguous_compatible(outcome_type(a), outcome_type(b))
     if a.kind != b.kind:
@@ -1819,7 +2172,7 @@ def _raises_match(a: Any, b: Any) -> bool:
     """Same exception type; an untyped raise matches any raise (raise vs return still
     differs, and two different known types still differ)."""
     a, b = _raise_name(a), _raise_name(b)
-    return a == b or UNTYPED_RAISE in (a, b)
+    return a == b or UNTYPED_RAISE in (a, b) or _reloc_equiv(a, b)
 
 
 def _is_untyped_raise(o: Outcome) -> bool:
@@ -1853,6 +2206,24 @@ def _values_match(a: Any, b: Any) -> bool:
     if _type_only(a) or _type_only(b):
         return types_match(value_type(a), value_type(b))
     if not (isinstance(a, dict) and isinstance(b, dict)):
+        return False
+    if "__type__" in a and "__type__" in b:
+        return _same_type_name(a["__type__"], b["__type__"])
+    if "__callable__" in a and "__callable__" in b:
+        return _same_closure(a["__callable__"], b["__callable__"])
+    if "__object__" in a and "__object__" in b:
+        if a.get("__truncated__") or b.get("__truncated__"):  # truncated object: type level
+            return types_match(value_type(a), value_type(b))
+        if not _same_type_name(a["__object__"], b["__object__"]):
+            return False
+        if _attrs_match(a, b):
+            return True
+        handles = _HANDLES.get()
+        if _type_key(a["__object__"]) in handles or _type_key(b["__object__"]) in handles:
+            ev = _EVIDENCE.get()
+            if ev is not None:
+                ev.drift.append(HANDLE_NOTE)
+            return True
         return False
     for tag in ("__list__", "__tuple__", "__set__"):
         if tag in a and tag in b:
@@ -1918,6 +2289,600 @@ def _cover(xs: Iterable, ys: Iterable, match: Callable[[Any, Any], bool]) -> boo
             and all(any(match(x, y) for x in xs) for y in ys))
 
 
+# ── Round 3: edit provenance (line-mapped diff, ledger, anchors, representation) ───────────
+
+_TYPE_RELOC: ContextVar[Mapping[str, str]] = ContextVar("pymolt_type_reloc", default={})
+_NOISE_PREFIXES = ("importlib._bootstrap",)
+_STRICT_CLAIMS = ("same-object", "same-signature", "verified-rule", "python-fixer")
+_CLASS_HOOKS = ("__init_subclass__", "__set_name__", "__prepare__")
+_APPEAR_HOOKS = ("__getattribute__",)  # a new implicit protocol hook is not a call anyone made
+def _COMPOUND(node: ast.stmt) -> bool:  # noqa: N802
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.For,
+                             ast.AsyncFor, ast.While, ast.If, ast.With, ast.AsyncWith, ast.Try,
+                             ast.Match, getattr(ast, "TryStar", ast.Try)))
+
+
+_SIMPLE_STMTS = (ast.Return, ast.Assign, ast.AnnAssign, ast.Expr, ast.AugAssign)
+
+
+def _reloc_equiv(a: str, b: str) -> bool:
+    """``a`` and ``b`` are an old/new spelling pair from the plan's type relocations (full
+    names or their last segments)."""
+    for old_t, new_t in _TYPE_RELOC.get().items():
+        names = {old_t, new_t, old_t.rsplit(".", 1)[-1], new_t.rsplit(".", 1)[-1]}
+        if a != b and a in names and b in names:
+            return True
+    return False
+
+
+class _Provenance:
+    """Which side's lines were edited (line-mapped diff of the sources), which edits are
+    pymolt's own (the ledger) and what the static contact maps say."""
+
+    def __init__(self, ctx: DiffContext | None, new_root: str | None) -> None:
+        self.ctx = ctx
+        self.new_root = new_root
+        # No ledger (edits None) means nobody vouches for the edit: judge it as a hand edit.
+        self.ledger_known = False
+        self.no_ledger = False
+        self.edits = (ctx.edits if ctx else None) or []
+        self.symbol_map: dict[str, str] = {}
+        if ctx is not None:
+            self.symbol_map.update(ctx.successors or {})
+            for e in self.edits:
+                if e.get("old_symbol") and e.get("new_symbol"):
+                    self.symbol_map[e["old_symbol"]] = e["new_symbol"]
+        self.maps: dict[str, tuple[dict[int, tuple[str, int | None]],
+                                   dict[int, tuple[str, int | None]]]] = {}
+        old_src = (ctx.old_sources if ctx else None) or {}
+        new_src = (ctx.new_sources if ctx else None) or {}
+        for file in old_src.keys() & new_src.keys():
+            self.maps[file] = _line_map(old_src[file], new_src[file])
+        self.sources = (old_src, new_src)
+        # Hand-edit judging needs line-mapped sources or a positive ledger; with neither (no
+        # snapshots at all) the round-2 line-text rules apply, strictly.
+        self.ledger_known = ctx is not None and (bool(self.maps) or ctx.edits is not None)
+        self.no_ledger = self.ledger_known and ctx is not None and ctx.edits is None
+        self._stmts: dict[tuple[int, str], dict[int, tuple] | None] = {}
+
+    def status(self, file: str, line: int | None, side: int) -> str | None:
+        """``same`` / ``edited`` / ``gone`` (deleted or inserted) / None (no line map)."""
+        m = self.maps.get(file)
+        if m is None or line is None:
+            return None
+        st = m[side].get(line, ("gone", None))[0]
+        if st == "same":  # a statement is edited if any of its lines is
+            span = self.stmt_span(side, file, line)
+            if span and any(m[side].get(ln, ("gone", None))[0] != "same"
+                            for ln in range(span[0], span[1] + 1)):
+                return "edited"
+        if st == "same":  # a decorator's call is attributed to the ``def`` line by some versions
+            for dl in self._decorator_lines(side, file).get(line, ()):
+                if m[side].get(dl, ("gone", None))[0] != "same":
+                    return "edited"
+        return st
+
+    def resolves_to_project(self, file: str, line: int | None, symbol: str) -> bool:
+        """On the new side, the callee at ``line`` whose leaf is the symbol's leaf is rooted in a
+        name that resolves to project code: a ``def`` / ``class`` in the file, an import from a
+        project module, or an assignment from one of those. Local variables, parameters,
+        dependency imports and anything unknown are not."""
+        text = self.sources[1].get(file)
+        if text is None or line is None:
+            return False
+        try:
+            tree = _parse_source(text)
+        except (SyntaxError, ValueError):
+            return False
+        span = self.stmt_span(1, file, line) or (line, line)
+        leaf = _symbol_leaf(symbol)
+        roots: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and span[0] <= node.lineno <= span[1]:
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                if name == leaf:
+                    while isinstance(fn, ast.Attribute):
+                        fn = fn.value
+                    if isinstance(fn, ast.Name):
+                        roots.append(fn.id)
+        if not roots:
+            return False
+        scope = _enclosing_function(tree, line)
+        return all(self._project_name(tree, scope, r, 0) for r in roots)
+
+    def _is_project_module(self, module: str, level: int) -> bool:
+        if level:
+            return True  # a relative import stays inside the project
+        rel = module.replace(".", "/")
+        new_src = self.sources[1]
+        if any(k in new_src for k in (rel + ".py", rel + "/__init__.py")):
+            return True
+        root = self.new_root
+        return bool(root) and (os.path.exists(os.path.join(root, rel + ".py"))
+                               or os.path.exists(os.path.join(root, rel, "__init__.py")))
+
+    def _project_name(self, tree: ast.AST, scope: ast.AST | None, name: str, depth: int) -> bool:
+        if depth > 3:
+            return False
+        if scope is not None and name in _param_names(scope):
+            return False
+        for body_owner in (scope, tree):
+            if body_owner is None:
+                continue
+            for node in ast.walk(body_owner):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) \
+                        and node.name == name and node is not scope:
+                    return True
+                if isinstance(node, ast.ImportFrom):
+                    for a in node.names:
+                        if (a.asname or a.name) == name:
+                            return self._is_project_module(node.module or "", node.level)
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        if (a.asname or a.name.split(".")[0]) == name:
+                            return self._is_project_module(a.name, 0)
+                if isinstance(node, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                    v = node.value  # an alias of project code; a call's result is a runtime value
+                    while isinstance(v, ast.Attribute):
+                        v = v.value
+                    if isinstance(v, ast.Name):
+                        return v.id != name and self._project_name(tree, scope, v.id, depth + 1)
+                    return False
+        return False
+
+    def _simple_stmts(self, side: int, file: str) -> list[ast.stmt]:
+        key = (side + 8, file)
+        if key not in self._stmts:
+            text = self.sources[side].get(file)
+            out: list[ast.stmt] = []
+            if text is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+                out = [n for n in ast.walk(tree) if isinstance(n, ast.stmt)
+                       and not _COMPOUND(n)] if tree is not None else []
+                out.sort(key=lambda n: n.lineno)
+            self._stmts[key] = out  # type: ignore[assignment]
+        return self._stmts[key]  # type: ignore[return-value]
+
+    def naming_status(self, side: int, file: str, line: int | None, symbol: str) -> str | None:
+        """For a fact whose callee leaf is not named on its own statement (a generator body runs
+        when first consumed, so the fact lands on the consumer): the edit status of the nearest
+        preceding statement in the same function that does name it. None when its own statement
+        names it, it is a dunder, or nothing names it."""
+        leaf = _symbol_leaf(symbol)
+        if line is None or (leaf.startswith("__") and leaf.endswith("__")):
+            return None
+        stmts = self._simple_stmts(side, file)
+        own = [n for n in stmts if n.lineno <= line <= (n.end_lineno or n.lineno)]
+        if not own or any(_names_leaf(n, leaf) for n in own):
+            return None
+        start = min(n.lineno for n in own)
+        text = self.sources[side].get(file)
+        scope = _enclosing_function(_parse_source(text), line) if text else None
+        lo, hi = (scope.lineno, scope.end_lineno) if scope is not None else (0, 10**9)
+        prior = [n for n in stmts if lo <= n.lineno < start and (n.end_lineno or 0) <= hi
+                 and _names_leaf(n, leaf)]
+        if not prior:
+            return None
+        named = prior[-1]
+        m = self.maps.get(file)
+        if m is None:
+            return None
+        edited = any(m[side].get(ln, ("gone", None))[0] != "same"
+                     for ln in range(named.lineno, (named.end_lineno or named.lineno) + 1))
+        return "edited" if edited else "same"
+
+    def attribute_read_evidence(self, side: int, file: str, line: int | None,
+                                symbol: str) -> bool:
+        """The statement's AST shows the leaf is read, not called, or called with arguments the
+        fact did not bind (``G.edges(data=True)``: the getter, then a call on its value)."""
+        leaf = _symbol_leaf(symbol)
+        for n in self._simple_stmts(side, file):
+            if line is None or not (n.lineno <= line <= (n.end_lineno or n.lineno)):
+                continue
+            called: set[int] = set()
+            for node in ast.walk(n):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                        and node.func.attr == leaf:
+                    called.add(id(node.func))
+                    if node.args or node.keywords:
+                        return True
+            for node in ast.walk(n):
+                if isinstance(node, ast.Attribute) and node.attr == leaf \
+                        and id(node) not in called:
+                    return True
+        return False
+
+    def stmt_span(self, side: int, file: str, line: int | None) -> tuple[int, int] | None:
+        """The innermost enclosing simple statement's (first, last) line, from the snapshot."""
+        if line is None:
+            return None
+        key = (side + 6, file)
+        if key not in self._stmts:
+            spans: dict[int, tuple[int, int]] = {}
+            text = self.sources[side].get(file)
+            tree = None
+            if text is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+            for node in ast.walk(tree) if tree is not None else ():
+                if isinstance(node, ast.stmt) and not _COMPOUND(node):
+                    end = node.end_lineno or node.lineno
+                    for ln in range(node.lineno, end + 1):
+                        spans[ln] = (node.lineno, end)
+            self._stmts[key] = spans if tree is not None else None
+        table = self._stmts[key]
+        return table.get(line) if table else None
+
+    def _decorator_lines(self, side: int, file: str) -> dict[int, list[int]]:
+        key = (side + 4, file)
+        if key not in self._stmts:
+            out: dict[int, list[int]] = {}
+            text = self.sources[side].get(file)
+            if text is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+                for node in ast.walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) \
+                            and node.decorator_list:
+                        out[node.lineno] = [d.lineno for d in node.decorator_list]
+            self._stmts[key] = out
+        return self._stmts[key]  # type: ignore[return-value]
+
+    def mapped_line(self, file: str, line: int | None, side: int) -> int | None:
+        m = self.maps.get(file)
+        if m is None or line is None:
+            return None
+        return m[side].get(line, ("gone", None))[1]
+
+    def ledger_covers(self, file: str, line: int | None, side: int) -> bool:
+        key = "old_lines" if side == 0 else "new_lines"
+        if line is None:
+            return False
+        for e in self.edits:
+            if e.get("claim") not in _STRICT_CLAIMS:
+                continue  # pymolt's heuristic edit (claim null) judges like a hand edit
+            rng = e.get(key)
+            if e.get("file") == file and isinstance(rng, list | tuple) and len(rng) == 2 \
+                    and rng[0] <= line <= rng[1]:
+                return True
+        return False
+
+    def stmt_info(self, side: int, v: "_V") -> tuple | None:
+        """``(kind, target, call leaf)`` of the one simple statement at the fact's line."""
+        f = v.fact
+        table = self._stmt_table(side, f.file)
+        if table is not None and f.line in table:
+            return table[f.line]
+        return _parse_stmt_text(f.text)
+
+    def in_class_body(self, side: int, file: str, line: int | None) -> bool:
+        """The line sits directly in a class body (not inside a method): a class-creation site."""
+        key = (side + 2, file)
+        if key not in self._stmts:
+            text = self.sources[side].get(file)
+            lines: dict[int, tuple] | None = None
+            if text is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+                if tree is not None:
+                    lines = {}
+                    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+                        lines[cls.lineno] = ()  # the ``class`` statement itself
+                        for stmt in cls.body:
+                            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                                continue
+                            for ln in range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1):
+                                lines[ln] = ()
+            self._stmts[key] = lines
+        table = self._stmts[key]
+        return table is not None and line in table
+
+    def _stmt_table(self, side: int, file: str) -> dict[int, tuple] | None:
+        key = (side, file)
+        if key not in self._stmts:
+            text = self.sources[side].get(file)
+            table = None
+            if text is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+                if tree is not None:
+                    table = {}
+                    for node in ast.walk(tree):
+                        if isinstance(node, _SIMPLE_STMTS):
+                            info = _stmt_of(node)
+                            for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+                                table[ln] = info
+            self._stmts[key] = table
+        return self._stmts[key]
+
+
+def _parse_source(text: str) -> ast.AST:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return ast.parse(text)
+
+
+def _names_leaf(node: ast.AST, leaf: str) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute) and n.attr == leaf:
+            return True
+        if isinstance(n, ast.Name) and n.id == leaf:
+            return True
+        if isinstance(n, ast.alias) and (n.asname or n.name).split(".")[-1] == leaf:
+            return True
+    return False
+
+
+def _param_names(fn: ast.AST) -> set[str]:
+    args = getattr(fn, "args", None)
+    if args is None:
+        return set()
+    names = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    names.update(a.arg for a in (args.vararg, args.kwarg) if a is not None)
+    return names
+
+
+def _enclosing_function(tree: ast.AST, line: int) -> ast.AST | None:
+    best = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and \
+                node.lineno <= line <= (node.end_lineno or node.lineno):
+            if best is None or node.lineno >= best.lineno:
+                best = node
+    return best
+
+
+def _line_map(old_text: str, new_text: str) -> tuple[dict[int, tuple[str, int | None]],
+                                                     dict[int, tuple[str, int | None]]]:
+    """difflib over stripped lines: per side, line -> (``same``, other line) | (``edited``,
+    None) inside a replace hunk | (``gone``, None) for a deleted / inserted line."""
+    a = [ln.strip() for ln in old_text.splitlines()]
+    b = [ln.strip() for ln in new_text.splitlines()]
+    om: dict[int, tuple[str, int | None]] = {}
+    nm: dict[int, tuple[str, int | None]] = {}
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                om[i1 + k + 1] = ("same", j1 + k + 1)
+                nm[j1 + k + 1] = ("same", i1 + k + 1)
+        else:
+            state = "edited" if tag == "replace" else "gone"
+            for i in range(i1, i2):
+                om[i + 1] = (state, None)
+            for j in range(j1, j2):
+                nm[j + 1] = (state, None)
+    return om, nm
+
+
+def _stmt_of(node: ast.AST) -> tuple | None:
+    value = getattr(node, "value", None)
+    if isinstance(node, ast.Return):
+        kind, target = "return", ""
+    elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+        kind, target = "assign", ast.dump(node.targets[0])
+    elif isinstance(node, ast.AnnAssign):
+        kind, target = "assign", ast.dump(node.target)
+    else:
+        return None
+    if not isinstance(value, ast.Call):
+        return None
+    fn = value.func
+    leaf = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else None
+    return (kind, target, leaf) if leaf else None
+
+
+def _parse_stmt_text(text: str | None) -> tuple | None:
+    if not text:
+        return None
+    for tail in ("", ")", "))", ")))"):
+        try:
+            tree = ast.parse(text + tail)
+        except SyntaxError:
+            continue
+        if len(tree.body) == 1:
+            return _stmt_of(tree.body[0])
+    return None
+
+
+def _wrapper_like(symbol: str) -> bool:
+    return ".<locals>." in symbol or symbol.startswith("decorator.") or ".decorator." in symbol
+
+
+def _symbol_leaf(symbol: str) -> str:
+    parts = symbol.split(".")
+    if parts[-1] in ("__init__", "__new__") and len(parts) > 1:
+        return parts[-2]
+    return parts[-1]
+
+
+def _scalars(inputs: Any) -> list[Any]:
+    bound = inputs.get("bound") if isinstance(inputs, dict) else None
+    if not isinstance(bound, dict):
+        return []
+    return [v for k, v in bound.items()
+            if k not in ("self", "cls") and isinstance(v, str | int | float | bool)]
+
+
+def _anchored_pairs(old_left: list["_V"], new_left: list["_V"], prov: _Provenance,
+                    ) -> list[tuple["_V", "_V"]]:
+    """Pair edited-line leftovers inside one (file, function) by an *anchor*: the same symbol, a
+    ledger / plan symbol mapping, or a one-statement edit (both ``return <call>`` / the same
+    ``target = <call>``) whose outermost call matches the symbol. Scalar argument values
+    choose within a candidate set; ambiguity stays unpaired."""
+    olds = [v for v in old_left if v.rewritten_site]
+    news = [v for v in new_left if v.rewritten_site]
+    cross = True
+    by_func: dict[tuple, tuple[list, list]] = defaultdict(lambda: ([], []))
+    for v in olds:
+        by_func[(v.fact.file, v.fact.func)][0].append(v)
+    for v in news:
+        by_func[(v.fact.file, v.fact.func)][1].append(v)
+
+    def anchored(o: _V, n: _V) -> bool:
+        if o.fact.symbol == n.fact.symbol:
+            return True
+        if not cross:
+            return False
+        if prov.symbol_map.get(o.fact.symbol) == n.fact.symbol:
+            return True
+        so, sn = prov.stmt_info(0, o), prov.stmt_info(1, n)
+        return (so is not None and sn is not None and so[:2] == sn[:2]
+                and so[2] == _symbol_leaf(o.fact.symbol)
+                and sn[2] == _symbol_leaf(n.fact.symbol))
+
+    pairs: list[tuple[_V, _V]] = []
+    for os_, ns in by_func.values():
+        if not os_ or not ns:
+            continue
+        edges = {(id(o), id(n)) for o in os_ for n in ns if anchored(o, n)}
+        # connected components over the anchor edges
+        comp: dict[int, int] = {}
+        nodes = {id(v): v for v in (*os_, *ns)}
+        parent = {k: k for k in nodes}
+
+        def find(x: int, parent: dict[int, int] = parent) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b in edges:
+            parent[find(a)] = find(b)
+        for k in nodes:
+            comp[k] = find(k)
+        groups: dict[int, tuple[list, list]] = defaultdict(lambda: ([], []))
+        for o in os_:
+            groups[comp[id(o)]][0].append(o)
+        for n in ns:
+            groups[comp[id(n)]][1].append(n)
+        for go, gn in groups.values():
+            if not go or not gn:
+                continue
+            go.sort(key=lambda v: v.first_seen)
+            gn.sort(key=lambda v: v.first_seen)
+            if len(go) == 1 and len(gn) == 1:
+                if (id(go[0]), id(gn[0])) in edges:
+                    pairs.append((go[0], gn[0]))
+                continue
+            chosen: set[int] = set()
+            best: dict[int, tuple[int, _V] | None] = {}
+            for o in go:
+                so = _scalars(o.fact.input)
+                scored = sorted(((sum(1 for x in so if x in _scalars(n.fact.input)), n)
+                                 for n in gn if (id(o), id(n)) in edges),
+                                key=lambda t: -t[0])
+                best[id(o)] = (scored[0][1] if scored and scored[0][0] > 0
+                               and (len(scored) == 1 or scored[1][0] < scored[0][0]) else None)
+            for o in go:
+                n = best[id(o)]
+                if n is None or id(n) in chosen:
+                    continue
+                rivals = [x for x in go if best[id(x)] is n]
+                if len(rivals) == 1:
+                    pairs.append((o, n))
+                    chosen.update((id(o), id(n)))
+            rest_o = [o for o in go if id(o) not in chosen]
+            rest_n = [n for n in gn if id(n) not in chosen]
+            if len(rest_o) == 1 and len(rest_n) == 1 and (id(rest_o[0]), id(rest_n[0])) in edges:
+                pairs.append((rest_o[0], rest_n[0]))
+    return pairs
+
+
+# representation-only: the same values in a different container or type family
+
+def _content(v: Any) -> Any:
+    """A canonical, container-free rendering of a value's content; ``_UNKNOWN`` when any part
+    is opaque, cyclic or truncated (no digest, so no representation-only claim)."""
+    if isinstance(v, dict):
+        if any(k in v for k in _TYPE_ONLY_KEYS) or v.get("__truncated__"):
+            return _UNKNOWN
+        if "__structure__" in v:
+            return _content(v["values"]) if "values" in v else _UNKNOWN
+        for tag in ("__list__", "__tuple__"):
+            if tag in v and isinstance(v[tag], list):
+                return _seq([_content(x) for x in v[tag]])
+        if "__set__" in v and isinstance(v["__set__"], list):
+            return _seq(sorted((_content(x) for x in v["__set__"]), key=_canon), True)
+        if "__object__" in v and isinstance(v.get("attrs"), dict):
+            return _seq([_content(x) for x in v["attrs"].values()])
+        if "__dict__" in v:
+            return ("dict", [(_content(k), _content(x)) for k, x in _pairs(v["__dict__"])])
+        return _UNKNOWN if any(k.startswith("__") for k in v) else v
+    if isinstance(v, list):
+        return _seq([_content(x) for x in v])
+    return v
+
+
+_UNKNOWN = object()
+
+
+def _seq(items: list, unordered: bool = False) -> Any:
+    if any(i is _UNKNOWN for i in items):
+        return _UNKNOWN
+    return ("unordered", items) if unordered else items
+
+
+def _items(c: Any) -> list | None:
+    if isinstance(c, tuple) and c and c[0] == "unordered":
+        return sorted(c[1], key=_canon)
+    return c if isinstance(c, list) else None
+
+
+def _representation_only(old: list[Outcome], new: list[Outcome]) -> bool:
+    if len(old) != 1 or len(new) != 1 or old[0].kind != "return" or new[0].kind != "return":
+        return False
+    a, b = _content(old[0].value), _content(new[0].value)
+    if a is _UNKNOWN or b is _UNKNOWN:
+        return False
+    ia, ib = _items(a), _items(b)
+    if ia is not None and ib is not None:
+        same = [_canon(x) for x in ia] == [_canon(x) for x in ib]
+        unordered = (isinstance(a, tuple)) or (isinstance(b, tuple))
+        if not same and unordered:
+            same = sorted(_canon(x) for x in ia) == sorted(_canon(x) for x in ib)
+        return same and _canon(old[0].value) != _canon(new[0].value)
+    return False
+
+
+def _value_labels(v: Any) -> set[str]:
+    out: set[str] = set()
+    if isinstance(v, dict):
+        for tag in ("__opaque__", "__structure__", "__object__"):
+            if isinstance(v.get(tag), str):
+                out.add(v[tag])
+    return out
+
+
+def _input_labels(inputs: Any) -> set[str]:
+    bound = inputs.get("bound") if isinstance(inputs, dict) else None
+    out: set[str] = set()
+    if isinstance(bound, dict):
+        for x in bound.values():
+            out |= _value_labels(x)
+    return out
+
+
+def _is_noise(symbol: str) -> str | None:
+    if symbol.startswith(_NOISE_PREFIXES):
+        return "import machinery"
+    if symbol.rsplit(".", 1)[-1] in _CLASS_HOOKS:
+        return "implicit class-creation hook"
+    return None
+
+
 # ── diff ──────────────────────────────────────────────────────────────────────────────────
 
 
@@ -1930,6 +2895,10 @@ class _V:
     input_key: str
     core_key: str = ""
     rewritten_site: bool = False
+    unobservable: bool = False  # edited line whose replacement left no recorded call
+    stmt_key: Any = None        # (file, first line of its statement, in new-side numbering)
+    noise: str | None = None    # why a vanished call is only a DRIFT note
+    vanish: str | None = None   # why a vanished call on an unedited line is only a review item
 
     @property
     def first_seen(self) -> int:
@@ -1938,15 +2907,30 @@ class _V:
 
 def diff_facts(
     old: FactSet, new: FactSet, *, profile: DiffProfile | str = DiffProfile.EXACT,
+    context: DiffContext | None = None,
 ) -> FactDiff:
     """Compare two FactSets (baseline -> post-migration). See the module docstring."""
-    prof = DiffProfile(profile)
+    token = _HANDLES.set(_handle_types(old.facts, new.facts))
+    reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
+    try:
+        return _diff_facts(old, new, DiffProfile(profile), context)
+    finally:
+        _TYPE_RELOC.reset(reloc)
+        _HANDLES.reset(token)
+
+
+def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
+                context: DiffContext | None = None) -> FactDiff:
     old_facts, new_facts, c_level_excluded = _exclude_c_level(old, new)
+    # Finalizers run at GC time, not at a call site the project controls.
+    old_facts = [f for f in old_facts if not f.symbol.endswith(".__del__")]
+    new_facts = [f for f in new_facts if not f.symbol.endswith(".__del__")]
     old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
         old_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in old_facts]
         new_facts = [f.model_copy(update={"input": input_type(f.input)}) for f in new_facts]
 
+    old_facts, new_facts = _normalize_scopes(old_facts), _normalize_scopes(new_facts)
     modes = _site_modes(old_facts, new_facts, old.site_tallies, new.site_tallies)
     ov = _views(old_facts, modes)
     nv = _views(new_facts, modes)
@@ -1959,11 +2943,27 @@ def diff_facts(
         v.core_key = _canon(_core_input(v.fact.input, defaulted_names.get(v.fact.symbol, ())))
 
     _mark_rewritten_sites(ov, nv, modes)
+    prov = _Provenance(context, new.root)
+    for side, views in enumerate((ov, nv)):  # a line map beats the line-text heuristic
+        for v in views:
+            st = prov.status(v.fact.file, v.fact.line, side)
+            if st is not None:
+                v.rewritten_site = st != "same"
+                if st == "same" and prov.naming_status(
+                        side, v.fact.file, v.fact.line, v.fact.symbol) == "edited":
+                    v.rewritten_site = True  # the statement that names the callee was edited
+            span = prov.stmt_span(side, v.fact.file, v.fact.line)
+            if span:  # key on the statement, in the new side's numbering
+                start = span[0] if side == 1 else prov.mapped_line(v.fact.file, span[0], 0)
+                v.stmt_key = (v.fact.file, start) if start is not None else None
+            else:
+                v.stmt_key = (v.fact.file, v.site_value)
 
     def site(v: _V) -> tuple:
         return (v.fact.file, v.fact.func, v.site_value)
 
     entries: list[FactEntry] = []
+    pending: list[tuple[_V, _V, FactEntry]] = []
     old_left, new_left = list(ov), list(nv)
     passes: list[Callable[[_V], Any]] = [
         lambda v: (v.fact.symbol, site(v), v.input_key),                # 1 exact key
@@ -1972,40 +2972,97 @@ def diff_facts(
         lambda v: (site(v), v.core_key),                                # 4 identity changed
         lambda v: (v.fact.symbol, v.core_key),                          # 5 site moved
     ]
-    for key_fn in passes:
-        pairs, old_left, new_left = _pair_groups(old_left, new_left, key_fn)
+
+    def pair_pass(pairs: list[tuple[_V, _V]], *, input_changed: bool = False) -> None:
         for o, n in pairs:
             # A text-mode call whose line text changed inside the same function: REWRITTEN.
             same_call = (modes.get(o.fact.file) == "text"
                          and (o.fact.file, o.fact.func) == (n.fact.file, n.fact.func)
                          and o.site_value != n.site_value)
-            entries.append(_pair_entry(o, n, prof, modes,
-                                       rewritten="same-call" if same_call else None))
+            e = _pair_entry(o, n, prof, modes, input_changed=input_changed,
+                            rewritten="same-call" if same_call else None)
+            entries.append(e)
+            pending.append((o, n, e))
 
-    # 6 Positional REWRITTEN pairing inside edited functions.
-    by_func_o: dict[tuple, list[_V]] = defaultdict(list)
-    by_func_n: dict[tuple, list[_V]] = defaultdict(list)
-    for v in old_left:
-        if v.rewritten_site:
-            by_func_o[(v.fact.file, v.fact.func)].append(v)
-    for v in new_left:
-        if v.rewritten_site:
-            by_func_n[(v.fact.file, v.fact.func)].append(v)
+    for i, key_fn in enumerate(passes):
+        pairs, old_left, new_left = _pair_groups(old_left, new_left, key_fn)
+        pair_pass(pairs)
+        if i == 1:  # a binding failure pairs with the other side's normal call, any input
+            for bkey in (lambda v: (v.fact.symbol, site(v)),
+                         lambda v: (v.fact.symbol, v.fact.file, v.fact.func)):
+                pairs, old_left, new_left = _pair_binding(old_left, new_left, bkey)
+                pair_pass(pairs, input_changed=True)
+            # a wrapped compiled call (real inputs) vs a ``__c_call__`` event: symbol and site
+            pairs, old_left, new_left = _pair_binding(
+                old_left, new_left, lambda v: (v.fact.symbol, site(v)), _is_c_call)
+            pair_pass(pairs, input_changed=True)
+    # 5b Same symbol, same site, different input (one-to-one): the call is the same. Not on a
+    # sampled capture: there, differing inputs may just be different samples of one call.
+    sampled = bool(old.site_tallies or new.site_tallies)
+    if not sampled:
+        pairs, old_left, new_left = _pair_groups(
+            old_left, new_left, lambda v: (v.fact.symbol, site(v)))
+        pair_pass(pairs, input_changed=True)
+    # 5b' Same symbol, file and line text (line number in line mode), whatever the function:
+    # a scope that differs by version (PEP 709 inlines comprehensions, genexpr/lambda frames).
+    if not sampled:
+        pairs, old_left, new_left = _pair_groups(
+            old_left, new_left, lambda v: (v.fact.symbol, v.fact.file, v.site_value))
+        pair_pass(pairs, input_changed=True)
+    # 5s Same symbol, same *statement* (a chained multi-line call: 3.9 attributes every call to
+    # the statement's first line, 3.12 to each call's own line).
+    if not sampled and prov.maps:
+        pairs, old_left, new_left = _pair_groups(
+            old_left, new_left,
+            lambda v: (v.fact.symbol, v.stmt_key if v.stmt_key else id(v)))
+        pair_pass(pairs, input_changed=True)
+    # 5c Same site, a *relocated* symbol (same package, same last name) and any input.
+    if not sampled:
+        pairs, old_left, new_left = _pair_groups(
+            old_left, new_left,
+            lambda v: (site(v), v.fact.symbol.split(".")[0], v.fact.symbol.rsplit(".", 1)[-1]))
+        pair_pass(pairs, input_changed=True)
+
+    # 6 Anchored pairing on edited lines (same symbol, ledger / plan symbol, one-statement
+    # edit); never positional across different symbols.
     paired: set[int] = set()
-    for fkey, olds in by_func_o.items():
-        news = by_func_n.get(fkey, [])
-        olds.sort(key=lambda v: v.first_seen)
-        news.sort(key=lambda v: v.first_seen)
-        for o, n in zip(olds, news):
-            entries.append(_pair_entry(o, n, prof, modes, rewritten="positional"))
-            paired.update((id(o), id(n)))
+    for o, n in _anchored_pairs(old_left, new_left, prov):
+        e = _pair_entry(o, n, prof, modes, rewritten="anchored")
+        entries.append(e)
+        pending.append((o, n, e))
+        paired.update((id(o), id(n)))
     old_left = [v for v in old_left if id(v) not in paired]
     new_left = [v for v in new_left if id(v) not in paired]
 
+    # 7 One leftover each side at an unedited statement, one of them a decorator wrapper: the
+    # same call named by its decorator's wrapper code; compared at type level.
+    by_stmt: dict[Any, tuple[list[_V], list[_V]]] = defaultdict(lambda: ([], []))
     for v in old_left:
-        entries.append(_single_entry(v, old_side=True))
+        if not v.rewritten_site and v.stmt_key:
+            by_stmt[v.stmt_key][0].append(v)
     for v in new_left:
-        entries.append(_single_entry(v, old_side=False))
+        if not v.rewritten_site and v.stmt_key:
+            by_stmt[v.stmt_key][1].append(v)
+    paired = set()
+    for os_, ns in by_stmt.values():
+        if len(os_) == 1 and len(ns) == 1 and (
+                _wrapper_like(os_[0].fact.symbol) or _wrapper_like(ns[0].fact.symbol)):
+            e = _pair_entry(os_[0], ns[0], DiffProfile.SHAPE, modes, rewritten=None,
+                            input_changed=True)
+            e.notes.append("wrapper-naming")
+            entries.append(e)
+            paired.update((id(os_[0]), id(ns[0])))
+    old_left = [v for v in old_left if id(v) not in paired]
+    new_left = [v for v in new_left if id(v) not in paired]
+
+    _mark_unobservable(old_left, new)
+    _mark_vanished(old_left, new_facts, prov, ov)
+    for v in old_left:
+        entries.append(_single_entry(v, old_side=True, prov=prov))
+    for v in new_left:
+        entries.append(_single_entry(v, old_side=False, prov=prov))
+    _judge_pairs(pending, old_left, new_left, prov)
+    _apply_noise(entries, prov, {f.symbol.split('.')[0] for f in old_facts})
 
     unsampled = _apply_tallies(entries, old, new, ov, nv, modes)
     _soften_evicted(entries, old, new)
@@ -2019,7 +3076,11 @@ def diff_facts(
         warnings.append(
             f"c-level-excluded:{c_level_excluded}: C-level raise facts were not compared — "
             f"one side's backend ({_families(old)} vs {_families(new)}) does not record them")
-    return FactDiff(profile=prof, entries=entries, old_summary=old.summary(),
+    if prov.maps or prov.ledger_known:
+        summary = FactDiff(entries=entries, no_ledger=prov.no_ledger).edited_summary()
+        warnings.append("edit-provenance: " + summary)
+    return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger,
+                    old_summary=old.summary(),
                     new_summary=new.summary(), warnings=warnings, unsampled=unsampled)
 
 
@@ -2279,6 +3340,7 @@ def diff_traces(
     old_root: str | Path | None = None,
     new_root: str | Path | None = None,
     profile: DiffProfile | str = DiffProfile.EXACT,
+    context: DiffContext | None = None,
 ) -> FactDiff:
     """Load two traces (each with its own sidecar site_text) and diff them.
 
@@ -2286,7 +3348,31 @@ def diff_traces(
     ran from different checkouts (or a container and the host)."""
     old = load_facts(old_path, root=old_root if old_root is not None else root)
     new = load_facts(new_path, root=new_root if new_root is not None else root)
-    return diff_facts(old, new, profile=profile)
+    return diff_facts(old, new, profile=profile, context=context)
+
+
+_PSEUDO_SCOPES = ("<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>", "<lambda>")
+
+
+def _normalize_scopes(facts: list[Fact]) -> list[Fact]:
+    """Comprehension, generator and lambda frames belong to the function that contains them
+    (3.12 inlines list/dict/set comprehensions, so the same code is ``<listcomp>`` on one side
+    and the enclosing function on the other). A qualname ``f.<listcomp>`` becomes ``f``; a bare
+    pseudo-scope takes the real function recorded at the same (file, line) on its own side."""
+    real: dict[tuple[str, int], str] = {}
+    for f in facts:
+        if f.line is not None and not f.func.startswith("<") and "<" not in f.func:
+            real.setdefault((f.file, f.line), f.func)
+    out = []
+    for f in facts:
+        func = f.func
+        for marker in _PSEUDO_SCOPES:
+            if f".{marker}" in func:
+                func = func.split(f".{marker}")[0]
+        if func in _PSEUDO_SCOPES and f.line is not None:
+            func = real.get((f.file, f.line), func)
+        out.append(f if func == f.func else f.model_copy(update={"func": func}))
+    return out
 
 
 def _site_modes(old_facts: list[Fact], new_facts: list[Fact],
@@ -2306,7 +3392,7 @@ def _views(facts: list[Fact], modes: dict[str, str]) -> list[_V]:
     groups: dict[tuple, list[Fact]] = defaultdict(list)
     for f in facts:
         sv = f.text if modes.get(f.file) == "text" else f.line
-        groups[(f.symbol, f.file, f.func, sv, _canon(f.input))].append(f)
+        groups[(f.symbol, f.file, f.func, sv, _canon(f.input), f.binding)].append(f)
     views = [_V(fact=_merge_facts(fs), site_value=key[3], input_key=key[4])
              for key, fs in groups.items()]
     views.sort(key=lambda v: v.first_seen)
@@ -2364,14 +3450,49 @@ def _pair_groups(
             [v for v in new_left if id(v) not in paired])
 
 
+def _is_c_call(v: _V) -> bool:
+    return isinstance(v.fact.input, dict) and v.fact.input.get("__c_call__") is True
+
+
+def _pair_binding(
+    old_left: list[_V], new_left: list[_V], key_fn: Callable[[_V], Any],
+    flag: Callable[[_V], bool] = lambda v: v.fact.binding,
+) -> tuple[list[tuple[_V, _V]], list[_V], list[_V]]:
+    """Pair a flagged fact (a binding failure; a ``__c_call__`` event) with the other side's
+    *unflagged* call under the same key, in first-seen order, up to the shorter list (both
+    directions: a call that now fails to bind, or one that used to)."""
+    go: dict[Any, list[_V]] = defaultdict(list)
+    gn: dict[Any, list[_V]] = defaultdict(list)
+    for v in old_left:
+        go[key_fn(v)].append(v)
+    for v in new_left:
+        gn[key_fn(v)].append(v)
+    pairs: list[tuple[_V, _V]] = []
+    paired: set[int] = set()
+    for key, olds in go.items():
+        news = gn.get(key)
+        if not news:
+            continue
+        for old_binding in (False, True):
+            os_ = sorted((v for v in olds if flag(v) is old_binding
+                          and id(v) not in paired), key=lambda v: v.first_seen)
+            ns = sorted((v for v in news if flag(v) is not old_binding
+                         and id(v) not in paired), key=lambda v: v.first_seen)
+            for o, n in zip(os_, ns):
+                pairs.append((o, n))
+                paired.update((id(o), id(n)))
+    return (pairs, [v for v in old_left if id(v) not in paired],
+            [v for v in new_left if id(v) not in paired])
+
+
 def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
-                rewritten: str | None) -> FactEntry:
+                rewritten: str | None, input_changed: bool = False) -> FactEntry:
     """Classify one old/new pair. ``rewritten`` is ``"same-call"`` / ``"positional"`` for a
     REWRITTEN pair (outcomes compared, symbol and input free to differ), else None."""
     of, nf = o.fact, n.fact
     cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
     drift = (of.defaulted is not None and nf.defaulted is not None
-             and of.defaulted != nf.defaulted)
+             and of.defaulted != nf.defaulted) or cmp.drift
     if rewritten:
         category = FactCategory.REWRITTEN
     elif cmp.comparison is Comparison.UNCOMPARABLE:
@@ -2386,7 +3507,9 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     if _is_widened_input(of.input) or _is_widened_input(nf.input):
         notes.append("widened")
     if rewritten != "positional":
-        if o.input_key != n.input_key:
+        if input_changed and o.input_key != n.input_key:
+            notes.append("matched-modulo-input")
+        elif o.input_key != n.input_key:
             notes.append("matched-modulo-defaults")
         if of.symbol != nf.symbol:
             notes.append("identity-changed")
@@ -2394,6 +3517,10 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         notes.append("site-moved")
     elif not rewritten and o.site_value != n.site_value:
         notes.append("line-moved")  # line mode only: a text-mode move is REWRITTEN
+    if nf.binding != of.binding:
+        raised = _binding_raise(nf if nf.binding else of)
+        notes.append(f"now raises {raised} while binding its arguments" if nf.binding
+                     else f"no longer raises {raised} while binding its arguments")
     all_notes = [*notes, *cmp.notes]
     return FactEntry.model_construct(  # trusted, typed values: no validation copies
         _ENTRY_FIELDS_SET, category=category, comparison=cmp.comparison, level=cmp.level,
@@ -2409,10 +3536,219 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     )
 
 
-def _single_entry(v: _V, *, old_side: bool) -> FactEntry:
+def _binding_raise(f: Fact) -> str:
+    return next((_raise_name(o.value) for o in f.outcomes if o.kind == "raise"), "TypeError")
+
+
+def _mark_unobservable(old_left: list[_V], new: FactSet) -> None:
+    """An old fact left unpaired whose source line no longer exists in the post side's file was
+    edited (``resp.getheader(...)`` -> ``resp.headers.get(...)``): the replacement is a call
+    nothing recorded (a stdlib method, a plain attribute), so the vanished call is not evidence
+    of a behaviour change. Read the current source; unreadable files leave the fact as is."""
+    if new.root is None:
+        return
+    cache: dict[str, set[str] | None] = {}
+    for v in old_left:
+        f = v.fact
+        if v.rewritten_site or f.text is None or f.file == "?":
+            continue
+        path = f.file if os.path.isabs(f.file) else os.path.join(new.root, f.file)
+        if path not in cache:
+            lines = _read_source_lines(path)
+            cache[path] = None if lines is None else {ln.strip()[:SITE_TEXT_MAX] for ln in lines}
+        texts = cache[path]
+        if texts is not None and f.text not in texts:
+            v.rewritten_site = True
+            v.unobservable = True
+
+
+def _self_only(f: Fact) -> bool:
+    bound = f.input.get("bound") if isinstance(f.input, dict) else None
+    return (isinstance(bound, dict) and all(k in ("self", "cls") for k in bound)
+            and not any(d for d in (f.defaulted or ())))
+
+
+def _attribute_read(v: _V, f: Fact, prov: _Provenance, old_views: list[_V]) -> bool:
+    """Positive evidence that a vanished self-only call was a property read: its value was used
+    as a receiver on the same statement, or the statement's AST shows it is not the call."""
+    returned = {lab for o in f.outcomes if o.kind == "return" for lab in _value_labels(o.value)}
+    if returned and v.stmt_key:
+        for other in old_views:
+            if other is not v and other.stmt_key == v.stmt_key \
+                    and _receiver_type(other.fact.input) in returned:
+                return True
+    return prov.attribute_read_evidence(0, f.file, f.line, f.symbol)
+
+
+def _contact_matches(contact: str, symbol: str) -> bool:
+    return contact == symbol or contact.rsplit(".", 1)[-1] == symbol.rsplit(".", 1)[-1]
+
+
+def _mark_vanished(old_left: list[_V], new_facts: list[Fact], prov: _Provenance,
+                   old_views: list[_V] | None = None) -> None:
+    """An old call on an *unedited* line with no partner: a review item, not a failure, when the
+    static contact maps say the line is no longer a dependency call, or when nothing in its
+    function ran on the new side. Otherwise it stays DISAPPEARED (FAIL)."""
+    ctx = prov.ctx
+    if ctx is None:
+        return
+    ran = {(f.file, f.func) for f in new_facts}
+    for v in old_left:
+        f = v.fact
+        if v.rewritten_site or prov.status(f.file, f.line, 0) != "same":
+            continue
+        if _self_only(f) and _attribute_read(v, f, prov, old_views or []):
+            v.noise = "attribute read no longer goes through a traced getter"
+            continue
+        nl = prov.mapped_line(f.file, f.line, 0)
+        if nl is not None and prov.resolves_to_project(f.file, nl, f.symbol):
+            # The project changed what the name refers to. The contact map, when present, only
+            # confirms: it never downgrades on its own (a removed dependency symbol is the
+            # breaking change itself).
+            now = (ctx.new_contacts.get(f.file, {}).get(nl, set())
+                   if ctx.new_contacts is not None else set())
+            if not any(_contact_matches(c, f.symbol) for c in now):
+                v.vanish = "no longer a dependency call here"
+                continue
+        if (f.file, f.func) not in ran:
+            v.vanish = "not reached: the enclosing function made no recorded call on the new side"
+
+
+def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
+                 new_left: list[_V], prov: _Provenance) -> None:
+    """Judge each pair by edit provenance (only with a context whose ledger is known; without
+    one a pair is compared strictly, as before)."""
+    if prov.ctx is None:
+        return
+    told: set[str] = set()
+    tnew: set[str] = set()
+    edited = [(o, 0) for o, _, _ in pending if o.rewritten_site]
+    edited += [(n, 1) for _, n, _ in pending if n.rewritten_site]
+    edited += [(v, 0) for v in old_left if v.rewritten_site]
+    edited += [(v, 1) for v in new_left if v.rewritten_site]
+    for v, side in edited:
+        for out in v.fact.outcomes:
+            if out.kind == "return":
+                (told if side == 0 else tnew).update(_value_labels(out.value))
+    fresh_new, fresh_old = tnew - told, told - tnew
+    for o, n, e in pending:
+        old_ed, new_ed = o.rewritten_site, n.rewritten_site
+        tier = None
+        if old_ed or new_ed:
+            covered = (prov.ledger_covers(o.fact.file, o.fact.line, 0)
+                       or prov.ledger_covers(n.fact.file, n.fact.line, 1))
+            tier = "ledger" if covered else ("hand" if prov.ledger_known else None)
+        elif (prov.ledger_known and e.category is FactCategory.CHANGED
+              and (_input_labels(n.fact.input) & fresh_new
+                   or _input_labels(o.fact.input) & fresh_old)):
+            tier = "downstream"
+        if tier is None:
+            continue
+        e.provenance = tier
+        if e.category in (FactCategory.EQUAL, FactCategory.CHANGED, FactCategory.REWRITTEN) \
+                and e.comparison is Comparison.EQUAL:
+            e.category = FactCategory.REWRITTEN
+        if tier == "ledger" or e.comparison is not Comparison.CHANGED:
+            if tier == "ledger" and e.comparison is Comparison.CHANGED:
+                e.category = FactCategory.REWRITTEN  # strict: the drop-in claim failed
+                e.notes.append("pymolt's own edit changed behaviour")
+            continue
+        old_o, new_o = o.fact.outcomes, n.fact.outcomes
+        if _representation_only(old_o, new_o):
+            e.category, e.comparison, e.drift = FactCategory.DRIFT, Comparison.EQUAL, True
+            e.notes.append("representation changed")
+        elif all(x.kind == "return" for x in old_o) and any(x.kind == "raise" for x in new_o):
+            e.category = FactCategory.REWRITTEN  # stays CHANGED: fails
+            e.notes.append("now raises on an edited line")
+        else:
+            e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
+            e.review = "the value differs on a hand-edited line: review"
+            e.notes.append(e.review)
+
+
+def _implicit_call_reason(e: FactEntry) -> str | None:
+    """A call that nothing on its line names: the library's own internals or an implicit
+    protocol (``==`` -> ``__eq__``) attributed to the project's line; or a name on the line that
+    is read, not called (an attribute that became, or stopped being, a descriptor)."""
+    site = e.old_site or e.new_site
+    text = site.text if site is not None else None
+    if not text:
+        return None
+    leaf = _symbol_leaf(e.symbol)
+    parts = e.symbol.split(".")
+    if parts[-1] == "__init__" and len(parts) > 1 and parts[-2][:1].islower():
+        # a module-level ``__init__`` is a library-generated constructor of a project class
+        return "library instrumentation of a project class's constructor"
+    match = re.search(rf"(?<![\w]){re.escape(leaf)}\b\s*(\()?", text)
+    if match is None:
+        if _wrapper_like(e.symbol) or re.search(r"_\d+$", parts[-1]):
+            return "decorator wrapper internals: not named on this line"
+        if leaf.startswith("__") and leaf.endswith("__"):
+            return "implicit protocol call: not named on this line"
+        return None  # an alias (f = dep.func; f()) can hide a real regression: stays strict
+    if not match.group(1) and not leaf.startswith("__init"):
+        return "attribute access routed through a descriptor"
+    return None
+
+
+def _apply_noise(entries: list[FactEntry], prov: _Provenance,
+                 old_packages: set[str]) -> None:
+    """Import machinery and implicit class-creation hooks are never verdict drivers."""
+    for e in entries:
+        if e.category in (FactCategory.EQUAL, FactCategory.DRIFT):
+            continue
+        reason = _is_noise(e.symbol)
+        leaf = e.symbol.rsplit(".", 1)[-1]
+        if reason is None and e.category is FactCategory.APPEARED and leaf in _APPEAR_HOOKS:
+            reason = "implicit protocol hook"
+        if (reason is None and e.category is FactCategory.APPEARED
+                and e.symbol.split(".")[0] in sys.stdlib_module_names
+                and e.symbol.split(".")[0] not in old_packages):
+            reason = "asymmetric instrumentation: stdlib package traced on the new side only"
+        if reason is None and leaf == "__setitem__":
+            site = e.old_site or e.new_site
+            side = 0 if e.old_site else 1
+            if site is not None and prov.in_class_body(side, site.file, site.line):
+                reason = "class-body namespace write"
+        if (reason is None and prov.ctx is not None
+                and e.category in (FactCategory.DISAPPEARED, FactCategory.APPEARED)):
+            reason = _implicit_call_reason(e)
+        if reason is None:
+            continue
+        e.category, e.review, e.unverified = FactCategory.DRIFT, None, False
+        e.notes.append(f"noise: {reason}")
+
+
+def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> FactEntry:
     f = v.fact
-    if v.rewritten_site:
+    entry = _single_entry_base(v, old_side=old_side)
+    if prov is None or prov.ctx is None or entry.category is FactCategory.DRIFT:
+        return entry
+    if v.noise:
+        entry.category, entry.provenance = FactCategory.DRIFT, "unedited"
+        entry.notes.append(v.noise)
+    elif v.vanish:
+        entry.category, entry.review, entry.provenance = (
+            FactCategory.REWRITTEN, v.vanish, "unedited")
+        entry.notes.append(v.vanish)
+    elif v.rewritten_site and prov.ledger_known:
+        side = 0 if old_side else 1
+        covered = prov.ledger_covers(f.file, f.line, side)
+        entry.category, entry.unverified = FactCategory.REWRITTEN, True
+        entry.provenance = "ledger" if covered else "hand"
+        entry.notes.append("unverified edited site")
+    return entry
+
+
+def _single_entry_base(v: _V, *, old_side: bool) -> FactEntry:
+    f = v.fact
+    if f.attr_of is not None and not v.rewritten_site:
+        category = FactCategory.DRIFT
+        notes = ["module-attribute-access", f"via {f.attr_of}"]
+    elif v.rewritten_site:
         category, notes = FactCategory.REWRITTEN, ["unpaired"]
+        if v.unobservable:
+            notes.append(UNOBSERVABLE_NOTE)
     else:
         category = FactCategory.DISAPPEARED if old_side else FactCategory.APPEARED
         notes = []
