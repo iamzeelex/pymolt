@@ -89,6 +89,21 @@ A step's `depends_on` lists the earlier steps it cannot do without, in the same 
 - when a statement cannot be keyed (a file no Python grammar parses), or more than 8 steps change
   one function, the earlier steps that change the same function or class.
 
+Work pymolt does not do becomes steps too, with who is expected to do it (`executor`):
+
+| Step | Who | From |
+|---|---|---|
+| `manual-rewrite` | agent | a rule that matched but is not applied (`manual`), or a rule advisory that it could not rewrite a site |
+| `api-change` | agent | a removed, moved, deprecated symbol or a changed signature the plan does not rewrite |
+| `python-manual` | agent | a Python-version risk the plan does not fix, or the target's compile findings |
+| `behaviour-change` | person | a changed default the site relies on, a warning the baseline recorded, a Python behaviour change |
+| `review` | person | a rewrite applied with a caveat to check |
+
+One step covers one symbol and kind of change across all its sites. Every predicted risk names
+its step (`step_id`): the pymolt step that rewrote its statement or the import that binds it,
+or the manual step that holds it. A step lists the risk ids it covers (`why.risk_ids`), and its
+sites as anchors on the code the baseline ran (`where`).
+
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
 reason in the step's `why.evidence`. A plan saved by an earlier pymolt (`"schema_version": 1`)
 is read as one step, `v1`.
