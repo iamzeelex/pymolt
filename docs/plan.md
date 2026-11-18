@@ -123,17 +123,26 @@ Each step also says how it will be judged and how big it is:
 in plan order, on the text the steps before it left. For each file a step changes:
 1. the file is at the step's reviewed before-text: it gets the plan's after-text;
 2. it is at the reviewed after-text already: nothing is written, and the step gets its epoch;
-3. the step's old statements are gone, but its new ones stand in their place, between the same
+3. the file moved on (an earlier step skipped or rolled back, an edit elsewhere, a reformat), but
+   every statement the step rewrites is still there, found by its anchor: the step's recipe runs
+   again at those statements, and its result is written when it makes the same change there
+   as the reviewed one and changes no other statement. The step is re-based;
+4. the step's old statements are gone, but its new ones stand in their place, between the same
    neighbours, with every import it adds at module level: the step is `present`. Nothing is
    written and no epoch recorded, so verify judges those lines as hand edits;
-4. anything else: the step is stale, and the command names each statement it lost.
+5. anything else: the step is stale, and the command names each statement it lost, or says
+   that its recipe now makes another change there.
+
+So one stale step costs that step, not a re-plan: later steps that do not depend on it still
+apply, re-based where their lines moved.
 
 A step depends on the steps it builds on (`depends_on`); `apply .` leaves out a step whose
 dependency is not in effect, and `--step` refuses it. `apply --step ID --skip --reason TEXT`
 declines a step: it stays out, and so do its dependents.
 
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
-reason in the step's `why.evidence`. Such a step applies only to its own two texts. A plan saved by an earlier pymolt (`"schema_version": 1`)
+reason in the step's `why.evidence`. Such a step applies only to its own two texts: it has no
+recipe to run again. A plan saved by an earlier pymolt (`"schema_version": 1`)
 is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema.json`.
 
 ### PLAN.md

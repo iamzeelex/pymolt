@@ -74,7 +74,13 @@ from pymolt.migration_plan import (
 from pymolt.migration_state import MigrationReceipt
 from pymolt.workorder.models import PlanStep
 from pymolt.workorder.rules import FileDecision, Pythons, decide
-from pymolt.workorder.state import RunView, applicable_steps, basic_statuses, remaining
+from pymolt.workorder.state import (
+    CODE_TYPES,
+    RunView,
+    applicable_steps,
+    basic_statuses,
+    remaining,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +282,13 @@ def select(plan: MigrationPlan, steps: list[PlanStep], view: RunView, *,
         if target is None:
             raise StepRefusal(f"unknown step {step}: the plan has "
                               + (", ".join(order) if order else "no step"))
+        if step not in applicable and target.executor == "pymolt" \
+                and target.type in CODE_TYPES:
+            raise StepRefusal(
+                f"step {step} cannot be applied on its own: the plan's steps do not rebuild "
+                f"its changes, so apply writes them as one whole-file step "
+                f"({', '.join(s.id for s in steps)})",
+                hint="Apply the plan with `pymolt apply .`, or re-plan with `pymolt plan .`.")
         if step not in applicable:
             raise StepRefusal(
                 f"step {step} is a {target.executor} step ({target.type}): pymolt does not "

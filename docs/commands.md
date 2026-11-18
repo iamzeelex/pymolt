@@ -92,7 +92,9 @@ steps. It writes no source file. Its `--json` adds `steps` and `plan_md`. Detail
 Writes the saved plan's pymolt steps: with no option, every one whose dependencies are in effect,
 in plan order, in one transaction. A step already in effect is a no-op. Each step's file is
 decided on its current text: at the step's reviewed before-text it gets the plan's after-text; at
-the reviewed after-text nothing is written and the step still gets its epoch; with the step's
+the reviewed after-text nothing is written and the step still gets its epoch; when only other
+lines moved, its recipe runs again at its statements (re-based) and is written if it makes the
+reviewed change there; with the step's
 change already made by hand in its place (other lines differ) the step is `present`, nothing is
 written, and verify judges those lines as hand edits. Otherwise the step is stale and the whole
 invocation is refused, naming each statement that is gone. Every

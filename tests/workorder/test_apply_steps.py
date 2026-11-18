@@ -493,3 +493,17 @@ def test_the_v1_entry_point_still_returns_the_receipt(tmp_path):
     assert apply_migration_plan(tmp_path, plan).outcome == "already_applied"
     assert MigrationPlan.load(tmp_path, tmp_path / ".pymolt" / "migrations" / plan.plan_id
                               / "plan.json") == plan
+
+
+def test_steps_that_do_not_rebuild_the_plans_changes_apply_as_one_whole_file_step(tmp_path):
+    """A plan whose step hunks do not chain to ``changes`` (an order the files disagree on)
+    is written as its one whole-file step; its own steps cannot be applied one by one."""
+    plan = plan_for(tmp_path, {M: (APP, RECIPES)})
+    plan.steps = [s for s in plan.steps if s.id != "mech-2"]
+
+    with pytest.raises(StepRefusal, match="cannot be applied on its own"):
+        apply_steps(tmp_path, plan, step="mech-1")
+    result = apply_steps(tmp_path, plan)
+
+    assert result.applied == ["v1"]
+    assert read(tmp_path, M) == plan.changes[0].new_source
