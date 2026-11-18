@@ -22,10 +22,13 @@ claim verify judges it by. Three phases, each under the migration lock:
   write it. No change is refused, except for a ``review`` or ``env`` step, which records a
   completion with no entries.
 - **``--done`` with no ``--record`` first**: each of the step's files is diffed from its last
-  known state (the after-text of the latest epoch in effect that wrote it, else its text at plan
-  time). Only the statements inside the step's anchor scopes are attributed to it; the other
-  changes are listed, left unrecorded, and judged as hand edits. The event's before-text keeps
-  them, so rolling the step back undoes only its own statements.
+  known state: the after-text of the latest ledger event on it, whatever that event is (an
+  apply, a record, a restoring rollback, a run of another plan), from the blob store; its text
+  at plan time only when the ledger has no event on it. A text the store no longer holds is
+  refused, never guessed: an older text would credit the step with changes nobody made for it
+  (a rolled-back edit, say). Only the statements inside the step's anchor scopes are attributed
+  to it; the other changes are listed, left unrecorded, and judged as hand edits. The event's
+  before-text keeps them, so rolling the step back undoes only its own statements.
 - **``--record --abort``** appends an ``abort`` event, drops the snapshot manifest (its blobs
   follow the store's retention) and restores the step's previous status. Files are untouched.
 
@@ -496,23 +499,32 @@ def _plan_t0(ctx: _Context, rel: str) -> str | None:
 
 
 def _last_known(ctx: _Context, rel: str) -> tuple[str | None, bool]:
-    """``(text, is plan-time text)``: the after-text of the latest epoch in effect (of a run on
-    disk) that wrote ``rel``, else its text at plan time."""
-    from pymolt.apply_ledger import chain_runs
-
-    chain = chain_runs(ctx.receipt) | {ctx.run_id}
-    current = {seq for (run, _sid), seq in ctx.ledger.current_epochs().items() if run in chain}
+    """``(text, is plan-time text)``: the after-text of the latest ledger event on ``rel``,
+    whatever it is (an apply, a record, a restoring rollback, a run of another plan), else, when
+    the ledger has none, its text at plan time. Not only the epochs in effect: a step rolled
+    back, or a run of an earlier plan, also left the file at a text pymolt knows, and starting
+    from an older one would credit the step with their changes. Raises ``StepRefusal`` when that
+    text is not in the blob store."""
     latest = None
     for event in sorted(ctx.ledger.events, key=lambda e: e.seq):
-        if event.seq in current:
-            for f in event.files:
-                if f.file == rel and f.after:
-                    latest = f.after
-    if latest is not None:
-        text = _blob(ctx.root, latest)
-        if text is not None:
-            return text, False
-    return _plan_t0(ctx, rel), True
+        for f in event.files:
+            if f.file == rel:
+                latest = (event, f)
+    if latest is None:
+        return _plan_t0(ctx, rel), True
+    event, f = latest
+    text = _blob(ctx.root, f.after) if f.after else None
+    if text is None:
+        raise StepRefusal(
+            f"step {ctx.step.id}: the text {rel} had after ledger event {event.seq} "
+            f"({event.event} of {event.step_id}) is not in the blob store"
+            + (f" ({f.after[:12]})" if f.after else " (the event names no text)")
+            + ", so pymolt cannot tell which changes since are the step's",
+            refused={ctx.step.id: [f"{rel}: last known text missing"]},
+            hint=f"Start with `pymolt apply --step {ctx.step.id} --record` before editing, "
+                 "then `--record --done`: the snapshot then says what changed.")
+    t0 = _plan_t0(ctx, rel)
+    return text, t0 is not None and text == t0
 
 
 def _previous_befores(ctx: _Context) -> dict[str, str | None]:
