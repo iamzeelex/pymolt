@@ -61,13 +61,13 @@ def _capture(root: Path, when: str):
                                        privacy="values")
 
 
-def _planned(root: Path, fact: dict):
+def _planned(root: Path, fact: dict, app: str = APP):
     """A project calling ``json.loads``, its baseline, and a plan whose one agent step the
     planner built from ``fact`` at the call's site."""
     project(root, baseline=False)
     (root / "app").mkdir()
     (root / "app" / "__init__.py").write_text("", encoding="utf-8")
-    (root / M).write_text(APP, encoding="utf-8")
+    (root / M).write_text(app, encoding="utf-8")
     _capture(root, "baseline")
     deps = [DependencyMigration("a", "1.0", "2.0")]
     plan = create_migration_plan(
@@ -123,4 +123,36 @@ def test_a_recorded_edit_is_judged_by_its_steps_default_claim(tmp_path, successo
     provenance = "intended" if successor == "another object" else "ledger"
     assert _judgement(report) == (EXPECTED[successor][change], {provenance})
     if EXPECTED[successor][change] == "fail":
+        assert report.all_fact_diff["verdict"] == "fail"
+
+
+# An iterator is recorded as an opaque value (its type only): verify sees list_iterator become
+# list_reverseiterator, but not the pairs inside.
+OPAQUE_OLD = "y = json.loads(v, object_pairs_hook=iter)"
+OPAQUE_NEW = "y = json.loads(v, object_pairs_hook=reversed)"
+
+
+@pytest.mark.parametrize("successor", list(FACTS))
+def test_an_unseen_change_is_a_review_under_representation_and_fails_under_preserve(
+        tmp_path, successor):
+    plan = _planned(tmp_path, FACTS[successor], APP.replace(OLD, OPAQUE_OLD))
+    step = plan.steps[-1]
+    record_step(tmp_path, plan, step.id, agent=True)
+    path = tmp_path / M
+    path.write_text(path.read_text(encoding="utf-8").replace(OPAQUE_OLD, OPAQUE_NEW),
+                    encoding="utf-8")
+    record_step(tmp_path, plan, step.id, done=True, agent=True)
+    _capture(tmp_path, "post_migration")
+    report = service.build_contract_report_from_state(tmp_path)
+
+    entry = next(e for e in report.all_fact_diff["entries"] if e.get("symbol") == "json.loads")
+    assert entry["old"][0]["value"] == {"__opaque__": "list_iterator"}
+    if successor == "another object":
+        assert _judgement(report) == ("review", {"intended"})
+        assert entry["review"].startswith("representation unverifiable")
+        for settles in ("--privacy values", "baseline replicate", "pymolt verify . --accept"):
+            assert settles in entry["review"]
+        assert report.all_fact_diff["verdict"] == "inconclusive"
+    else:
+        assert _judgement(report) == ("fail", {"ledger"})
         assert report.all_fact_diff["verdict"] == "fail"
