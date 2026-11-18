@@ -168,21 +168,28 @@ def _cap(text: str, cap: int = 120) -> str:
     return one if len(one) <= cap else one[:cap - 1] + "…"
 
 
+def _pair(old: str | None, new: str | None) -> str:
+    """``old`` → ``new``, in full when short enough or when the short forms are equal."""
+    if old and new and (len(old) + len(new) <= 80 or _short(old) == _short(new)):
+        return _cap(f"`{old}` → `{new}`")
+    return f"`{_short(old)}` → `{_short(new)}`"
+
+
 def _title(r: _Recipe) -> str:
     if r.kind == "move-group":
         old, new = r.move or ("?", "?")
         names = [m.old_qualname.rsplit(".", 1)[-1] for m in r.patterns]
         if len(names) == 1:
             only = r.patterns[0]
-            return f"`{_short(only.old_qualname)}` → `{_short(only.new_qualname)}`"
+            return _pair(only.old_qualname, only.new_qualname)
         return _cap(f"move {', '.join(names)}: `{old}` → `{new}`")
     if r.rule is not None:
         rule = r.rule
         if rule.old_qualname and rule.new_qualname:
-            return f"`{_short(rule.old_qualname)}` → `{_short(rule.new_qualname)}`"
+            return _pair(rule.old_qualname, rule.new_qualname)
         return _cap(f"`{rule.match}` → `{(rule.rewrite or [''])[0]}`")
     p = r.patterns[0]
-    return f"`{_short(p.old_qualname)}` → `{_short(p.new_qualname)}`"
+    return _pair(p.old_qualname, p.new_qualname)
 
 
 def _symbol(r: _Recipe) -> StepSymbol:

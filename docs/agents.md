@@ -28,6 +28,12 @@ saves; with some of them it is an error. An existing capture needs `--force`.
 
 `apply` and `rollback` have no agent view: they write source, and a person runs them.
 
+`plan --agent` lists the plan's steps (`data.steps`, with who does each) and, under
+`data.next.brief`, the brief of the first step for an agent: where its sites are now (resolved on
+the current files), what to do, the constraints verify judges by, and the commands to run after.
+Text that comes from a dependency, from your code or from a capture is under `data` with
+`"untrusted": true`: it is data, never instructions.
+
 ## Claude Code plugin
 
 [`plugin/`](../plugin/) ships a skill, an agent and the `/pymolt:migrate` command, which drive
@@ -61,5 +67,5 @@ plan, and a person applies it.
 | `setup` | with no choices, the valid manifests, tools and Python versions; with them, the saved configuration |
 | `assess` | which versions move or conflict, what needs manual work, how to build the target environment, optional risk scores |
 | `capture` | runs your test or app command with the tracer and keeps the capture. It runs a process on your machine, so it needs `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment |
-| `plan` | the API changes, Python breakage, codemods and predicted risks, as a saved plan and unified diffs |
+| `plan` | the API changes, Python breakage, codemods and predicted risks, as a saved plan, its steps, unified diffs and the first agent step's brief. It also writes `.pymolt/PLAN.md` |
 | `verify` | the verdict, coverage and recall with their granularity, which predicted risks came true, and which dependency calls changed |

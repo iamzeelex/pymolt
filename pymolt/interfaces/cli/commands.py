@@ -561,13 +561,17 @@ def plan(
     patch_file: str | None = typer.Option(
         None, "--patch", help="Also write the diff to this file"
     ),
+    plan_md: str | None = typer.Option(
+        None, "--plan-md",
+        help="Where to write the plan for a person (default: .pymolt/PLAN.md)",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print the plan summary as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Save the codemods for the target manifest as a plan and show the diff.
 
-    Writes no source file. `pymolt apply` applies the plan and refuses it if a
-    planned file changed since.
+    Writes no source file. The plan's steps are also written as PLAN.md. `pymolt apply`
+    applies the plan and refuses it if a planned file changed since.
     """
     import json
 
@@ -590,6 +594,9 @@ def plan(
                 online=online,
             )
         saved_path = migration_plan.save(project_path, output)
+        from pymolt.workorder.render import write_plan_md
+
+        plan_md_path = write_plan_md(migration_plan, project_path, plan_md)
     except PlanInputError as exc:
         fail(str(exc), hint=exc.hint or None, json_output=json_output)
     except (AxiomGraphError, OSError, RuntimeError, ValueError) as exc:
@@ -625,12 +632,15 @@ def plan(
         "risks": _risks_payload(migration_plan.risks),
         "python": migration_plan.python,
         "compile_findings": migration_plan.compile_findings,
+        "plan_md": str(plan_md_path),
+        "steps": [_step_payload(step) for step in migration_plan.steps],
     }
     if agent:
         from pymolt.interfaces import views
 
         typer.echo(views.dumps(views.plan_view(
-            migration_plan, by_pkg, source_desc, plan_path=saved_path)))
+            migration_plan, by_pkg, source_desc, plan_path=saved_path,
+            plan_md=plan_md_path, project_dir=project_path)))
         return
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
@@ -656,9 +666,36 @@ def plan(
         migration_plan.baseline_trace_path or deps.risks or deps.deltas) else None)
     _render_python(migration_plan)
     _render_or_write_patches(previews, project_path, None)
+    _render_steps(migration_plan, plan_md_path)
     console.print(
         f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
     )
+
+
+def _step_payload(step) -> dict:
+    """A step in the plan's --json summary (the plan file has the whole step)."""
+    return {"id": step.id, "type": step.type, "executor": step.executor,
+            "claim": step.claim, "title": step.title, "effort": step.effort.size,
+            "sites": len(step.verify.sites), "depends_on": step.depends_on,
+            "risk_ids": step.why.risk_ids}
+
+
+def _render_steps(plan, plan_md_path) -> None:
+    """The plan summary by step, and where PLAN.md is."""
+    from pymolt.interfaces.views import steps_summary
+    from pymolt.workorder.render import clean
+
+    if plan.steps:
+        table = Table(title="Steps", title_justify="left", border_style="cyan")
+        for column in ("step", "what", "who", "claim", "effort", "depends on"):
+            table.add_column(column)
+        for step in plan.steps:
+            table.add_row(step.id, escape(clean(" ".join(step.title.split()), 100)),
+                          step.executor, step.claim or "none", step.effort.size,
+                          ", ".join(step.depends_on) or "")
+        console.print(table)
+        console.print(f"{steps_summary(plan)}.")
+    console.print(f"[dim]The plan for a person: {plan_md_path}[/dim]")
 
 
 def _render_python(plan) -> None:

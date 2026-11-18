@@ -76,7 +76,9 @@ before any code change, because it cannot be recreated later. Details are in
 ### `pymolt plan [dir]`
 Computes which APIs your code uses changed between the base and the target, which Python-version
 changes affect it, the codemods for both and the predicted risk at each call site. Saves this as a
-plan and shows the diff. It writes no source file. Details are in [plan.md](plan.md).
+plan of ordered steps, writes it for a person as `.pymolt/PLAN.md`, and shows the diff and the
+steps. It writes no source file. Its `--json` adds `steps` and `plan_md`. Details are in
+[plan.md](plan.md).
 
 | Option | Meaning |
 |---|---|
@@ -84,6 +86,7 @@ plan and shows the diff. It writes no source file. Details are in [plan.md](plan
 | `--online` | Read intermediate releases from PyPI for successor hints (package names and versions only) |
 | `--endpoint` | Use a remote Axiom at this URL instead of the local engine (or set `PYMOLT_AXIOM_ENDPOINT`) |
 | `--output`, `--patch` | Where to save the plan; also write the diff to a file |
+| `--plan-md` | Where to write the plan for a person (default: `.pymolt/PLAN.md`) |
 
 ### `pymolt apply [dir]`
 Writes exactly the saved plan. It refuses if a planned file changed since the plan was made. Every
