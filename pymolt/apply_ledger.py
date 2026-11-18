@@ -530,18 +530,21 @@ def in_effect_entries(project_dir: str | Path, receipt: Any
     if ledger is None:
         return None, None, None
     runs = chain_runs(receipt)
+    check = getattr(receipt, "run_in_effect", None)
+    effective = [r for r in runs if (check(r) if callable(check) else
+                                     getattr(receipt, "in_effect", False))]
     current = ledger.current_epochs()
-    # A run in effect the ledger records, or one that changed no file (it has nothing to
-    # record): the ledger speaks for the code on disk.
+    # A chain run with a current epoch, or a run in effect that changed no file (it has
+    # nothing to record): the ledger speaks for the code on disk.
     if any(run in runs for run, _step in current) or any(
-            _changed_nothing(receipt, run) for run in runs):
+            _changed_nothing(receipt, run) for run in effective):
         return ledger.in_effect(runs), None, ledger
     latest = max(ledger.events, key=lambda e: e.seq).run_id if ledger.events else None
-    if not runs:
+    if not effective:
         why = "no apply run is in effect"
     else:
-        named = getattr(receipt, "run_id", None) or sorted(runs)[0]
-        why = f"run {str(named)[:8]} is the one in effect"
+        named = getattr(receipt, "run_id", None)
+        why = f"run {str(named if named in effective else effective[-1])[:8]} is the one in effect"
     return None, (f"the apply ledger of run {(latest or 'unknown')[:8]} is not used ({why}): "
                   "edits are judged as hand edits"), ledger
 

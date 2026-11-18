@@ -325,6 +325,9 @@ class MigrationRunState(BaseModel):
     applied_at: str | None = None
     rolled_back_at: str | None = None
     error: str | None = None
+    # step id -> its status in this run (``applied``, ``rolled_back``), from the run's first
+    # mutation since steps exist; None in runs written before.
+    steps: dict[str, str] | None = None
 
 
 def create_migration_plan(
@@ -868,12 +871,17 @@ def _apply_migration_plan_unlocked(
         plan_path=str(frozen_plan_path),
     )
     ledger_before = LedgerSnapshot.take(root)
+    prior = MigrationReceipt.load(root)
     try:
-        append_ledger(root, [(event.model_copy(update={"at": applied_at}), entries)
-                             for event, entries in records])
+        ledger = append_ledger(root, [(event.model_copy(update={"at": applied_at}), entries)
+                                      for _step, event, entries in records])
+        appended = list(zip([step for step, _e, _n in records],
+                            ledger.events[len(ledger.events) - len(records):], strict=True))
+        _receipt_set_after_apply(receipt, prior, plan, appended, check)
         _save_run_state(
             run_dir,
-            state.model_copy(update={"status": "applied", "applied_at": applied_at}),
+            state.model_copy(update={"status": "applied", "applied_at": applied_at,
+                                     "steps": {step.id: "applied" for step, _e in appended}}),
         )
         receipt.save(root)
     except BaseException as metadata_exc:
@@ -1128,11 +1136,68 @@ def _apply_records(root: Path, plan: MigrationPlan, run_id: str):
             except Exception:  # noqa: BLE001 - provenance degrades to lines, the apply stands
                 logger.warning("could not anchor the ledger entries of %s", path, exc_info=True)
                 entries += entries_for(path, before, after, attrs, anchored=False, **kwargs)
-        out.append((LedgerEvent(
+        out.append((step, LedgerEvent(
             event="apply", run_id=run_id, step_id=step.id, at=_now(), executor="pymolt",
             actor="pymolt", wrote=True, risk_ids=_step_risk_ids(plan, step),
             files=[EventFile(file=path, before=_sha256(before), after=_sha256(after))
                    for path, before, after in files]), entries))
+    return out
+
+
+def _step_sites(plan: MigrationPlan, step: PlanStep, files: list[str]) -> int:
+    if step.effort.sites:
+        return step.effort.sites
+    return sum(c.sites for c in plan.changes if c.path in files) if step.id == V1_STEP_ID \
+        else 0
+
+
+def _receipt_set_after_apply(receipt, prior, plan: MigrationPlan, appended, check) -> None:
+    """Carry the receipt set over from ``prior`` and record this run: it opens (closing an
+    open run of another plan or attempt, whose steps in effect stay in effect) and each of
+    its applied steps gets a receipt with its epoch, checks and risk links."""
+    from pymolt.migration_state import ReceiptRun, StepReceipt, step_checks
+
+    now = receipt.applied_at
+    runs = [r.model_copy() for r in prior.runs] if prior is not None else []
+    steps = dict(prior.steps) if prior is not None else {}
+    for run in runs:
+        if not run.closed and run.run_id != receipt.run_id:
+            run.closed, run.closed_at = True, now
+    if not any(r.run_id == receipt.run_id for r in runs):
+        runs.append(ReceiptRun(
+            run_id=receipt.run_id, plan_id=plan.plan_id, plan_path=receipt.plan_path,
+            opened_at=now, starting_fingerprint=receipt.environment_fingerprint,
+            setup_fingerprint=receipt.environment_setup_fingerprint,
+            target_manifest_sha256=plan.target_manifest_sha256))
+    for step, event in appended:
+        files = [f.file for f in event.files]
+        steps[f"{receipt.run_id}:{step.id}"] = StepReceipt(
+            status="applied", epoch=event.seq, executor="pymolt", actor="pymolt",
+            claim=step.claim, applied_at=now, files=files, risk_ids=list(event.risk_ids),
+            sites=_step_sites(plan, step, files),
+            checks=step_checks(check, files, runs_on_base=step.runs_on_base))
+    receipt.runs, receipt.steps = runs, steps
+    receipt.summarize([step.id for step, _event in appended])
+
+
+def _receipt_set_after_rollback(receipt, run_id: str, rolled_back_at: str,
+                                restored: list[str], records):
+    """The receipt after rolling back ``run_id``: each step the rollback ended (or kept, when
+    it rewrote none of its files) is ``rolled_back``; the schema-1 summary changes only when
+    ``run_id`` is the latest run, as in v1."""
+    out = receipt.model_copy(deep=True)
+    ended = {event.step_id: bool(event.restored) for event, _entries in records}
+    for step_id, step in out.steps_of(run_id).items():
+        if not step.in_effect:
+            continue
+        mine = [f for f in step.files if f in restored]
+        out.steps[f"{run_id}:{step_id}"] = step.model_copy(update={
+            "status": "rolled_back", "rolled_back_at": rolled_back_at, "files_restored": mine,
+            "epoch": None if ended.get(step_id, bool(mine)) else step.epoch})
+    if out.run_id == run_id:
+        out.status, out.rolled_back_at, out.files_restored = "rolled_back", rolled_back_at, \
+            restored
+        out.summarize()
     return out
 
 
@@ -1254,13 +1319,13 @@ def _rollback_migration_unlocked(
             run_dir,
             state.model_copy(update={
                 "status": "rolled_back", "rolled_back_at": rolled_back_at,
+                "steps": {**(state.steps or {}),
+                          **{event.step_id: "rolled_back" for event, _n in records}},
             }),
         )
-        if receipt and receipt.run_id == effective_run_id:
-            receipt = receipt.model_copy(update={
-                "status": "rolled_back", "rolled_back_at": rolled_back_at,
-                "files_restored": restored,
-            })
+        if receipt is not None:
+            receipt = _receipt_set_after_rollback(receipt, effective_run_id, rolled_back_at,
+                                                  restored, records)
             receipt.save(root)
         # The post-migration capture stays while the code it recorded is still on disk (the
         # rollback restored no file); otherwise it is set aside, kept among the diagnostics.
