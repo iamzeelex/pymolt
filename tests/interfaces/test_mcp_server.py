@@ -20,7 +20,8 @@ pytest.importorskip("mcp")
 from pymolt.interfaces import mcp_server  # noqa: E402
 from pymolt.interfaces.cli.commands import app  # noqa: E402
 
-_EXPECTED_TOOLS = {"status", "scan", "setup", "assess", "capture", "verify", "plan"}
+_EXPECTED_TOOLS = {"status", "scan", "setup", "assess", "capture", "verify", "plan", "apply",
+                   "rollback"}
 runner = CliRunner()
 
 
@@ -76,9 +77,10 @@ def test_dir_taking_tools_use_project_dir_param():
 
 
 def test_the_adapter_stays_thin():
-    """The acceptance bar: seven tools over the view layer, about 300 lines."""
+    """The acceptance bar: nine tools over the view layer, about 400 lines (the two write
+    tools, apply and rollback, are parity-tested in tests/workorder/test_agent_view.py)."""
     source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    assert len(source.splitlines()) <= 310
+    assert len(source.splitlines()) <= 420
     assert "_fit_answer" not in source and "truncation_note" not in source
 
 

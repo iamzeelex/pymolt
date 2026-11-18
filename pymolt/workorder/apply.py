@@ -133,7 +133,7 @@ class ApplyResult(BaseModel):
 
 
 AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a person approved for "
-                 "agents, and this pymolt records no approval: a person runs `pymolt apply .`")
+                 "agents (`pymolt apply . --approve-agent`)")
 
 
 # ── entry points ──────────────────────────────────────────────────────────────────────────
@@ -142,20 +142,22 @@ AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a pers
 def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | None = None,
                 through: str | None = None, dry_run: bool = False,
                 allow_no_baseline: bool = False, smoke: bool = False,
-                agent: bool = False) -> ApplyResult:
-    """Apply the selected pymolt steps of ``plan`` (module docstring). Raises ``StepRefusal`` /
-    ``MigrationConflictError`` (exit 2), ``MigrationEvidenceError`` (exit 4),
-    ``MigrationCheckError`` (exit 1) or ``MigrationPlanError`` / ``OSError`` (exit 3)."""
+                agent: bool = False, smoke_reason: str | None = None) -> ApplyResult:
+    """Apply the selected pymolt steps of ``plan`` (module docstring). Under ``agent`` the
+    plan must be approved for agents (``workorder.approval``), except for a dry run.
+    ``smoke_reason``: why the smoke import is not run, for the receipts (MCP without
+    ``PYMOLT_MCP_ALLOW_EXEC``). Raises ``StepRefusal`` / ``MigrationConflictError`` (exit 2),
+    ``MigrationEvidenceError`` (exit 4), ``MigrationCheckError`` (exit 1) or
+    ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if step and through:
         raise StepRefusal("--step and --through cannot be combined")
     if agent and allow_no_baseline:
         raise StepRefusal("--allow-no-baseline is refused under --agent: a person decides to "
                           "apply without a baseline")
-    if agent and not dry_run:
-        raise StepRefusal(AGENT_REFUSAL)
     with _migration_lock(project_dir, "apply"):
         return _apply(Path(project_dir).resolve(), plan, step=step, through=through,
-                      dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke)
+                      dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke,
+                      agent=agent, smoke_reason=smoke_reason)
 
 
 def skip_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, reason: str, *,
@@ -403,10 +405,15 @@ def _classify(decisions: list[FileDecision]) -> str:
 
 
 def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | None,
-           dry_run: bool, allow_no_baseline: bool, smoke: bool) -> ApplyResult:
+           dry_run: bool, allow_no_baseline: bool, smoke: bool, agent: bool = False,
+           smoke_reason: str | None = None) -> ApplyResult:
     receipt = MigrationReceipt.load(root)
     run_id, state = run_for(root, plan, receipt)
     _check_frozen(root, run_id, plan)
+    if agent and not dry_run:
+        from pymolt.workorder.approval import require_approval
+
+        require_approval(root, plan, run_id, "pymolt-steps", "apply")
     if state is not None and dry_run and recover_invocation(root, state, plan, check_only=True):
         raise StepRefusal("an interrupted apply or rollback needs recovering first: run "
                           "`pymolt apply .` without --dry-run")
@@ -486,6 +493,10 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
 
     check, smoke_before = _check_before_write(
         root, _pseudo_plan(plan, texts.changed(), decided), smoke and not dry_run)
+    if smoke_reason and check.smoke is None:
+        from pymolt.apply_check import SmokeCheck
+
+        check.smoke = SmokeCheck(status="skipped", reason=smoke_reason)
     result.self_check = check
     result.checks = {s.id: _checks(check, s, decisions) for s, decisions in decided}
     if dry_run:

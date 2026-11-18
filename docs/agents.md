@@ -26,12 +26,23 @@ With `--json` or `--agent`, no command asks a question or takes a default for yo
 choices returns the valid manifests, tools and Python versions and saves nothing; with all four it
 saves; with some of them it is an error. An existing capture needs `--force`.
 
-`apply` and `rollback` write source, and a person runs them. `apply --agent` writes nothing: it
-refuses a pymolt step, and with `--dry-run` returns the diff the steps would write, or with
-`--step ID --brief` the step's brief. An agent records its own edits: `apply --step ID --record
---agent` before editing, `--record --done --agent` after (`--record --abort --agent` drops it).
-The record is the agent's, with the step's claim; `--claim`, `--expect any|representation` and
-`--pair OLD=NEW` may only tighten how verify judges it.
+`apply` and `rollback` write source. An agent runs the plan's pymolt steps once a person
+approved the plan for agents: `pymolt apply . --approve-agent`, on a terminal (a person
+attestation, below), approves this plan as it is. A re-plan, or any change to the plan, voids the
+approval. Then `apply --agent` writes the pymolt steps (`.`, `--step`, `--through`), and `rollback
+--step ID --agent` rolls one back. Without the approval `apply --agent` refuses a pymolt step and
+names the command. A whole-run rollback, `--force`, `--cascade`, `--skip`, `--allow-no-baseline`
+and `--by person` stay a person's under `--agent`.
+
+These work on any plan: `--dry-run` returns the diff the steps would write, `--step ID --brief`
+the step's brief. An agent records its own edits: `apply --step ID --record --agent` before
+editing, `--record --done --agent` after (`--record --abort --agent` drops it). The record is the
+agent's, with the step's claim; `--claim`, `--expect any|representation` and `--pair OLD=NEW` may
+only tighten how verify judges it.
+
+`apply --agent` returns what it applied (re-based steps marked), what was already in effect or
+present, each step's checks, the steps that remain by status, and `data.next`: the next command,
+its step and, for a step an agent or a person does, its brief.
 
 `plan --agent` lists the plan's steps (`data.steps`, with who does each) and, under
 `data.next.brief`, the brief of the first step for an agent: where its sites are now (resolved on
@@ -87,8 +98,12 @@ uv tool install "./pymolt[mcp]"
 }
 ```
 
-The seven tools are named after the CLI commands. None of them writes source: `plan` saves the
-plan, and a person applies it.
+The nine tools are named after the CLI commands. Only `apply` and `rollback` write: they need
+`PYMOLT_MCP_ALLOW_WRITE=1` in the server's environment, and they write a pymolt step only on a plan
+a person approved for agents. They take none of `force`, `cascade`, `approve_agent`, `claim`,
+`expect`, `pair` or `allow_no_baseline`, and refuse a call that passes one. Their dry runs and
+briefs need no opt-in. Without `PYMOLT_MCP_ALLOW_EXEC=1`, `apply` runs no smoke import, and each
+step's receipt says `smoke_import: not checked: MCP without PYMOLT_MCP_ALLOW_EXEC`.
 
 | Tool | Returns |
 |---|---|
@@ -99,3 +114,5 @@ plan, and a person applies it.
 | `capture` | runs your test or app command with the tracer and keeps the capture. It runs a process on your machine, so it needs `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment |
 | `plan` | the API changes, Python breakage, codemods and predicted risks, as a saved plan, its steps, unified diffs and the first agent step's brief. It also writes `.pymolt/PLAN.md` |
 | `verify` | the verdict, coverage and recall with their granularity, which predicted risks came true, and which dependency calls changed |
+| `apply` | applies the plan's pymolt steps on an approved plan, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. Writing needs `PYMOLT_MCP_ALLOW_WRITE=1` |
+| `rollback` | rolls back one step of an approved plan. It needs `PYMOLT_MCP_ALLOW_WRITE=1` |

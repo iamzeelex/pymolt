@@ -21,6 +21,7 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **granularity** | How coverage and recall knew a contact ran: `line` (3.12+), `function` (3.6–3.11), `file` (captures without the executed-code record), `symbol` (traces without call sites) |
 | **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)) |
 | **replicate** | A second run of the baseline's command on the same code and environment; what differs between the two is run-to-run noise |
+| **approval** | A person's attested `apply --approve-agent`: agents may apply this plan's pymolt steps and roll one back. A re-plan or any change to the plan voids it |
 | **attestation** | A person's confirmation, typed on a terminal, kept outside the project with an HMAC. Only an attestation can judge an edit more leniently than a hand edit |
 | **ACCEPTED** | A changed outcome on an edited line that a person attested as intended: it counts as compared equal and is always printed, with who accepted it and when |
 | **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it |

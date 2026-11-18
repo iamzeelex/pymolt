@@ -27,8 +27,8 @@ taken after the step's epoch: it recorded the code the rollback took away. Other
 describes the code on disk and stays. ``--force`` sets it aside when a restored file is in its
 snapshot.
 
-Under ``--agent``, ``--force`` and ``--cascade`` are refused, and so is everything else: an agent
-rolls a step back only on a plan a person approved for agents, which this pymolt does not record.
+Under ``--agent``, ``--force``, ``--cascade`` and a whole run are refused: an agent rolls back one
+step (``--step``) on a plan a person approved for agents (``workorder.approval``).
 """
 
 from __future__ import annotations
@@ -73,8 +73,8 @@ class RollbackResult:
     notes: list[str] = field(default_factory=list)
 
 
-AGENT_REFUSAL = ("under --agent, pymolt rolls a step back only on a plan a person approved for "
-                 "agents, and this pymolt records no approval: a person runs `pymolt rollback`")
+AGENT_REFUSAL = ("under --agent, pymolt rolls back one step (--step) on a plan a person "
+                 "approved for agents; a person rolls back a whole run")
 
 
 def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
@@ -86,7 +86,7 @@ def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
         raise MigrationConflictError(
             f"--{'force' if force else 'cascade'} is refused under --agent: a person discards "
             "edits or rolls back dependent steps")
-    if agent:
+    if agent and step is None:
         raise MigrationConflictError(AGENT_REFUSAL)
     if step is not None and force:
         raise MigrationConflictError("--force rolls back a whole run: it does not go with --step")
@@ -95,6 +95,10 @@ def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
     with _migration_lock(project_dir, "rollback"):
         root = Path(project_dir).resolve()
         _refuse_open_record(root)
+        if agent:
+            from pymolt.workorder.approval import require_rollback_approval
+
+            require_rollback_approval(root, run_id)
         if step is not None:
             return _rollback_step(root, step, run_id=run_id, cascade=cascade)
         return _rollback(root, run_id=run_id, force=force)
