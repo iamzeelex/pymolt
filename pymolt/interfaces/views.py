@@ -755,6 +755,34 @@ def steps_summary(plan) -> str:
     return f"{len(plan.steps)} step(s)" + (f": {parts}" if parts else "")
 
 
+def apply_view(result, plan) -> dict:
+    """An ``apply`` invocation (``workorder.apply.ApplyResult``) -> view (design 3.6):
+    ``applied`` (``rebased``: re-based onto another text), ``noop``, ``present``, ``checks``
+    per step, ``remaining`` by status. A dry run adds the diff it would write."""
+    lists = _Lists()
+    titles = {s.id: s.title for s in plan.steps}
+    done = {"applied": "applied", "already_applied": "already in effect", "nothing":
+            "nothing applied", "present": "already present by hand", "dry_run": "dry run",
+            "skipped": "skipped"}[result.outcome]
+    summary = f"{done}: " + (", ".join(result.applied) or ", ".join(result.noop)
+                             or ", ".join(result.present) or ", ".join(result.skipped)
+                             or "no step")
+    remaining = {status: lists.cap(f"remaining.{status}", ids)
+                 for status, ids in result.remaining.items()}
+    data = {
+        "outcome": result.outcome, "plan_id": result.plan_id, "run_id": result.run_id,
+        "applied": [{"step": sid, "title": titles.get(sid), "rebased": sid in result.rebased,
+                     "wrote": sid not in result.unwritten} for sid in result.applied],
+        "rebased": list(result.rebased), "noop": list(result.noop),
+        "present": list(result.present), "skipped": list(result.skipped),
+        "blocked": dict(result.blocked), "checks": dict(result.checks),
+        "remaining": remaining, "files": lists.cap("files", list(result.files)),
+        "diff": [{"file": d["file"], "diff": d["diff"][:ANSWER_BUDGET_CHARS]}
+                 for d in lists.cap("diff", list(result.diff))],
+    }
+    return ok(summary, lists.finish(data, list(result.notes)))
+
+
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
               plan_md: str | Path | None = None, project_dir: str | Path | None = None) -> dict:
     """A saved ``MigrationPlan`` -> view. The full report is the plan file itself.
