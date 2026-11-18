@@ -1031,9 +1031,17 @@ Rules 4–6 apply only while a receipt exists or no post capture newer than the 
 migration done entirely by hand (H7) goes straight to rules 7 and 8, and its edits are judged as
 hand edits.
 
-## 7. Open owner decisions and lean variants
+## 7. Owner decisions and lean variants
 
 ### 7.1 Decisions
+
+**Decided by the owner on 2026-11-17: every default below, as written. The full variants were chosen over the lean ones.**
+- `manifest-pin` is a pymolt step (decision 1).
+- Agents run pymolt-checked steps after one person-attested approval per plan (variant A, decision 4).
+- Re-basing, stage 6, ad-hoc accepts and the text store stay in scope.
+- Decision 5 (an imports-only baseline) stays the optional stage 8.
+
+The "if the owner decides otherwise" column is kept as a record of the alternatives.
 
 Each row names the default this spec is written for, and exactly what changes otherwise.
 
