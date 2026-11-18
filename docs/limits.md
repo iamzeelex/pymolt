@@ -37,6 +37,11 @@ Each of these is a review item, so the verdict is INCONCLUSIVE until a person de
 One case goes the other way: a change in the *kind* of a rare outcome (a call that raised once in 76
 now returns) still fails, although it may be noise.
 
+- **Attestations stop accidents, not an adversarial agent.** An agent with a pseudo-terminal can
+  type the nonce, and one that can read your home directory can read the attestation key
+  ([agents.md](agents.md#what-a-person-attests)). Attestations are per machine: on another
+  machine an attested change is judged as unattested.
+
 ### What the tracer does not see
 
 - **Some exception types on 3.6–3.11 test suites.** `setprofile` does not pass the exception to the
