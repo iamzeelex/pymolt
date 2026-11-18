@@ -845,14 +845,15 @@ def _decide_steps(status: FunnelStatus, projection, receipt, post: PhaseState,
         return True
     manual = next((s for s in projection.steps if s.executor != "pymolt"
                    and s.status == "planned" and s.type != "target-env"), None)
-    if manual is not None and post.state in {TODO, STALE}:
-        # Design 6 rule 6 names `--record`, which comes with stage 5; until then the step is
-        # done by hand and the capture records it.
+    if manual is not None:
+        who = "an agent" if manual.executor == "agent" else "a person"
+        status.next_command = f"pymolt apply --step {manual.id} --record"
         status.next_step = manual.id
-        status.notes.append(
-            f"Step {manual.id} is for {'an agent' if manual.executor == 'agent' else 'a person'}"
-            f": `pymolt apply --step {manual.id} --brief` says what to do. Do it before the "
-            "post-migration capture.")
+        status.next_reason = (
+            f"Step {manual.id} is for {who}: `pymolt apply --step {manual.id} --brief` says "
+            "what to do. Start its record, make the change, then `--record --done` (or "
+            "`pymolt apply --step ID --skip --reason TEXT` declines it).")
+        return True
     return False
 
 
@@ -866,8 +867,9 @@ def _decide_judged(status: FunnelStatus, projection) -> bool:
             status.next_reason = (f"Step {failed.id} failed verify: an outcome at its sites "
                                   "changed. Rolling it back restores the text before it.")
         else:
-            status.next_command = None
-            status.next_reason = (f"Step {failed.id} failed verify: fix it, then capture "
+            status.next_command = f"pymolt apply --step {failed.id} --record"
+            status.next_reason = (f"Step {failed.id} failed verify: fix it under a new record "
+                                  "(`--record`, the fix, `--record --done`), then capture "
                                   "post-migration again.")
         return True
     review = projection.first("needs_review")
@@ -875,7 +877,8 @@ def _decide_judged(status: FunnelStatus, projection) -> bool:
         status.next_step = review.id
         status.next_command = f"pymolt verify . --step {review.id}"
         status.next_reason = (f"Step {review.id} needs a person's review of what changed at "
-                              "its sites.")
+                              "its sites: the report names each finding's id, and a person "
+                              "accepts an intended one with `pymolt verify . --accept ID`.")
         return True
     evidence = projection.first("needs_evidence")
     if evidence is not None:

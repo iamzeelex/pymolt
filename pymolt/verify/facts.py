@@ -170,6 +170,8 @@ class DiffContext:
     # What the report should say about how the context was built (a ledger left unused).
     notes: list[str] = field(default_factory=list)
     not_in_capture: list[str] = field(default_factory=list)
+    # The accepts verify honours, and ``--strict`` (``verify.accepts.AcceptContext``).
+    accepts: Any = None
 
 
 class DiffProfile(StrEnum):
@@ -467,8 +469,20 @@ class FactEntry(BaseModel):
     new_warnings: list[CallWarning] | None = None
     old_where: dict[str, Any] | None = Field(default=None, exclude=True)
     new_where: dict[str, Any] | None = Field(default=None, exclude=True)
-    # Edit provenance (only with a ``DiffContext``): unedited / ledger / hand / downstream.
+    # Edit provenance (only with a ``DiffContext``): unedited / ledger (a ``preserve`` entry
+    # covers the edited line) / intended (an ``intended`` entry does) / hand / downstream.
     provenance: str | None = None
+    # The ledger step whose entry decides the edited line, and its run (None: no entry does).
+    step_id: str | None = None
+    step_run: str | None = None
+    # A change a person attested (an expectation recorded with a person's attestation, or a
+    # ``verify --accept``): ``{"how", "by", "at", "attestation", "step"}``. Counted as compared
+    # equal by the verdict, and always reported.
+    accepted: dict[str, Any] | None = None
+    # A failing or review entry's finding id and its finding's outcome fingerprint
+    # (``verify.accepts``): what ``verify --accept`` names and binds.
+    finding: str | None = None
+    fingerprint: str | None = None
     review: str | None = None       # a difference a person must look at: INCONCLUSIVE, not FAIL
     unverified: bool = False        # an edited site nothing could be paired with: counted only
     # Why an entry that is not a plain exact comparison came out as it did: ``<mechanism>:
@@ -496,7 +510,7 @@ class FactEntry(BaseModel):
     @computed_field
     @property
     def fails(self) -> bool:
-        if self.review or self.unverified or self.noise:
+        if self.review or self.unverified or self.noise or self.accepted:
             return False
         if self.category in (FactCategory.CHANGED, FactCategory.DISAPPEARED,
                              FactCategory.APPEARED):
@@ -505,7 +519,7 @@ class FactEntry(BaseModel):
 
     @property
     def inconclusive(self) -> bool:
-        if self.unverified or self.noise:
+        if self.unverified or self.noise or self.accepted:
             return False
         if self.review:
             return True
@@ -542,12 +556,14 @@ class FactDiff(BaseModel):
         """Edited sites by outcome: equal / representation-only / need review / unverified
         (plus ``failed`` for a ledger or hand edit that changed behaviour)."""
         out = {"sites": 0, "equal": 0, "representation_only": 0, "review": 0,
-               "unverified": 0, "failed": 0}
+               "unverified": 0, "failed": 0, "accepted": 0}
         for e in self.entries:
-            if e.provenance not in ("ledger", "hand", "downstream"):
+            if e.provenance not in ("ledger", "intended", "hand", "downstream"):
                 continue
             out["sites"] += 1
-            if e.unverified:
+            if e.accepted:
+                out["accepted"] += 1
+            elif e.unverified:
                 out["unverified"] += 1
             elif e.review:
                 out["review"] += 1
@@ -560,11 +576,13 @@ class FactDiff(BaseModel):
         return out
 
     def edited_summary(self) -> str:
-        """``N edited sites: a equal, b representation-only, c need review, d unverified``."""
+        """``N edited sites: a equal, b representation-only, c need review, d unverified`` (and
+        ``e failed``, ``f accepted`` when there are any)."""
         e = self.edited_sites()
         line = (f"{e['sites']} edited sites: {e['equal']} equal, {e['representation_only']} "
                 f"representation-only, {e['review']} need review, {e['unverified']} unverified")
         line += f", {e['failed']} failed" if e["failed"] else ""
+        line += f", {e['accepted']} accepted" if e["accepted"] else ""
         return line + ("; no apply ledger: edits judged as hand edits" if self.no_ledger else "")
 
     def counts(self) -> dict[str, int]:
@@ -2714,7 +2732,6 @@ def _cover(xs: Iterable, ys: Iterable, match: Callable[[Any, Any], bool]) -> boo
 
 _TYPE_RELOC: ContextVar[Mapping[str, str]] = ContextVar("pymolt_type_reloc", default={})
 _NOISE_PREFIXES = ("importlib._bootstrap",)
-_STRICT_CLAIMS = ("same-object", "same-signature", "verified-rule", "python-fixer")
 _CLASS_HOOKS = ("__init_subclass__", "__set_name__", "__prepare__")
 _APPEAR_HOOKS = ("__getattribute__",)  # a new implicit protocol hook is not a call anyone made
 def _COMPOUND(node: ast.stmt) -> bool:  # noqa: N802
@@ -2726,22 +2743,37 @@ def _COMPOUND(node: ast.stmt) -> bool:  # noqa: N802
 _SIMPLE_STMTS = (ast.Return, ast.Assign, ast.AnnAssign, ast.Expr, ast.AugAssign)
 
 
+def _normalized(entry: Mapping) -> Mapping:
+    """The entry with a schema-1 claim (``same-object``, ...) read as ``preserve`` plus that
+    ``basis`` (design 2.5): the ladder knows only ``preserve`` and ``intended``."""
+    from pymolt.apply_ledger import CLAIMS, normalize_claim
+
+    if entry.get("claim") not in CLAIMS:
+        return entry
+    claim, basis = normalize_claim(entry.get("claim"))
+    return {**entry, "claim": claim, "basis": entry.get("basis") or basis}
+
+
 def _vouches(entry: Mapping) -> bool:
-    """A ledger entry whose claim makes its edit strict: ``preserve`` (ledger v2), or one of
-    the claims a schema-1 entry names (``same-object``, ...)."""
-    claim = entry.get("claim")
-    return claim == "preserve" or claim in _STRICT_CLAIMS
+    """A ledger entry whose claim makes its edit strict: ``preserve``."""
+    return entry.get("claim") == "preserve"
+
+
+def _attested(entry: Mapping) -> bool:
+    """The entry's ``intended`` claim carries a person's attestation. ``attested`` is set by
+    the coverage computation from the out-of-tree attestation log (``pymolt.attest``), never
+    read from the ledger."""
+    return entry.get("claim") == "intended" and entry.get("attested") is True
 
 
 def _claim_rank(entry: Mapping) -> int:
     """How strictly an entry's claim judges its lines, for a line several entries cover (the
-    strictest wins): ``preserve`` 3, ``intended`` unattested 2, no claim (a hand edit) 1,
-    ``intended`` with a person-attested expectation 0. ``attested`` is set by the coverage
-    computation from a check outside the ledger, never read from it."""
+    strictest wins; design 5.1): ``preserve`` 3, ``intended`` unattested 2, no claim (a hand
+    edit) 1, ``intended`` with a person-attested expectation 0."""
     if _vouches(entry):
         return 3
     if entry.get("claim") == "intended":
-        return 0 if entry.get("attested") is True else 2
+        return 0 if _attested(entry) else 2
     return 1
 
 
@@ -2777,7 +2809,7 @@ class _Provenance:
         # No ledger (edits None) means nobody vouches for the edit: judge it as a hand edit.
         self.ledger_known = False
         self.no_ledger = False
-        self.edits = (ctx.edits if ctx else None) or []
+        self.edits = [_normalized(e) for e in (ctx.edits if ctx else None) or []]
         self.symbol_map: dict[str, str] = {}
         if ctx is not None:
             self.symbol_map.update(ctx.successors or {})
@@ -2913,10 +2945,21 @@ class _Provenance:
     def ledger_covers_site(self, file: str, line: int | None, side: int) -> bool:
         """The ledger vouches for the call's own line, or for every edited line of the
         definition span it belongs to."""
-        if self.ledger_covers(file, line, side):
-            return True
+        entry = self.covering_site(file, line, side)
+        return entry is not None and _vouches(entry)
+
+    def covering_site(self, file: str, line: int | None, side: int) -> Mapping | None:
+        """The entry whose claim judges a call (design 5.1): the one deciding its own line;
+        else, when every edited line of the definition span it belongs to is covered, the least
+        strict of theirs (the call sees each of those edits); None: a hand edit."""
+        entry = self.covering(file, line, side)
+        if entry is not None:
+            return entry
         edited = self.edited_span_lines(side, file, line)
-        return bool(edited) and all(self.ledger_covers(file, ln, side) for ln in edited)
+        found = [self.covering(file, ln, side) for ln in edited]
+        if not found or any(e is None for e in found):
+            return None
+        return min(found, key=_claim_rank)
 
     def resolves_to_project(self, file: str, line: int | None, symbol: str) -> bool:
         """On the new side, the callee at ``line`` whose leaf is the symbol's leaf is rooted in a
@@ -6649,10 +6692,14 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
     for o, n, e in pending:
         old_ed, new_ed = o.rewritten_site, n.rewritten_site
         tier = None
+        entry = None
         if old_ed or new_ed:
-            covered = (prov.ledger_covers_site(o.fact.file, o.fact.line, 0)
-                       or prov.ledger_covers_site(n.fact.file, n.fact.line, 1))
-            tier = "ledger" if covered else ("hand" if prov.ledger_known else None)
+            sides = [x for x in (prov.covering_site(o.fact.file, o.fact.line, 0),
+                                 prov.covering_site(n.fact.file, n.fact.line, 1))
+                     if x is not None]
+            entry = max(sides, key=_claim_rank) if sides else None
+            tier = _tier(entry) if entry is not None else (
+                "hand" if prov.ledger_known else None)
         elif (prov.ledger_known and e.category is FactCategory.CHANGED
               and (_input_labels(n.fact.input) & fresh_new
                    or _input_labels(o.fact.input) & fresh_old)):
@@ -6660,15 +6707,22 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
         if tier is None:
             continue
         e.provenance = tier
+        if entry is not None and entry.get("step_id"):
+            e.step_id = str(entry["step_id"])
+            e.step_run = str(entry.get("run_id") or "") or None
         if e.category in (FactCategory.EQUAL, FactCategory.CHANGED, FactCategory.REWRITTEN) \
                 and e.comparison is Comparison.EQUAL:
             e.category = FactCategory.REWRITTEN
         if tier == "ledger" or e.comparison is not Comparison.CHANGED:
             if tier == "ledger" and e.comparison is Comparison.CHANGED:
                 e.category = FactCategory.REWRITTEN  # strict: the drop-in claim failed
-                e.notes.append("pymolt's own edit changed behaviour")
+                e.notes.append("pymolt's own edit changed behaviour"
+                               if (entry or {}).get("basis") != "manual" else
+                               "the recorded edit claimed preserve and changed behaviour")
             continue
         old_o, new_o = o.fact.outcomes, n.fact.outcomes
+        if tier == "intended" and _judge_intended(e, entry or {}, old_o, new_o):
+            continue
         if _representation_only(old_o, new_o):
             e.category, e.comparison, e.drift = FactCategory.DRIFT, Comparison.EQUAL, True
             e.notes.append("representation changed")
@@ -6679,6 +6733,77 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
             e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
             e.review = "the value differs on a hand-edited line: review"
             e.notes.append(e.review)
+
+
+def _tier(entry: Mapping) -> str:
+    """The provenance an entry gives the lines it decides: ``ledger`` (``preserve``: strict),
+    ``intended``, or ``hand`` (an entry with no claim vouches for nothing)."""
+    if _vouches(entry):
+        return "ledger"
+    return "intended" if entry.get("claim") == "intended" else "hand"
+
+
+def _leaf_type(name: Any) -> str:
+    return str(name or "").rsplit(".", 1)[-1]
+
+
+def _returned_type(value: Any) -> str:
+    """The type name of a normalized returned value (a tagged structure, object or opaque
+    value: its tag; a JSON scalar or container: its Python type)."""
+    if isinstance(value, dict):
+        for tag in ("__structure__", "__object__", "__opaque__"):
+            if isinstance(value.get(tag), str):
+                return value[tag]
+        for tag, name in (("__list__", "list"), ("__tuple__", "tuple"), ("__set__", "set"),
+                          ("__dict__", "dict"), ("__bytes__", "bytes")):
+            if tag in value:
+                return name
+        return "dict"
+    if value is None:
+        return "NoneType"
+    return type(value).__name__
+
+
+def expectation_met(expect: str, old: list[Outcome], new: list[Outcome]) -> bool:
+    """Whether a stated expectation holds of the new outcomes (design 5.2): ``representation``
+    (only the representation changed), ``raise:<T>`` (every new outcome raises T) or
+    ``return:<T>`` (every new outcome returns a T). Types compare by their last segment."""
+    if expect == "representation":
+        return _representation_only(old, new)
+    kind, _sep, want = expect.partition(":")
+    if kind not in ("raise", "return") or not want or not new:
+        return False
+    if kind == "raise":
+        return all(o.kind == "raise" and _leaf_type(o.value) == _leaf_type(want) for o in new)
+    return all(o.kind == "return" and _leaf_type(_returned_type(o.value)) == _leaf_type(want)
+               for o in new)
+
+
+def _judge_intended(e: FactEntry, entry: Mapping, old: list[Outcome],
+                    new: list[Outcome]) -> bool:
+    """A changed outcome on a line an ``intended`` entry decides (design 5.1). With a
+    person-attested expectation: ACCEPTED when it is met, FAIL otherwise. Unattested: FAIL when
+    it contradicts a stated ``representation`` expectation; else the hand rules (returns
+    False). An attested ``any`` is the hand rules too, until a person accepts the outcome."""
+    expect = entry.get("expect") or "any"
+    if _attested(entry) and expect != "any":
+        if expectation_met(expect, old, new):
+            e.category = FactCategory.REWRITTEN
+            info = entry.get("attestation") if isinstance(entry.get("attestation"), Mapping) \
+                else {}
+            e.accepted = {"how": f"expectation {expect}", "by": info.get("user"),
+                          "at": info.get("at"), "attestation": info.get("id"),
+                          "step": entry.get("step_id")}
+            e.notes.append(f"accepted: a person's attested expectation ({expect})")
+            return True
+        e.category = FactCategory.REWRITTEN           # stays CHANGED: fails
+        e.notes.append(f"the attested expectation {expect} is not met")
+        return True
+    if expect == "representation" and not _representation_only(old, new):
+        e.category = FactCategory.REWRITTEN           # stays CHANGED: fails
+        e.notes.append("the change is more than its stated expectation (representation only)")
+        return True
+    return False
 
 
 def _implicit_call_reason(e: FactEntry) -> str | None:
@@ -6796,9 +6921,12 @@ def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> 
         entry.notes.append(v.vanish)
     elif v.rewritten_site and prov.ledger_known:
         side = 0 if old_side else 1
-        covered = prov.ledger_covers_site(f.file, f.line, side)
+        covering = prov.covering_site(f.file, f.line, side)
         entry.category, entry.unverified = FactCategory.REWRITTEN, True
-        entry.provenance = "ledger" if covered else "hand"
+        entry.provenance = _tier(covering) if covering is not None else "hand"
+        if covering is not None and covering.get("step_id"):
+            entry.step_id = str(covering["step_id"])
+            entry.step_run = str(covering.get("run_id") or "") or None
         entry.notes.append("unverified edited site")
     return entry
 

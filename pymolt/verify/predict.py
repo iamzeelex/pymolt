@@ -1362,9 +1362,10 @@ def merge_python_risks(dependency: PredictionReport | None,
 
 class CalibrationResult(StrEnum):
     HIT = "hit"
-    PREVENTED = "prevented"          # fixed by the plan, and the rewrite kept the behaviour
+    PREVENTED = "prevented"          # fixed by a step, and the fix kept the behaviour
     MISS = "miss"
     NOT_EXERCISED = "not_exercised"
+    ACCEPTED = "accepted"            # the change at the site was accepted by a person
 
 
 class ObservedEntry(BaseModel):
@@ -1384,6 +1385,11 @@ class CalibratedRisk(BaseModel):
     result: CalibrationResult
     observed: list[ObservedEntry] = Field(default_factory=list)
     note: str | None = None
+    # The step the risk is linked to, and what verify found it did there (design 5.5):
+    # ``fixed`` (its effect removed or replaced the risk's statement in the post-migration
+    # code), ``recorded-not-fixing`` (in effect, but it did not), ``unfixed`` (not in effect).
+    step_id: str | None = None
+    fix: str | None = None
 
 
 class Calibration(BaseModel):
@@ -1395,7 +1401,10 @@ class Calibration(BaseModel):
     prevented: int = 0
     miss: int = 0
     not_exercised: int = 0
+    accepted: int = 0
     by_tier: dict[str, dict[str, int]] = Field(default_factory=dict)
+    # step id -> {hit, prevented, miss, not_exercised, accepted} of the risks linked to it.
+    by_step: dict[str, dict[str, int]] = Field(default_factory=dict)
     risks: list[CalibratedRisk] = Field(default_factory=list)
     unpredicted: list[ObservedEntry] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -1453,8 +1462,13 @@ def calibrate(
     *,
     source: Literal["plan", "baseline"] = "plan",
     plan_id: str | None = None,
+    links: Mapping[str, Any] | None = None,
 ) -> Calibration:
-    """Score each predicted risk against the post-migration fact diff (module docstring)."""
+    """Score each predicted risk against the post-migration fact diff (module docstring).
+    ``links``: risk id -> ``workorder.credit.StepLink``, the steps the risks are linked to and
+    whether each fixed its risk's statement (design 5.5). With links, a risk is prevented only
+    when its step fixed it; without them (no step context), ``fixed_by_plan`` decides, as
+    before steps."""
     cal = Calibration(source=source, plan_id=plan_id)
     items = [r if isinstance(r, PredictedRisk) else PredictedRisk.model_validate(r)
              for r in risks or ()]
@@ -1463,37 +1477,55 @@ def calibrate(
         cal.notes.append("no post-migration fact diff: no prediction could be checked")
     covered: set[int] = set()
     for risk in items:
+        link = links.get(risk.id) if links is not None else None
+        fix = link.fix if link is not None else None
+        fixed = (fix == "fixed") if links is not None else risk.fixed_by_plan
         on_line = [e for e in entries if any(_same_site(risk, e, s) for s in _entry_sites(e))]
         at_site = [e for e in on_line if risk.site.line is None or _same_symbol(risk, e)]
         covered.update(id(e) for e in at_site)
-        if any(_hits(e) for e in at_site):
+        if any(_hits(e) and not e.accepted for e in at_site):
             result, note = CalibrationResult.HIT, None
             # The line's other calls that moved with it (a ``.to_dict()`` that never ran
             # because ``mean`` now raises) are consequences of the predicted break.
             covered.update(id(e) for e in on_line)
             at_site = on_line
+        elif any(e.accepted for e in at_site):
+            result, note = CalibrationResult.ACCEPTED, "a person accepted the change here"
         elif any(_compared(e) for e in at_site):
-            if risk.fixed_by_plan:
+            if fixed:
                 result = CalibrationResult.PREVENTED
-                note = "fixed by the plan: the rewrite kept the behaviour at this site"
+                note = ("fixed by the plan: the rewrite kept the behaviour at this site"
+                        if links is None else
+                        f"fixed by step {link.step_id}: it replaced the statement, and the "
+                        "behaviour stayed the same")
             else:
                 result, note = CalibrationResult.MISS, None
+                if fix == "recorded-not-fixing":
+                    note = (f"step {link.step_id} is in effect, but its change did not touch "
+                            "this statement: unfixed")
         else:
             result = CalibrationResult.NOT_EXERCISED
             note = ("only uncomparable/unpaired entries at this site" if at_site else
                     "the post-migration capture did not compare this site")
         shown = [e for e in at_site if e.category is not FactCategory.EQUAL or e.notes]
+        step_id = link.step_id if link is not None else risk.step_id
         cal.risks.append(CalibratedRisk(
             id=risk.id, tier=risk.tier, symbol=risk.symbol, site=risk.site,
             fixed_by_plan=risk.fixed_by_plan, result=result,
-            observed=[_observed(e) for e in shown[:10]], note=note))
-        tier = cal.by_tier.setdefault(risk.tier.value, {r.value: 0 for r in CalibrationResult})
-        tier[result.value] += 1
+            observed=[_observed(e) for e in shown[:10]], note=note, step_id=step_id,
+            fix=fix))
+        tier = cal.by_tier.setdefault(risk.tier.value, {r.value: 0 for r in CalibrationResult
+                                                         if r is not CalibrationResult.ACCEPTED})
+        tier[result.value] = tier.get(result.value, 0) + 1
+        if step_id:
+            by = cal.by_step.setdefault(step_id, {r.value: 0 for r in CalibrationResult})
+            by[result.value] += 1
     cal.predicted = len(cal.risks)
     cal.hit = sum(1 for r in cal.risks if r.result is CalibrationResult.HIT)
     cal.prevented = sum(1 for r in cal.risks if r.result is CalibrationResult.PREVENTED)
     cal.miss = sum(1 for r in cal.risks if r.result is CalibrationResult.MISS)
-    cal.not_exercised = cal.predicted - cal.hit - cal.prevented - cal.miss
+    cal.accepted = sum(1 for r in cal.risks if r.result is CalibrationResult.ACCEPTED)
+    cal.not_exercised = cal.predicted - cal.hit - cal.prevented - cal.miss - cal.accepted
     cal.unpredicted = [_observed(e) for e in entries if e.fails and id(e) not in covered]
     return cal
 

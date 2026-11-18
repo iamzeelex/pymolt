@@ -459,7 +459,9 @@ def test_agent_refusals_and_what_it_may_do(tmp_path):
 
     refused = runner.invoke(app, ["apply", d, "--agent"])
     assert refused.exit_code == 2
-    assert "a person runs `pymolt apply .`" in json.loads(refused.stdout)["error"]
+    failure = json.loads(refused.stdout)
+    assert "approved for agents" in failure["error"]
+    assert "pymolt apply . --approve-agent" in failure["hint"]
     assert runner.invoke(app, ["apply", d, "--agent", "--step", "mech-1", "--skip",
                                "--reason", "x"]).exit_code == 2
     assert runner.invoke(app, ["apply", d, "--agent", "--dry-run",

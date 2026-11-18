@@ -124,14 +124,26 @@ the texts that no run on disk, and neither of the two runs closed last, still ne
 the advisories (a site not rewritten, a rewrite with a caveat to check) and the manual items, each
 with its file and line.
 
-Exit codes: 0 applied, already in effect, present or skipped; 1 a compile or smoke-import
-failure (nothing stays written); 2 refused (an unknown or stale step, a dependency not in effect,
+Exit codes: 0 applied, recorded, skipped, aborted, already in effect or present; 1 a compile or
+smoke-import failure (nothing stays written; a recorded edit stays); 2 refused (an unknown or
+stale step, a dependency not in effect, a record in the wrong state or another record open,
 another migration operation running, an option refused under `--agent`); 3 an environment or
 file error; 4 no valid baseline bound to the plan. A plan's steps apply in one run, opened by
 its first `apply`; a plan applied while another plan's run is open closes that run, whose
 applied steps stay in effect, and a closed run applies nothing more. A later `apply` of the same
 run checks the baseline against the world the run started from. An invocation interrupted
 between its write and its records is undone by the next one.
+
+A step for an agent or a person is recorded, not written: `apply --step ID --record` snapshots
+the project's `.py` files (and the step's own files), the edit is made, and `--record --done`
+records what changed since as the step's new epoch, with its claim, `basis: manual` and who made
+it. A run has one record open at a time, and while it is open `apply` and `rollback` write
+nothing. `--done` with no `--record` first diffs each of the step's files from its last known
+text and records only the statements inside the step's functions and classes; the other changes
+are listed and judged as hand edits. Recording a step again diffs from its previous epoch's
+before-text, so the new epoch is the whole step. `rollback --step` restores a recorded step's
+before-text. The recorded Python files are compiled on the target: a failure is on the receipt,
+the edit stays, and the exit code is 1.
 
 `apply` also writes the plan's pin step: each `name==version` line of a requirements manifest,
 with no hash, gets the target's pin, and `rollback` restores it. The other lines naming a moved
@@ -150,7 +162,14 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 | `--dry-run` | Decide and compile, then print the diff that would be written. Writes nothing |
 | `--skip`, `--reason` | With `--step`: mark the step skipped, with why. `apply` then leaves it out and its dependents stay blocked; `--step` applies it after all |
 | `--brief` | With `--step`: print the step's brief (JSON under `--agent`). Writes nothing |
-| `--agent` | The agent view. It refuses to write a pymolt step (a person runs `pymolt apply .`), `--skip` and `--allow-no-baseline`; `--dry-run` and `--brief` work |
+| `--record` | With `--step`: open a record of an agent's or a person's edit. Refused unless the step is planned, rolled back, stale or recorded, its dependencies are in effect and no other record is open |
+| `--done`, `--abort` | With `--record`: record what changed since as the step, or drop the open record (files untouched) |
+| `--by`, `--actor` | With `--record`: who made the edit (`agent` or `person`, default `person`, `agent` under `--agent`) and the name recorded |
+| `--claim` | With `--record --done`: `preserve` or `intended`. It may only tighten the step's claim; loosening it needs a person's attestation |
+| `--expect` | With `--record --done --claim intended`: `any` or `representation`. `raise:<Type>` and `return:<Type>` are a person's attested expectation |
+| `--pair` | With `--record --done`: `OLD=NEW`, a pairing anchor verify pairs old calls with new ones by (repeatable) |
+| `--approve-agent` | A person approves this plan for agents, on a terminal (an attestation). Refused under `--agent` and `--json`. A re-plan or any change to the plan voids it |
+| `--agent` | The agent view. It writes pymolt steps only on a plan a person approved for agents; it refuses `--skip`, `--allow-no-baseline` and `--by person`. `--dry-run`, `--brief` and `--record` work on any plan |
 | `--allow-no-baseline` | Apply without a baseline capture; `verify` will then be INCONCLUSIVE |
 | `--smoke` | Also import the changed modules in the target environment setup names, before and after the write. A module that imported before and fails after undoes the write, and the ledger records the rollback. Without a target environment it is skipped, with the reason. It runs your code's import-time code |
 
@@ -167,14 +186,28 @@ the evidence. Details are in [verify.md](verify.md).
 | `--policy`, `--metrics`, `--auto-rollback` | Canary policy and metrics, and rollback when a required gate fails |
 | `--shadow` | Shadow operations; unsafe writes are left out |
 | `--cascade` | A cascade report to include |
+| `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
+| `--strict` | Review every accepted change instead of counting it equal |
+| `--step` | Also print that step's judgement and exit by it: 0 verified, 1 failed, 4 needs review, needs evidence or not in the capture, 2 an unknown step. The verdict still covers the whole surface |
 
 ### `pymolt rollback [dir]`
 Restores the files the open run's steps changed, latest step first. It refuses to discard edits
 made after the apply unless given `--force`, which restores each file the run touched to its text
-before the run and never writes another file. `--run-id` picks an earlier run; it is refused
-while a later run's step in effect changed one of its files (roll that run back first). The plan
-stays valid: `apply` writes the rolled-back steps again in the same run, re-based when their
-lines moved. A step whose epoch changed no file stays in effect.
+before the run and never writes another file (a step rolled back alone before is not such an
+edit). `--run-id` picks an earlier run; it is refused while a later run's step in effect changed
+one of its files (roll that run back first). The plan stays valid: `apply` writes the
+rolled-back steps again in the same run, re-based when their lines moved. A step whose epoch
+changed no file stays in effect.
+
+`--step` rolls back one step. A file the step was the last change to gets back its text from
+before the step. A file a later step or a hand edit changed since gets only the step's own change
+undone, and keeps everything else byte for byte: the lines the step wrote must be there
+unchanged, each statement it wrote must still stand between the statements around it then (or
+what a later step rewrote them to), and the result must give back the step's old statements and
+compile on the target. An import the step wrote goes only when nothing uses it any more: no code
+in the file, no `__all__`, no other module importing it from this one. Otherwise it stays, and
+the output says so. Anything else refuses the step, names what changed the file and why its
+change cannot be undone alone, and writes nothing.
 
 The post-migration capture is set aside in the archive only when it recorded code the rollback
 took away: a rolled-back step's new statements are in its source snapshot, and it was taken
@@ -182,11 +215,11 @@ after that step. Otherwise it still describes the code and is kept.
 
 | Option | Meaning |
 |---|---|
-| `--step` | That step only. Allowed when each of its files still holds the text the step wrote and no later step changed it since; refused otherwise, naming the later steps or edits. Refused while a step in effect depends on it |
+| `--step` | That step only: each of its files gets back its text before the step, or, when later steps or edits changed the file, only the step's own change is undone (above). Refused when that cannot be done safely, naming the later steps or edits, and while a step in effect depends on it. `--json` lists the steps undone alone in `inverse`, and the imports that stay in `notes` |
 | `--cascade` | With `--step`: roll back the steps that depend on it first, latest first |
 | `--run-id` | The run to roll back (default: the open run) |
 | `--force` | Also discard edits made after apply (the whole run only) |
-| `--agent` | Refused, with `--force` and `--cascade` above all: a person rolls back |
+| `--agent` | With `--step`, on a plan a person approved for agents. A whole run, `--force` and `--cascade` are refused: a person does those |
 
 ## Tools
 

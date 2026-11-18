@@ -142,3 +142,45 @@ APP = ("import a\n"
        "    z = 1\n"
        "    return a.h(x)\n")
 RECIPES = [rename("a.f", "a.g"), rename("a.h", "a.k"), rename("a.g", "a.m")]
+
+
+def manual_step(root: Path, file: str, line: int, *, sid: str = "sig-1",
+                step_type: str = "api-change", executor: str = "agent",
+                claim: str | None = "preserve", expect: str | None = None,
+                symbol: tuple[str | None, str | None] = ("a.h", "a.k"), text: str | None = None,
+                risk_ids: list[str] | None = None, depends_on: list[str] | None = None):
+    """An agent or person step whose one site is the statement on ``line`` of ``file`` (its
+    anchor made on ``text``, default the file as it is now)."""
+    from pymolt.anchors import make_anchor
+    from pymolt.workorder.models import (
+        ManualDo,
+        PlanStep,
+        StepDo,
+        StepSymbol,
+        StepVerify,
+        StepWhy,
+        step_key,
+    )
+
+    source = text if text is not None else (root / file).read_text(encoding="utf-8")
+    where = make_anchor(source, line, file=file, python="3.11", symbol=symbol[0], id="a1")
+    phase = {"api-change": "signature", "python-manual": "signature",
+             "manual-rewrite": "mechanical", "behaviour-change": "behaviour",
+             "review": "behaviour"}[step_type]
+    return PlanStep(
+        id=sid, key=step_key(step_type, f"{sid}|{symbol[0]}"), phase=phase, type=step_type,
+        title=f"{symbol[0]} by hand", executor=executor, claim=claim,
+        basis="manual" if claim else None, symbol=StepSymbol(old=symbol[0], new=symbol[1]),
+        where=[where], depends_on=list(depends_on or ()),
+        why=StepWhy(risk_ids=list(risk_ids or ())),
+        do=StepDo(manual=ManualDo(summary="make it by hand")),
+        verify=StepVerify(judge="strict" if claim == "preserve" else "expectation",
+                          expect=expect))
+
+
+def with_steps(root: Path, plan, *steps, save: bool = True):
+    """``plan`` with ``steps`` added after its own (saved, when ``save``)."""
+    out = plan.model_copy(update={"steps": [*plan.steps, *steps]})
+    if save:
+        out.save(root)
+    return out

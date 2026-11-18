@@ -118,6 +118,8 @@ def cap_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def verdict_class(e: FactEntry) -> str:
     if e.noise:
         return "noise"
+    if e.accepted:
+        return "accepted"
     if e.fails:
         return "failing"
     if e.review:
@@ -270,7 +272,7 @@ def _finding(group: list[FactEntry], **extra: Any) -> dict[str, Any]:
     site, text = _site(rep)
     levels = Counter((e.level.value if e.level else "none") for e in group)
     out: dict[str, Any] = {
-        "symbol": rep.symbol, "site": site, "site_text": text,
+        "id": rep.finding, "symbol": rep.symbol, "site": site, "site_text": text,
         "mechanism": mechanism(rep), "entries": len(group),
         "calls": {"old": sum(e.old_count for e in group),
                   "new": sum(e.new_count for e in group)},
@@ -357,6 +359,8 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                    for k, v in sorted(levels.items())},
     }
 
+    accepted = [{**_finding([e]), "accepted": dict(e.accepted or {})}
+                for e in by_class["accepted"]][:FINDINGS_CAP]
     n_fail = len(by_class["failing"])
     reasons = []
     if failing:
@@ -367,6 +371,10 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                        + " (review)")
     if by_class["not-comparable"]:
         reasons.append(f"{len(by_class['not-comparable'])} not comparable")
+    if by_class["accepted"]:
+        n = len(by_class["accepted"])
+        reasons.append(f"{n} accepted change{'' if n == 1 else 's'} (a person attested "
+                       f"{'it' if n == 1 else 'them'})")
     if diff.incomplete:
         reasons.append("a facts snapshot evicted facts: the evidence is incomplete")
     return {
@@ -376,10 +384,12 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                    "review": len(by_class["review"]), "noise": len(by_class["noise"]),
                    "explained": len(by_class["explained"]),
                    "not_comparable": len(by_class["not-comparable"]),
-                   "equal": len(by_class["equal"])},
+                   "equal": len(by_class["equal"]), "accepted": len(by_class["accepted"])},
         "failing": [f for _r, _n, f in failing[:FINDINGS_CAP]],
         "failing_total": len(failing),
         "review": review,
+        "accepted": accepted,
+        "accepted_total": len(by_class["accepted"]),
         "explained": table,
         "quality": quality,
     }
@@ -420,7 +430,8 @@ def render_text(summary: dict[str, Any], *, explained: bool = False,
         for f in summary["failing"]:
             if budget <= 0:
                 break
-            out.append(f"  ✗ {f['symbol']} @ {f['site']}  ×{f['entries']}  {f['why']}")
+            out.append(f"  ✗ {f['symbol']} @ {f['site']}  ×{f['entries']}  {f['why']}"
+                       + (f"  [finding {f['id']}]" if f.get("id") else ""))
             if printed < _SAMPLED_FINDINGS:
                 out.extend(_sample_lines(f["sample"], "      "))
             budget -= 1
@@ -435,10 +446,21 @@ def render_text(summary: dict[str, Any], *, explained: bool = False,
         for f in r["findings"][:5]:
             if budget <= 0:
                 break
-            out.append(f"  ? {f['symbol']} @ {f['site']}  ×{f['entries']}")
+            out.append(f"  ? {f['symbol']} @ {f['site']}  ×{f['entries']}"
+                       + (f"  [finding {f['id']}]" if f.get("id") else ""))
             budget -= 1
         if r["findings_total"] > 5:
             out.append(f"  … {r['findings_total'] - 5} more site(s)")
+    if summary.get("accepted_total"):
+        n = summary["accepted_total"]
+        out.append(f"{n} accepted change{'' if n == 1 else 's'} (a person attested "
+                   f"{'it' if n == 1 else 'each'}; `verify --strict` reviews them):")
+        for f in summary.get("accepted") or ():
+            a = f.get("accepted") or {}
+            who = a.get("by") or "a person"
+            when = f" on {a['at']}" if a.get("at") else ""
+            out.append(f"  = {f['symbol']} @ {f['site']}  {a.get('how') or 'accepted'}, by "
+                       f"{who}{when}")
     if explained and summary.get("explained"):
         out.append("Explained (not failing):")
         for row in summary["explained"]:

@@ -318,6 +318,16 @@ def verify_migration(
         "--auto-rollback",
         help="Run rollback when a required canary gate fails",
     ),
+    accept: str | None = typer.Option(
+        None, "--accept",
+        help="Accept a failing or review finding (its id) as an intended change: a person on "
+             "a terminal types the nonce printed"),
+    strict: bool = typer.Option(
+        False, "--strict", help="Review every accepted change instead of counting it equal"),
+    step: str | None = typer.Option(
+        None, "--step",
+        help="Also print this step's judgement and exit by it (0 verified, 1 failed, 4 needs "
+             "review or evidence, or not in the capture)"),
     json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
     verbose: bool = typer.Option(
@@ -368,6 +378,10 @@ def verify_migration(
     project_path = require_project_dir(project_dir, json_output=json_output)
     if agent:
         project_path = project_path.resolve()
+    if accept and json_output:
+        fail("--accept is a person's attested act: it is refused under --agent and --json",
+             hint="A person runs `pymolt verify . --accept ID` on a terminal.",
+             json_output=json_output)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
         if path_value:
@@ -394,14 +408,21 @@ def verify_migration(
             if comparator is None:
                 raise ComparatorError("--profile custom requires --comparator module:callable")
             load_custom_comparator(comparator)
-        contract_report = service.build_contract_report_from_state(
-            project_path,
-            trace_override=post_file,
-            against_override=baseline_file,
-            probe_python=probe_python,
-            comparator_profile=selected.value,
-            custom_comparator=comparator,
-        )
+        def build_report():
+            return service.build_contract_report_from_state(
+                project_path,
+                trace_override=post_file,
+                against_override=baseline_file,
+                probe_python=probe_python,
+                comparator_profile=selected.value,
+                custom_comparator=comparator,
+                strict=strict,
+            )
+
+        contract_report = build_report()
+        if accept:
+            _accept_finding(project_path, contract_report, accept)
+            contract_report = build_report()
 
         if bool(golden_before) != bool(golden_after):
             raise ValueError("--golden-before and --golden-after must be supplied together")
@@ -487,14 +508,25 @@ def verify_migration(
             json_output=json_output,
         )
 
+    exit_code = _verification_exit(unified.verdict)
+    judged = None
+    if step:
+        judged, exit_code = _step_judgement(project_path, unified, step, json_output)
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(views.verify_view(unified, project_path, saved_path=saved_path)))
-        raise typer.Exit(code=_verification_exit(unified.verdict))
+        view = views.verify_view(unified, project_path, saved_path=saved_path)
+        if judged is not None:
+            view["data"]["step"] = judged
+            view["summary"] = f"step {step}: {judged['status']}; " + view["summary"]
+        typer.echo(views.dumps(view))
+        raise typer.Exit(code=exit_code)
     if json_output:
-        typer.echo(json.dumps(unified.model_dump(mode="json"), indent=2))
-        raise typer.Exit(code=_verification_exit(unified.verdict))
+        payload = unified.model_dump(mode="json")
+        if judged is not None:
+            payload["step"] = judged
+        typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(code=exit_code)
 
     _render_contract_report(contract_report, verbose=verbose)
     if canary is not None:
@@ -535,7 +567,47 @@ def verify_migration(
         f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
         title="Verdict", border_style=border, expand=False,
     ))
-    raise typer.Exit(code=_verification_exit(unified.verdict))
+    if judged is not None:
+        lines = [f"[bold]{escape(judged['status'])}[/bold]"
+                 + (f" (epoch {judged['epoch']})" if judged.get("epoch") else "")]
+        for key in ("failing", "review", "unexercised"):
+            for item in judged.get(key) or ():
+                lines.append(f"{key}: {escape(str(item))}")
+        for r in judged.get("risks") or ():
+            lines.append(f"risk {escape(r['id'])}: {escape(r['result'])}"
+                         + (f" ({escape(r['fix'])})" if r.get("fix") else ""))
+        if judged.get("note"):
+            lines.append(escape(judged["note"]))
+        console.print(Panel("\n".join(lines), title=f"Step {escape(step)}", expand=False,
+                            border_style={0: "green", 1: "red"}.get(exit_code, "yellow")))
+    raise typer.Exit(code=exit_code)
+
+
+def _step_judgement(project_path: Path, unified, step: str, json_output: bool
+                    ) -> tuple[dict, int]:
+    """``verify --step``: the step's judgement from this verify (a filter over the one
+    post-migration capture, design 5.3) and its exit code."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.workorder.judge import EXIT
+    from pymolt.workorder.state import project_steps
+
+    plan = MigrationPlan.load(project_path)
+    if plan is None or plan.step(step) is None:
+        fail(f"unknown step {step}: the plan has "
+             + (", ".join(s.id for s in plan.steps) if plan is not None else "no plan"),
+             json_output=json_output)
+    judged = unified.steps.get(step)
+    if judged is not None:
+        return {"id": step, **judged}, EXIT.get(judged.get("status"), 4)
+    state = project_steps(project_path, plan).step(step)
+    status = state.status if state is not None else "planned"
+    note = (f"step {step} is {status}: not in effect, so this verify does not judge it"
+            if state is None or state.epoch is None else
+            f"step {step} has no site this verify could judge")
+    if unified.contract.compared is None or unified.contract.compared.after_capture != \
+            "post-migration":
+        note = "this verify did not compare the post-migration capture: no step is judged"
+    return {"id": step, "status": status, "note": note}, 4
 
 
 @app.command(rich_help_panel="Migration")
@@ -861,6 +933,30 @@ def apply_plan_cmd(
     reason: str | None = typer.Option(None, "--reason", help="Why the step is skipped"),
     brief: bool = typer.Option(
         False, "--brief", help="With --step: print the step's brief; write nothing"),
+    record: bool = typer.Option(
+        False, "--record",
+        help="With --step: record an agent's or a person's edit (snapshot the files now)"),
+    done: bool = typer.Option(
+        False, "--done", help="With --record: record what changed since, as the step"),
+    abort: bool = typer.Option(
+        False, "--abort", help="With --record: drop the open record; files are untouched"),
+    by: str | None = typer.Option(
+        None, "--by", help="With --record: who made the edit, agent or person"),
+    actor: str | None = typer.Option(
+        None, "--actor", help="With --record: the name recorded for who made the edit"),
+    claim: str | None = typer.Option(
+        None, "--claim",
+        help="With --record --done: preserve or intended (it may only tighten the step's)"),
+    expect: str | None = typer.Option(
+        None, "--expect",
+        help="With --record --done and --claim intended: any or representation; a person on "
+             "a terminal may give raise:<Type> or return:<Type>"),
+    pair: list[str] = typer.Option(
+        [], "--pair", help="With --record --done: OLD=NEW, a pairing anchor (repeatable)"),
+    approve_agent: bool = typer.Option(
+        False, "--approve-agent",
+        help="A person approves this plan for agents: `apply --agent` may then write its "
+             "pymolt steps, and `rollback --agent --step` roll one back"),
     allow_no_baseline: bool = typer.Option(
         False,
         "--allow-no-baseline",
@@ -902,15 +998,34 @@ def apply_plan_cmd(
             hint="Create a fresh plan with `pymolt plan .`.",
             json_output=json_output,
         )
-    if (brief or skip) and not step:
-        fail(f"--{'brief' if brief else 'skip'} needs --step ID", json_output=json_output)
+    if (brief or skip or record) and not step:
+        flag = "brief" if brief else "skip" if skip else "record"
+        fail(f"--{flag} needs --step ID", json_output=json_output)
     if reason and not skip:
         fail("--reason goes with --skip", json_output=json_output)
+    if (done or abort) and not record:
+        fail(f"--{'done' if done else 'abort'} goes with --record", json_output=json_output)
+    if (by or actor or claim or expect or pair) and not record:
+        fail("--by, --actor, --claim, --expect and --pair go with --record",
+             json_output=json_output)
+    if record and (skip or dry_run or through or brief):
+        fail("--record does not go with --skip, --dry-run, --through or --brief",
+             json_output=json_output)
+    if approve_agent:
+        _approve_agent(project_path, migration_plan, json_output=json_output,
+                       others=bool(step or through or dry_run or skip or record or brief))
+        return
     if brief:
         _print_brief(migration_plan, step, project_path, agent=agent)
         return
     try:
-        if skip:
+        if record:
+            from pymolt.workorder.record import record_step
+
+            result = record_step(project_path, migration_plan, step, done=done, abort=abort,
+                                 agent=agent, by=by, actor=actor, claim=claim, expect=expect,
+                                 pairs=pair, attestation=_attester(agent, json_output))
+        elif skip:
             result = skip_step(project_path, migration_plan, step, reason or "", agent=agent)
         else:
             result = apply_steps(project_path, migration_plan, step=step, through=through,
@@ -952,21 +1067,73 @@ def apply_plan_cmd(
     advisories = [item.model_dump(mode="json") for item in migration_plan.advisories]
     manual = [item.model_dump(mode="json") for item in migration_plan.manual]
     receipt = result.receipt
+    code = EXIT_FINDING if result.check_failed else 0
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(views.apply_view(result, migration_plan)))
-        return
+        typer.echo(views.dumps(views.apply_view(result, migration_plan, project_path)))
+        raise typer.Exit(code=code)
     if json_output:
         payload = {**(receipt.model_dump(mode="json") if receipt is not None else {}),
                    "outcome": result.outcome,
                    **result.model_dump(mode="json", exclude={"receipt", "outcome"}),
                    "advisories": advisories, "manual": manual}
         typer.echo(json.dumps(payload, indent=2))
-        return
+        raise typer.Exit(code=code)
     _render_apply(result, migration_plan, project_path)
-    _render_left_to_you(migration_plan)
+    if not record:
+        _render_left_to_you(migration_plan)
     next_step(project_path)
+    raise typer.Exit(code=code)
+
+
+def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool) -> None:
+    """``apply --approve-agent``: a person approves the plan for agents (design 3.6)."""
+    from pymolt.migration_plan import MigrationConflictError
+    from pymolt.workorder.approval import approve
+
+    if json_output:
+        fail("--approve-agent is a person's attested act: it is refused under --agent and "
+             "--json", hint="A person runs `pymolt apply . --approve-agent` on a terminal.",
+             json_output=json_output)
+    if others:
+        fail("--approve-agent goes alone: it approves the whole plan and applies nothing")
+    try:
+        done = approve(project_path, plan, attester=_attester(False, False))
+    except MigrationConflictError as exc:
+        fail(f"the plan was not approved: {exc}", hint=exc.hint, code=EXIT_USAGE)
+    console.print(Panel(
+        f"Approved plan [bold cyan]{plan.plan_id[:8]}[/bold cyan] for agents "
+        f"(attestation {escape(done['attestation'])}): `pymolt apply --agent` may write its "
+        "pymolt steps, and `pymolt rollback --step ID --agent` roll one back. A re-plan or any "
+        "change to the plan voids it. [bold]Nothing was written to your code.[/bold]",
+        title="Approved for agents", border_style="green", expand=False))
+
+
+def _accept_finding(project_path: Path, report, finding: str) -> None:
+    """``verify --accept``: a person accepts one finding (design 5.2), or the command fails."""
+    from pymolt.verify.accepts import AcceptRefusal, accept_finding
+
+    if report._fact_diff is None or report._accepts is None:
+        fail("--accept needs a behaviour diff of the two captures, and there is none",
+             code=EXIT_USAGE)
+    try:
+        done = accept_finding(project_path, report._fact_diff, finding,
+                              attester=_attester(False, False), ctx=report._accepts)
+    except AcceptRefusal as exc:
+        fail(f"finding {finding} was not accepted: {exc}", hint=exc.hint, code=EXIT_USAGE)
+    console.print(f"[green]Accepted[/green] finding {escape(done.finding)} ({escape(done.symbol)})"
+                  f" as {'ad-hoc ' if done.adhoc else ''}step {escape(done.step)}, attestation "
+                  f"{escape(done.attestation)}. It expires when the outcome or a capture changes.")
+
+
+def _attester(agent: bool, json_output: bool):
+    """The terminal a person attests on (design 5.6): never under --agent or --json, and only
+    when stdin and stdout are terminals (the adapter checks)."""
+    from pymolt.adapters.attest_tty import TtyPrompter
+    from pymolt.attest import Attester
+
+    return Attester(prompter=TtyPrompter(agent=agent, json_output=json_output))
 
 
 def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None:
@@ -1000,6 +1167,34 @@ def _render_apply(result, plan, project_path: Path) -> None:
             title="Dry run", border_style="cyan", expand=False))
         for item in result.diff:
             console.print(escape(item["diff"]), end="", markup=False, highlight=False)
+    elif result.outcome == "in_progress":
+        sid = ", ".join(result.in_progress)
+        console.print(Panel(
+            f"Recording step [bold]{escape(sid)}[/bold] of plan {plan_label}: the files are "
+            "snapshotted. Make the change, then "
+            f"[bold]pymolt apply --step {escape(sid)} --record --done[/bold] "
+            f"(or [bold]--record --abort[/bold]). [bold]Nothing was written.[/bold]",
+            title="Record open", border_style="cyan", expand=False))
+    elif result.outcome == "recorded":
+        sid = ", ".join(result.recorded)
+        checks = (result.checks.get(result.recorded[0]) or {}) if result.recorded else {}
+        console.print(Panel(
+            f"Recorded step [bold]{escape(sid)}[/bold] of plan {plan_label}: "
+            f"{len(result.files)} file(s)"
+            + (f", attested ({escape(result.attestation)})" if result.attestation else "")
+            + ".\n" + escape(", ".join(f"{k} {v}" for k, v in checks.items())),
+            title="Step recorded",
+            border_style="red" if result.check_failed else "green", expand=False))
+        for item in result.unrecorded:
+            where = item.get("file") or "?"
+            if item.get("lines"):
+                where += ":" + "-".join(str(n) for n in item["lines"])
+            console.print(f"[yellow]unrecorded[/yellow] {escape(where)}: "
+                          f"{escape(str(item.get('why')))}")
+    elif result.outcome == "aborted":
+        console.print(Panel(
+            f"Record aborted, plan {plan_label}. [bold]No file was touched.[/bold]",
+            title="Record aborted", border_style="yellow", expand=False))
     elif result.outcome == "skipped":
         console.print(Panel(
             f"Skipped step [bold]{escape(', '.join(result.skipped))}[/bold] of plan "
@@ -1092,7 +1287,8 @@ def rollback(
         None, "--run-id", help="Apply run to undo (default: the open one)"
     ),
     step: str | None = typer.Option(
-        None, "--step", help="Roll back this step only (it must be the last change to its files)"),
+        None, "--step", help="Roll back this step only. A file later changes moved on gets "
+                             "only the step's own change undone, or the step is refused"),
     cascade: bool = typer.Option(
         False, "--cascade", help="With --step: roll back the steps that depend on it first"),
     force: bool = typer.Option(
@@ -1103,8 +1299,8 @@ def rollback(
 ):
     """Undo the open run's apply: restore the files its steps changed.
 
-    Refuses if a file was edited after apply, unless --force. --step rolls back one step,
-    when it is the last change to its files.
+    Refuses if a file was edited after apply, unless --force. --step rolls back one step: in a
+    file that later steps or edits moved on, only that step's own change is undone.
     """
     import json
 
@@ -1132,6 +1328,11 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.rollback_view(result)))
+        return
     post, post_trace = result.post, result.post_trace
     payload = {
         "run_id": rolled_run,
@@ -1140,6 +1341,8 @@ def rollback(
         "files_restored": len(result.files_restored),
         "steps": result.steps,
         "kept": result.kept,
+        "inverse": result.inverse,
+        "notes": result.notes,
         "post_migration_capture": post,
         "post_migration_trace": post_trace,
     }
@@ -1152,6 +1355,10 @@ def rollback(
     }.get(post or "", "")
     kept = (f" (kept in effect: {', '.join(result.kept)}, it changed no file)"
             if result.kept else "")
+    if result.inverse:
+        kept += (f"\nUndone alone, later changes kept: "
+                 f"{', '.join(result.inverse)}")
+    kept += "".join(f"\n{note}" for note in result.notes)
     console.print(Panel(
         f"Rolled back run [bold cyan]{rolled_run[:8]}[/bold cyan]\n"
         f"Steps: {escape(', '.join(result.steps + result.kept) or 'none')}{escape(kept)}\n"
