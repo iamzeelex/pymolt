@@ -20,16 +20,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from pydantic_core import ValidationError
 
 from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
 from pymolt.verify.predict import PredictionReport
+from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, PlanStep
 
 logger = logging.getLogger(__name__)
 
-PLAN_SCHEMA_VERSION = 1
+# PLAN_SCHEMA_VERSION 2: the plan is a work order of steps (``pymolt.workorder``); a schema-1
+# file is read as one synthetic step (``pymolt.workorder.v1``).
 DEFAULT_PLAN_PATH = Path(".pymolt/migration_plan.json")
 
 
@@ -197,6 +199,8 @@ class PlannedAdvisory(BaseModel):
     column: int
     severity: str
     reason: str
+    # The rule that raised it (its ``recipe_key``); None in plans made before it was recorded.
+    rule: str | None = None
 
 
 class PlannedManualItem(BaseModel):
@@ -225,6 +229,9 @@ class PlanInspection(BaseModel):
 
 
 class MigrationPlan(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": PLAN_SCHEMA_ID})
+
     schema_version: int = PLAN_SCHEMA_VERSION
     plan_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     created_at: str = Field(default_factory=_now)
@@ -258,6 +265,20 @@ class MigrationPlan(BaseModel):
     # SyntaxError / SyntaxWarning findings are here.
     python: dict[str, Any] | None = None
     compile_findings: list[dict[str, Any]] = Field(default_factory=list)
+    # The work order (``pymolt.workorder.models``): ordered by phase, then by application order.
+    # ``changes`` stays the v1 view: every file's text after all of its pymolt code steps.
+    steps: list[PlanStep] = Field(default_factory=list)
+    # The schema this plan was read from when an adapter made its steps (1: a schema-1 plan,
+    # read as one synthetic step ``v1``); None for a plan written as it is.
+    adapted_from: int | None = None
+
+    @property
+    def setup_fingerprint(self) -> str | None:
+        """The setup fingerprint at plan time (``environment_setup_fingerprint``): H3's input."""
+        return self.environment_setup_fingerprint
+
+    def step(self, step_id: str) -> PlanStep | None:
+        return next((s for s in self.steps if s.id == step_id), None)
 
     @field_validator("plan_id")
     @classmethod
@@ -276,7 +297,12 @@ class MigrationPlan(BaseModel):
             return None
         try:
             with source.open(encoding="utf-8") as stream:
-                return cls.model_validate(json.load(stream))
+                data = json.load(stream)
+            if isinstance(data, dict) and data.get("schema_version", 1) == 1:
+                from pymolt.workorder.v1 import read_v1
+
+                return read_v1(cls, data)
+            return cls.model_validate(data)
         except (OSError, json.JSONDecodeError, ValidationError):
             return None
 
