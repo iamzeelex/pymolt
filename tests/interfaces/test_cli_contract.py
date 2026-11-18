@@ -12,6 +12,7 @@ Three invariants, each of which was broken in a way no existing test could see
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -26,6 +27,14 @@ from pymolt.interfaces.cli.output import (
 )
 
 runner = CliRunner()
+
+# Typer forces a terminal under GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS, so rich help
+# carries ANSI codes there; the panel checks read the text without them.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _help_text() -> str:
+    return _ANSI.sub("", runner.invoke(app, ["--help"]).output)
 
 
 @pytest.fixture
@@ -236,8 +245,8 @@ class TestRendering:
         assert "next →" not in result.stdout
 
     def test_help_lists_the_preparation_phases_in_funnel_order(self):
-        result = runner.invoke(app, ["--help"])
-        funnel = result.output.split("╭─ Migration ")[1].split("╰")[0]
+        output = _help_text()
+        funnel = output.split("╭─ Migration ")[1].split("╰")[0]
         order = [name for name in ("scan", "setup", "assess", "plan", "apply") if name in funnel]
         positions = [funnel.index(name) for name in order]
         assert positions == sorted(positions), f"funnel out of order: {order}"
@@ -250,12 +259,12 @@ class TestRendering:
         It brackets the migration (baseline before, post-migration after), so it
         gets its own help panel rather than trailing the preparation phases.
         """
-        result = runner.invoke(app, ["--help"])
+        output = _help_text()
         # Match the panel border, not the phrase — the help text names the panel too.
-        assert "╭─ Behavioural proof" in result.output
-        proof = result.output.split("╭─ Behavioural proof")[1].split("╰")[0]
+        assert "╭─ Behavioural proof" in output
+        proof = output.split("╭─ Behavioural proof")[1].split("╰")[0]
         assert "capture" in proof and "verify" in proof
-        prep = result.output.split("╭─ Migration ")[1].split("╰")[0]
+        prep = output.split("╭─ Migration ")[1].split("╰")[0]
         assert "capture" not in prep and "verify" not in prep
 
     def test_help_leads_with_capturing_a_baseline_first(self):
