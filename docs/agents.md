@@ -28,7 +28,10 @@ saves; with some of them it is an error. An existing capture needs `--force`.
 
 `apply` and `rollback` write source, and a person runs them. `apply --agent` writes nothing: it
 refuses a pymolt step, and with `--dry-run` returns the diff the steps would write, or with
-`--step ID --brief` the step's brief.
+`--step ID --brief` the step's brief. An agent records its own edits: `apply --step ID --record
+--agent` before editing, `--record --done --agent` after (`--record --abort --agent` drops it).
+The record is the agent's, with the step's claim; `--claim`, `--expect any|representation` and
+`--pair OLD=NEW` may only tighten how verify judges it.
 
 `plan --agent` lists the plan's steps (`data.steps`, with who does each) and, under
 `data.next.brief`, the brief of the first step for an agent: where its sites are now (resolved on

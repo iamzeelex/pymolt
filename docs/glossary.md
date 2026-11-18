@@ -30,6 +30,8 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **anchor** | A statement named by what it is (its code with the formatting stripped), its function or class and its neighbours, never by its line, so it is found again after lines move |
 | **run** | The application of one plan, opened by its first `apply`. Applying another plan closes it; its applied steps stay in effect |
 | **epoch** | One application of a step, numbered by its ledger event. A rollback ends it; applying the step again opens a new one |
+| **record** | An agent's or a person's edit made as a step: `apply --step ID --record` snapshots the files, `--record --done` records what changed as the step's epoch, with its claim |
+| **claim** | What a step promises verify: `preserve` (every outcome at its sites stays the same) or `intended` (the outcome changes on purpose; a person attests the new one) |
 | **re-based** | A step applied to a file that moved on since the plan: its recipe ran again at its anchored statements and made the reviewed change there |
 | **present** | A step whose change is already in its place, made by hand: `apply` writes nothing for it and verify judges those lines as hand edits |
 | **stale step** | A step a statement of which is gone, or whose recipe now makes another change: `apply` refuses it and names why |

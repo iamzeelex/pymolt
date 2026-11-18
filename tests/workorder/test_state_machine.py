@@ -11,8 +11,9 @@ re-plan, over two runs. After every event:
 - every status change is a row of the state table (4.1);
 - ``project_steps`` is total and deterministic, and a step in effect is projected in effect.
 
-Every ordered pair of event kinds occurs (checked). ``--record`` and ``--abort`` come with
-stage 5.
+Every ordered pair of event kinds occurs (checked). Stage 5 adds ``--record``, ``--record
+--done`` (after a ``--record``, or with none first) and ``--record --abort``: a run has at most
+one step ``in_progress``, and while it is open ``apply`` and ``rollback`` write nothing.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from pymolt.apply_ledger import chain_runs, in_effect_entries, load_ledger
 from pymolt.migration_plan import MigrationConflictError, MigrationPlan, MigrationPlanError
 from pymolt.migration_state import MigrationReceipt
 from pymolt.workorder.apply import apply_steps, skip_step
+from pymolt.workorder.record import record_step
 from pymolt.workorder.rollback import rollback_steps
 from pymolt.workorder.state import RunView, project_steps
 
@@ -36,13 +38,16 @@ SEQUENCES = 500
 LENGTH = 9
 M, N = "app/m.py", "app/n.py"
 KINDS = ("apply", "step", "through", "rollback", "rollback_step", "force", "skip", "edit",
-         "replan")
+         "replan", "record", "done", "abort")
 # (status before, command) -> statuses allowed after it; None is "planned" (no ledger status).
 ALLOWED = {
     (None, "apply"): {"applied"}, ("rolled_back", "apply"): {"applied"},     # rows 1-3, 7
     ("skipped", "apply"): {"applied"},          # --step on a skipped step (a departure)
     ("applied", "rollback"): {"rolled_back"},   # rows 5, 12, 14
     (None, "skip"): {"skipped"}, ("rolled_back", "skip"): {"skipped"},    # row 16
+    ("recorded", "rollback"): {"rolled_back"},  # rows 5 and 12 for a recorded step
+    (None, "done"): {"recorded"}, ("rolled_back", "done"): {"recorded"},  # 3.3
+    ("recorded", "done"): {"recorded"},         # row 8: a re-record
 }
 
 
@@ -82,6 +87,10 @@ def template(tmp_path_factory):
 
 def _check(root: Path, plans: dict[str, MigrationPlan], edited_after: dict[str, int]) -> None:
     receipt = MigrationReceipt.load(root)
+    open_records = Counter(key.split(":", 1)[0] for key, step in
+                           (receipt.steps if receipt else {}).items()
+                           if step.status == "in_progress")
+    assert all(n == 1 for n in open_records.values()), open_records   # one per run
     ledger = load_ledger(root, receipt=receipt)
     if ledger is None:
         return
@@ -136,8 +145,9 @@ def _one(template_root: Path, plan1, plan2, work: Path, seed: int, pairs: Counte
         before = _snapshot(root)
         statuses = _statuses(root, plans)
         code = [s.id for s in plan.steps if s.executor == "pymolt"]
-        command = {"apply": "apply", "step": "apply", "through": "apply", "skip": "skip"}.get(
-            kind, "rollback")
+        command = {"apply": "apply", "step": "apply", "through": "apply", "skip": "skip",
+                   "record": "record", "done": "done", "abort": "abort"}.get(kind, "rollback")
+        recordable = [s.id for s in plan.steps if s.type != "target-env"]
         rolled_step = None
         try:
             if kind == "apply":
@@ -155,6 +165,14 @@ def _one(template_root: Path, plan1, plan2, work: Path, seed: int, pairs: Counte
                 rollback_steps(root, force=True)
             elif kind == "skip":
                 skip_step(root, plan, rng.choice(code + ["env-2"]), "declined")
+            elif kind == "record":
+                record_step(root, plan, rng.choice(recordable + ["env-2"]))
+            elif kind == "done":
+                record_step(root, plan, _open_or(root, plan, rng.choice(recordable)),
+                            done=True)
+            elif kind == "abort":
+                record_step(root, plan, _open_or(root, plan, rng.choice(recordable)),
+                            abort=True)
             elif kind == "edit":
                 rel = rng.choice((M, N))
                 path = root / rel
@@ -189,6 +207,17 @@ def _one(template_root: Path, plan1, plan2, work: Path, seed: int, pairs: Counte
     shutil.rmtree(root)
 
 
+def _open_or(root: Path, plan: MigrationPlan, other: str) -> str:
+    """The plan's step with an open record, else ``other`` (``--done`` with no ``--record``
+    first, or an abort that is refused)."""
+    receipt = MigrationReceipt.load(root)
+    for key, step in (receipt.steps if receipt else {}).items():
+        run, sid = key.split(":", 1)
+        if step.status == "in_progress" and plan.step(sid) is not None:
+            return sid
+    return other
+
+
 STATUSES = {"planned", "blocked", "stale", "present", "in_progress", "applied", "recorded",
             "skipped", "rolled_back", "not_in_capture", "verified", "failed", "needs_review",
             "needs_evidence"}
@@ -205,7 +234,7 @@ def _projected(root: Path, plan: MigrationPlan) -> None:
     view = RunView.of(load_ledger(root), first.run_id)
     for s in first.steps:
         if view.in_effect(s.id):
-            assert s.status in ("applied", "recorded"), (s.id, s.status)
+            assert s.status in ("applied", "recorded", "in_progress"), (s.id, s.status)
 
 
 def test_random_sequences_keep_the_invariants(template, tmp_path, monkeypatch):

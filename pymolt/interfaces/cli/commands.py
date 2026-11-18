@@ -861,6 +861,26 @@ def apply_plan_cmd(
     reason: str | None = typer.Option(None, "--reason", help="Why the step is skipped"),
     brief: bool = typer.Option(
         False, "--brief", help="With --step: print the step's brief; write nothing"),
+    record: bool = typer.Option(
+        False, "--record",
+        help="With --step: record an agent's or a person's edit (snapshot the files now)"),
+    done: bool = typer.Option(
+        False, "--done", help="With --record: record what changed since, as the step"),
+    abort: bool = typer.Option(
+        False, "--abort", help="With --record: drop the open record; files are untouched"),
+    by: str | None = typer.Option(
+        None, "--by", help="With --record: who made the edit, agent or person"),
+    actor: str | None = typer.Option(
+        None, "--actor", help="With --record: the name recorded for who made the edit"),
+    claim: str | None = typer.Option(
+        None, "--claim",
+        help="With --record --done: preserve or intended (it may only tighten the step's)"),
+    expect: str | None = typer.Option(
+        None, "--expect",
+        help="With --record --done and --claim intended: any or representation; a person on "
+             "a terminal may give raise:<Type> or return:<Type>"),
+    pair: list[str] = typer.Option(
+        [], "--pair", help="With --record --done: OLD=NEW, a pairing anchor (repeatable)"),
     allow_no_baseline: bool = typer.Option(
         False,
         "--allow-no-baseline",
@@ -902,15 +922,30 @@ def apply_plan_cmd(
             hint="Create a fresh plan with `pymolt plan .`.",
             json_output=json_output,
         )
-    if (brief or skip) and not step:
-        fail(f"--{'brief' if brief else 'skip'} needs --step ID", json_output=json_output)
+    if (brief or skip or record) and not step:
+        flag = "brief" if brief else "skip" if skip else "record"
+        fail(f"--{flag} needs --step ID", json_output=json_output)
     if reason and not skip:
         fail("--reason goes with --skip", json_output=json_output)
+    if (done or abort) and not record:
+        fail(f"--{'done' if done else 'abort'} goes with --record", json_output=json_output)
+    if (by or actor or claim or expect or pair) and not record:
+        fail("--by, --actor, --claim, --expect and --pair go with --record",
+             json_output=json_output)
+    if record and (skip or dry_run or through or brief):
+        fail("--record does not go with --skip, --dry-run, --through or --brief",
+             json_output=json_output)
     if brief:
         _print_brief(migration_plan, step, project_path, agent=agent)
         return
     try:
-        if skip:
+        if record:
+            from pymolt.workorder.record import record_step
+
+            result = record_step(project_path, migration_plan, step, done=done, abort=abort,
+                                 agent=agent, by=by, actor=actor, claim=claim, expect=expect,
+                                 pairs=pair)
+        elif skip:
             result = skip_step(project_path, migration_plan, step, reason or "", agent=agent)
         else:
             result = apply_steps(project_path, migration_plan, step=step, through=through,
@@ -952,21 +987,24 @@ def apply_plan_cmd(
     advisories = [item.model_dump(mode="json") for item in migration_plan.advisories]
     manual = [item.model_dump(mode="json") for item in migration_plan.manual]
     receipt = result.receipt
+    code = EXIT_FINDING if result.check_failed else 0
     if agent:
         from pymolt.interfaces import views
 
         typer.echo(views.dumps(views.apply_view(result, migration_plan)))
-        return
+        raise typer.Exit(code=code)
     if json_output:
         payload = {**(receipt.model_dump(mode="json") if receipt is not None else {}),
                    "outcome": result.outcome,
                    **result.model_dump(mode="json", exclude={"receipt", "outcome"}),
                    "advisories": advisories, "manual": manual}
         typer.echo(json.dumps(payload, indent=2))
-        return
+        raise typer.Exit(code=code)
     _render_apply(result, migration_plan, project_path)
-    _render_left_to_you(migration_plan)
+    if not record:
+        _render_left_to_you(migration_plan)
     next_step(project_path)
+    raise typer.Exit(code=code)
 
 
 def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None:
@@ -1000,6 +1038,34 @@ def _render_apply(result, plan, project_path: Path) -> None:
             title="Dry run", border_style="cyan", expand=False))
         for item in result.diff:
             console.print(escape(item["diff"]), end="", markup=False, highlight=False)
+    elif result.outcome == "in_progress":
+        sid = ", ".join(result.in_progress)
+        console.print(Panel(
+            f"Recording step [bold]{escape(sid)}[/bold] of plan {plan_label}: the files are "
+            "snapshotted. Make the change, then "
+            f"[bold]pymolt apply --step {escape(sid)} --record --done[/bold] "
+            f"(or [bold]--record --abort[/bold]). [bold]Nothing was written.[/bold]",
+            title="Record open", border_style="cyan", expand=False))
+    elif result.outcome == "recorded":
+        sid = ", ".join(result.recorded)
+        checks = (result.checks.get(result.recorded[0]) or {}) if result.recorded else {}
+        console.print(Panel(
+            f"Recorded step [bold]{escape(sid)}[/bold] of plan {plan_label}: "
+            f"{len(result.files)} file(s)"
+            + (f", attested ({escape(result.attestation)})" if result.attestation else "")
+            + ".\n" + escape(", ".join(f"{k} {v}" for k, v in checks.items())),
+            title="Step recorded",
+            border_style="red" if result.check_failed else "green", expand=False))
+        for item in result.unrecorded:
+            where = item.get("file") or "?"
+            if item.get("lines"):
+                where += ":" + "-".join(str(n) for n in item["lines"])
+            console.print(f"[yellow]unrecorded[/yellow] {escape(where)}: "
+                          f"{escape(str(item.get('why')))}")
+    elif result.outcome == "aborted":
+        console.print(Panel(
+            f"Record aborted, plan {plan_label}. [bold]No file was touched.[/bold]",
+            title="Record aborted", border_style="yellow", expand=False))
     elif result.outcome == "skipped":
         console.print(Panel(
             f"Skipped step [bold]{escape(', '.join(result.skipped))}[/bold] of plan "

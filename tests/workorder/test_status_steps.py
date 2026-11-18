@@ -226,22 +226,21 @@ def test_rule_5_a_stale_pymolt_step(tmp_path):
     assert status.next_step == "mech-2"
 
 
-def test_rule_6_a_step_for_a_person_is_named_with_its_brief(tmp_path):
-    """Until `--record` (stage 5), the step is done by hand before the capture: the next command
-    stays the capture, and a note names the step and its brief."""
+def test_rule_6_a_step_for_a_person_is_recorded_and_named_with_its_brief(tmp_path):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan)
 
     status = build_status(tmp_path)
 
-    assert status.next_command.startswith("pymolt capture post-migration")
+    assert status.next_command == "pymolt apply --step env-1 --record"
     assert status.next_step == "env-1"
-    assert any("`pymolt apply --step env-1 --brief`" in n for n in status.notes)
+    assert "`pymolt apply --step env-1 --brief`" in status.next_reason
 
 
 def test_rules_7_and_8_the_capture_then_the_verdict(tmp_path):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan)
+    skip_step(tmp_path, plan, "env-1", "the manifest is bumped by hand later")
     assert build_status(tmp_path).next_command.startswith("pymolt capture post-migration")
     post_capture(tmp_path, M)
     assert build_status(tmp_path).next_command == "pymolt verify ."
@@ -255,6 +254,7 @@ def test_rules_7_and_8_the_capture_then_the_verdict(tmp_path):
 def test_rules_9_to_11_a_step_verify_judged(tmp_path, judgement, command, reason):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan)
+    skip_step(tmp_path, plan, "env-1", "bumped by hand")       # else rule 6 names it first
     post_capture(tmp_path, M)
     _judge(tmp_path, plan, {"mech-1": {"status": judgement, "epoch": 1}})
 
@@ -267,6 +267,7 @@ def test_rules_9_to_11_a_step_verify_judged(tmp_path, judgement, command, reason
 def test_rule_12_done(tmp_path):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan)
+    skip_step(tmp_path, plan, "env-1", "bumped by hand")
     post_capture(tmp_path, M)
     _judge(tmp_path, plan, {s: {"status": "verified", "epoch": n}
                             for n, s in enumerate(["mech-1", "mech-2", "mech-3"], 1)},
