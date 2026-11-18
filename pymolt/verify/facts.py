@@ -2721,6 +2721,13 @@ def _COMPOUND(node: ast.stmt) -> bool:  # noqa: N802
 _SIMPLE_STMTS = (ast.Return, ast.Assign, ast.AnnAssign, ast.Expr, ast.AugAssign)
 
 
+def _vouches(entry: Mapping) -> bool:
+    """A ledger entry whose claim makes its edit strict: ``preserve`` (ledger v2), or one of
+    the claims a schema-1 entry names (``same-object``, ...)."""
+    claim = entry.get("claim")
+    return claim == "preserve" or claim in _STRICT_CLAIMS
+
+
 def _reloc_equiv(a: str, b: str) -> bool:
     """``a`` and ``b`` are an old/new spelling pair from the plan's type relocations (full
     names or their last segments)."""
@@ -3067,7 +3074,7 @@ class _Provenance:
         if line is None:
             return False
         for e in self.edits:
-            if e.get("claim") not in _STRICT_CLAIMS:
+            if not _vouches(e):
                 continue  # pymolt's heuristic edit (claim null) judges like a hand edit
             rng = e.get(key)
             if e.get("file") == file and isinstance(rng, list | tuple) and len(rng) == 2 \
