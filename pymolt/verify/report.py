@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from pymolt.core.stdlib import is_stdlib
 from pymolt.verify import identity_resolver
@@ -159,6 +159,10 @@ class ComparedRecordings(BaseModel):
 
 
 class ContractReport(BaseModel):
+    # The fact diff and its accept context, kept for `verify --accept` (not saved).
+    _fact_diff: Any = PrivateAttr(default=None)
+    _accepts: Any = PrivateAttr(default=None)
+
     root: str
     static_targets: int = 0
     observed_targets: int = 0
@@ -942,9 +946,16 @@ def build_contract_report(
                     from pymolt.verify.replicate import apply_noise_profile
 
                     apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1])
+                from pymolt.verify.accepts import apply_accepts, stamp_findings
+
+                stamp_findings(fdiff)
+                accepts = getattr(diff_context, "accepts", None)
+                report.notes.extend(apply_accepts(fdiff, accepts))
+                report._fact_diff, report._accepts = fdiff, accepts
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
-                    report.calibration = _calibration(predictions, old_facts, fdiff, root)
+                    report.calibration = _calibration(predictions, old_facts, fdiff, root,
+                                                      diff_context)
         except (OSError, ValueError) as e:
             report.notes.append(f"version diff failed: {e}")
 
@@ -1174,9 +1185,11 @@ def _order_causes(root: Path, old_facts: FactSet, new_facts: FactSet,
 
 
 def _calibration(predictions: Mapping[str, Any], old_facts: FactSet, fdiff: FactDiff,
-                 root: Path) -> Calibration:
+                 root: Path, diff_context=None) -> Calibration:
     """Score the predictions; ``risks: None`` means "predict from the baseline side now"
-    (its runtime warnings, no delta facts), with ``changes`` for fixed-by-plan."""
+    (its runtime warnings, no delta facts), with ``changes`` for fixed-by-plan. With the two
+    captures' sources (``diff_context``), a fix is credited by statement to the step a risk is
+    linked to (``workorder.credit``)."""
     risks = predictions.get("risks")
     notes = list(predictions.get("notes") or ())
     if risks is None:
@@ -1184,8 +1197,26 @@ def _calibration(predictions: Mapping[str, Any], old_facts: FactSet, fdiff: Fact
                              root=root)
         risks = made.risks
         notes.extend(made.notes)
+    links = None
+    if diff_context is not None and diff_context.old_sources is not None \
+            and diff_context.new_sources is not None:
+        try:
+            from pymolt.verify.predict import PredictedRisk
+            from pymolt.workorder.coverage import setup_pythons
+            from pymolt.workorder.credit import step_links
+
+            items = [r if isinstance(r, PredictedRisk) else PredictedRisk.model_validate(r)
+                     for r in risks or ()]
+            base, target = setup_pythons(root)
+            links = step_links(root, items, old_sources=diff_context.old_sources,
+                               new_sources=diff_context.new_sources, python_old=base,
+                               python_new=target)
+        except Exception as exc:  # noqa: BLE001 - calibration degrades to plan-time fixes
+            notes.append(f"fixes not credited by step ({type(exc).__name__}): the plan's "
+                         "fixed-by-plan decides")
+            links = None
     cal = calibrate(risks, fdiff, source=predictions.get("source") or "plan",
-                    plan_id=predictions.get("plan_id"))
+                    plan_id=predictions.get("plan_id"), links=links)
     cal.notes[:0] = notes
     return cal
 

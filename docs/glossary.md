@@ -21,6 +21,9 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **granularity** | How coverage and recall knew a contact ran: `line` (3.12+), `function` (3.6–3.11), `file` (captures without the executed-code record), `symbol` (traces without call sites) |
 | **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)) |
 | **replicate** | A second run of the baseline's command on the same code and environment; what differs between the two is run-to-run noise |
+| **approval** | A person's attested `apply --approve-agent`: agents may apply this plan's pymolt steps and roll one back. A re-plan or any change to the plan voids it |
+| **attestation** | A person's confirmation, typed on a terminal, kept outside the project with an HMAC. Only an attestation can judge an edit more leniently than a hand edit |
+| **ACCEPTED** | A changed outcome on an edited line that a person attested as intended: it counts as compared equal and is always printed, with who accepted it and when |
 | **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it |
 | **finding** | One reported difference: failing facts grouped by symbol and call site, or a review item |
 | **API change** | A symbol your code uses that is removed, moved, or changed in signature, default or deprecation status between base and target |
@@ -30,6 +33,8 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **anchor** | A statement named by what it is (its code with the formatting stripped), its function or class and its neighbours, never by its line, so it is found again after lines move |
 | **run** | The application of one plan, opened by its first `apply`. Applying another plan closes it; its applied steps stay in effect |
 | **epoch** | One application of a step, numbered by its ledger event. A rollback ends it; applying the step again opens a new one |
+| **record** | An agent's or a person's edit made as a step: `apply --step ID --record` snapshots the files, `--record --done` records what changed as the step's epoch, with its claim |
+| **claim** | What a step promises verify: `preserve` (every outcome at its sites stays the same) or `intended` (the outcome changes on purpose; a person attests the new one) |
 | **re-based** | A step applied to a file that moved on since the plan: its recipe ran again at its anchored statements and made the reviewed change there |
 | **present** | A step whose change is already in its place, made by hand: `apply` writes nothing for it and verify judges those lines as hand edits |
 | **stale step** | A step a statement of which is gone, or whose recipe now makes another change: `apply` refuses it and names why |

@@ -84,7 +84,8 @@ from pymolt.workorder.state import (
 
 logger = logging.getLogger(__name__)
 
-Outcome = Literal["applied", "already_applied", "nothing", "present", "dry_run", "skipped"]
+Outcome = Literal["applied", "already_applied", "nothing", "present", "dry_run", "skipped",
+                  "in_progress", "recorded", "aborted"]
 
 
 class StepRefusal(MigrationConflictError):
@@ -101,7 +102,10 @@ class ApplyResult(BaseModel):
     those, re-based onto another text; ``unwritten``: already at the reviewed text, so nothing
     was written); ``noop``: already in effect; ``present``: effect already in its slots, no
     epoch; ``blocked``: left out by ``apply .`` (a dependency not in effect), with why;
-    ``remaining``: the plan's steps not in effect afterwards, by status."""
+    ``remaining``: the plan's steps not in effect afterwards, by status. A record
+    (``workorder.record``) sets ``in_progress`` (``--record``, with its ``snapshot``),
+    ``recorded`` (``--done``, with the changes it left ``unrecorded``, the ``attestation`` id
+    and ``check_failed`` when the compile check failed on the recorded files)."""
 
     outcome: Outcome
     plan_id: str
@@ -120,10 +124,16 @@ class ApplyResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
     self_check: SelfCheck | None = None
     receipt: MigrationReceipt | None = None
+    in_progress: list[str] = Field(default_factory=list)
+    recorded: list[str] = Field(default_factory=list)
+    unrecorded: list[dict] = Field(default_factory=list)
+    snapshot: str | None = None
+    attestation: str | None = None
+    check_failed: bool = False
 
 
 AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a person approved for "
-                 "agents, and this pymolt records no approval: a person runs `pymolt apply .`")
+                 "agents (`pymolt apply . --approve-agent`)")
 
 
 # ── entry points ──────────────────────────────────────────────────────────────────────────
@@ -132,20 +142,22 @@ AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a pers
 def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | None = None,
                 through: str | None = None, dry_run: bool = False,
                 allow_no_baseline: bool = False, smoke: bool = False,
-                agent: bool = False) -> ApplyResult:
-    """Apply the selected pymolt steps of ``plan`` (module docstring). Raises ``StepRefusal`` /
-    ``MigrationConflictError`` (exit 2), ``MigrationEvidenceError`` (exit 4),
-    ``MigrationCheckError`` (exit 1) or ``MigrationPlanError`` / ``OSError`` (exit 3)."""
+                agent: bool = False, smoke_reason: str | None = None) -> ApplyResult:
+    """Apply the selected pymolt steps of ``plan`` (module docstring). Under ``agent`` the
+    plan must be approved for agents (``workorder.approval``), except for a dry run.
+    ``smoke_reason``: why the smoke import is not run, for the receipts (MCP without
+    ``PYMOLT_MCP_ALLOW_EXEC``). Raises ``StepRefusal`` / ``MigrationConflictError`` (exit 2),
+    ``MigrationEvidenceError`` (exit 4), ``MigrationCheckError`` (exit 1) or
+    ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if step and through:
         raise StepRefusal("--step and --through cannot be combined")
     if agent and allow_no_baseline:
         raise StepRefusal("--allow-no-baseline is refused under --agent: a person decides to "
                           "apply without a baseline")
-    if agent and not dry_run:
-        raise StepRefusal(AGENT_REFUSAL)
     with _migration_lock(project_dir, "apply"):
         return _apply(Path(project_dir).resolve(), plan, step=step, through=through,
-                      dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke)
+                      dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke,
+                      agent=agent, smoke_reason=smoke_reason)
 
 
 def skip_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, reason: str, *,
@@ -393,16 +405,25 @@ def _classify(decisions: list[FileDecision]) -> str:
 
 
 def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | None,
-           dry_run: bool, allow_no_baseline: bool, smoke: bool) -> ApplyResult:
+           dry_run: bool, allow_no_baseline: bool, smoke: bool, agent: bool = False,
+           smoke_reason: str | None = None) -> ApplyResult:
     receipt = MigrationReceipt.load(root)
     run_id, state = run_for(root, plan, receipt)
     _check_frozen(root, run_id, plan)
+    if agent and not dry_run:
+        from pymolt.workorder.approval import require_approval
+
+        require_approval(root, plan, run_id, "pymolt-steps", "apply")
     if state is not None and dry_run and recover_invocation(root, state, plan, check_only=True):
         raise StepRefusal("an interrupted apply or rollback needs recovering first: run "
                           "`pymolt apply .` without --dry-run")
     if state is not None:
         state = recover_invocation(root, state, plan) or state
         receipt = MigrationReceipt.load(root)
+    if not dry_run:
+        from pymolt.workorder.record import refuse_open_record
+
+        refuse_open_record(receipt, "apply")
     ledger = _load_ledger(root, receipt)
     start_fp, start_setup, baseline = _preconditions(
         root, plan, receipt, run_id, allow_no_baseline=allow_no_baseline)
@@ -472,6 +493,10 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
 
     check, smoke_before = _check_before_write(
         root, _pseudo_plan(plan, texts.changed(), decided), smoke and not dry_run)
+    if smoke_reason and check.smoke is None:
+        from pymolt.apply_check import SmokeCheck
+
+        check.smoke = SmokeCheck(status="skipped", reason=smoke_reason)
     result.self_check = check
     result.checks = {s.id: _checks(check, s, decisions) for s, decisions in decided}
     if dry_run:
@@ -525,8 +550,9 @@ def _checks(check: SelfCheck, step: PlanStep, decisions: list[FileDecision]) -> 
 
 
 def _drift_notes(root: Path, ledger, receipt, noop: list[str], texts: _Texts) -> list[str]:
-    """A no-op step whose file moved on since the last epoch that wrote it: verify judges the
-    changed lines as hand edits (H1 said so by refusing; a step in effect is a no-op)."""
+    """A no-op step whose file moved on since the last epoch, or rollback, that wrote it: verify
+    judges the changed lines as hand edits (H1 said so by refusing; a step in effect is a
+    no-op)."""
     if not noop or ledger is None:
         return []
     from pymolt.apply_ledger import chain_runs
@@ -535,7 +561,8 @@ def _drift_notes(root: Path, ledger, receipt, noop: list[str], texts: _Texts) ->
     epochs = {seq for (run, _sid), seq in ledger.current_epochs().items() if run in chain}
     last: dict[str, str] = {}
     for event in sorted(ledger.events, key=lambda e: e.seq):
-        if event.seq in epochs:
+        if event.seq in epochs or (event.event == "rollback" and event.restored
+                                   and event.run_id in chain):
             last.update({f.file: f.after for f in event.files if f.after})
     notes = []
     for rel, digest in sorted(last.items()):
@@ -940,6 +967,10 @@ def _receipt_with_run(root: Path, receipt, plan: MigrationPlan, run_id: str, now
         receipt = MigrationReceipt(
             run_id=run_id, plan_id=plan.plan_id, applied_at=now, status="rolled_back",
             target_python=plan.target_python, source_manifest=plan.source_manifest,
+            target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
+                                  if plan.target_manifest_path else None),
+            baseline_trace_path=plan.baseline_trace_path,
+            baseline_captured_at=plan.baseline_captured_at,
             no_codemods_required=not plan.changes,
             plan_path=str(_run_dir(root, run_id) / "plan.json"))
     if receipt.run(run_id) is None:

@@ -2687,9 +2687,10 @@ def build_contract_report_from_state(
     changed_api_paths=None,
     comparator_profile: str = "exact",
     custom_comparator=None,
+    strict: bool = False,
 ) -> ContractReport:
     """The unified report, sourcing trace/against from the persisted state when
-    not explicitly overridden.
+    not explicitly overridden. ``strict``: every ACCEPTED change is a review item.
 
     Resolution: explicit overrides always win. Otherwise — both slots captured
     -> trace=post_migration, against=baseline (this is what answers "what
@@ -2774,8 +2775,8 @@ def build_contract_report_from_state(
             predictions = {"risks": [], "source": "baseline", "plan_id": None,
                            "notes": [f"predicted risks unavailable: {exc}"]}
 
-    diff_context = build_diff_context(project_dir, trace, against) if trace and against \
-        else None
+    diff_context = build_diff_context(project_dir, trace, against, strict=strict) \
+        if trace and against else None
     report = build_contract_report(
         project_dir,
         trace=trace,
@@ -2821,7 +2822,8 @@ def _compared_recordings(project_dir: str | Path, state: ContractState, trace: s
     )
 
 
-def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path):
+def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path, *,
+                       strict: bool = False):
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
@@ -2885,6 +2887,15 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     except Exception as exc:  # noqa: BLE001 - provenance is best effort
         logger.warning("could not read the applied plan for the diff context: %s", exc)
     ctx.successors = successors or None
+    try:
+        from pymolt.verify.accepts import context_for
+
+        ctx.accepts = context_for(root, trace, against, old_sources=ctx.old_sources,
+                                  new_sources=ctx.new_sources, strict=strict)
+    except Exception as exc:  # noqa: BLE001 - no accept is honoured, the diff stands
+        logger.warning("could not read the accepted findings: %s", exc, exc_info=True)
+        ctx.notes.append(f"accepted findings could not be read ({type(exc).__name__}): none "
+                         "is honoured")
     return ctx
 
 
@@ -2912,11 +2923,46 @@ def _ledger_context(root: Path, receipt, ctx) -> None:
                              "entries are located by the lines they were written at")
         return
     base, target = setup_pythons(root)
+    attested, attest_notes = record_attestations(root, ledger)
     coverage = ledger_coverage(ctx.old_sources, ctx.new_sources, entries, python_old=base,
-                               python_new=target)
+                               python_new=target, attested=attested)
+    ctx.notes.extend(attest_notes)
     ctx.edits = coverage.entries
     ctx.not_in_capture = [f"{run}:{step}" for run, step in coverage.not_in_capture]
     ctx.notes.extend(coverage.notes)
+
+
+def record_attestations(root: Path, ledger):
+    """``(check, notes)``: ``check(entry)`` is the person attestation an ``intended`` entry's
+    record event carries, verified against this machine's out-of-tree log (``pymolt.attest``):
+    bound to the project, the run, the step, the claim and expectation, and the recorded
+    files. None when it has none or it does not verify; ``notes`` say why for the latter. The
+    ledger's own fields are never trusted for it."""
+    from pymolt.attest import AttestationStore, files_digest
+
+    store = AttestationStore()
+    by_seq = {e.seq: e for e in (ledger.events if ledger is not None else ())}
+    cache: dict[tuple, dict | None] = {}
+    notes: list[str] = []
+
+    def check(entry):
+        event = by_seq.get(entry.epoch)
+        if (event is None or event.event != "record" or event.run_id != entry.run_id
+                or event.step_id != entry.step_id or not event.attestation):
+            return None
+        key = (event.seq, entry.claim, entry.expect)
+        if key not in cache:
+            found = store.check(event.attestation, kind="record", project=root,
+                                run_id=event.run_id, step=event.step_id, claim=entry.claim,
+                                expect=entry.expect, files=files_digest(event.files))
+            cache[key] = found.info()
+            if not found.ok:
+                notes.append(f"step {event.step_id}'s record names attestation "
+                             f"{event.attestation}, but {found.reason}: its intended claim is "
+                             "judged as unattested")
+        return cache[key]
+
+    return check, notes
 
 
 def _relocation_map(relocations: object) -> dict[str, str] | None:

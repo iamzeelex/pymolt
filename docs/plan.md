@@ -140,6 +140,11 @@ A step depends on the steps it builds on (`depends_on`); `apply .` leaves out a 
 dependency is not in effect, and `--step` refuses it. `apply --step ID --skip --reason TEXT`
 declines a step: it stays out, and so do its dependents.
 
+`pymolt rollback --step ID` takes one step back out. Where later steps or edits changed its files
+since, only its own change is undone, by its hunks and statements, and the later changes stay;
+when that cannot be done safely the step is refused and nothing is written
+([commands.md](commands.md#pymolt-rollback-dir)). Applying it again re-bases it.
+
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
 reason in the step's `why.evidence`. Such a step applies only to its own two texts: it has no
 recipe to run again. A plan saved by an earlier pymolt (`"schema_version": 1`)

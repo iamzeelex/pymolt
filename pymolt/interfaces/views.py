@@ -772,16 +772,39 @@ def steps_summary(plan) -> str:
     return f"{len(plan.steps)} step(s)" + (f": {parts}" if parts else "")
 
 
-def apply_view(result, plan) -> dict:
+def _next_for(project_dir, plan) -> dict | None:
+    """``{command, step, brief}``: what `status` names next, with the step's brief when an agent
+    or a person does it (its text from dependencies and the project is under ``data``)."""
+    if project_dir is None:
+        return None
+    from pymolt.status import build_status
+    from pymolt.workorder.render import brief_data
+
+    try:
+        status = build_status(project_dir)
+    except Exception:  # noqa: BLE001 - the view stands without the next command
+        return None
+    step = plan.step(status.next_step) if status.next_step else None
+    brief = brief_data(plan, step, project_dir) if step is not None \
+        and step.executor != "pymolt" else None
+    return {"command": status.next_command, "step": status.next_step,
+            "reason": status.next_reason, "brief": brief}
+
+
+def apply_view(result, plan, project_dir=None) -> dict:
     """An ``apply`` invocation (``workorder.apply.ApplyResult``) -> view (design 3.6):
-    ``applied`` (``rebased``: re-based onto another text), ``noop``, ``present``, ``checks``
-    per step, ``remaining`` by status. A dry run adds the diff it would write."""
+    ``applied`` (``rebased``: re-based onto another text), ``noop``, ``present``, ``refused``
+    (none: a refused invocation is a failure), ``checks`` per step, ``remaining`` by status,
+    and ``next``: the next command, its step and that step's brief. A dry run adds the diff it
+    would write; a record its files and the changes it left unrecorded."""
     lists = _Lists()
     titles = {s.id: s.title for s in plan.steps}
     done = {"applied": "applied", "already_applied": "already in effect", "nothing":
             "nothing applied", "present": "already present by hand", "dry_run": "dry run",
-            "skipped": "skipped"}[result.outcome]
-    summary = f"{done}: " + (", ".join(result.applied) or ", ".join(result.noop)
+            "skipped": "skipped", "in_progress": "record open", "recorded": "recorded",
+            "aborted": "record aborted"}[result.outcome]
+    summary = f"{done}: " + (", ".join(result.applied) or ", ".join(result.recorded)
+                             or ", ".join(result.in_progress) or ", ".join(result.noop)
                              or ", ".join(result.present) or ", ".join(result.skipped)
                              or "no step")
     remaining = {status: lists.cap(f"remaining.{status}", ids)
@@ -793,11 +816,28 @@ def apply_view(result, plan) -> dict:
         "rebased": list(result.rebased), "noop": list(result.noop),
         "present": list(result.present), "skipped": list(result.skipped),
         "blocked": dict(result.blocked), "checks": dict(result.checks),
+        "refused": {}, "next": _next_for(project_dir, plan),
+        "recorded": list(result.recorded), "in_progress": list(result.in_progress),
+        "unrecorded": lists.cap("unrecorded", list(result.unrecorded)),
+        "attestation": result.attestation, "check_failed": result.check_failed,
         "remaining": remaining, "files": lists.cap("files", list(result.files)),
         "diff": [{"file": d["file"], "diff": d["diff"][:ANSWER_BUDGET_CHARS]}
                  for d in lists.cap("diff", list(result.diff))],
     }
     return ok(summary, lists.finish(data, list(result.notes)))
+
+
+def rollback_view(result) -> dict:
+    """A ``rollback`` (``workorder.rollback.RollbackResult``) -> view: the steps it rolled back
+    (``kept``: in effect still, they changed no file), the files restored, and what became of
+    the post-migration capture."""
+    summary = (f"rolled back {', '.join(result.steps) or 'no step'} of run {result.run_id[:8]}"
+               f"; {len(result.files_restored)} file(s) restored")
+    data = {"run_id": result.run_id, "plan_id": result.plan.plan_id,
+            "rolled_back_at": result.rolled_back_at, "steps": list(result.steps),
+            "kept": list(result.kept), "files_restored": list(result.files_restored),
+            "post_migration_capture": result.post, "post_migration_trace": result.post_trace}
+    return ok(summary, _Lists().finish(data, list(result.notes)))
 
 
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
@@ -1132,7 +1172,8 @@ def _findings_data(summary: dict) -> dict:
     """The fact diff's findings for an agent: failing findings (why each is not noise),
     review reasons with the one action that settles each, and the explained mechanisms."""
     def compact(f: dict) -> dict:
-        return {k: f[k] for k in ("symbol", "site", "entries", "change", "why", "explained")
+        return {k: f[k] for k in ("id", "symbol", "site", "entries", "change", "why",
+                                  "explained", "accepted")
                 if f.get(k) is not None}
     return {
         "ledger": summary.get("ledger"),
@@ -1142,6 +1183,7 @@ def _findings_data(summary: dict) -> dict:
                    for r in summary.get("review") or []],
         "explained": [{"mechanism": t["mechanism"], "entries": t["entries"]}
                       for t in summary.get("explained") or []],
+        "accepted": [compact(f) for f in (summary.get("accepted") or [])[:20]],
         "quality": summary.get("quality"),
     }
 

@@ -8,9 +8,17 @@ setup -> capture baseline -> plan -> apply -> manual migration -> capture post-m
 
 Usage:
   python bench/generalization/run.py envs [TOY...]
-  python bench/generalization/run.py run [TOY...] --out DIR [--parallel N]
+  python bench/generalization/run.py run [TOY...] --out DIR [--parallel N] [--record]
   python bench/generalization/run.py score DIR          # re-score an existing run
   python bench/generalization/run.py diff DIR_A DIR_B   # compare two scorecards
+
+``--record`` (stage 5's guard) wraps the manual migration in ``apply --step ID --record --agent``
+/ ``--record --done --agent``, one step at a time, each edit under the plan step it matches (an
+edit no step matches stays a hand edit), and adds three must-FAIL scenarios per toy with manual
+edits: one manual edit's call gets a bogus keyword (a new raise), recorded as ``preserve``
+(``mut-preserve``), recorded and then rewritten to ``intended`` in the ledger as an agent could
+(``mut-intended``), or left unrecorded beside the recorded edits (``mut-beside``). None may PASS.
+It writes ``record_summary.json`` next to the scorecard.
 
 Stdlib only. See README.md for what each metric means.
 """
@@ -248,10 +256,177 @@ def pytest_summary(log: Path) -> str:
     return lines[-1] if lines else ""
 
 
+MUTATIONS = ("mut-preserve", "mut-intended", "mut-beside")
+_KEYWORD = "pymolt_mutation=1"
+
+
+def _call_span(text: str) -> tuple[int, int] | None:
+    """``(open paren, close paren)`` of the first dotted call in ``text`` outside a ``def``,
+    ``class``, decorator or import line (the call a mutation gives a bogus keyword)."""
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        bare = line.strip()
+        if bare.startswith(("def ", "class ", "@", "import ", "from ", "#")):
+            pos += len(line)
+            continue
+        for m in re.finditer(r"[A-Za-z_][\w]*(?:\.[A-Za-z_]\w*)+\(", line):
+            start = pos + m.end() - 1
+            depth, i, quote = 0, start, None
+            while i < len(text):
+                c = text[i]
+                if quote:
+                    quote = None if c == quote else quote
+                elif c in "'\"":
+                    quote = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return start, i
+                i += 1
+        pos += len(line)
+    return None
+
+
+def mutate(text: str) -> str | None:
+    """``text`` with its first dotted call given a bogus keyword (it now raises TypeError)."""
+    span = _call_span(text)
+    if span is None:
+        return None
+    start, end = span
+    inner = text[start + 1:end].strip()
+    return text[:end] + (f", {_KEYWORD}" if inner else _KEYWORD) + text[end:]
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def _plan_steps(root: Path) -> list[dict]:
+    return jload(root / ".pymolt" / "migration_plan.json").get("steps") or []
+
+
+def match_step(steps: list[dict], edit: dict) -> str | None:
+    """The agent or person step a manual edit makes: the first, in plan order, with a site in
+    the edit's file whose symbol's last name is in the text the edit replaces, else one whose
+    site's line is in it; None (a hand edit) otherwise."""
+    old = edit.get("old") or ""
+    mine = [s for s in steps if s.get("executor") != "pymolt" and s.get("phase") != "env"
+            and any(a.get("file") == edit.get("file") for a in s.get("where") or ())]
+    for s in mine:
+        names = [(s.get("symbol") or {}).get("old"), *(a.get("symbol") for a in s["where"])]
+        if any(n and n.rsplit(".", 1)[-1] in old for n in names):
+            return s["id"]
+    for s in mine:
+        if any(a.get("file") == edit.get("file") and (a.get("site_text") or "~") in old
+               for a in s["where"]):
+            return s["id"]
+    return None
+
+
+def run_manual(root: Path, toy: dict, step, warnings: list[str], pm: str, *,
+               record: bool, variant: str | None) -> dict:
+    """The manual migration, under records in record mode (module docstring). Returns
+    ``{"records": [(step, [edit index])], "mutated": index or None, "unrecorded": [index]}``."""
+    edits = list(toy.get("manual_migration") or [])
+    info: dict = {"records": [], "mutated": None, "unrecorded": []}
+    steps = _plan_steps(root) if record else []
+    matched = [match_step(steps, e) if record else None for e in edits]
+    target = None
+    if variant:
+        # Not in a file with coroutines: a raise there can leave a test awaiting forever.
+        target = next((i for i, e in enumerate(edits) if matched[i] and "content" not in e
+                       and "async def" not in _read(root / e["file"])
+                       and mutate(e.get("new") or "") is not None), None)
+        if target is not None:
+            edits[target] = {**edits[target], "new": mutate(edits[target]["new"])}
+            info["mutated"] = target
+    open_step = None
+    by_id = {s["id"]: s for s in steps}
+
+    def close() -> None:
+        nonlocal open_step
+        if open_step is not None:
+            pairs = record_pairs(toy, by_id.get(open_step) or {})
+            info.setdefault("pairs", {})[open_step] = pairs
+            step(f"done_{open_step}_{len(info['records'])}",
+                 [pm, "apply", ".", "--step", open_step, "--record", "--done", "--agent",
+                  *(x for pair in pairs for x in ("--pair", pair))])
+            open_step = None
+
+    later = []
+    for i, edit in enumerate(edits):
+        sid = matched[i]
+        if variant == "mut-beside" and i == target:
+            later.append(i)                    # applied after the records close, unrecorded
+            continue
+        if sid != open_step:
+            close()
+            if sid is not None:
+                step(f"record_{sid}_{len(info['records'])}",
+                     [pm, "apply", ".", "--step", sid, "--record", "--agent"])
+                open_step = sid
+                info["records"].append([sid, []])
+        if sid is not None:
+            info["records"][-1][1].append(i)
+        else:
+            info["unrecorded"].append(i)
+        w = apply_edit(root, edit, manual=True)
+        if w:
+            warnings.append(f"manual_migration: {w}")
+    close()
+    for i in later:
+        info["unrecorded"].append(i)
+        w = apply_edit(root, edits[i], manual=True)
+        if w:
+            warnings.append(f"manual_migration: {w}")
+    if variant == "mut-intended" and target is not None:
+        _rewrite_claim(root)
+    return info
+
+
+def record_pairs(toy: dict, plan_step: dict) -> list[str]:
+    """The pairing anchors an agent adds to its record (``--pair OLD=NEW``) when the step names
+    no successor: the step's old symbol and the qualified name, in the target environment, of
+    the ground truth's dotted successor for it (what the agent wrote; it can look the name
+    up)."""
+    old = (plan_step.get("symbol") or {}).get("old")
+    if not old or (plan_step.get("symbol") or {}).get("new"):
+        return []
+    out = []
+    for g in toy.get("ground_truth") or ():
+        succ = g.get("successor") or ""
+        if leaf(g.get("symbol")) != leaf(old) or not re.fullmatch(r"[A-Za-z_][\w.]*", succ) \
+                or "." not in succ:
+            continue
+        new = resolve_object(toy["_key"], "new", succ)
+        if new and new != old:
+            out.append(f"{old}={new}")
+    return list(dict.fromkeys(out))
+
+
+def _rewrite_claim(root: Path) -> None:
+    """What an agent with a shell could do: rewrite the claim of the record that holds the
+    mutation to ``intended`` (unattested) in the ledger."""
+    path = root / ".pymolt" / "apply_ledger.json"
+    data = jload(path)
+    epochs = {e.get("epoch") for e in data.get("entries") or ()
+              if _KEYWORD in ((e.get("anchor_new") or {}).get("stmt") or "")}
+    for e in data.get("entries") or ():
+        if e.get("epoch") in epochs:
+            e["claim"], e["expect"] = "intended", "any"
+    path.write_text(json.dumps(data, indent=2))
+
+
 def run_scenario(toy: dict, scn: str, out: Path, pymolt: Path, timeout: int,
-                 online: bool = False) -> dict:
+                 online: bool = False, record: bool = False,
+                 variant: str | None = None) -> dict:
     key = toy["_key"]
-    root = out / key / scn
+    root = out / key / (variant or scn)
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
@@ -289,17 +464,18 @@ def run_scenario(toy: dict, scn: str, out: Path, pymolt: Path, timeout: int,
         step("plan_online", [pm, "plan", ".", "--target-manifest", "requirements-target.txt",
                              "--agent", "--online"], stdout="plan_agent_online.json")
     step("apply", [pm, "apply", "."])
-    for edit in toy.get("manual_migration") or []:
-        w = apply_edit(root, edit, manual=True)
-        if w:
-            warnings.append(f"manual_migration: {w}")
-    step("tests_new", [str(new_py), *pytest_cmd])
+    manual = run_manual(root, toy, step, warnings, pm, record=record, variant=variant)
+    short = min(timeout, 300) if variant else None    # a mutation must not hang the matrix
+    step("tests_new", [str(new_py), *pytest_cmd], to=short)
     step("capture_post", [pm, "capture", "post-migration", "--mode", "tests", "--project-dir",
-                          ".", "--force", "--", str(new_py), *pytest_cmd])
+                          ".", "--force", *(["--accept-failing"] if variant else []), "--",
+                          str(new_py), *pytest_cmd], to=short)
     step("verify", [pm, "verify", ".", "--json"], stdout="verify.json")
     result = {"toy": key, "scenario": scn, "steps": steps, "warnings": warnings,
               "tests_new": pytest_summary(root / "tests_new.log"),
               "seconds": round(sum(s["seconds"] for s in steps.values()), 1)}
+    if record:
+        result.update({"record": True, "variant": variant, "manual": manual})
     (root / "result.json").write_text(json.dumps(result, indent=2))
     return result
 
@@ -1041,11 +1217,14 @@ def cmd_run(args: argparse.Namespace) -> int:
             if ok:
                 ready[futs[fut]] = toys[futs[fut]]
     env_secs = time.time() - start
-    jobs = [(t, s) for t in ready.values() for s in SCENARIOS]
+    jobs = [(t, s, None) for t in ready.values() for s in SCENARIOS]
+    if args.record:
+        jobs += [(t, "equiv", v) for t in ready.values() if t.get("manual_migration")
+                 for v in MUTATIONS]
     with cf.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
         futs2 = {pool.submit(run_scenario, t, s, out, pymolt, args.timeout,
-                             args.online): (t["_key"], s)
-                 for t, s in jobs}
+                             args.online, args.record, v): (t["_key"], v or s)
+                 for t, s, v in jobs}
         for fut in cf.as_completed(futs2):
             k, s = futs2[fut]
             try:
@@ -1062,10 +1241,54 @@ def cmd_run(args: argparse.Namespace) -> int:
     meta = {"when": time.strftime("%Y-%m-%d %H:%M:%S"), "pymolt": str(pymolt),
             "wall_seconds": round(time.time() - start, 1), "env_seconds": round(env_secs, 1),
             "parallel": args.parallel, "online": args.online}
+    meta["record"] = bool(args.record)
     write_scorecard(out, rows, meta)
     print((out / "scorecard.md").read_text())
+    if args.record:
+        summary = record_summary(toys, rows, out)
+        (out / "record_summary.json").write_text(json.dumps(summary, indent=2))
+        print(json.dumps(summary["totals"], indent=2))
     print(f"wall time {meta['wall_seconds']}s; scorecard: {out / 'scorecard.md'}")
     return 0
+
+
+def record_summary(toys: dict, rows: list[dict], out: Path) -> dict:
+    """Record mode's guard: edited sites over the equiv scenarios, every change scenario's
+    verdict on its expected symbol, and the must-FAIL mutations (none may PASS)."""
+    totals = {"equiv_sites": 0, "equiv_unverified": 0, "change_fail_ok": 0, "change_total": 0,
+              "mutations": 0, "mutations_pass": 0, "mutations_not_mutated": 0}
+    per: dict = {}
+    for row in rows:
+        key = row.get("toy")
+        scen = (row.get("D") or {}).get("scenarios") or {}
+        es = (scen.get("equiv") or {}).get("edited_sites") or {}
+        totals["equiv_sites"] += es.get("sites") or 0
+        totals["equiv_unverified"] += es.get("unverified") or 0
+        change = scen.get("change") or {}
+        if change:
+            totals["change_total"] += 1
+            totals["change_fail_ok"] += bool(change.get("ok")
+                                             and not change.get("expected_changed_missing"))
+        per[key] = {"equiv": scen.get("equiv", {}).get("verdict"),
+                    "change": change.get("verdict"), "equiv_edited": es,
+                    "change_missing": change.get("expected_changed_missing")}
+        for v in MUTATIONS:
+            root = out / key / v
+            if not root.is_dir():
+                continue
+            verify = jload(root / "verify.json")
+            fd = (verify.get("contract") or {}).get("all_fact_diff") or {}
+            result = jload(root / "result.json")
+            mutated = (result.get("manual") or {}).get("mutated")
+            totals["mutations"] += 1
+            totals["mutations_pass"] += verify.get("verdict") == "pass"
+            totals["mutations_not_mutated"] += mutated is None
+            per[key][v] = {"verdict": verify.get("verdict"), "fact_verdict": fd.get("verdict"),
+                           "mutated_edit": mutated, "edited": fd.get("edited_sites"),
+                           "records": (result.get("manual") or {}).get("records")}
+    totals["equiv_unverified_share"] = (f"{totals['equiv_unverified']} of "
+                                        f"{totals['equiv_sites']}")
+    return {"totals": totals, "toys": per}
 
 
 def cmd_score(args: argparse.Namespace) -> int:
@@ -1143,6 +1366,9 @@ def main() -> int:
     p.add_argument("--online", action="store_true",
                    help="also run `plan --online` (intermediate-release successor hints); the "
                         "scorecard reports A successors offline and online")
+    p.add_argument("--record", action="store_true",
+                   help="record the manual migration as steps (`apply --record`), and run the "
+                        "must-FAIL mutations")
     p = sub.add_parser("score", help="re-score an existing run directory")
     p.add_argument("dir")
     p.add_argument("toys", nargs="*")

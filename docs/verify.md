@@ -148,11 +148,42 @@ A line diff of the source each capture stored decides who edited a call's line:
   post-migration capture predates a step (its source still has the statements from before
   the step), the report says so: capture post-migration again;
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
-  symbol from the plan, or by a one-statement edit. An equal outcome is REWRITTEN equal. A
-  different value is a review item, which makes the verdict inconclusive. A new raise fails. A
-  call with no partner is counted as an unverified edited site; it does not block PASS.
+  symbol from the plan or the ledger, or by a one-statement edit. An equal outcome is REWRITTEN
+  equal. A different value is a review item, which makes the verdict inconclusive. A new raise
+  fails. A call with no partner is counted as an unverified edited site; it does not block PASS.
 
-The report prints the edited sites as equal, representation-only, need review and unverified.
+A ledger entry is judged by its claim, whoever made the edit: pymolt, or an agent or a person
+who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls.
+
+| Outcome on an edited line | hand edit | `preserve` | `intended` | `intended`, expectation attested by a person |
+|---|---|---|---|---|
+| equal | equal | equal | equal | equal |
+| representation only | DRIFT | FAIL | DRIFT | ACCEPTED if it expects `representation`; else FAIL |
+| different value | review | FAIL | review; FAIL if it expects `representation` | ACCEPTED if it expects `return:<Type>` and gets one; else FAIL |
+| new raise | FAIL | FAIL | FAIL | ACCEPTED if it expects `raise:<Type>` and gets one; else FAIL |
+| no partner | unverified | unverified | unverified | unverified |
+
+For every outcome, `preserve` is at least as strict as `intended`, and `intended` at least as
+strict as a hand edit, so recording an edit never judges it more leniently than leaving it
+unrecorded. Only a person's attestation does (an `intended` claim whose expectation a person
+attested, or `verify --accept`), and a new raise fails unless one expects it. An ACCEPTED entry
+counts as compared equal, and the report prints each one with who accepted it and when.
+
+### Accepting a change
+
+Each failing or review finding has an id, printed after it. `pymolt verify . --accept ID` lets a
+person accept that change as intended: pymolt prints the finding and a nonce, and the person types
+the nonce back (see [agents.md](agents.md#what-a-person-attests)). The accept is bound to the
+finding, the statement it is on, a fingerprint of its new outcomes and both captures. On a line an
+`intended` step covers, it is that step's; on an unedited line or a hand edit it makes an ad-hoc
+step `x-<id>` that exists in the ledger only. A line a `preserve` claim covers cannot be accepted.
+
+Later verdicts honour the accept while it holds. It expires when the outcome changes, the
+statement changes, or either capture is replaced, and the finding stands again with the reason.
+`--strict` reviews every accepted change instead.
+
+The report prints the edited sites as equal, representation-only, need review and unverified,
+then failed and accepted when there are any.
 
 ### Run noise
 
@@ -290,11 +321,28 @@ The API paths the plan found changed only focus the report:
 When the migration was made with `plan` and `apply`, `verify` scores each risk the plan predicted:
 - **hit**: a failing change (CHANGED, DISAPPEARED, or REWRITTEN with a different outcome) was
   observed for that symbol at that call site. The mechanism the plan named is not checked;
-- **prevented by the plan**: the plan rewrote the call and the behaviour stayed the same;
+- **prevented**: the risk's step fixed it and the behaviour stayed the same. A fix is credited
+  when the step is in effect and, in the post-migration code, its change removed or replaced
+  the risk's statement (or the import that binds its symbol). A step in effect that did not
+  touch the statement is `recorded-not-fixing`, and a step skipped or rolled back leaves the risk
+  unfixed: both score as a hit or a miss, never prevented. A step a person recorded can prevent
+  a risk as well as one pymolt applied;
+- **accepted**: a person accepted the change at that site;
 - **miss**: the call site was compared and nothing changed, so the prediction did not come true;
 - **not exercised**: no capture compared that call site.
 
-Failing entries that no prediction covers are listed as **unpredicted**.
+Failing entries that no prediction covers are listed as **unpredicted**. The scores are also
+given per step.
+
+### One step
+
+Every `verify` judges each step in effect on the same comparison, and saves the judgements in
+`.pymolt/verification.json`, where `status` reads them. A step's entries are the facts on the
+lines its ledger entries cover and at its planned sites. It is `failed` when one fails,
+`needs_review` when one is a review item, `needs_evidence` when a site was not compared or an
+edited site could not be paired, `not_in_capture` when the capture predates it, and `verified`
+otherwise. `pymolt verify . --step ID` prints one step's judgement and exits by it; it takes no
+new capture. Only a verdict on the baseline and post-migration captures judges steps.
 
 ### Further oracles
 

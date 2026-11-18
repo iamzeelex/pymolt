@@ -73,15 +73,23 @@ def test_row_5_a_step_that_is_the_last_change_to_its_files_rolls_back(tmp_path):
 
 
 def test_row_5_refuses_a_step_a_later_step_or_an_edit_changed_since(tmp_path):
+    """Phase 1 refuses once the file moved on; phase 2 (``test_rollback_inverse``) then undoes
+    the step's own change alone, and only when it cannot is the step refused: here a hand edit
+    rewrote the statement next to mech-1's, and another rewrote mech-2's own."""
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan, through="mech-2")
+    edited = read(tmp_path, M).replace("z = 1", "z = 2")
+    (tmp_path / M).write_text(edited, encoding="utf-8")
 
-    with pytest.raises(MigrationConflictError, match="mech-2 changed it after mech-1"):
+    with pytest.raises(MigrationConflictError, match="mech-2 changed it after mech-1, and its "
+                                                     "own change cannot be undone alone.*slot"):
         rollback_steps(tmp_path, step="mech-1")
-    (tmp_path / M).write_text(read(tmp_path, M) + "# by hand\n", encoding="utf-8")
-    with pytest.raises(MigrationConflictError, match="was edited after mech-2 wrote it"):
+    edited = edited.replace("a.k(x)", "a.k(x) + 0")
+    (tmp_path / M).write_text(edited, encoding="utf-8")
+    with pytest.raises(MigrationConflictError, match="was edited after mech-2 wrote it.*lines "
+                                                     "it wrote there were changed since"):
         rollback_steps(tmp_path, step="mech-2")
-    assert read(tmp_path, M).endswith("# by hand\n")
+    assert read(tmp_path, M) == edited
 
 
 def test_dependents_are_refused_and_cascade_rolls_them_back_first(tmp_path):
@@ -305,8 +313,10 @@ def test_rollback_refusals(tmp_path):
         rollback_steps(tmp_path, force=True, agent=True)
     with pytest.raises(MigrationConflictError, match="--cascade is refused under --agent"):
         rollback_steps(tmp_path, step="mech-1", cascade=True, agent=True)
-    with pytest.raises(MigrationConflictError, match="a person runs `pymolt rollback`"):
+    with pytest.raises(MigrationConflictError, match="no person approved this plan"):
         rollback_steps(tmp_path, step="mech-1", agent=True)
+    with pytest.raises(MigrationConflictError, match="a person rolls back a whole run"):
+        rollback_steps(tmp_path, agent=True)
     with pytest.raises(MigrationConflictError, match="does not go with --step"):
         rollback_steps(tmp_path, step="mech-1", force=True)
     with pytest.raises(MigrationConflictError, match="--cascade goes with --step"):
@@ -334,8 +344,14 @@ def test_the_cli_rollback_step_options(tmp_path):
     one = runner.invoke(app, ["rollback", d, "--step", "mech-3", "--json"])
     assert one.exit_code == 0, one.output
     assert json.loads(one.stdout)["steps"] == ["mech-3"]
-    # mech-2 changed the file after mech-1 and is not its dependent: --cascade does not help.
-    assert runner.invoke(app, ["rollback", d, "--step", "mech-1", "--cascade"]).exit_code == 2
+    # mech-2 changed the file after mech-1 and is not its dependent: mech-1's own change is
+    # undone alone (--cascade has no dependent to roll back first).
+    alone = runner.invoke(app, ["rollback", d, "--step", "mech-1", "--cascade", "--json"])
+    assert alone.exit_code == 0, alone.output
+    assert (json.loads(alone.stdout)["steps"], json.loads(alone.stdout)["inverse"]) == (
+        ["mech-1"], ["mech-1"])
     text = runner.invoke(app, ["rollback", d, "--step", "mech-2"])
     assert text.exit_code == 0, text.output
     assert "Migration rolled back" in text.output and "mech-2" in text.output
+    assert "Undone alone, later changes kept: mech-2" in text.output
+    assert read(tmp_path, M) == APP

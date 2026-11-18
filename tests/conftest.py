@@ -1,7 +1,7 @@
-from pathlib import Path
 import pytest
-from pymolt.core.graph import DependencyGraph, Node
+
 from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixation
+from pymolt.core.graph import DependencyGraph, Node
 
 
 @pytest.fixture(autouse=True)
@@ -13,6 +13,10 @@ def _isolate_test_cache_and_config(monkeypatch: pytest.MonkeyPatch, tmp_path_fac
     c_dir.mkdir(exist_ok=True)
     cfg_dir.mkdir(exist_ok=True)
     monkeypatch.setenv("XDG_CACHE_HOME", str(c_dir))
+    # Person attestations (pymolt.attest) live outside the project, in the user's state and
+    # config folders: a test never writes the real ones.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_dir / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
 
 
 @pytest.fixture
