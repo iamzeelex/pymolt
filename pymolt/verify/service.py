@@ -2825,13 +2825,14 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
-    diff then falls back to line-text rules); the apply ledger from ``.pymolt/apply_ledger.json``
-    while the run it records is the one in effect (``apply_ledger.ledger_in_effect``);
-    the static contact maps are built from the snapshots; ``successors`` (old -> new symbol)
-    from the applied plan's impacts, its risks' delta facts and the ledger; and
-    ``type_relocations`` from the plan when it carries them. Never raises: a part that
+    diff then falls back to line-text rules). The apply ledger's in-effect entries (the
+    current epochs of the runs whose code is on disk, ``apply_ledger.in_effect_entries``) are
+    located in the two snapshots once, through the one line alignment provenance uses
+    (``workorder.coverage.ledger_coverage``); without snapshots, by the lines they were
+    written at. The static contact maps are built from the snapshots; ``successors`` (old ->
+    new symbol) from the applied plans' impacts, their risks' delta facts and the ledger; and
+    ``type_relocations`` from the plans when they carry them. Never raises: a part that
     cannot be built is left None."""
-    from pymolt.apply_ledger import ledger_in_effect
     from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.contact_map import contacts_by_line
     from pymolt.verify.facts import DiffContext
@@ -2841,9 +2842,13 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     ctx.old_sources = load_sources(sources_path(against))
     ctx.new_sources = load_sources(sources_path(trace))
     receipt = MigrationReceipt.load(root)
-    ctx.edits, ledger_note = ledger_in_effect(root, receipt)
-    if ledger_note:
-        ctx.notes.append(ledger_note)
+    try:
+        _ledger_context(root, receipt, ctx)
+    except Exception as exc:  # noqa: BLE001 - provenance degrades to hand edits
+        logger.warning("could not read the apply ledger: %s", exc, exc_info=True)
+        ctx.edits = None
+        ctx.notes.append(f"the apply ledger could not be read ({type(exc).__name__}): edits are "
+                         "judged as hand edits")
     for side, sources in (("old", ctx.old_sources), ("new", ctx.new_sources)):
         if sources:
             try:
@@ -2881,6 +2886,37 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
         logger.warning("could not read the applied plan for the diff context: %s", exc)
     ctx.successors = successors or None
     return ctx
+
+
+def _ledger_context(root: Path, receipt, ctx) -> None:
+    """``ctx.edits`` (the in-effect ledger entries, located), ``ctx.not_in_capture`` and the
+    notes that say what the ledger could not do."""
+    from pymolt.apply_ledger import in_effect_entries
+    from pymolt.workorder.coverage import (
+        ledger_coverage,
+        located_by_recorded_lines,
+        setup_pythons,
+    )
+
+    entries, note, ledger = in_effect_entries(root, receipt)
+    if note:
+        ctx.notes.append(note)
+    if entries is None:
+        ctx.edits = None
+        return
+    ctx.notes.extend(ledger.notes if ledger is not None else ())
+    if ctx.old_sources is None or ctx.new_sources is None:
+        ctx.edits = located_by_recorded_lines(entries)
+        if entries:
+            ctx.notes.append("the captures carry no source snapshot, so the apply ledger's "
+                             "entries are located by the lines they were written at")
+        return
+    base, target = setup_pythons(root)
+    coverage = ledger_coverage(ctx.old_sources, ctx.new_sources, entries, python_old=base,
+                               python_new=target)
+    ctx.edits = coverage.entries
+    ctx.not_in_capture = [f"{run}:{step}" for run, step in coverage.not_in_capture]
+    ctx.notes.extend(coverage.notes)
 
 
 def _relocation_map(relocations: object) -> dict[str, str] | None:
