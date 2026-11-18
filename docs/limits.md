@@ -36,13 +36,18 @@ Each of these is a review item, so the verdict is INCONCLUSIVE until a person de
 - **A value that varies between runs**, when no baseline replicate measured the noise. Capture the
   baseline with `--runs 2`. A replicate still cannot vouch for an outcome too rare for it to have
   shown (1 raise in 76 calls).
-- **An input that changed with no visible cause** on an unedited line.
+- **An input that changed with no visible cause** on an unedited line, including an input one side
+  passed and the other did not, at a call both sides make.
 - **A dict whose key order changed**, unless the order is shown to be deterministic.
 - **An environment difference** between the two captures (OS, resource limits, privileges) at a
   call that reads it. Capture both sides on the same platform.
 
-One case goes the other way: a change in the *kind* of a rare outcome (a call that raised once in 76
-now returns) still fails, although it may be noise.
+Two cases go the other way. Both still fail, although they may be noise:
+- a change in the *kind* of a rare outcome (a call that raised once in 76 now returns);
+- a value that depends on timing (a poll, a count of reports), when the replicate records the
+  call's input in full and both baseline runs agreed on it. The replicate runs at the baseline's
+  timing, and a different Python or tracer shifts it. The report then calls the difference
+  reproducible in the replicate, not deterministic.
 
 - **Attestations stop accidents, not an adversarial agent.** An agent with a pseudo-terminal can
   type the nonce, and one that can read your home directory can read the attestation key
@@ -124,9 +129,26 @@ Details: [scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md),
 
 **locust** (gevent, 3.8 → 3.12, no code change) is the noisy real-project pilot:
 - without noise handling, the diff reported 14,065 failing entries;
-- with masks and a replicate, 2 findings remained: msgpack bytes reordered because Python 3.9
-  changed a TypedDict's key order (a real change), and a rare gevent outcome (1 raise in 76 calls);
-- the post side of that run lost 43% of its events. Since the event-loss and recall fixes, a
-  re-captured post side loses none, and not-comparable entries fell from 3,309 to 2. The msgpack
-  calls now compare by value and land in review, because each message carries a per-run node id.
-  A full re-capture with every fix in place has not been run yet.
+- the first run with masks and a replicate left 2 findings, but its post side lost 43% of its
+  events.
+- A full re-capture with every event-loss and recall fix in place (2026-11-17) lost no events on
+  any of its three runs. The post side waited 1.4 s in total for its trace writer.
+- That re-capture's verdict is FAIL. Verified again with the two fixes below, the same captures
+  fail on one finding: msgpack bytes reordered because Python 3.9 changed a TypedDict's key
+  order. This is a real change.
+- Two `verify` bugs gave three more FAILs, now fixed:
+  - Two `@app.route` decorators on one function. 3.8 attributes both calls to the `def` line and
+    3.12 each to its own `@` line, and `verify` did not pair them.
+  - Two values from one timing-sensitive test, which shift with the tracer's overhead. Both
+    baseline runs agreed on them, so `verify` called them deterministic. One is now measured
+    noise. The other, a polled value one side never saw, is a review item.
+- 4 review items and 2 not-comparable entries remain:
+  - three timing-dependent test values;
+  - `typing_extensions.final`, which is the stdlib's `typing.final` on 3.12, so it is not traced;
+  - a compiled gevent method whose raise only `sys.monitoring` sees.
+- The replicate explains the per-run msgpack differences (node ids) and 409 differences in
+  all. The rare gevent outcome raised on both sides this time.
+- 121 of 175 static symbols are BLIND under this test subset (trust 65%).
+
+Details: [scorecard](../bench/legacy_eval/results/pilot-locust-recapture/scorecard.md),
+[findings](../bench/legacy_eval/locust.md).

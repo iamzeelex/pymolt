@@ -21,12 +21,19 @@ from pymolt.interfaces.cli.commands import app  # noqa: E402
 from pymolt.status import build_status  # noqa: E402
 from pymolt.verify import service  # noqa: E402
 from pymolt.verify.fact_report import summarize  # noqa: E402
-from pymolt.verify.facts import FactCategory, Outcome, diff_facts  # noqa: E402
+from pymolt.verify.facts import (  # noqa: E402
+    CappedSite,
+    FactCategory,
+    Outcome,
+    SiteTally,
+    diff_facts,
+)
 from pymolt.verify.models import CaptureMode, ContractState  # noqa: E402
 from pymolt.verify.replicate import (  # noqa: E402
     NOISE_PROFILE_PATH,
     apply_noise_profile,
     build_noise_profile,
+    timing_difference,
 )
 from pymolt.verify.service import TraceCaptureResult  # noqa: E402
 
@@ -220,7 +227,7 @@ def test_verify_judges_the_migration_with_the_measured_noise(tmp_path, monkeypat
         "billing.total"]["notes"]
     assert rep.all_fact_diff["noise_measured"]["explained"] == 1
     cache = json.loads((tmp_path / NOISE_PROFILE_PATH).read_text())
-    assert cache["schema"] == "pymolt.noise-profile/4" and cache["identity"]["pymolt"]
+    assert cache["schema"] == "pymolt.noise-profile/5" and cache["identity"]["pymolt"]
     # a stale replicate is ignored, and the report says so
     state = service.load_contract_state(tmp_path)
     state.baseline_replicate.replicate_of = "earlier"
@@ -469,3 +476,217 @@ def test_a_strict_input_change_is_labelled_as_an_input_change():
     (finding,) = summarize(d)["failing"]
     assert finding["change"] == "input changed"
     assert finding["why"].startswith("input changed; stable across baseline runs")
+
+
+# ── evidence that facts' counts hide: calls that moved between inputs ──────────────────────
+
+def _logged(**counts):
+    """A logging site called with a user count; ``u8=8`` means 8 calls with ``{"U": 8}``."""
+    facts = []
+    for name, n in counts.items():
+        users = int(name[1:])
+        f = fact("json.dumps", {"obj": {"__dict__": [["U", users]]}},
+                 (("return", f'{{"U": {users}}}'),), line=7, text="s = json.dumps(counts)",
+                 count=n)
+        f.outcomes[0].count = n
+        facts.append(f)
+    return fs(*facts)
+
+
+def test_calls_that_moved_between_inputs_in_the_replicate_are_input_variation():
+    # Same inputs in both baseline runs, but some calls logged 4 users in one run and 5 or 6
+    # in the other: what reaches the call depends on the run (timing), although every value
+    # recurs and each pair is equal.
+    profile = build_noise_profile(_logged(u4=6, u5=3, u6=5, u8=8), _logged(u4=2, u5=6, u6=6, u8=8))
+    assert profile["varying"] == {}
+    (leaves,) = profile["input_shifts"].values()
+    assert leaves == ['obj/"U"']
+
+
+def test_an_input_change_where_the_replicate_moved_calls_between_inputs_is_noise():
+    # locust runners.py:1402: both baseline runs logged 8 users eight times, the post side 7.
+    base, rep = _logged(u4=6, u5=3, u6=5, u8=8), _logged(u4=2, u5=6, u6=6, u8=8)
+    post = _logged(u4=4, u5=4, u6=7, u7=8)
+    d, counts, by = judged(base, rep, post)
+    moved = [e for e in d.entries if e.new_input is not None and e.input != e.new_input]
+    assert moved and all(e.noise and not e.fails for e in moved)
+    assert not counts.get("confirmed")
+
+
+def test_more_calls_of_the_same_input_in_one_run_is_no_input_variation():
+    # A retry loop that polled once more in one run: the volume varies, not what reached the
+    # call. An input change at that site stays strict.
+    base, rep = _logged(u0=5, u3=1), _logged(u0=6, u3=1)
+    profile = build_noise_profile(base, rep)
+    assert profile["varying"] == {} and profile["input_shifts"] == {}
+    d, _, by = judged(base, rep, _logged(u0=5, u2=1))
+    assert any(e.fails for e in d.entries)
+
+
+def test_sampled_runs_infer_nothing_from_counts():
+    tally = [SiteTally(symbol="json.dumps", file="app.py", func="main", line=7,
+                       text="s = json.dumps(counts)", count=22, returns=22, raises={})]
+    base, rep = _logged(u4=6, u5=3, u6=5, u8=8), _logged(u4=2, u5=6, u6=6, u8=8)
+    base.site_tallies, rep.site_tallies = tally, tally
+    assert build_noise_profile(base, rep)["input_shifts"] == {}
+
+
+@pytest.mark.parametrize("loss", [
+    {"dropped_events": 3}, {"evicted": 2}, {"widened": 4}, {"outcomes_other": 1},
+    {"c_capped": [CappedSite(symbol="json.dumps", file="app.py", func="main", line=7,
+                             text=None, recorded=2000, muted=5, exact=True)]},
+])
+def test_counts_from_a_replicate_that_lost_calls_are_no_evidence(loss):
+    base, rep = _logged(u4=6, u5=3, u6=5, u8=8), _logged(u4=2, u5=6, u6=6, u8=8)
+    for k, v in loss.items():
+        setattr(rep, k, v)
+    assert build_noise_profile(base, rep)["input_shifts"] == {}
+    d, _, _ = judged(base, rep, _logged(u4=4, u5=4, u6=7, u7=8))
+    assert any(e.fails for e in d.entries)
+
+
+def test_only_the_leaves_that_moved_in_the_replicate_explain_an_input_change():
+    base, rep = _logged(u4=6, u5=3, u6=5, u8=8), _logged(u4=2, u5=6, u6=6, u8=8)
+    post = _logged(u4=4, u5=4, u6=7)
+    renamed = fact("json.dumps", {"obj": {"__dict__": [["V", 8]]}}, (("return", '{"V": 8}'),),
+                   line=7, text="s = json.dumps(counts)", count=8)
+    renamed.outcomes[0].count = 8
+    post.facts.append(renamed)          # another key, not another count: not what moved
+    d, _, _ = judged(base, rep, post)
+    (e,) = [x for x in d.entries if x.new_input is not None and x.input != x.new_input]
+    assert e.fails and not e.noise
+
+
+# ── an input seen on one side only, at a call both sides make ─────────────────────────────
+
+def _polled(*seen, receiver=True, typed=False):
+    """``self.assertEqual(3, n)`` retried until ``n == 3``: one fact per value seen, each
+    raising until then. ``receiver``: the test case is rendered by type (hidden input)."""
+    facts = []
+    for n in sorted(set(seen)):
+        c = seen.count(n)
+        out = (("return", None),) if n == 3 else (
+            ("raise", "AssertionError" if typed else "<unknown>"),)
+        bound = {"first": 3, "second": n}
+        if receiver:
+            bound["self"] = {"__opaque__": "tests.T"}
+        f = fact("unittest.case.TestCase.assertEqual", bound, out, line=9,
+                 text="self.assertEqual(3, len(missing))", count=c)
+        f.outcomes[0].count = c
+        facts.append(f)
+    return fs(*facts)
+
+
+POLLED = (0, 0, 0, 0, 0, 1, 2, 3)
+
+
+def test_a_polled_value_missing_on_one_side_is_an_input_change():
+    # locust test_runners.py:972: the poll saw 2 on 3.8 only. The call is made on both sides,
+    # raising until the value arrives: what reached it changed, not the dependency.
+    d = diff_facts(_polled(*POLLED), _polled(0, 0, 0, 0, 0, 1, 3, typed=True))
+    (e,) = [x for x in d.entries if x.category is FactCategory.DISAPPEARED]
+    assert e.review.startswith("input changed") and "input-variant" in e.notes
+    assert not e.fails and d.verdict.value == "inconclusive"
+
+
+def test_a_replicate_with_hidden_inputs_cannot_confirm_a_missing_polled_value():
+    base = rep = _polled(*POLLED)
+    d, counts, _ = judged(base, rep, _polled(0, 0, 0, 0, 0, 1, 3, typed=True))
+    (e,) = [x for x in d.entries if x.category is FactCategory.DISAPPEARED]
+    assert e.review and not e.fails and not any("confirmed" in n for n in e.notes)
+    assert not counts.get("confirmed")
+
+
+def test_a_replicate_with_complete_inputs_judges_a_missing_value_strictly():
+    base = rep = _polled(*POLLED, receiver=False)
+    post = _polled(0, 0, 0, 0, 0, 1, 3, receiver=False, typed=True)
+    d = diff_facts(base, post)
+    apply_noise_profile(d, build_noise_profile(base, rep), "r")
+    (e,) = [x for x in d.entries if x.category is FactCategory.DISAPPEARED]
+    assert e.fails and "confirmed deterministic: equal in the baseline replicate" in e.notes
+    # Across Python versions or tracers the replicate ran at the baseline's timing only.
+    d = diff_facts(base, post)
+    counts = apply_noise_profile(d, build_noise_profile(base, rep), "r",
+                                 timing="the sides ran Python 3.8, setprofile vs Python 3.12")
+    (e,) = [x for x in d.entries if x.category is FactCategory.DISAPPEARED]
+    assert e.fails and not any(n.startswith("confirmed") for n in e.notes)
+    assert any(n.startswith("reproducible in the baseline replicate, not confirmed") for n in
+               e.notes)
+    assert counts["timing"] == 1 and not counts.get("confirmed")
+    (f,) = summarize(d)["failing"]
+    assert "reproducible in the baseline replicate" in f["why"] and "Python 3.12" in f["why"]
+
+
+def test_a_value_change_at_equal_input_keeps_its_determinism_claim_across_pythons():
+    base, rep, post = side(port=1, total=10), side(port=1, total=10), side(port=1, total=12)
+    d = diff_facts(base, post)
+    apply_noise_profile(d, build_noise_profile(base, rep), "r", timing="the sides ran X vs Y")
+    (e,) = [x for x in d.entries if x.symbol == "billing.total"]
+    assert "confirmed deterministic: equal in the baseline replicate" in e.notes
+
+
+def _with(base, bound, outcome):
+    return fs(*base.facts, fact("unittest.case.TestCase.assertEqual",
+                                {"self": {"__opaque__": "tests.T"}, "first": 3, **bound},
+                                (outcome,), line=9, text="self.assertEqual(3, len(missing))"))
+
+
+@pytest.mark.parametrize("base,post", [
+    # a new raise type at the site (both sides typed)
+    (_polled(0, 1, 3, typed=True),
+     _with(_polled(0, 1, 3, typed=True), {"second": 5}, ("raise", "ValueError"))),
+    # the site's only raise vanished
+    (_polled(0, 3, typed=True), _polled(3, typed=True)),
+    # a signature the old side never used there
+    (_polled(0, 1, 3, typed=True),
+     _with(_polled(0, 1, 3, typed=True), {"second": 4, "msg": "x"},
+           ("raise", "AssertionError"))),
+], ids=["new-raise-type", "only-raise-vanished", "new-signature"])
+def test_a_one_sided_input_that_changes_the_site_still_fails(base, post):
+    d = diff_facts(base, post)
+    assert any(e.fails for e in d.entries)
+    assert not any("input-variant" in e.notes for e in d.entries if e.fails)
+
+
+def test_a_call_gone_from_its_site_is_still_presence():
+    base = rep = fs(*_polled(*POLLED).facts,
+                    fact("lib.ping", {"n": 1}, line=12, text="lib.ping(1)"))
+    d, counts, by = judged(base, rep, _polled(*POLLED))
+    e = by["lib.ping"]
+    assert e.fails and "input-variant" not in e.notes
+    assert "confirmed deterministic: equal in the baseline replicate" in e.notes
+
+
+def test_a_value_one_replicate_run_missed_explains_the_same_change_but_not_a_vanished_site():
+    base = fs(*_polled(*POLLED).facts, fact("lib.ping", {"n": 1}, line=12, text="lib.ping(1)"))
+    rep = fs(*_polled(0, 0, 0, 0, 0, 1, 3).facts, fact("lib.ping", {"n": 1}, line=12,
+                                                       text="lib.ping(1)"))
+    profile = build_noise_profile(base, rep)
+    assert ["input"] in profile["varying"].values()
+    d, _, by = judged(base, rep, _polled(0, 0, 0, 0, 0, 1, 3, typed=True))
+    (e,) = [x for x in d.entries if x.category is FactCategory.DISAPPEARED
+            and x.symbol.endswith("assertEqual")]
+    assert e.noise and not e.fails and not e.inconclusive
+    assert by["lib.ping"].fails             # the whole call gone is not input variation
+
+
+def test_a_replicate_that_lost_events_neither_explains_nor_judges_a_missing_value():
+    base = _polled(*POLLED, receiver=False)
+    rep = _polled(0, 0, 0, 0, 0, 1, 3, receiver=False)
+    rep.dropped_events = 4
+    profile = build_noise_profile(base, rep)
+    assert profile["varying"] == {} and profile["presence_evidence"] is False
+    d, _, _ = judged(base, rep, _polled(0, 0, 0, 0, 0, 1, 3, receiver=False, typed=True))
+    (e,) = [x for x in d.entries if x.category is FactCategory.DISAPPEARED]
+    assert e.review and not e.fails and not e.noise
+
+
+def test_the_timing_difference_names_the_python_and_the_tracer():
+    old, new = fs(backends=("setprofile",)), fs(backends=("monitoring",))
+    old.python_versions, new.python_versions = ["3.8.18"], ["3.12.1"]
+    assert timing_difference(old, new) == (
+        "the sides ran Python 3.8, setprofile vs Python 3.12, monitoring")
+    new.python_versions, new.backends = ["3.8.20"], ["setprofile"]
+    assert timing_difference(old, new) is None
+    new.python_versions = []                      # unknown: no claim either way
+    assert timing_difference(old, new) is None

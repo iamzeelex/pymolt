@@ -943,9 +943,10 @@ def build_contract_report(
                     order_causes=_order_causes(root, old_facts, new_facts, report.notes),
                 )
                 if noise_profile is not None:
-                    from pymolt.verify.replicate import apply_noise_profile
+                    from pymolt.verify.replicate import apply_noise_profile, timing_difference
 
-                    apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1])
+                    apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1],
+                                        timing=timing_difference(old_facts, new_facts))
                 from pymolt.verify.accepts import apply_accepts, stamp_findings
 
                 stamp_findings(fdiff)

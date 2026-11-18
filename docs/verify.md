@@ -130,7 +130,7 @@ then compares the two sides.
 | Category | Meaning | Fails? |
 |---|---|---|
 | CHANGED | same call, different outcome | yes |
-| DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes, unless the name no longer refers to a dependency there or the function never ran (then inconclusive) |
+| DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes, unless the name no longer refers to a dependency there or the function never ran (then inconclusive), or the other side makes the same call there with other inputs (an [input change](#run-noise)) |
 | REWRITTEN | the call site's line was edited; the call is compared with the one that replaced it | see [Edited lines](#edited-lines) |
 | DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view) | no, reported |
 | UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape | makes the verdict inconclusive |
@@ -213,9 +213,17 @@ project root or the Python version, or when an input carried such a value into a
 - **Input changes.** On an unedited line, an input that changed with no visible cause is a review
   item: what reached the call changed, which is not proof that the dependency did. A new raise or
   a new type still fails.
+  - This includes an input seen on one side only, at a call both sides make with the same outcome
+    kinds and types and the same signature, such as a poll that saw one more intermediate value.
 - **The replicate.** A difference is noise only where the replicate shows the same kind of
   difference at that call site. A site the replicate shows stable is judged strictly. An outcome
   too rare for the replicate to have shown is never called deterministic.
+  - Calls whose counts moved between inputs at one site (one value more often in one run,
+    another in the other) count as input variation, but only for the input fields that moved.
+  - The replicate runs at the baseline's timing. When the two sides ran a different Python or
+    tracer, their per-call overhead differs. An input or presence difference the replicate
+    repeats exactly then still fails, but is called reproducible in the replicate, not
+    deterministic.
 - **Dict key order.** A different order is a review item. It fails only with proof that the order
   is deterministic: a replicate with random hash seeds that agreed on 5 or more keys, a pinned hash
   seed, or a known cause, such as the field order Python 3.9 gives a TypedDict.
@@ -236,7 +244,10 @@ Each comparison states its level:
 Two captures from different Python versions are compared fairly:
 - an untyped raise (3.6–3.11: swallowed by C code, or handled without a call while another tool
   owns `sys.settrace`) matches any exception type;
-- C-level raise facts are left out when only one side's tracer records them.
+- C-level raise facts are left out when only one side's tracer records them;
+- a decorator's call is attributed to the `def` line before 3.11 and to its `@` line after. It
+  is compared within its decorated statement, including several decorators from one factory
+  stacked on one function.
 
 ## Coverage
 
