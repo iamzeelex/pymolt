@@ -856,8 +856,17 @@ then judge by its claim:
 | equal | REWRITTEN equal | REWRITTEN equal | REWRITTEN equal | REWRITTEN equal |
 | representation only | DRIFT | **FAIL** | DRIFT | ACCEPTED if the expectation is `representation`; FAIL if it states another outcome |
 | different value | review | **FAIL** | review; **FAIL** if it contradicts a stated `representation` expectation | ACCEPTED if the expectation is met (`return:<T>`, or the fingerprint of a `verify --accept`); otherwise FAIL |
+| type changed, values not visible | review | **FAIL** | review, naming what settles it | ACCEPTED if the expectation is met (`return:<T>`, or an accept fingerprint); otherwise FAIL |
 | new raise | **FAIL** | **FAIL** | **FAIL** | ACCEPTED only if `raise:<T>` or an accept fingerprint covers it; otherwise FAIL |
 | unpaired | unverified | unverified | unverified | unverified |
+
+"Values not visible" (owner decision, 2026-11-18): the call was compared by type only
+(`ComparisonLevel.TYPE` or `KIND`), or a returned value on either side is opaque, truncated or
+cyclic, while both sides raise the same types (`facts._content_unseen`). A stated
+`representation` expectation cannot be checked against it, so it does not contradict it: the
+unattested `intended` claim makes it a review, as the hand rule does, and the item names what
+settles it: a capture with `--privacy values`, a baseline replicate, or a person's
+`verify --accept`. A different value that is visible, or a new raise, still FAILs.
 
 The ladder is monotone. For every outcome, `preserve` ≥ `intended` unattested ≥ hand, in strictness.
 Only a person-attested expectation (5.6) can judge more leniently than a hand edit, so nothing an
