@@ -6779,12 +6779,39 @@ def expectation_met(expect: str, old: list[Outcome], new: list[Outcome]) -> bool
                for o in new)
 
 
+#: The review of a change an unattested ``representation`` expectation cannot be checked
+#: against: the values are not visible, only their types (design 5.1).
+OPAQUE_REPRESENTATION = "representation unverifiable"
+_OPAQUE_REPRESENTATION_REVIEW = (
+    f"{OPAQUE_REPRESENTATION}: the step expects a change of representation only, and verify "
+    "sees the type change but not the values; settle it by capturing with `--privacy values` "
+    "where the values are recordable, by a baseline replicate, or by a person's "
+    "`pymolt verify . --accept ID`")
+
+
+def _content_unseen(e: FactEntry, old: list[Outcome], new: list[Outcome]) -> bool:
+    """The difference lies only in returned content verify cannot see: both sides raise the
+    same types (or none), both return, and the entry was compared by type only or a returned
+    value on either side is opaque, truncated or cyclic (``_content`` is unknown). A change of
+    outcome kind or of a raised type is visible, never unseen."""
+    raised = [sorted(_canon(o.value) for o in side if o.kind == "raise") for side in (old, new)]
+    returns = [[o for o in side if o.kind == "return"] for side in (old, new)]
+    if raised[0] != raised[1] or not returns[0] or not returns[1]:
+        return False
+    if e.level in (ComparisonLevel.TYPE, ComparisonLevel.KIND):
+        return True
+    return any(_content(o.value) is _UNKNOWN for side in returns for o in side)
+
+
 def _judge_intended(e: FactEntry, entry: Mapping, old: list[Outcome],
                     new: list[Outcome]) -> bool:
     """A changed outcome on a line an ``intended`` entry decides (design 5.1). With a
-    person-attested expectation: ACCEPTED when it is met, FAIL otherwise. Unattested: FAIL when
-    it contradicts a stated ``representation`` expectation; else the hand rules (returns
-    False). An attested ``any`` is the hand rules too, until a person accepts the outcome."""
+    person-attested expectation: ACCEPTED when it is met, FAIL otherwise. Unattested, with a
+    stated ``representation`` expectation: FAIL when the change is visibly more than that
+    (another value, a new raise); a review when only the type is visible (``_content_unseen``),
+    as under the hand rule; DRIFT when only the representation changed (the hand rules, below).
+    Otherwise the hand rules (returns False). An attested ``any`` is the hand rules too, until
+    a person accepts the outcome."""
     expect = entry.get("expect") or "any"
     if _attested(entry) and expect != "any":
         if expectation_met(expect, old, new):
@@ -6800,6 +6827,11 @@ def _judge_intended(e: FactEntry, entry: Mapping, old: list[Outcome],
         e.notes.append(f"the attested expectation {expect} is not met")
         return True
     if expect == "representation" and not _representation_only(old, new):
+        if _content_unseen(e, old, new):
+            e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
+            e.review = _OPAQUE_REPRESENTATION_REVIEW
+            e.notes.append(e.review)
+            return True
         e.category = FactCategory.REWRITTEN           # stays CHANGED: fails
         e.notes.append("the change is more than its stated expectation (representation only)")
         return True
