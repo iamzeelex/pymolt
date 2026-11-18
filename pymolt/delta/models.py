@@ -24,7 +24,8 @@ Fact kinds:
 - ``SIGNATURE``  a parameter was removed, renamed, added as required or changed kind
                  (``param`` names it), or, with ``param`` null and ``evidence`` "bases", the
                  class's bases changed;
-- ``DEFAULT``    a parameter's default value changed (``old``/``new`` are reprs);
+- ``DEFAULT``    a parameter's default value changed (``old``/``new`` are reprs, free of the
+                 places code is installed in: ``probe.default_repr``);
 - ``DEPRECATED`` the symbol warns: ``deprecated_in_old`` says whether the old version already
                  did; an ``evidence`` entry starting ``deprecated-in-new:`` says the new one does;
 - ``BEHAVIOR``   (python subject) the name stays but what it produces changes: ``changed_in``

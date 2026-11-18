@@ -24,6 +24,10 @@ kind, owner (the class or module that really defines the attribute), canonical n
 (``warnings.warn`` prose in its own source, the PEP 562 ``__getattr__`` branch serving
 it, PEP 702 ``__deprecated__``, ``.. deprecated::`` docstring lines), warnings raised on
 access, and its forwarding target (``__wrapped__`` or a one-line ``return f(...)``).
+A parameter default is rendered as a function of its value alone (``default_repr``): the
+two sides of a delta run in two environments installed in two places, so a module is named,
+not located, and the site dirs, the virtualenv, the stdlib, the project and the home dir
+become placeholders in any other repr.
 The walk stops at the first step owned by something that is not one of ``roots``
 (``request.method.lower`` ends at ``method``).
 """
@@ -43,7 +47,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 7
+PROBE_VERSION = 8
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -71,6 +75,77 @@ def _on_alarm(signum, frame):
 
 def _norm(text):
     return _ADDR.sub("", text)
+
+
+# ── defaults, without the places code lives in ───────────────────────────────────────
+
+# ``(pattern, {path: placeholder})`` for this environment and project; set by ``main``.
+_PLACES = None
+_DEFAULT_CAP = 80
+
+
+def place_table(site_dirs, cwd):
+    """The places a default's repr may carry, each with its placeholder: the site dirs, the
+    virtualenv's prefix, the stdlib, the project (``cwd``) and the home dir. A path counts as
+    given and resolved (a symlinked temp dir), never a filesystem root. On a tie the earlier
+    kind wins: a project that is the home dir is ``<project>``."""
+    table = {}
+
+    def add(path, name):
+        if not isinstance(path, str) or not path or not os.path.isabs(path):
+            return
+        for form in (path, os.path.realpath(path)):
+            form = form.rstrip("/\\") or form
+            if os.path.dirname(form) == form:      # "/" or "C:\": everything is below it
+                continue
+            table.setdefault(form, name)
+            if "\\" in form:                       # a str's repr doubles its backslashes
+                table.setdefault(form.replace("\\", "\\\\"), name)
+
+    for entry in site_dirs or ():
+        add(entry, "<site-packages>")
+    if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
+        add(sys.prefix, "<env>")
+        add(sys.exec_prefix, "<env>")
+    add(os.path.dirname(os.__file__), "<stdlib>")
+    add(cwd, "<project>")
+    add(os.path.expanduser("~"), "~")
+    return table
+
+
+def places_pattern(table):
+    """``(pattern, table)``: the pattern finds the table's paths as whole path components
+    (never inside a longer name), the longest first, so a site dir wins over the prefix that
+    holds it. None for an empty table."""
+    if not table:
+        return None
+    alternatives = "|".join(re.escape(p) for p in sorted(table, key=len, reverse=True))
+    pattern = re.compile(r"(?<![\w.\-/\\])(?:" + alternatives + r")(?=$|[\\/'\"\s)>,;:\]])")
+    return pattern, table
+
+
+def _unplace(text):
+    if _PLACES is None:
+        return text
+    pattern, table = _PLACES
+    return pattern.sub(lambda m: table[m.group(0)], text)
+
+
+def default_repr(value):
+    """A parameter default as the delta compares it, a function of the value alone: a module
+    by its name; a set or frozenset with its members sorted (its own order follows the
+    process's hash seed); anything else its repr. Addresses and places (``place_table``)
+    are dropped, then the text is capped."""
+    if isinstance(value, types.ModuleType):
+        name = getattr(value, "__name__", None)
+        if isinstance(name, str):
+            return ("<module %r>" % name)[:_DEFAULT_CAP]
+    if type(value) in (set, frozenset) and value:
+        members = "{" + ", ".join(sorted(repr(m) for m in value)) + "}"
+        text = members if type(value) is set else "frozenset(" + members + ")"
+    else:
+        text = repr(value)
+    return _unplace(_norm(text))[:_DEFAULT_CAP]
 
 
 # ── objects ───────────────────────────────────────────────────────────────────────────
@@ -143,7 +218,7 @@ def _shape(obj):
             default = None
         else:
             try:
-                default = _norm(repr(p.default))[:80]
+                default = default_repr(p.default)
             except Exception:
                 default = "<unrepresentable>"
         out.append([p.name, str(p.kind).split(".")[-1], default])
@@ -984,6 +1059,7 @@ def _emit(out, payload):
 
 
 def main():
+    global _PLACES
     out = os.fdopen(os.dup(1), "w")
     try:
         os.dup2(2, 1)  # anything an import prints goes to stderr, not the protocol
@@ -1016,6 +1092,7 @@ def main():
         if entry and os.path.basename(entry.rstrip(os.sep)) in ("site-packages", "dist-packages"):
             if os.path.isdir(entry) and entry not in site_dirs:
                 site_dirs.append(entry)
+    _PLACES = places_pattern(place_table(site_dirs, cwd))
     contexts = []
     for code in request.get("contexts") or []:
         try:

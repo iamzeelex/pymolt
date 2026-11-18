@@ -22,8 +22,8 @@ The answer is deliberately weaker than a probe's, and says so:
   its canonical name and no kind;
 - **PEP 562** names come from ``delta/fetch.py``'s scope reader (``present``,
   ``module_warnings``);
-- **defaults** are kept only when they are literals, spelled as ``repr`` like the probe
-  spells them; anything else is ``UNEVALUATED`` and never compared;
+- **defaults** are kept only when they are literals, spelled by the probe's own
+  ``default_repr``; anything else is ``UNEVALUATED`` and never compared;
 - a signature is only reported when it is certain: a decorator that may rewrite it, a
   dataclass-like class, or an ``__init__`` that is not found gives ``shape: None``.
 
@@ -457,7 +457,7 @@ class StaticReader:
             else:
                 text = _expr_text(default)
                 try:
-                    shown = repr(ast.literal_eval(text))[:80]
+                    shown = probe_mod.default_repr(ast.literal_eval(text))
                 except Exception:  # noqa: BLE001 — not a literal: never compared
                     shown = UNEVALUATED
             out.append([p.name, p.kind.name.upper(), shown])
