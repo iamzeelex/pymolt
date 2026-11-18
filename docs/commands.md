@@ -168,7 +168,8 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 | `--claim` | With `--record --done`: `preserve` or `intended`. It may only tighten the step's claim; loosening it needs a person's attestation |
 | `--expect` | With `--record --done --claim intended`: `any` or `representation`. `raise:<Type>` and `return:<Type>` are a person's attested expectation |
 | `--pair` | With `--record --done`: `OLD=NEW`, a pairing anchor verify pairs old calls with new ones by (repeatable) |
-| `--agent` | The agent view. It refuses to write a pymolt step (a person runs `pymolt apply .`), `--skip`, `--allow-no-baseline` and `--by person`; `--dry-run`, `--brief` and `--record` work |
+| `--approve-agent` | A person approves this plan for agents, on a terminal (an attestation). Refused under `--agent` and `--json`. A re-plan or any change to the plan voids it |
+| `--agent` | The agent view. It writes pymolt steps only on a plan a person approved for agents; it refuses `--skip`, `--allow-no-baseline` and `--by person`. `--dry-run`, `--brief` and `--record` work on any plan |
 | `--allow-no-baseline` | Apply without a baseline capture; `verify` will then be INCONCLUSIVE |
 | `--smoke` | Also import the changed modules in the target environment setup names, before and after the write. A module that imported before and fails after undoes the write, and the ledger records the rollback. Without a target environment it is skipped, with the reason. It runs your code's import-time code |
 
@@ -207,7 +208,7 @@ after that step. Otherwise it still describes the code and is kept.
 | `--cascade` | With `--step`: roll back the steps that depend on it first, latest first |
 | `--run-id` | The run to roll back (default: the open run) |
 | `--force` | Also discard edits made after apply (the whole run only) |
-| `--agent` | Refused, with `--force` and `--cascade` above all: a person rolls back |
+| `--agent` | With `--step`, on a plan a person approved for agents. A whole run, `--force` and `--cascade` are refused: a person does those |
 
 ## Tools
 

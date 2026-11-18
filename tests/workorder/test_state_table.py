@@ -305,8 +305,10 @@ def test_rollback_refusals(tmp_path):
         rollback_steps(tmp_path, force=True, agent=True)
     with pytest.raises(MigrationConflictError, match="--cascade is refused under --agent"):
         rollback_steps(tmp_path, step="mech-1", cascade=True, agent=True)
-    with pytest.raises(MigrationConflictError, match="a person runs `pymolt rollback`"):
+    with pytest.raises(MigrationConflictError, match="no person approved this plan"):
         rollback_steps(tmp_path, step="mech-1", agent=True)
+    with pytest.raises(MigrationConflictError, match="a person rolls back a whole run"):
+        rollback_steps(tmp_path, agent=True)
     with pytest.raises(MigrationConflictError, match="does not go with --step"):
         rollback_steps(tmp_path, step="mech-1", force=True)
     with pytest.raises(MigrationConflictError, match="--cascade goes with --step"):

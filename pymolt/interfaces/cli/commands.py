@@ -953,6 +953,10 @@ def apply_plan_cmd(
              "a terminal may give raise:<Type> or return:<Type>"),
     pair: list[str] = typer.Option(
         [], "--pair", help="With --record --done: OLD=NEW, a pairing anchor (repeatable)"),
+    approve_agent: bool = typer.Option(
+        False, "--approve-agent",
+        help="A person approves this plan for agents: `apply --agent` may then write its "
+             "pymolt steps, and `rollback --agent --step` roll one back"),
     allow_no_baseline: bool = typer.Option(
         False,
         "--allow-no-baseline",
@@ -1007,6 +1011,10 @@ def apply_plan_cmd(
     if record and (skip or dry_run or through or brief):
         fail("--record does not go with --skip, --dry-run, --through or --brief",
              json_output=json_output)
+    if approve_agent:
+        _approve_agent(project_path, migration_plan, json_output=json_output,
+                       others=bool(step or through or dry_run or skip or record or brief))
+        return
     if brief:
         _print_brief(migration_plan, step, project_path, agent=agent)
         return
@@ -1063,7 +1071,7 @@ def apply_plan_cmd(
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(views.apply_view(result, migration_plan)))
+        typer.echo(views.dumps(views.apply_view(result, migration_plan, project_path)))
         raise typer.Exit(code=code)
     if json_output:
         payload = {**(receipt.model_dump(mode="json") if receipt is not None else {}),
@@ -1077,6 +1085,29 @@ def apply_plan_cmd(
         _render_left_to_you(migration_plan)
     next_step(project_path)
     raise typer.Exit(code=code)
+
+
+def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool) -> None:
+    """``apply --approve-agent``: a person approves the plan for agents (design 3.6)."""
+    from pymolt.migration_plan import MigrationConflictError
+    from pymolt.workorder.approval import approve
+
+    if json_output:
+        fail("--approve-agent is a person's attested act: it is refused under --agent and "
+             "--json", hint="A person runs `pymolt apply . --approve-agent` on a terminal.",
+             json_output=json_output)
+    if others:
+        fail("--approve-agent goes alone: it approves the whole plan and applies nothing")
+    try:
+        done = approve(project_path, plan, attester=_attester(False, False))
+    except MigrationConflictError as exc:
+        fail(f"the plan was not approved: {exc}", hint=exc.hint, code=EXIT_USAGE)
+    console.print(Panel(
+        f"Approved plan [bold cyan]{plan.plan_id[:8]}[/bold cyan] for agents "
+        f"(attestation {escape(done['attestation'])}): `pymolt apply --agent` may write its "
+        "pymolt steps, and `pymolt rollback --step ID --agent` roll one back. A re-plan or any "
+        "change to the plan voids it. [bold]Nothing was written to your code.[/bold]",
+        title="Approved for agents", border_style="green", expand=False))
 
 
 def _accept_finding(project_path: Path, report, finding: str) -> None:
@@ -1296,6 +1327,11 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.rollback_view(result)))
+        return
     post, post_trace = result.post, result.post_trace
     payload = {
         "run_id": rolled_run,
