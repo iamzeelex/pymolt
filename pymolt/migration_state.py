@@ -143,6 +143,9 @@ class MigrationReceipt(BaseModel):
     # The receipt set (schema 2): every run, oldest first, and each run's steps.
     runs: list[ReceiptRun] = Field(default_factory=list)
     steps: dict[str, StepReceipt] = Field(default_factory=dict)
+    # The id of the last apply or rollback invocation this receipt records: an interrupted one
+    # whose receipt was saved had committed (``migration_plan.recover_invocation``).
+    last_invocation: str | None = None
     # What the apply call that returned this receipt did; not saved. ``already_applied``: the
     # plan was applied before and its files still hold its changes, so nothing was written.
     _outcome: Literal["applied", "already_applied"] = PrivateAttr(default="applied")

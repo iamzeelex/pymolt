@@ -15,6 +15,16 @@ recognised by a post-migration capture taken since the baseline, or, unless a va
 `apply`, by files or pins changed since the baseline. Its verdict completes it; a FAIL then has no
 rollback to point at.
 
+With a saved plan, a `steps` line counts the plan's steps by status: `planned`, `blocked` (a
+dependency not in effect), `stale` (a statement it rewrites is gone, or the plan itself is stale),
+`present` (its change is already there, made by hand), `applied`, `rolled_back`, `skipped`, and
+`not_in_capture` (applied after the post-migration capture). `--json` and `--agent` list them
+under `steps`; `--agent` adds the brief of the step the next command is about. The next command
+follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply --step ID --dry-run`
+for a stale one, then the post-migration capture, with a note naming the first step left to a
+person or an agent. The post-migration capture is stale when a file it recorded no longer has the
+recorded text, whatever changed it.
+
 ### `pymolt scan [dir]`
 Lists the manifests, the Python-version divergence, the dependency edges, and every place your code
 touches a dependency: calls, attribute reads, decorators, base classes, context managers, constants
@@ -89,7 +99,15 @@ steps. It writes no source file. Its `--json` adds `steps` and `plan_md`. Detail
 | `--plan-md` | Where to write the plan for a person (default: `.pymolt/PLAN.md`) |
 
 ### `pymolt apply [dir]`
-Writes exactly the saved plan. It refuses if a planned file changed since the plan was made. Every
+Writes the saved plan's pymolt steps: with no option, every one whose dependencies are in effect,
+in plan order, in one transaction. A step already in effect is a no-op. Each step's file is
+decided on its current text: at the step's reviewed before-text it gets the plan's after-text; at
+the reviewed after-text nothing is written and the step still gets its epoch; when only other
+lines moved, its recipe runs again at its statements (re-based) and is written if it makes the
+reviewed change there; with the step's
+change already made by hand in its place (other lines differ) the step is `present`, nothing is
+written, and verify judges those lines as hand edits. Otherwise the step is stale and the whole
+invocation is refused, naming each statement that is gone. Every
 changed file is prepared and parsed before the first write, and a failed apply restores them all.
 Before the first write it compiles each changed file's new source on the target Python, and on the
 base Python where the change claims to run there; it refuses a file that compiled before the
@@ -106,16 +124,35 @@ the texts that no run on disk, and neither of the two runs closed last, still ne
 the advisories (a site not rewritten, a rewrite with a caveat to check) and the manual items, each
 with its file and line.
 
+Exit codes: 0 applied, already in effect, present or skipped; 1 a compile or smoke-import
+failure (nothing stays written); 2 refused (an unknown or stale step, a dependency not in effect,
+another migration operation running, an option refused under `--agent`); 3 an environment or
+file error; 4 no valid baseline bound to the plan. A plan's steps apply in one run, opened by
+its first `apply`; a plan applied while another plan's run is open closes that run, whose
+applied steps stay in effect, and a closed run applies nothing more. A later `apply` of the same
+run checks the baseline against the world the run started from. An invocation interrupted
+between its write and its records is undone by the next one.
+
+`apply` also writes the plan's pin step: each `name==version` line of a requirements manifest,
+with no hash, gets the target's pin, and `rollback` restores it. The other lines naming a moved
+package, and other kinds of manifest, are a step for a person.
+
 The plan stays valid while the setup (manifest file, base Python, toolset, container), the target
 manifest and the planned files are unchanged. Bumping the pins in the project's manifest does not
-make it stale. Bump them after `plan` and before the post-migration capture, before or after
-`apply` (see [plan.md](plan.md#when-to-bump-the-manifest)).
+make it stale. Bump the lines `apply` does not after `plan` and before the post-migration
+capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifest)).
 
 | Option | Meaning |
 |---|---|
 | `--plan` | The plan file (default: `.pymolt/migration_plan.json`) |
+| `--step` | That step only. Refused when one of its dependencies is not in effect, or when it is a step for an agent or a person |
+| `--through` | Every pymolt step up to that one that is not in effect. Refused when a dependency on the way is not in effect and not on the way |
+| `--dry-run` | Decide and compile, then print the diff that would be written. Writes nothing |
+| `--skip`, `--reason` | With `--step`: mark the step skipped, with why. `apply` then leaves it out and its dependents stay blocked; `--step` applies it after all |
+| `--brief` | With `--step`: print the step's brief (JSON under `--agent`). Writes nothing |
+| `--agent` | The agent view. It refuses to write a pymolt step (a person runs `pymolt apply .`), `--skip` and `--allow-no-baseline`; `--dry-run` and `--brief` work |
 | `--allow-no-baseline` | Apply without a baseline capture; `verify` will then be INCONCLUSIVE |
-| `--smoke` | Also import the changed modules in the target environment setup names, before and after the write. A module that imported before and fails after undoes the write. Without a target environment it is skipped, with the reason. It runs your code's import-time code |
+| `--smoke` | Also import the changed modules in the target environment setup names, before and after the write. A module that imported before and fails after undoes the write, and the ledger records the rollback. Without a target environment it is skipped, with the reason. It runs your code's import-time code |
 
 ### `pymolt verify [dir]`
 Compares the baseline and post-migration captures and prints `PASS`, `FAIL` or `INCONCLUSIVE` with
@@ -132,11 +169,24 @@ the evidence. Details are in [verify.md](verify.md).
 | `--cascade` | A cascade report to include |
 
 ### `pymolt rollback [dir]`
-Restores the files the last `apply` changed. It refuses to discard edits made after the apply unless
-given `--force`. `--run-id` picks an earlier apply. The plan stays valid: while its files are back at
-the planned originals, `apply` runs it again as a new run, with the same checks. When it restored files, the post-migration
-capture is set aside in the archive. When it restored none, the capture still describes the code
-and is kept.
+Restores the files the open run's steps changed, latest step first. It refuses to discard edits
+made after the apply unless given `--force`, which restores each file the run touched to its text
+before the run and never writes another file. `--run-id` picks an earlier run; it is refused
+while a later run's step in effect changed one of its files (roll that run back first). The plan
+stays valid: `apply` writes the rolled-back steps again in the same run, re-based when their
+lines moved. A step whose epoch changed no file stays in effect.
+
+The post-migration capture is set aside in the archive only when it recorded code the rollback
+took away: a rolled-back step's new statements are in its source snapshot, and it was taken
+after that step. Otherwise it still describes the code and is kept.
+
+| Option | Meaning |
+|---|---|
+| `--step` | That step only. Allowed when each of its files still holds the text the step wrote and no later step changed it since; refused otherwise, naming the later steps or edits. Refused while a step in effect depends on it |
+| `--cascade` | With `--step`: roll back the steps that depend on it first, latest first |
+| `--run-id` | The run to roll back (default: the open run) |
+| `--force` | Also discard edits made after apply (the whole run only) |
+| `--agent` | Refused, with `--force` and `--cascade` above all: a person rolls back |
 
 ## Tools
 

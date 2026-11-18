@@ -23,10 +23,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from pydantic_core import ValidationError
 
-from pymolt.apply_ledger import LedgerSnapshot, append_ledger, claim_for
+from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
 from pymolt.verify.predict import PredictionReport
-from pymolt.workorder.blobs import put_texts
 from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP_ID, PlanStep
 
 logger = logging.getLogger(__name__)
@@ -325,6 +324,32 @@ class MigrationPlan(BaseModel):
         return saved
 
 
+class InvocationFile(BaseModel):
+    """One file an invocation writes: its text before and after, by sha256 (the texts are in
+    the blob store)."""
+
+    file: str
+    before: str
+    after: str
+
+
+class Invocation(BaseModel):
+    """The run's latest mutating invocation (an ``apply`` or a ``rollback``), saved before its
+    first write. ``prepared`` until its receipt is saved (``done``); an invocation left
+    ``prepared`` or ``failed`` is recovered by the next one: its files go back to their texts
+    before it, and the ledger events it appended (``seq >= ledger_next_seq``) are dropped,
+    unless the receipt says it committed (``last_invocation``)."""
+
+    id: str
+    operation: Literal["apply", "rollback"]
+    status: Literal["prepared", "done", "failed", "recovered"]
+    at: str
+    steps: list[str] = Field(default_factory=list)
+    files: list[InvocationFile] = Field(default_factory=list)
+    ledger_next_seq: int = 1
+    error: str | None = None
+
+
 class MigrationRunState(BaseModel):
     run_id: str
     status: Literal["prepared", "applied", "failed", "rolled_back"]
@@ -336,9 +361,11 @@ class MigrationRunState(BaseModel):
     applied_at: str | None = None
     rolled_back_at: str | None = None
     error: str | None = None
-    # step id -> its status in this run (``applied``, ``rolled_back``), from the run's first
-    # mutation since steps exist; None in runs written before.
+    # step id -> its status in this run (``applied``, ``rolled_back``, ``skipped``), from the
+    # run's first mutation since steps exist; None in runs written before.
     steps: dict[str, str] | None = None
+    # The latest mutating invocation (None in runs written before invocations were recorded).
+    invocation: Invocation | None = None
 
 
 def create_migration_plan(
@@ -617,13 +644,16 @@ def inspect_migration_plan(
     *,
     expected: Literal["old", "new"] = "old",
     check_environment: bool = True,
+    check_files: bool = True,
 ) -> PlanInspection:
     """Check that a plan still describes the current files and environment.
 
     The environment is the setup (manifest file, base Python, toolset, container) and the
     target manifest's contents. The source manifest's contents may move: bumping its pins is
     the migration (the rule verify applies to a baseline, ``environment_setup_fingerprint``).
-    A plan that predates the setup fingerprint is checked against the full fingerprint."""
+    A plan that predates the setup fingerprint is checked against the full fingerprint.
+    ``check_files=False`` checks the plan's own texts against their hashes but not the disk:
+    apply decides each step's files by its own rules (``workorder.rules``)."""
     from pymolt.verify.service import environment_fingerprint, environment_setup_fingerprint
 
     root = Path(project_dir).resolve()
@@ -659,6 +689,8 @@ def inspect_migration_plan(
             continue
         if _sha256(change.new_source) != change.new_sha256:
             reasons.append(f"plan's replacement-source hash is invalid: {change.path}")
+            continue
+        if not check_files:
             continue
         try:
             path = _project_file(root, change.path)
@@ -717,18 +749,109 @@ def apply_migration_plan(
     allow_no_baseline: bool = False,
     smoke: bool = False,
 ):
-    """Apply ``plan`` (see ``_apply_migration_plan_unlocked``). Before the first write every
-    changed file's new source is compiled (``apply_check``); with ``smoke`` the touched
-    modules are also imported in the target environment, before and after the write, and a
-    module the write broke undoes it. Raises ``MigrationCheckError`` for either failure."""
-    with _migration_lock(project_dir, "apply"):
-        return _apply_migration_plan_unlocked(
-            project_dir, plan, allow_no_baseline=allow_no_baseline, smoke=smoke
-        )
+    """Apply every pymolt step of ``plan`` whose dependencies are in effect (``pymolt apply .``,
+    ``workorder.apply.apply_steps``). Before the first write every changed file is compiled
+    (``apply_check``); with ``smoke`` the touched modules are also imported in the target
+    environment, before and after the write, and a module the write broke undoes it. Raises
+    ``MigrationCheckError`` for either failure. Returns the receipt, whose ``outcome`` is
+    ``already_applied`` when every step was in effect already (nothing written)."""
+    from pymolt.migration_state import MigrationReceipt
+    from pymolt.workorder.apply import apply_steps
+
+    result = apply_steps(project_dir, plan, allow_no_baseline=allow_no_baseline, smoke=smoke)
+    receipt = result.receipt or MigrationReceipt.load(project_dir)
+    if receipt is not None:
+        receipt.mark_outcome("applied" if result.outcome == "applied" else "already_applied")
+    return receipt
+
+
+def needs_recovery(state: MigrationRunState | None) -> bool:
+    """The run's last invocation was interrupted (or a run from before invocations were
+    recorded was left prepared or failed: it has no step statuses, which a run gets once one
+    of its mutations committed, and no invocation)."""
+    if state is None:
+        return False
+    if state.invocation is not None:
+        return state.invocation.status in ("prepared", "failed")
+    return state.status in ("prepared", "failed") and not state.steps
+
+
+def recover_invocation(root: Path, state: MigrationRunState, plan: MigrationPlan, *,
+                       check_only: bool = False):
+    """Recover the run's interrupted invocation (``Invocation``): its files back at their
+    texts before it, the ledger events it appended dropped, unless its receipt was saved (it
+    committed). Returns the run state after it (None: nothing to recover); ``check_only``:
+    whether there is something to recover. Refuses (``MigrationConflictError``) when a file
+    was edited since the interruption."""
+    if not needs_recovery(state):
+        return False if check_only else None
+    if check_only:
+        return True
+    run_dir = _run_dir(root, state.run_id)
+    invocation = state.invocation
+    if invocation is None:
+        frozen = MigrationPlan.load(root, run_dir / "plan.json")
+        if frozen is None or frozen.model_dump() != plan.model_dump():
+            raise MigrationConflictError(
+                f"interrupted run {state.run_id[:8]} does not match this plan"
+            )
+        _recover_interrupted_apply(root, frozen)
+        return state
+    from pymolt.migration_state import MigrationReceipt
+
+    receipt = MigrationReceipt.load(root)
+    if receipt is not None and receipt.last_invocation == invocation.id:
+        recovered = state.model_copy(update={
+            "invocation": invocation.model_copy(update={"status": "done"})})
+        _save_run_state(run_dir, recovered)
+        return recovered
+    from pymolt.codemods.apply import write_previews
+    from pymolt.workorder.blobs import get_text
+
+    reverse: list[FilePreview] = []
+    for item in invocation.files:
+        path = _project_file(root, item.file)
+        try:
+            current = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise MigrationConflictError(
+                f"cannot recover the interrupted {invocation.operation}: unreadable "
+                f"{item.file}") from exc
+        digest = _sha256(current)
+        if digest == item.before:
+            continue
+        before = get_text(root, item.before)
+        if digest != item.after or before is None:
+            raise MigrationConflictError(
+                f"cannot recover the interrupted {invocation.operation} of run "
+                f"{state.run_id[:8]}: {item.file} was edited since",
+                hint="Put the file back as the interrupted command left it, or restore it by "
+                     "hand and remove the run's `invocation` from its state.json.")
+        reverse.append(FilePreview(path=str(path), old_source=current, new_source=before,
+                                   sites=0))
+    write_previews(reverse)
+    _drop_ledger_after(root, invocation.ledger_next_seq)
+    recovered = state.model_copy(update={
+        "invocation": invocation.model_copy(update={"status": "recovered"})})
+    _save_run_state(run_dir, recovered)
+    return recovered
+
+
+def _drop_ledger_after(root: Path, next_seq: int) -> None:
+    """Drop the ledger events (and their entries) an uncommitted invocation appended."""
+    from pymolt.apply_ledger import load_ledger, save_ledger
+
+    ledger = load_ledger(root)
+    if ledger is None or not any(e.seq >= next_seq for e in ledger.events):
+        return
+    ledger.events = [e for e in ledger.events if e.seq < next_seq]
+    ledger.entries = [e for e in ledger.entries if e.epoch < next_seq]
+    save_ledger(root, ledger)
 
 
 def _recover_interrupted_apply(root: Path, plan: MigrationPlan) -> None:
-    """Restore a prepared/failed run to its exact pre-apply source boundary."""
+    """Restore a prepared/failed run from before invocations were recorded to its exact
+    pre-apply source boundary."""
     from pymolt.codemods.apply import write_previews
 
     reverse: list[FilePreview] = []
@@ -754,220 +877,6 @@ def _recover_interrupted_apply(root: Path, plan: MigrationPlan) -> None:
             sites=change.sites,
         ))
     write_previews(reverse)
-
-
-def _apply_migration_plan_unlocked(
-    project_dir: str | Path,
-    plan: MigrationPlan,
-    *,
-    allow_no_baseline: bool = False,
-    smoke: bool = False,
-):
-    """Apply exactly one reviewed plan and retain everything needed to undo it."""
-    from pymolt.codemods.apply import write_previews
-    from pymolt.migration_state import MigrationReceipt
-    from pymolt.verify.models import CaptureValidity
-    from pymolt.verify.service import (
-        baseline_setup_unchanged,
-        environment_fingerprint,
-        environment_setup_fingerprint,
-        inspect_trace_artifact,
-        load_contract_state,
-    )
-
-    root = Path(project_dir).resolve()
-    _validate_run_id(plan.plan_id)
-    runs = _plan_runs(root, plan.plan_id)
-    existing = runs[-1] if runs else None
-    # The run this apply records: the plan's first, an interrupted one retried, or, after a
-    # rollback, a new run of the same plan.
-    run_id, attempt = plan.plan_id, 1
-    if existing is not None:
-        run_id, attempt = existing.run_id, existing.attempt
-    run_dir = _run_dir(root, run_id)
-    if existing and existing.status in {"prepared", "failed"}:
-        frozen = MigrationPlan.load(root, run_dir / "plan.json")
-        if frozen is None or frozen.model_dump() != plan.model_dump():
-            raise MigrationConflictError(
-                f"interrupted run {run_id[:8]} does not match this plan"
-            )
-        _recover_interrupted_apply(root, frozen)
-    if existing and existing.status == "applied":
-        return _already_applied(root, plan, existing)
-
-    inspection = inspect_migration_plan(root, plan)
-    if not inspection.valid:
-        raise MigrationConflictError(
-            "stale migration plan: " + "; ".join(inspection.reasons)
-        )
-
-    # The world this migration starts from, taken before any source write. The
-    # receipt keeps it so the baseline can later be judged against it rather
-    # than against whatever manifest the migration moved the project to.
-    starting_fingerprint = environment_fingerprint(root)
-    starting_setup = environment_setup_fingerprint(root)
-    baseline = load_contract_state(root).baseline
-    if not allow_no_baseline:
-        if baseline is None:
-            raise MigrationEvidenceError(
-                "a valid baseline capture is required before apply"
-            )
-        quality = inspect_trace_artifact(baseline.trace_path)
-        # Same world, or the same setup with only the manifest's pins moved since the
-        # baseline: that move is part of the migration, not a different starting point.
-        same_world = baseline.env_fingerprint == starting_fingerprint or (
-            baseline.env_fingerprint is not None
-            and baseline_setup_unchanged(baseline, starting_setup))
-        if (
-            baseline.validity is not CaptureValidity.VALID
-            or quality.validity is not CaptureValidity.VALID
-            or not same_world
-        ):
-            raise MigrationEvidenceError("the baseline capture is invalid or stale")
-        if not plan.baseline_trace_path or not plan.baseline_captured_at:
-            raise MigrationEvidenceError(
-                "the plan is not bound to its authorizing baseline"
-            )
-        from pymolt.verify.service import same_slot_path
-
-        if (
-            not same_slot_path(root, plan.baseline_trace_path, baseline.trace_path)
-            or plan.baseline_captured_at != baseline.captured_at
-        ):
-            raise MigrationEvidenceError(
-                "the baseline capture was replaced after planning"
-            )
-        baseline_path = Path(baseline.trace_path)
-        if not baseline_path.is_absolute():
-            baseline_path = root / baseline_path
-        try:
-            baseline_hash = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise MigrationEvidenceError("the baseline trace is unreadable") from exc
-        if not plan.baseline_trace_sha256 or baseline_hash != plan.baseline_trace_sha256:
-            raise MigrationEvidenceError(
-                "the baseline trace content changed after planning"
-            )
-
-    if existing and existing.status == "rolled_back":
-        # Every planned file is back at its planned original (checked above): apply the
-        # reviewed plan again as a new run, with no new plan.
-        run_id, attempt = uuid.uuid4().hex, existing.attempt + 1
-        run_dir = _run_dir(root, run_id)
-
-    check, smoke_before = _check_before_write(root, plan, smoke)
-    # What the ledger will say about the write, from the plan's own texts: one ``apply`` event
-    # per pymolt step, with its statements. Computed before any write, so a failure here
-    # costs nothing.
-    records = _apply_records(root, plan, run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    frozen_plan_path = plan.save(root, run_dir / "plan.json")
-    state = MigrationRunState(
-        run_id=run_id, status="prepared", prepared_at=_now(),
-        plan_id=None if run_id == plan.plan_id else plan.plan_id, attempt=attempt,
-    )
-    _save_run_state(run_dir, state)
-
-    previews = [
-        FilePreview(
-            path=str(_project_file(root, change.path)),
-            old_source=change.old_source,
-            new_source=change.new_source,
-            sites=change.sites,
-        )
-        for change in plan.changes
-    ]
-    try:
-        write_previews(previews)
-    except BaseException as exc:
-        _save_run_state(
-            run_dir,
-            state.model_copy(update={"status": "failed", "error": str(exc)}),
-        )
-        raise
-    if smoke_before is not None:
-        check.smoke = _smoke_after(root, smoke_before)
-        if check.smoke.status == "failed":
-            _undo_write(previews)
-            failures = "; ".join(f"{name}: {error}" for name, error in check.smoke.failed.items())
-            _save_run_state(run_dir, state.model_copy(update={
-                "status": "failed", "error": f"smoke import failed: {failures}"}))
-            raise MigrationCheckError(
-                f"the smoke import failed after the write, so the files were restored: "
-                f"{failures}", check=check,
-                hint="The plan's rewrite broke an import that worked before it. The files are "
-                     "as they were before apply; fix the plan's rewrite by hand, or apply "
-                     "without --smoke and let capture and verify judge it.")
-
-    applied_at = _now()
-    receipt = MigrationReceipt(
-        run_id=run_id,
-        plan_id=plan.plan_id,
-        applied_at=applied_at,
-        target_python=plan.target_python,
-        source_manifest=plan.source_manifest,
-        target_manifest_path=(
-            str(_project_file(root, plan.target_manifest_path))
-            if plan.target_manifest_path else None
-        ),
-        baseline_trace_path=baseline.trace_path if baseline else None,
-        baseline_captured_at=baseline.captured_at if baseline else None,
-        environment_fingerprint=starting_fingerprint,
-        environment_setup_fingerprint=starting_setup,
-        allow_no_baseline=allow_no_baseline,
-        self_check=check,
-        files_changed=[str(_project_file(root, item.path)) for item in plan.changes],
-        patterns_applied=sum(item.sites for item in plan.changes),
-        no_codemods_required=not plan.changes,
-        plan_path=str(frozen_plan_path),
-    )
-    ledger_before = LedgerSnapshot.take(root)
-    prior = MigrationReceipt.load(root)
-    try:
-        # The texts first: an event names its files' texts by hash, and the store holds them.
-        put_texts(root, (text for *_rest, files in records
-                         for _path, before, after in files for text in (before, after)))
-        ledger = append_ledger(root, [(event.model_copy(update={"at": applied_at}), entries)
-                                      for _step, event, entries, _files in records])
-        appended = list(zip([step for step, *_rest in records],
-                            ledger.events[len(ledger.events) - len(records):], strict=True))
-        _receipt_set_after_apply(receipt, prior, plan, appended, check)
-        _save_run_state(
-            run_dir,
-            state.model_copy(update={"status": "applied", "applied_at": applied_at,
-                                     "steps": {step.id: "applied" for step, _e in appended}}),
-        )
-        receipt.save(root)
-    except BaseException as metadata_exc:
-        _restore_ledger(ledger_before)
-        reverse = [
-            FilePreview(
-                path=preview.path,
-                old_source=preview.new_source,
-                new_source=preview.old_source,
-                sites=preview.sites,
-            )
-            for preview in previews
-        ]
-        try:
-            write_previews(reverse)
-        except BaseException as rollback_exc:
-            raise RuntimeError(
-                "source apply succeeded, metadata failed, and automatic rollback "
-                f"was incomplete: {rollback_exc}"
-            ) from metadata_exc
-        try:
-            _save_run_state(
-                run_dir,
-                state.model_copy(update={
-                    "status": "failed", "error": f"metadata: {metadata_exc}",
-                }),
-            )
-        except OSError:
-            pass
-        raise
-    _collect_blobs(root)
-    return receipt
 
 
 def _collect_blobs(root: Path) -> None:
@@ -1038,40 +947,6 @@ def _undo_write(previews: list[FilePreview]) -> None:
     ])
 
 
-def _already_applied(root: Path, plan: MigrationPlan, state: MigrationRunState):
-    """Apply run again on an applied plan: a no-op while every planned file still holds the
-    plan's new source (the receipt says so); a conflict, with nothing written, otherwise."""
-    from pymolt.migration_state import MigrationReceipt
-
-    inspection = inspect_migration_plan(root, plan, expected="new", check_environment=False)
-    if not inspection.valid:
-        raise MigrationConflictError(
-            f"plan {plan.plan_id[:8]} is already applied (run {state.run_id[:8]}), and "
-            "files changed since: " + "; ".join(inspection.reasons),
-            hint="Nothing was written. `pymolt rollback .` restores the files the apply "
-                 "changed (`--force` also discards the later edits). A plan made now would "
-                 "stack a second migration on the applied one.",
-        )
-    receipt = MigrationReceipt.load(root)
-    if receipt is None or receipt.run_id != state.run_id:
-        # A later run's receipt is the saved one: describe this run from its frozen plan.
-        receipt = MigrationReceipt(
-            run_id=state.run_id, plan_id=plan.plan_id,
-            applied_at=state.applied_at or state.prepared_at,
-            target_python=plan.target_python, source_manifest=plan.source_manifest,
-            target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
-                                  if plan.target_manifest_path else None),
-            baseline_trace_path=plan.baseline_trace_path,
-            baseline_captured_at=plan.baseline_captured_at,
-            files_changed=[str(_project_file(root, item.path)) for item in plan.changes],
-            patterns_applied=sum(item.sites for item in plan.changes),
-            no_codemods_required=not plan.changes,
-            plan_path=str(_run_dir(root, state.run_id) / "plan.json"),
-        )
-    receipt.mark_outcome("already_applied")
-    return receipt
-
-
 def _restore_ledger(snapshot) -> None:
     """Put the ledger back as it was before a mutation whose metadata failed (best effort: the
     mutation's own error is the one to report)."""
@@ -1134,9 +1009,11 @@ def _ledger_steps(plan: MigrationPlan) -> list[tuple[PlanStep, list[tuple[str, s
 
 def _whole_plan_step(plan: MigrationPlan) -> PlanStep:
     """The plan's one whole-file step (``workorder.v1.v1_step``). Its anchors are only
-    metadata here; should making them fail, the step is built without them, so the apply
-    is never refused for its provenance."""
-    from pymolt.workorder.models import StepDo, StepEffort, StepRecipe, step_key
+    metadata here; should making them fail, the step is built without them (its edits then
+    name the texts by hash and hunks alone), so the apply is never refused for its
+    provenance."""
+    from pymolt.workorder.edits import hunks_of
+    from pymolt.workorder.models import StepDo, StepEdit, StepEffort, StepRecipe, step_key
     from pymolt.workorder.v1 import v1_step
 
     try:
@@ -1150,6 +1027,8 @@ def _whole_plan_step(plan: MigrationPlan) -> PlanStep:
         phase="mechanical", type="codemod", title="The plan's rewrite", executor="pymolt",
         claim="preserve" if claims else None,
         do=StepDo(recipe=StepRecipe(kind="whole-file", keys=recipes, sites="all")),
+        edits=[StepEdit(file=c.path, before_sha256=c.old_sha256, after_sha256=c.new_sha256,
+                        hunks=hunks_of(c.old_source, c.new_source)) for c in plan.changes],
         effort=StepEffort(sites=sum(c.sites for c in plan.changes), files=len(plan.changes),
                           why="pymolt applies it"))
 
@@ -1164,139 +1043,11 @@ def _step_risk_ids(plan: MigrationPlan, step: PlanStep) -> list[str]:
             or (step.id == V1_STEP_ID and r.step_id is None and r.fixed_by_plan)]
 
 
-def _apply_records(root: Path, plan: MigrationPlan, run_id: str):
-    """The ledger records of applying the whole plan as ``run_id``: per pymolt step, ``(step,
-    apply event, the statements it changed, its files' (path, before, after))``. A whole-file
-    step attributes each changed region to the recipe that names it, with that recipe's
-    claim. A file whose statements cannot be anchored is recorded by its lines only."""
-    from pymolt.apply_ledger import (
-        EventFile,
-        LedgerEvent,
-        _recipe_for,
-        attrs_for_recipe,
-        entries_for,
-        step_attrs,
-    )
-
-    base, target = _pythons(root, plan)
-    changes = {c.path: c for c in plan.changes}
-    out = []
-    for step, files in _ledger_steps(plan):
-        whole = step.do.recipe is not None and step.do.recipe.kind == "whole-file"
-        entries = []
-        for path, before, after in files:
-            if whole:
-                change = changes.get(path)
-                recipes = list(change.recipes) if change else []
-                claims = dict(change.claims) if change else {}
-
-                def attrs(old_text, new_text, recipes=recipes, claims=claims):
-                    return attrs_for_recipe(_recipe_for(recipes, old_text, new_text), claims)
-            else:
-                attrs = step_attrs(step)
-            # T0 is the base Python's code; every later text, a step's after-text included,
-            # is the target's (the builder anchors the plan's steps the same way).
-            t0 = changes[path].old_source if path in changes else None
-            kwargs = {"run_id": run_id, "step_id": step.id,
-                      "python_before": base if before == t0 else target,
-                      "python_after": target}
-            try:
-                entries += entries_for(path, before, after, attrs, **kwargs)
-            except Exception:  # noqa: BLE001 - provenance degrades to lines, the apply stands
-                logger.warning("could not anchor the ledger entries of %s", path, exc_info=True)
-                entries += entries_for(path, before, after, attrs, anchored=False, **kwargs)
-        out.append((step, LedgerEvent(
-            event="apply", run_id=run_id, step_id=step.id, at=_now(), executor="pymolt",
-            actor="pymolt", wrote=True, risk_ids=_step_risk_ids(plan, step),
-            files=[EventFile(file=path, before=_sha256(before), after=_sha256(after))
-                   for path, before, after in files]), entries, files))
-    return out
-
-
 def _step_sites(plan: MigrationPlan, step: PlanStep, files: list[str]) -> int:
     if step.effort.sites:
         return step.effort.sites
     return sum(c.sites for c in plan.changes if c.path in files) if step.id == V1_STEP_ID \
         else 0
-
-
-def _receipt_set_after_apply(receipt, prior, plan: MigrationPlan, appended, check) -> None:
-    """Carry the receipt set over from ``prior`` and record this run: it opens (closing an
-    open run of another plan or attempt, whose steps in effect stay in effect) and each of
-    its applied steps gets a receipt with its epoch, checks and risk links."""
-    from pymolt.migration_state import ReceiptRun, StepReceipt, step_checks
-
-    now = receipt.applied_at
-    runs = [r.model_copy() for r in prior.runs] if prior is not None else []
-    steps = dict(prior.steps) if prior is not None else {}
-    for run in runs:
-        if not run.closed and run.run_id != receipt.run_id:
-            run.closed, run.closed_at = True, now
-    if not any(r.run_id == receipt.run_id for r in runs):
-        runs.append(ReceiptRun(
-            run_id=receipt.run_id, plan_id=plan.plan_id, plan_path=receipt.plan_path,
-            opened_at=now, starting_fingerprint=receipt.environment_fingerprint,
-            setup_fingerprint=receipt.environment_setup_fingerprint,
-            target_manifest_sha256=plan.target_manifest_sha256))
-    for step, event in appended:
-        files = [f.file for f in event.files]
-        steps[f"{receipt.run_id}:{step.id}"] = StepReceipt(
-            status="applied", epoch=event.seq, executor="pymolt", actor="pymolt",
-            claim=step.claim, applied_at=now, files=files, risk_ids=list(event.risk_ids),
-            sites=_step_sites(plan, step, files),
-            checks=step_checks(check, files, runs_on_base=step.runs_on_base))
-    receipt.runs, receipt.steps = runs, steps
-    # Progress counts every pymolt step of the plan (a manifest pin too, which this apply
-    # does not write); a plan whose steps the apply could not follow counts the one it wrote.
-    written = [step.id for step, _event in appended]
-    planned = [s.id for s in plan.steps if s.executor == "pymolt"]
-    receipt.summarize(planned if set(written) <= set(planned) else written)
-
-
-def _receipt_set_after_rollback(receipt, run_id: str, rolled_back_at: str,
-                                restored: list[str], records):
-    """The receipt after rolling back ``run_id``: each step the rollback ended (or kept, when
-    it rewrote none of its files) is ``rolled_back``; the schema-1 summary changes only when
-    ``run_id`` is the latest run, as in v1."""
-    out = receipt.model_copy(deep=True)
-    ended = {event.step_id: bool(event.restored) for event, _entries in records}
-    for step_id, step in out.steps_of(run_id).items():
-        if not step.in_effect:
-            continue
-        mine = [f for f in step.files if f in restored]
-        out.steps[f"{run_id}:{step_id}"] = step.model_copy(update={
-            "status": "rolled_back", "rolled_back_at": rolled_back_at, "files_restored": mine,
-            "epoch": None if ended.get(step_id, bool(mine)) else step.epoch})
-    if out.run_id == run_id:
-        out.status, out.rolled_back_at, out.files_restored = "rolled_back", rolled_back_at, \
-            restored
-        out.summarize()
-    return out
-
-
-def _rollback_records(root: Path, run_id: str, rolled_back_at: str,
-                      texts: dict[str, tuple[str, str]]):
-    """The ledger's ``rollback`` events for every step of ``run_id`` with a current epoch, in
-    reverse order. ``texts``: each file the rollback wrote, ``(text before it, restored
-    text)``. A step whose files it did not rewrite keeps its epoch (``restored: false``)."""
-    from pymolt.apply_ledger import EventFile, LedgerEvent, load_ledger
-
-    ledger = load_ledger(root)
-    if ledger is None:
-        return []
-    out = []
-    current = ledger.current_epochs()
-    for (run, step_id), seq in sorted(current.items(), key=lambda kv: -kv[1]):
-        if run != run_id:
-            continue
-        event = next(e for e in ledger.events if e.seq == seq)
-        rewrote = [f.file for f in event.files if f.file in texts]
-        out.append((LedgerEvent(
-            event="rollback", run_id=run_id, step_id=step_id, at=rolled_back_at,
-            restored=bool(rewrote),
-            files=[EventFile(file=f, before=_sha256(texts[f][0]), after=_sha256(texts[f][1]))
-                   for f in rewrote]), []))
-    return out
 
 
 def rollback_migration(
@@ -1305,135 +1056,9 @@ def rollback_migration(
     run_id: str | None = None,
     force: bool = False,
 ):
-    with _migration_lock(project_dir, "rollback"):
-        return _rollback_migration_unlocked(
-            project_dir, run_id=run_id, force=force
-        )
+    """Roll back every step in effect of the run (default: the latest), restoring each file it
+    touched (``workorder.rollback``). Returns ``(plan, rolled_back_at, run_id)``."""
+    from pymolt.workorder.rollback import rollback_steps
 
-
-def _rollback_migration_unlocked(
-    project_dir: str | Path,
-    *,
-    run_id: str | None = None,
-    force: bool = False,
-):
-    """Atomically restore every source frozen in an applied migration plan. Returns
-    ``(plan, rolled_back_at, run_id)``."""
-    from pymolt.codemods.apply import write_previews
-    from pymolt.migration_state import MigrationReceipt
-    from pymolt.verify.service import (
-        load_contract_state,
-        restore_archived_capture,
-        set_aside_post_migration,
-    )
-
-    root = Path(project_dir).resolve()
-    receipt = MigrationReceipt.load(root)
-    original_receipt = receipt.model_copy(deep=True) if receipt is not None else None
-    contract_state = load_contract_state(root)
-    original_contract_state = contract_state.model_copy(deep=True)
-    effective_run_id = run_id or (receipt.run_id if receipt else None)
-    if not effective_run_id:
-        raise MigrationConflictError("no applied migration is available to roll back")
-    run_dir = _run_dir(root, effective_run_id)
-    state = _load_run_state(run_dir / "state.json")
-    if state is None or state.status != "applied":
-        status = state.status if state else "missing"
-        raise MigrationConflictError(
-            f"migration {effective_run_id[:8]} is not rollback-ready ({status})"
-        )
-    plan = MigrationPlan.load(root, run_dir / "plan.json")
-    if plan is None:
-        raise MigrationPlanError(f"frozen plan for {effective_run_id[:8]} is unreadable")
-
-    inspection = inspect_migration_plan(
-        root, plan, expected="new", check_environment=False
-    )
-    if not inspection.valid and not force:
-        raise MigrationConflictError(
-            "refusing to overwrite post-migration edits: "
-            + "; ".join(inspection.reasons)
-            + "; pass --force only if discarding them is intentional"
-        )
-
-    previews: list[FilePreview] = []
-    for change in plan.changes:
-        path = _project_file(root, change.path)
-        try:
-            current = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise MigrationPlanError(f"cannot restore missing source: {change.path}") from exc
-        previews.append(FilePreview(
-            path=str(path),
-            old_source=current if force else change.new_source,
-            new_source=change.old_source,
-            sites=change.sites,
-        ))
-    # What the rollback rewrites: a run that changed no file (a no-op apply) restores nothing.
-    restored = [
-        change.path for change, preview in zip(plan.changes, previews, strict=True)
-        if preview.old_source != preview.new_source
-    ]
-    rolled_back_at = _now()
-    records = _rollback_records(
-        root, effective_run_id, rolled_back_at,
-        {change.path: (preview.old_source, preview.new_source)
-         for change, preview in zip(plan.changes, previews, strict=True)
-         if preview.old_source != preview.new_source})
-    ledger_before = LedgerSnapshot.take(root)
-    write_previews(previews)
-    state_path = root / ".pymolt" / "contract_state.json"
-    original_post = original_contract_state.post_migration
-    archived: str | None = None
-    try:
-        if records:
-            put_texts(root, (text for preview in previews
-                             if preview.old_source != preview.new_source
-                             for text in (preview.old_source, preview.new_source)))
-            append_ledger(root, records)
-        _save_run_state(
-            run_dir,
-            state.model_copy(update={
-                "status": "rolled_back", "rolled_back_at": rolled_back_at,
-                "steps": {**(state.steps or {}),
-                          **{event.step_id: "rolled_back" for event, _n in records}},
-            }),
-        )
-        if receipt is not None:
-            receipt = _receipt_set_after_rollback(receipt, effective_run_id, rolled_back_at,
-                                                  restored, records)
-            receipt.save(root)
-        # The post-migration capture stays while the code it recorded is still on disk (the
-        # rollback restored no file); otherwise it is set aside, kept among the diagnostics.
-        if contract_state.post_migration is not None and restored:
-            archived = set_aside_post_migration(root, contract_state, effective_run_id)
-            contract_state.save(state_path)
-    except BaseException as metadata_exc:
-        _restore_ledger(ledger_before)
-        forward = [
-            FilePreview(
-                path=preview.path,
-                old_source=preview.new_source,
-                new_source=preview.old_source,
-                sites=preview.sites,
-            )
-            for preview in previews
-        ]
-        try:
-            write_previews(forward)
-        except BaseException as restore_exc:
-            raise RuntimeError(
-                "source rollback succeeded, metadata failed, and restoring the applied "
-                f"state was incomplete: {restore_exc}"
-            ) from metadata_exc
-        try:
-            _save_run_state(run_dir, state)
-            if original_receipt is not None:
-                original_receipt.save(root)
-            if archived is not None and original_post is not None:
-                restore_archived_capture(archived, original_post.trace_path)
-            original_contract_state.save(state_path)
-        except OSError:
-            pass
-        raise
-    return plan, rolled_back_at, effective_run_id
+    result = rollback_steps(project_dir, run_id=run_id, force=force)
+    return result.plan, result.rolled_back_at, result.run_id
