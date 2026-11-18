@@ -16,8 +16,10 @@ Usage:
 / ``--record --done --agent``, one step at a time, each edit under the plan step it matches (an
 edit no step matches stays a hand edit), and adds three must-FAIL scenarios per toy with manual
 edits: one manual edit's call gets a bogus keyword (a new raise), recorded as ``preserve``
-(``mut-preserve``), recorded and then rewritten to ``intended`` in the ledger as an agent could
-(``mut-intended``), or left unrecorded beside the recorded edits (``mut-beside``). None may PASS.
+(``mut-preserve``: every record passes ``--claim preserve``, which tightens a step whose claim is
+``intended``), recorded under the step's claim and then rewritten to ``intended`` with ``any`` in
+the ledger as an agent could (``mut-intended``), or left unrecorded beside the recorded edits
+(``mut-beside``). None may PASS.
 It writes ``record_summary.json`` next to the scorecard.
 
 Stdlib only. See README.md for what each metric means.
@@ -353,9 +355,10 @@ def run_manual(root: Path, toy: dict, step, warnings: list[str], pm: str, *,
         if open_step is not None:
             pairs = record_pairs(toy, by_id.get(open_step) or {})
             info.setdefault("pairs", {})[open_step] = pairs
+            tighten = ["--claim", "preserve"] if variant == "mut-preserve" else []
             step(f"done_{open_step}_{len(info['records'])}",
                  [pm, "apply", ".", "--step", open_step, "--record", "--done", "--agent",
-                  *(x for pair in pairs for x in ("--pair", pair))])
+                  *tighten, *(x for pair in pairs for x in ("--pair", pair))])
             open_step = None
 
     later = []

@@ -202,6 +202,67 @@ def test_done_with_no_record_first_attributes_only_the_steps_statements(tmp_path
     assert read(tmp_path, M) == after_mech.replace("return v + 1", "return v + 2")
 
 
+N = "app/n.py"
+N_TEXT = "import a\ny = a.h()\nw = a.f()\n"
+
+
+def test_done_with_no_record_first_starts_from_the_latest_event_on_the_file(tmp_path):
+    """State machine seed 75, made deterministic: run R1 writes ``y = a.k()``; a re-plan's T0
+    holds it; R1's step is rolled back (``y = a.h()`` again); a person then makes plan 2's step
+    by hand and records it with ``--done`` only. The rollback is the file's last known state:
+    the undone ``y`` line is nobody's change for the step, so it is never credited to it."""
+    from _stepwise import plan_next
+
+    plan1 = plan_for(tmp_path, {N: (N_TEXT, [rename("a.h", "a.k")])}, baseline=False)
+    apply_steps(tmp_path, plan1, allow_no_baseline=True)
+    assert read(tmp_path, N) == "import a\ny = a.k()\nw = a.f()\n"
+    plan2 = plan_next(tmp_path, {N: [rename("a.f", "a.q")]})
+    assert plan2.changes[0].old_source == "import a\ny = a.k()\nw = a.f()\n"     # its T0
+    rollback_steps(tmp_path, run_id=plan1.plan_id, step="mech-1")
+    assert read(tmp_path, N) == N_TEXT
+    (tmp_path / N).write_text(N_TEXT.replace("w = a.f()", "w = a.q()"), encoding="utf-8")
+
+    result = record_step(tmp_path, plan2, "mech-1", done=True)
+
+    assert result.outcome == "recorded"
+    record = ledger(tmp_path)["events"][-1]
+    rolled = ledger(tmp_path)["events"][-2]
+    assert (rolled["event"], record["event"]) == ("rollback", "record")
+    assert record["files"][0]["before"] == rolled["files"][0]["after"]     # not plan 2's T0
+    mine = [e for e in ledger(tmp_path)["entries"] if e["epoch"] == record["seq"]]
+    assert [(e["anchor_old"]["stmt"], e["anchor_new"]["stmt"]) for e in mine] == [
+        ("w = a.f()", "w = a.q()")]
+    assert not any("a.k" in ((e.get("anchor_old") or {}).get("stmt") or "") for e in mine)
+
+
+def test_done_with_no_record_first_and_no_event_on_the_file_starts_from_t0(tmp_path):
+    plan = _plan(tmp_path)
+    _edit(tmp_path, "y = a.h(v)", "y = a.k(v)")
+
+    result = record_step(tmp_path, plan, "sig-1", done=True)
+
+    assert result.outcome == "recorded" and events(tmp_path)[-1][1] == "record"
+    record = ledger(tmp_path)["events"][-1]
+    assert record["files"][0]["before"] == plan.changes[0].old_sha256        # the plan's T0
+    assert [e["anchor_new"]["stmt"] for e in ledger(tmp_path)["entries"]] == ["y = a.k(v)"]
+
+
+def test_done_with_no_record_first_refuses_a_last_known_text_the_store_lost(tmp_path):
+    plan = _plan(tmp_path)
+    apply_steps(tmp_path, plan, allow_no_baseline=True)
+    after = ledger(tmp_path)["events"][-1]["files"][0]["after"]
+    (tmp_path / ".pymolt" / "blobs" / f"{after}.gz").unlink()
+    _edit(tmp_path, "y = a.h(v)", "y = a.k(v)")
+    before = ledger(tmp_path)
+
+    with pytest.raises(StepRefusal, match=r"app/m\.py had after ledger event 1 \(apply of "
+                                          r"mech-1\) is not in the blob store"):
+        record_step(tmp_path, plan, "sig-1", done=True)
+
+    assert ledger(tmp_path) == before
+    assert _step(tmp_path, plan.plan_id, "sig-1") is None
+
+
 def test_done_with_no_record_first_and_nothing_in_scope_is_refused(tmp_path):
     plan = _plan(tmp_path)
     _edit(tmp_path, "return v + 1", "return v + 2")

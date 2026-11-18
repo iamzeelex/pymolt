@@ -77,10 +77,20 @@ composition exactly (1.5).
 | `mechanical` | `codemod` (`recipe.kind` ∈ `rewrite-import`, `rename-call`, `rule`) | pymolt | `preserve` / `same-object`, `same-signature`, `verified-rule` | adopted dependency patterns and rules | yes |
 | `mechanical` | `python-fix` (`recipe.kind` ∈ `rewrite-attr`, `replace-attr-path`, `rewrite-module`, `rewrite-import`, `rename-call`) | pymolt | `preserve` / `python-fixer` | adopted Python fixes | yes |
 | `mechanical` | `manual-rewrite` | agent | `preserve` / `manual` | H5 items (blocked or downgraded rules); rule advisories `not-applied` | no. The template is shown as a suggestion |
-| `signature` | `api-change` | agent | `preserve` / `manual` | risks needing attention: REMOVED/MOVED with no auto fix, SIGNATURE at a passed parameter, DEPRECATED with a successor | no |
-| `signature` | `python-manual` | agent | `preserve` / `manual` | Python risks with `fix: advisory`; compile findings on the target | no |
+| `signature` | `api-change` | agent | `preserve`, or `intended` + `representation` (below) / `manual` | risks needing attention: REMOVED/MOVED with no auto fix, SIGNATURE at a passed parameter, DEPRECATED with a successor | no |
+| `signature` | `python-manual` | agent | `preserve`, or `intended` + `representation` (below) / `manual` | Python risks with `fix: advisory`; compile findings on the target | no |
 | `behaviour` | `behaviour-change` | person | `preserve` (proposed) or `intended` | DEFAULT at a defaulted parameter; warning-only high risks; Python BEHAVIOR facts | no |
 | `behaviour` | `review` | person | `preserve` | rule advisories `precondition` | no |
+
+An agent or person step's default claim follows the kind of successor its deciding delta fact shows
+(owner decision, 2026-11-18; `workorder/manual.py::default_claim`), and `why.claim` says which:
+- the same object (MOVED), or the same object with a changed signature (SIGNATURE): `preserve`;
+- another object (REMOVED; DEPRECATED with a successor the delta names; a spelling the delta shows
+  rebound): `intended` with `expect: representation` (5.1: representation-only is DRIFT, another
+  value or a new raise FAILs);
+- a behaviour change: `preserve`;
+- no fact about the successor (DEPRECATED with none named, a rule, a compile finding): `preserve`,
+  with `why.claim` saying it was not loosened for lack of evidence.
 
 How sites group into steps:
 - **Automated step:** one recipe, or one move group, across every file it changes.
@@ -755,7 +765,7 @@ Under `_migration_lock`:
 |---|---|
 | `--record` | Refuses unless the step is `planned`, `rolled_back`, `stale` or `recorded` (a re-record) and its dependencies are in effect. Refuses when **another step of the run is `in_progress`**: at most one per run, checked under the migration lock, because two open records would attribute each other's edits. Snapshot: every project `.py` file (the `_iter_py_files` skip rules, `codemods/apply.py:835-851`) goes into the blob store, which de-duplicates them. A per-step manifest, `migrations/<run>/steps/<id>/snapshot-<seq>.json` = `{file: sha256}`, lists them. Above 50 MB of new blob bytes, the remaining files are listed by hash only (`"hash_only": true`). Appends no event; the step receipt becomes `in_progress` |
 | `--record --done` | Diffs the snapshot against now. For a re-record, a file the step's previous epoch touched is diffed from that epoch's before-text instead, so the new epoch describes the whole step. Appends a `record` event (the new epoch) and its entries: anchors made on both texts, the claim and `expect` within the ladder (5.1), `basis: manual`, the actor, and `symbol` plus `--pair` as pairing anchors. The previous epoch is superseded. A file listed by hash only is recorded with "before text unknown", as a hand edit. The compile check runs on the changed files: target, plus base when the step says so. A failure goes into `checks`, the edit stays (pymolt did not write it), and the command exits with D's failure code. **No change: refuse**, except for `review` and `env` steps, which record a completion with no entries. A behaviour change with no code edit is accepted only through `verify --accept` (5.2) |
-| `--done` with no `--record` first | the before-text of each file is its last known state: its current in-effect after-text, else the plan's T0. Only hunks inside the step's anchor scopes are attributed to it. The others are listed, left unrecorded, and judged as hand edits |
+| `--done` with no `--record` first | the before-text of each file is its last known state: the after-text of the latest ledger event on that file, whatever the event (an `apply`, a `record`, a restoring `rollback`, a run of another plan), recovered from the blob store. The plan's T0 only when the ledger has no event on the file. A text missing from the store is refused (exit 2), never guessed. Only hunks inside the step's anchor scopes are attributed to it. The others are listed, left unrecorded, and judged as hand edits. (Revised 2026-11-18: the first version took the in-effect after-text, else T0. A step rolled back after a re-plan left the file at a text newer than the new plan's T0, and its undo was then credited to the step being recorded) |
 | `--record --abort` | appends an `abort` event, drops the snapshot manifest (the blobs follow the 2.1 retention rules) and restores the previous status. Files are untouched |
 
 A `manifest-pin` step recorded by a person (decision 1 = no) records the manifest's lines with
@@ -1040,6 +1050,10 @@ hand edits.
 - Agents run pymolt-checked steps after one person-attested approval per plan (variant A, decision 4).
 - Re-basing, stage 6, ad-hoc accepts and the text store stay in scope.
 - Decision 5 (an imports-only baseline) stays the optional stage 8.
+
+**Decided by the owner on 2026-11-18:** an agent or person step's default claim follows the kind of
+successor the delta shows (1.1): `intended` + `representation` for another object, `preserve`
+otherwise.
 
 The "if the owner decides otherwise" column is kept as a record of the alternatives.
 
