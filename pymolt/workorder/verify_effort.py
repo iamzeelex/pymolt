@@ -162,6 +162,11 @@ def effort_of(step: PlanStep) -> StepEffort:
     def make(size: str, why: str) -> StepEffort:
         return StepEffort(size=size, sites=sites, files=files, why=why)
 
+    if step.type == "target-env":
+        return make("small", "a build from the target manifest's pins")
+    if step.type == "manifest-pin":
+        return make("small" if sites <= 5 else "medium",
+                    f"{sites} manifest line(s) to change")
     known = _successor_known(step)
     if step.type == "behaviour-change":
         return make("large", "a behaviour change: a person decides the outcome")

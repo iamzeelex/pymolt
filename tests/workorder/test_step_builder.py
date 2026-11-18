@@ -131,8 +131,8 @@ def test_the_steps_rebuild_every_planned_file_exactly(tmp_path):
                                   "compile_base": "not checked: no base interpreter or runner"}
     assert all(s.effort.size == "none" for s in _pymolt(plan))
     # The blocked rule is left to an agent, after the pymolt steps of its phase.
-    assert [(s.id, s.type, s.executor) for s in plan.steps[3:]] == [
-        ("mech-4", "manual-rewrite", "agent")]
+    assert [(s.id, s.type, s.executor) for s in plan.steps if s.executor != "pymolt"] == [
+        ("env-1", "target-env", "person"), ("mech-4", "manual-rewrite", "agent")]
 
 
 def test_each_steps_anchors_are_made_on_its_own_before_text(tmp_path):

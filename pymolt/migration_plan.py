@@ -447,6 +447,8 @@ def create_migration_plan(
         automated, root=root, changes=changes, risks=risks, manual_items=manual,
         advisories=advisories, compile_findings=compile_findings,
         dependencies=list(migrations), python_move=python_move, t0=t0)
+    steps = [*_env_steps(root, source_manifest, target_relative, target_python, migrations),
+             *steps]
     finish_steps(steps, risks, root=root, t0=t0, baseline_trace=baseline_path,
                  baseline_command=list(baseline.command) if baseline is not None else None)
 
@@ -483,6 +485,19 @@ def create_migration_plan(
         compile_findings=compile_findings,
         steps=steps,
     )
+
+
+def _env_steps(root: Path, source_manifest: str, target_manifest: str | None,
+               target_python: str, migrations) -> list:
+    """The env phase: the manifest pin and the target environment (``workorder.env``)."""
+    from pymolt.ingestion.config import EnvConfig
+    from pymolt.workorder.env import env_steps
+
+    config = EnvConfig.load(root / ".pymolt" / "env_config.json")
+    return env_steps(root, source_manifest=source_manifest, target_manifest=target_manifest,
+                     target_python=target_python if target_python != "unknown" else None,
+                     dependencies=list(migrations),
+                     target_env=config.target_env_path if config is not None else None)
 
 
 def _knowledge_id(rule) -> str | None:
