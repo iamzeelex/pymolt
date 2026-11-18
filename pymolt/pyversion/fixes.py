@@ -316,7 +316,7 @@ def apply_python_fixes(
     followed by the python rewrite, so one diff shows both. ``on_step(recipe, path, before,
     after)`` observes each fix (or move group) that changed a file, for the files the
     minimal-diff and re-compile gates keep; a dropped file reports none."""
-    from pymolt.codemods.apply import apply_patterns
+    from pymolt.codemods.apply import apply_patterns, carry_lines, line_map
 
     root = Path(root)
     outcome = FixOutcome(previews=list(previews))
@@ -342,13 +342,11 @@ def apply_python_fixes(
         start = original if prior is None else prior.new_source
         # The sites' lines are the original file's; on top of a dependency rewrite they are
         # moved to where that text now is, or a fix lands on the wrong statement.
-        moved = _line_map(original, start) if start != original else None
+        # ``apply_patterns`` carries them on through each fix's own change.
+        moved = line_map(original, start) if start != original else None
 
         def lines_for(pattern: CodemodPattern, rel=rel, moved=moved) -> frozenset[int]:
-            found = lines.get((rel, pattern.old_qualname), frozenset())
-            if moved is None:
-                return found
-            return frozenset(n for line in found for n in moved.get(line, ()))
+            return carry_lines(lines.get((rel, pattern.old_qualname), frozenset()), moved)
 
         events: list[tuple] = []
         try:
@@ -399,22 +397,6 @@ def apply_python_fixes(
     outcome.previews = sorted(merged.values(), key=lambda p: (
         order.get(Path(p.path).resolve(), len(order)), p.path))
     return outcome
-
-
-def _line_map(old: str, new: str) -> dict[int, tuple[int, ...]]:
-    """Each 1-based line of ``old`` -> the lines of ``new`` holding its text: itself where the
-    text is unchanged, the same position in a block replaced line for line, and the whole new
-    block where one changed into another number of lines. A deleted line maps to none."""
-    out: dict[int, tuple[int, ...]] = {}
-    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
-            for k in range(i2 - i1):
-                out[i1 + k + 1] = (j1 + k + 1,)
-        elif tag == "replace":
-            for k in range(i1, i2):
-                out[k + 1] = tuple(range(j1 + 1, j2 + 1))
-    return out
 
 
 def _recompile_gate(staged: dict, outcome: FixOutcome, target_exe: str | None,

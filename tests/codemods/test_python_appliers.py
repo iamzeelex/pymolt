@@ -115,3 +115,39 @@ def test_python_rename_renames_every_reference():
     out, n = apply_pattern(src, pat)
     assert n == 1
     assert "SafeConfigParser" not in out and out.count("ConfigParser") == 3
+
+
+MAPPING_ATTR = _p("rewrite-attr", "collections.Mapping", "collections.abc.Mapping",
+                  requires_import="collections.abc", scope="python")
+
+
+def test_lines_are_the_inputs_and_follow_each_earlier_change():
+    """``lines_for`` names lines of the input; the first fix adds an import (and a blank line),
+    so the second fix's site has moved by the time it runs."""
+    src = "import collections\nA = collections.Iterable\nB = collections.Mapping\n"
+    lines = {ABC_ATTR.old_qualname: frozenset({2}), MAPPING_ATTR.old_qualname: frozenset({3})}
+    out, hits = apply_patterns(src, [ABC_ATTR, MAPPING_ATTR],
+                               lines_for=lambda p: lines[p.old_qualname])
+    assert out == ("import collections\nimport collections.abc\n\n"
+                   "A = collections.abc.Iterable\nB = collections.abc.Mapping\n")
+    assert [(p.old_qualname, n) for p, n in hits] == [("collections.Iterable", 1),
+                                                      ("collections.Mapping", 1)]
+
+
+def test_a_move_group_finds_its_statement_after_an_earlier_fix_moved_it():
+    src = "import collections\nx = collections.Iterable\nfrom collections import Mapping\n"
+    move = _p("rewrite-import", "collections.Mapping", "collections.abc.Mapping", scope="python")
+    lines = {ABC_ATTR.old_qualname: frozenset({2}), move.old_qualname: frozenset({3})}
+    out, hits = apply_patterns(src, [ABC_ATTR, move], lines_for=lambda p: lines[p.old_qualname])
+    assert "from collections.abc import Mapping" in out
+    assert "x = collections.abc.Iterable" in out
+    assert sum(n for _, n in hits) == 2
+
+
+def test_a_site_on_a_line_an_earlier_change_deleted_is_not_rewritten_elsewhere():
+    from pymolt.codemods.apply import carry_lines, line_map
+
+    moved = line_map("a\nb\nc\n", "a\nc\n")
+    assert carry_lines(frozenset({2}), moved) == frozenset()
+    assert carry_lines(frozenset({3}), moved) == frozenset({2})
+    assert carry_lines(None, moved) is None
