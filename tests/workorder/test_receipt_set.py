@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from pymolt.apply_ledger import build_entries, in_effect_entries, ledger_path, load_ledger
 from pymolt.codemods.client import DependencyMigration
 from pymolt.codemods.models import ApiImpact, CodemodPattern, FilePreview
@@ -43,8 +45,15 @@ T1 = "import a\nx = a.g()\ny = 1\nz = a.h()\n"
 T2 = "import a\nx = a.g()\ny = 1\nz = a.k()\n"
 
 
-def test_apply_records_its_run_and_a_step_receipt_with_epoch_checks_and_links(tmp_path):
+@pytest.mark.parametrize("steps", ["builder", "none"])
+def test_apply_records_its_run_and_a_step_receipt_with_epoch_checks_and_links(tmp_path, steps):
+    """The step receipt of the plan's own step, or of the synthetic ``v1`` of a plan with
+    no steps."""
     plan = _plan(tmp_path, T0, T1, _pattern("a.f", "a.g"))
+    [planned] = [s.id for s in plan.steps if s.executor == "pymolt"]
+    if steps == "none":
+        plan.steps = []
+    step_id = planned if steps == "builder" else "v1"
     receipt = apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
 
     saved = MigrationReceipt.load(tmp_path)
@@ -52,7 +61,8 @@ def test_apply_records_its_run_and_a_step_receipt_with_epoch_checks_and_links(tm
     [run] = saved.runs
     assert (run.run_id, run.plan_id, run.closed, run.starting_fingerprint) == (
         receipt.run_id, plan.plan_id, False, receipt.environment_fingerprint)
-    step = saved.steps[f"{receipt.run_id}:v1"]
+    assert list(saved.steps) == [f"{receipt.run_id}:{step_id}"]
+    step = saved.steps[f"{receipt.run_id}:{step_id}"]
     assert (step.status, step.epoch, step.executor, step.claim, step.files, step.sites) == (
         "applied", 1, "pymolt", "preserve", ["m.py"], 1)
     assert set(step.checks) == {"compile_target", "compile_base", "smoke_import"}
@@ -61,11 +71,11 @@ def test_apply_records_its_run_and_a_step_receipt_with_epoch_checks_and_links(tm
     assert (saved.status, saved.progress, saved.in_effect) == ("applied", "complete", True)
     state = json.loads((tmp_path / ".pymolt" / "migrations" / receipt.run_id / "state.json")
                        .read_text())
-    assert state["steps"] == {"v1": "applied"}
+    assert state["steps"] == {step_id: "applied"}
 
     rollback_migration(tmp_path)
     after = MigrationReceipt.load(tmp_path)
-    step = after.steps[f"{receipt.run_id}:v1"]
+    step = after.steps[f"{receipt.run_id}:{step_id}"]
     assert (step.status, step.epoch, step.files_restored) == ("rolled_back", None, ["m.py"])
     assert (after.status, after.progress, after.in_effect) == ("rolled_back", "none", False)
     assert after.files_changed == receipt.files_changed          # the v1 value is kept
@@ -105,9 +115,27 @@ def test_a_rolled_back_attempt_leaves_the_chain_when_the_plan_applies_again(tmp_
     assert [(r.run_id, r.closed) for r in receipt.runs] == [
         (first.run_id, True), (again.run_id, False)]
     assert receipt.chain_run_ids() == [again.run_id]
-    assert receipt.steps[f"{again.run_id}:v1"].epoch == 3
+    [step_id] = [s.id for s in plan.steps if s.executor == "pymolt"]
+    assert receipt.steps[f"{again.run_id}:{step_id}"].epoch == 3
     entries, _note, _ = in_effect_entries(tmp_path, receipt)
     assert {e.epoch for e in entries} == {3}
+
+
+def test_progress_counts_every_pymolt_step_of_the_plan(tmp_path):
+    """A pymolt step the whole-plan apply does not write (a manifest pin) leaves it partial."""
+    from pymolt.workorder.models import ManifestPin, PlanStep, StepDo, StepRecipe
+
+    plan = _plan(tmp_path, T0, T1, _pattern("a.f", "a.g"))
+    pin = PlanStep(id="env-1", key="0" * 10, phase="env", type="manifest-pin",
+                   title="Pin a", executor="pymolt", claim="intended", basis="target-manifest",
+                   scope="env", do=StepDo(recipe=StepRecipe(kind="manifest-pin", pins=[
+                       ManifestPin(name="a", from_version="1.0", to_version="2.0",
+                                   old="a==1.0", new="a==2.0")])))
+    plan.steps = [pin, *plan.steps]
+    apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
+    receipt = MigrationReceipt.load(tmp_path)
+    assert [k.split(":", 1)[1] for k in receipt.steps] == [plan.steps[1].id]
+    assert (receipt.status, receipt.progress) == ("applied", "partial")
 
 
 def test_a_step_receipt_is_in_effect_while_it_has_an_epoch():

@@ -776,6 +776,40 @@ def apply_pattern(source: str, pattern: CodemodPattern, *,
     return new_module.code, rename.sites
 
 
+def line_map(old: str, new: str) -> dict[int, tuple[int, ...]]:
+    """Each 1-based line of ``old`` -> the lines of ``new`` holding its text: itself where the
+    text is unchanged, the same position in a block replaced line for line, and the whole new
+    block where one changed into another number of lines. A deleted line maps to none."""
+    out: dict[int, tuple[int, ...]] = {}
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = (j1 + k + 1,)
+        elif tag == "replace":
+            for k in range(i1, i2):
+                out[k + 1] = tuple(range(j1 + 1, j2 + 1))
+    return out
+
+
+def carry_lines(lines: frozenset[int] | None,
+                moved: dict[int, tuple[int, ...]] | None) -> frozenset[int] | None:
+    """``lines`` of one text, on the text ``moved`` (a ``line_map``) leads to. None stays None
+    (anywhere); ``moved`` None is no change."""
+    if lines is None or moved is None:
+        return lines
+    return frozenset(n for line in lines for n in moved.get(line, ()))
+
+
+def _then(moved: dict[int, tuple[int, ...]] | None,
+          step: dict[int, tuple[int, ...]]) -> dict[int, tuple[int, ...]]:
+    """The line map of two edits in a row: ``moved`` (None: none yet), then ``step``."""
+    if moved is None:
+        return step
+    return {line: tuple(sorted({m for n in ns for m in step.get(n, ())}))
+            for line, ns in moved.items()}
+
+
 def apply_patterns(
     source: str, patterns: list[CodemodPattern], *,
     lines_for: Callable[[CodemodPattern], frozenset[int] | None] | None = None,
@@ -786,11 +820,19 @@ def apply_patterns(
     The import-move patterns (``rewrite-import``, python ``rename-call``) that share an old and
     a new module are applied together, so one ``from OLD import a, b, c`` statement becomes at
     most one statement per target module instead of one per name. ``lines_for(pattern)`` gives
-    the source lines a pattern may touch (None: anywhere). ``on_step(recipe, before, after)``
+    the lines of ``source`` a pattern may touch (None: anywhere). Each pattern applies to the
+    text the ones before it left, so those lines are carried through every change before it
+    (an import one fix adds moves the next fix's site down). ``on_step(recipe, before, after)``
     observes each pattern or move group (a ``MoveGroup``) that changes the text."""
     hits: list[tuple[CodemodPattern, int]] = []
     groups = _move_renames(patterns)
     done_groups: set[tuple[str, str]] = set()
+    # ``source``'s lines -> the current text's; None while nothing has changed
+    moved: dict[int, tuple[int, ...]] | None = None
+
+    def lines_of(pattern: CodemodPattern) -> frozenset[int] | None:
+        return carry_lines(lines_for(pattern), moved) if lines_for is not None else None
+
     for pattern in patterns:
         key = (_module(pattern.old_qualname), _module(pattern.new_qualname))
         if _move_renames([pattern]):
@@ -801,7 +843,7 @@ def apply_patterns(
                 _module(p.old_qualname), _module(p.new_qualname)) == key]
             lines: frozenset[int] | None = None
             if lines_for is not None:
-                found = [lines_for(p) for p in members]
+                found = [lines_of(p) for p in members]
                 lines = (frozenset().union(*[f for f in found if f is not None])
                          if any(f is not None for f in found) else None)
             mover = MoveNamesCodemod(key[0], key[1], groups[key], lines=lines)
@@ -814,15 +856,18 @@ def apply_patterns(
                     hits.append((member, n))
                     group_hits.append((recipe_key(member), n))
             if source != before:
+                if lines_for is not None:
+                    moved = _then(moved, line_map(before, source))
                 _observe(on_step, MoveGroup(key[0], key[1], tuple(members), tuple(group_hits)),
                          before, source)
             continue
         before = source
-        source, sites = apply_pattern(
-            source, pattern, lines=lines_for(pattern) if lines_for else None)
+        source, sites = apply_pattern(source, pattern, lines=lines_of(pattern))
         if sites:
             hits.append((pattern, sites))
         if source != before:
+            if lines_for is not None:
+                moved = _then(moved, line_map(before, source))
             _observe(on_step, pattern, before, source)
     return source, hits
 
