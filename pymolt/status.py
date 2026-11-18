@@ -30,7 +30,8 @@ BLOCKED = "blocked"
 class PhaseState(BaseModel):
     """One phase of the funnel, as found on disk."""
 
-    phase: str          # scan | setup | assess | baseline | plan | migration | post-migration | report
+    phase: str          # scan | setup | assess | baseline | plan | steps | migration |
+    #                     post-migration | report
     state: str          # done | todo | stale | blocked
     detail: str = ""    # what was found, or what is missing
     blocker: str = ""   # why this cannot run yet (state == blocked)
@@ -54,6 +55,11 @@ class FunnelStatus(BaseModel):
     next_command: str | None = None
     next_reason: str = ""
     notes: list[str] = Field(default_factory=list)
+    # The saved plan's steps, each with its projected status (``workorder.state``):
+    # ``{id, status, executor, title}``; empty without a plan of steps.
+    steps: list[dict] = Field(default_factory=list)
+    # The step the next command (or note) is about, when it is about one.
+    next_step: str | None = None
 
     def phase(self, name: str) -> PhaseState | None:
         return next((p for p in self.phases if p.phase == name), None)
@@ -302,6 +308,14 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
         )
 
     if getattr(receipt, "status", "applied") == "rolled_back":
+        live = [r.run_id for r in receipt.runs_in_effect()] \
+            if hasattr(receipt, "runs_in_effect") else []
+        if live:
+            # An earlier run's steps are still on disk: the migration is that run's.
+            return PhaseState(
+                phase="migration", state=DONE,
+                detail=f"run {live[0][:8]} is in effect; the latest run "
+                       f"{receipt.run_id[:8]} was rolled back")
         return PhaseState(
             phase="migration",
             state=TODO,
@@ -346,7 +360,7 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     if receipt is not None and getattr(receipt, "status", "applied") == "applied":
         return PhaseState(
             phase="plan", state=DONE,
-            detail=f"consumed by migration run {receipt.run_id[:8]}",
+            detail=f"applied by migration run {receipt.run_id[:8]} (its steps: see steps)",
         )
     if assess.state != DONE:
         return PhaseState(
@@ -360,7 +374,9 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
             phase="plan", state=TODO,
             detail="no plan saved",
         )
-    inspection = inspect_migration_plan(project_path, plan)
+    # Run-level only: a planned file that moved is a step's business (re-based, present or
+    # stale: the steps phase).
+    inspection = inspect_migration_plan(project_path, plan, check_files=False)
     if not inspection.valid:
         return PhaseState(
             phase="plan", state=STALE,
@@ -520,10 +536,13 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     assess_phase = status.phase("assess")
     assert assess_phase is not None
     plan = _plan_phase(project_path, assess_phase, receipt)
+    projection = _projection(project_path, receipt, post_slot)
+    steps = _steps_phase(projection)
+    status.steps = [s.as_dict() for s in projection.steps] if projection else []
     migration = _migration_phase(receipt, baseline, baseline_slot, project_path)
     # No apply run is in effect: plan and apply are optional, so the migration may be one made
     # by hand (or by an agent). It is judged by what is on disk, not by a receipt.
-    hand = receipt is None or not receipt.in_effect
+    hand = receipt is None or not (receipt.in_effect or receipt.runs_in_effect())
     if hand and baseline.state == DONE:
         migration = _hand_migration(
             project_path, baseline_slot, post_slot, plan, fingerprint, setup_fingerprint,
@@ -543,17 +562,25 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
             phase="post-migration", state=STALE,
             detail=f"{post.detail} — no recorded migration precedes this capture",
         )
-    elif (
-        not hand
-        and post_slot is not None
-        and receipt is not None
-        and _capture_precedes(post_slot.captured_at, receipt.applied_at)
-    ):
-        post = PhaseState(
-            phase="post-migration", state=STALE,
-            detail=f"{post.detail} — captured before migration run {receipt.run_id[:8]}",
-        )
-    status.phases.extend([baseline, plan, migration, post])
+    elif not hand and post_slot is not None and receipt is not None and post.state == DONE:
+        # Stale when a file the capture recorded no longer has the recorded text, whatever
+        # changed it (a later step, a rollback, a re-record, a hand edit).
+        from pymolt.workorder.anchor_cache import changed_since
+
+        moved = changed_since(project_path, post_slot.sources_path)
+        if moved is None and _capture_precedes(post_slot.captured_at, receipt.applied_at):
+            post = PhaseState(
+                phase="post-migration", state=STALE,
+                detail=f"{post.detail} — captured before migration run {receipt.run_id[:8]}",
+            )
+        elif moved:
+            shown = ", ".join(moved[:3]) + (f" and {len(moved) - 3} more" if len(moved) > 3
+                                            else "")
+            post = PhaseState(
+                phase="post-migration", state=STALE,
+                detail=f"{post.detail} — {shown} changed since it was captured",
+            )
+    status.phases.extend([baseline, plan, *([steps] if steps else []), migration, post])
 
     if baseline.state == TODO and post.state == TODO:
         report = PhaseState(
@@ -605,13 +632,49 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     workload = detect_workload_command(project_path)
     _decide_next(
         status, config, baseline, plan, migration, post, report,
-        receipt, verification, workload, by_hand=by_hand,
+        receipt, verification, workload, by_hand=by_hand, projection=projection,
         has_replicate=usable_replicate(project_path, contract)[0] is not None,
         can_replicate=lambda: baseline_slot is not None and fingerprint is not None
         and fingerprint == baseline_slot.env_fingerprint
         and sources_changed(project_path, baseline_slot.sources_path) == [],
     )
     return status
+
+
+def _projection(project_path: Path, receipt, post_slot):
+    """The saved plan's steps, projected (None: no plan of steps, or the projection failed:
+    status then reads as before steps). ``post_newer``: a post-migration capture was taken
+    after the plan was made."""
+    try:
+        from pymolt.workorder.state import project_steps
+
+        projection = project_steps(project_path, receipt=receipt)
+        projection.post_newer = bool(
+            post_slot is not None and projection.created_at
+            and not _capture_precedes(post_slot.captured_at, projection.created_at))
+    except Exception:  # noqa: BLE001 - orientation must never break on a step it cannot read
+        import logging
+
+        logging.getLogger(__name__).warning("could not project the plan's steps",
+                                            exc_info=True)
+        return None
+    return projection if projection.steps else None
+
+
+def _steps_phase(projection) -> PhaseState | None:
+    if projection is None:
+        return None
+    pymolt = [s for s in projection.steps if s.executor == "pymolt"]
+    if projection.run_stale or any(s.status == "stale" for s in projection.steps):
+        state = STALE
+    elif all(s.status not in ("planned", "blocked") for s in pymolt):
+        state = DONE
+    else:
+        state = TODO
+    detail = projection.summary()
+    if projection.run_stale:
+        detail += f" — {projection.run_stale[0]}"
+    return PhaseState(phase="steps", state=state, detail=detail)
 
 
 _REPLICATE_REASON = "a baseline replicate would tell"  # service._fact_diff_reasons
@@ -632,8 +695,10 @@ def _decide_next(
     by_hand: bool = False,
     has_replicate: bool = False,
     can_replicate=lambda: False,
+    projection=None,
 ) -> None:
-    """The single next command. One, not a menu: the point is to remove the choice."""
+    """The single next command. One, not a menu: the point is to remove the choice. After the
+    baseline, the steps decide (design 6) while a plan of steps exists."""
     scan = status.phase("scan")
     assess = status.phase("assess")
 
@@ -677,6 +742,8 @@ def _decide_next(
             "Save the code changes as a plan and review the diff."
         )
         return
+    if projection is not None and _decide_steps(status, projection, receipt, post, by_hand):
+        return
     if migration.state in {TODO, STALE}:
         status.next_command = "pymolt apply ."
         status.next_reason = (
@@ -692,6 +759,8 @@ def _decide_next(
     if report.state != DONE:
         status.next_command = "pymolt verify ."
         status.next_reason = "Both captures exist. Compare them."
+        return
+    if projection is not None and _decide_judged(status, projection):
         return
     if verification is not None and verification.verdict.value == "fail":
         if by_hand:
@@ -734,3 +803,85 @@ def _decide_next(
         if verification is not None and verification.verdict.value == "pass"
         else "The verdict is INCONCLUSIVE; its reasons name the missing evidence."
     )
+
+
+def _decide_steps(status: FunnelStatus, projection, receipt, post: PhaseState,
+                  by_hand: bool) -> bool:
+    """Design 6, rules 2 to 6 (rule 1 is the plan rule before it). Rules 4 to 6 apply while a
+    receipt exists or no post-migration capture newer than the plan exists: a migration made by
+    hand goes straight to the capture and the verdict."""
+    pending = [s for s in projection.steps if s.status not in ("applied", "recorded")
+               and s.status not in ("rolled_back", "skipped")]
+    if projection.run_stale and pending:
+        status.next_command = "pymolt plan ."
+        status.next_reason = ("The plan is stale (" + projection.run_stale[0] + "): its steps "
+                              "not in effect no longer describe the project. Plan again.")
+        return True
+    busy = projection.first("in_progress")
+    if busy is not None:
+        status.next_command = f"pymolt apply --step {busy.id} --record --done"
+        status.next_step = busy.id
+        status.next_reason = f"Step {busy.id} is being recorded: finish (or abort) it."
+        return True
+    if receipt is None and projection.post_newer:
+        return False
+    ready = [s.id for s in projection.steps if s.executor == "pymolt" and s.status == "planned"]
+    stale = projection.first("stale", pymolt=True)
+    # Rule 4 before rule 5, except that `apply .` refuses while one of its steps is stale: then
+    # the stale step comes first.
+    if ready and stale is None:
+        status.next_command = "pymolt apply ."
+        status.next_reason = ("Apply the plan's pymolt steps " + ", ".join(ready[:6])
+                              + (" and more" if len(ready) > 6 else "")
+                              + ". The original files are kept for rollback.")
+        return True
+    if stale is not None:
+        status.next_command = f"pymolt apply --step {stale.id} --dry-run"
+        status.next_step = stale.id
+        why = stale.reasons[0] if stale.reasons else "its statements moved"
+        status.next_reason = (f"Step {stale.id} is stale ({why}). The dry run shows the "
+                              "statement it lost; then `pymolt plan .` plans what is left "
+                              "again.")
+        return True
+    manual = next((s for s in projection.steps if s.executor != "pymolt"
+                   and s.status == "planned" and s.type != "target-env"), None)
+    if manual is not None and post.state in {TODO, STALE}:
+        # Design 6 rule 6 names `--record`, which comes with stage 5; until then the step is
+        # done by hand and the capture records it.
+        status.next_step = manual.id
+        status.notes.append(
+            f"Step {manual.id} is for {'an agent' if manual.executor == 'agent' else 'a person'}"
+            f": `pymolt apply --step {manual.id} --brief` says what to do. Do it before the "
+            "post-migration capture.")
+    return False
+
+
+def _decide_judged(status: FunnelStatus, projection) -> bool:
+    """Design 6, rules 9 to 11: a step verify judged for its current epoch."""
+    failed = projection.first("failed")
+    if failed is not None:
+        status.next_step = failed.id
+        if failed.executor == "pymolt":
+            status.next_command = f"pymolt rollback --step {failed.id}"
+            status.next_reason = (f"Step {failed.id} failed verify: an outcome at its sites "
+                                  "changed. Rolling it back restores the text before it.")
+        else:
+            status.next_command = None
+            status.next_reason = (f"Step {failed.id} failed verify: fix it, then capture "
+                                  "post-migration again.")
+        return True
+    review = projection.first("needs_review")
+    if review is not None:
+        status.next_step = review.id
+        status.next_command = f"pymolt verify . --step {review.id}"
+        status.next_reason = (f"Step {review.id} needs a person's review of what changed at "
+                              "its sites.")
+        return True
+    evidence = projection.first("needs_evidence")
+    if evidence is not None:
+        status.next_step = evidence.id
+        status.next_command = None
+        status.next_reason = (f"Step {evidence.id} needs evidence: add a test that reaches its "
+                              "sites, then capture post-migration again.")
+        return True
+    return False

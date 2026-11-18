@@ -47,13 +47,17 @@ def _project(tmp_path):
 
 
 def _plan(tmp_path, *, files=1):
+    # The files exist before the baseline, so its source snapshot (and the post-migration
+    # capture's, which takes the baseline's files) records them.
+    for index in range(files):
+        (tmp_path / f"app{index}.py").write_text("from flask.helpers import safe_join\n",
+                                                 encoding="utf-8")
     target = _project(tmp_path)
     previews = []
     for index in range(files):
         path = tmp_path / f"app{index}.py"
         old = "from flask.helpers import safe_join\n"
         new = "from werkzeug.utils import safe_join\n"
-        path.write_text(old, encoding="utf-8")
         previews.append(FilePreview(
             path=str(path),
             old_source=old,
@@ -169,6 +173,7 @@ def test_rollback_invalidates_post_migration_capture(tmp_path):
         command=[sys.executable, str(script)],
         target="json",
     )
+    _record_in_post(tmp_path, "app0.py")
 
     rollback_migration(tmp_path)
 
@@ -180,13 +185,31 @@ def test_rollback_invalidates_post_migration_capture(tmp_path):
     # Its recording moved to the archive: the next post-migration capture cannot overwrite it.
     assert "/archive/" in aside.trace_path
     recorded = (tmp_path / aside.trace_path).read_bytes()
-    assert MigrationReceipt.load(tmp_path).files_restored == ["app0.py"]
+    assert MigrationReceipt.load(tmp_path).files_restored == ["requirements.txt", "app0.py"]
 
     service.capture_named_trace(
         tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
         command=[sys.executable, str(script)], target="json",
     )
     assert (tmp_path / aside.trace_path).read_bytes() == recorded
+
+
+def _record_in_post(root, *names):
+    """The post-migration capture as one that had facts in ``names``: its source snapshot
+    records their text (a real capture records the files whose calls it saw)."""
+    import gzip
+    import hashlib
+    import json as _json
+
+    slot = service.load_contract_state(root).post_migration
+    with gzip.open(slot.sources_path, "rt", encoding="utf-8") as fh:
+        data = _json.load(fh)
+    for name in names:
+        text = (root / name).read_text(encoding="utf-8")
+        data["files"][name] = {"sha256": hashlib.sha256(text.encode()).hexdigest(),
+                               "text": text}
+    with gzip.open(slot.sources_path, "wt", encoding="utf-8") as fh:
+        _json.dump(data, fh)
 
 
 def _post_capture(tmp_path):
@@ -201,8 +224,10 @@ def _post_capture(tmp_path):
 def test_rollback_of_a_run_that_changed_no_file_keeps_the_post_migration_capture(tmp_path):
     """A no-op apply's rollback restores nothing, so the post-migration capture still records
     the code on disk: it stays in its slot, and verify still compares it against the baseline
-    and reads that run's plan (the legacy harness rolls back after every run)."""
+    and reads that run's plan (the legacy harness rolls back after every run). The pins are
+    bumped before planning, so the plan has no pin step either."""
     target = _project(tmp_path)
+    (tmp_path / "requirements.txt").write_text("flask==3.0.0\n", encoding="utf-8")
     plan = create_migration_plan(
         tmp_path, [], [DependencyMigration("flask", "2.0.3", "3.0.0")],
         target_python="3.12", source_manifest="requirements.txt",
@@ -234,6 +259,7 @@ def test_verify_names_the_post_migration_capture_a_rollback_set_aside(tmp_path):
     plan = _plan(tmp_path)
     apply_migration_plan(tmp_path, plan)
     _post_capture(tmp_path)
+    _record_in_post(tmp_path, "app0.py")
 
     rollback_migration(tmp_path)
 
@@ -409,13 +435,15 @@ def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
 
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
     assert ledger["schema"] == "pymolt.apply_ledger/2"
-    [event] = ledger["events"]
-    # Previews with no recorded recipe chain: the builder keeps the code change in one step
-    # (the plan's manifest pin, env-1, is not written by this apply).
+    pin, event = ledger["events"]
+    # The plan's manifest pin (decision 1) comes first; it is not code, so it has no entries.
+    assert (pin["seq"], pin["step_id"], [f["file"] for f in pin["files"]]) == (
+        1, "env-1", ["requirements.txt"])
+    # Previews with no recorded recipe chain: the builder keeps the code change in one step.
     [step] = [s for s in plan.steps if s.type in ("codemod", "python-fix")]
     assert step.do.recipe.kind == "whole-file"
     assert (event["seq"], event["event"], event["run_id"], event["step_id"], event["wrote"]) == (
-        1, "apply", plan.plan_id, step.id, True)
+        2, "apply", plan.plan_id, step.id, True)
     assert [f["file"] for f in event["files"]] == ["app0.py", "app1.py"]
     assert event["files"][0]["after"] == plan.changes[0].new_sha256
     entries = ledger["entries"]
@@ -424,7 +452,7 @@ def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
     written = (tmp_path / "app0.py").read_text().splitlines()
     a, b = entry["new_lines"]
     assert "werkzeug.utils" in "\n".join(written[a - 1:b])
-    assert (entry["epoch"], entry["run_id"], entry["step_id"]) == (1, plan.plan_id, step.id)
+    assert (entry["epoch"], entry["run_id"], entry["step_id"]) == (2, plan.plan_id, step.id)
     assert entry["anchor_new"]["stmt"] == "from werkzeug.utils import safe_join"
     assert entry["anchor_old"]["stmt"] == "from flask.helpers import safe_join"
     assert (entry["kind"], entry["rule"], entry["old_symbol"], entry["new_symbol"]) == (
@@ -451,22 +479,28 @@ def test_apply_again_on_an_applied_plan_is_a_no_op_that_says_so(tmp_path):
     assert MigrationReceipt.load(tmp_path) == first
 
 
-def test_apply_again_after_a_later_edit_refuses_and_points_at_rollback(tmp_path):
-    """The old message called the plan stale and its hint led to a second, stacked plan."""
+def test_apply_again_after_a_later_edit_is_a_no_op_that_names_the_hand_edit(tmp_path):
+    """Design 4.1 row 4: a step in effect is a no-op. The edit made since is the person's:
+    nothing is written over it, and the summary says verify judges it as a hand edit."""
+    from pymolt.workorder.apply import apply_steps
+
     plan = _plan(tmp_path)
-    apply_migration_plan(tmp_path, plan)
+    first = apply_migration_plan(tmp_path, plan)
     path = tmp_path / "app0.py"
     path.write_text(path.read_text(encoding="utf-8") + "# later edit\n", encoding="utf-8")
 
-    with pytest.raises(MigrationConflictError, match="already applied") as caught:
-        apply_migration_plan(tmp_path, plan)
+    again = apply_steps(tmp_path, plan)
 
-    assert "stale" not in str(caught.value)
-    assert "rollback" in caught.value.hint and "stack" in caught.value.hint
+    assert again.outcome == "already_applied" and again.applied == []
+    assert again.noop == [s.id for s in plan.steps if s.executor == "pymolt"]
+    assert any("app0.py changed since" in note and "hand edits" in note for note in again.notes)
     assert path.read_text(encoding="utf-8").endswith("# later edit\n")
+    assert MigrationReceipt.load(tmp_path) == first
 
 
-def test_a_rolled_back_plan_applies_again_as_a_new_run(tmp_path):
+def test_a_rolled_back_plan_applies_again_in_its_run_with_a_new_epoch(tmp_path):
+    """Design 4.1 row 7: a rolled-back step applies again in the same run; its old epoch stays
+    ended."""
     import json
 
     plan = _plan(tmp_path, files=2)
@@ -476,38 +510,44 @@ def test_a_rolled_back_plan_applies_again_as_a_new_run(tmp_path):
     again = apply_migration_plan(tmp_path, plan)
 
     assert again.outcome == "applied" and again.status == "applied"
-    assert again.run_id != first.run_id and again.plan_id == plan.plan_id
+    assert again.run_id == first.run_id == plan.plan_id
     for index, change in enumerate(plan.changes):
         assert (tmp_path / f"app{index}.py").read_text(encoding="utf-8") == change.new_source
     run_dir = tmp_path / ".pymolt" / "migrations" / again.run_id
     state = json.loads((run_dir / "state.json").read_text())
-    assert (state["status"], state["plan_id"], state["attempt"]) == ("applied", plan.plan_id, 2)
+    assert (state["status"], state["attempt"]) == ("applied", 1)
     assert MigrationPlan.load(tmp_path, run_dir / "plan.json") == plan
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
-    assert [(e["event"], e["run_id"], e.get("restored")) for e in ledger["events"]] == [
-        ("apply", first.run_id, None), ("rollback", first.run_id, True),
-        ("apply", again.run_id, None)]
-    # The first run stays rolled back; the default rollback undoes the run in effect.
-    with pytest.raises(MigrationConflictError, match="not rollback-ready"):
-        rollback_migration(tmp_path, run_id=first.run_id)
+    pin, code = [s.id for s in plan.steps if s.executor == "pymolt"]
+    assert [(e["seq"], e["event"], e["step_id"], e.get("restored"))
+            for e in ledger["events"]] == [
+        (1, "apply", pin, None), (2, "apply", code, None), (3, "rollback", code, True),
+        (4, "rollback", pin, True), (5, "apply", pin, None), (6, "apply", code, None)]
+    assert {e["run_id"] for e in ledger["events"]} == {first.run_id}
+    assert {k.split(":")[1]: s.epoch for k, s in again.steps.items()} == {pin: 5, code: 6}
+    assert [r.run_id for r in again.runs] == [first.run_id]
     _plan_again, _at, rolled = rollback_migration(tmp_path)
-    assert rolled == again.run_id
+    assert rolled == first.run_id
     assert (tmp_path / "app0.py").read_text(encoding="utf-8") == plan.changes[0].old_source
+    with pytest.raises(MigrationConflictError, match="not rollback-ready"):
+        rollback_migration(tmp_path)
     third = apply_migration_plan(tmp_path, plan)
-    assert third.run_id not in (first.run_id, again.run_id)
+    assert third.run_id == first.run_id
     assert apply_migration_plan(tmp_path, plan).outcome == "already_applied"
 
 
 def test_re_apply_after_rollback_refuses_a_file_changed_since(tmp_path):
+    """The plan's whole-file step cannot be applied to another text (no recorded recipe)."""
     plan = _plan(tmp_path)
     apply_migration_plan(tmp_path, plan)
     rollback_migration(tmp_path)
     path = tmp_path / "app0.py"
     path.write_text("# user edit\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
 
-    with pytest.raises(MigrationConflictError, match="source changed after planning"):
+    with pytest.raises(MigrationConflictError, match="stale migration plan") as caught:
         apply_migration_plan(tmp_path, plan)
 
+    assert "app0.py" in str(caught.value) and "whole-file" in str(caught.value)
     assert path.read_text(encoding="utf-8").startswith("# user edit")
 
 

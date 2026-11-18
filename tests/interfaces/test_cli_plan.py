@@ -113,7 +113,7 @@ def test_plan_apply_rollback_cli_lifecycle(tmp_path, monkeypatch):
     reapplied = runner.invoke(app, ["apply", str(tmp_path)])
 
     assert reapplied.exit_code == 0, reapplied.output
-    assert "Migration applied" in reapplied.output and " as run " in reapplied.output
+    assert "Migration applied" in reapplied.output and " as run " not in reapplied.output
     assert "werkzeug.utils" in source_path.read_text(encoding="utf-8")
 
 
@@ -145,6 +145,11 @@ def test_rollback_json_says_what_became_of_the_post_migration_capture(tmp_path, 
         tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
         command=[sys.executable, str(script)], target="json",
     )
+    kept = runner.invoke(app, ["rollback", str(tmp_path), "--step", "env-1", "--json"])
+    assert kept.exit_code == 0, kept.output
+    # The pin is not code: the capture still describes every file it recorded.
+    assert json.loads(kept.stdout)["post_migration_capture"] == "kept"
+    _record_in_post(tmp_path, "app.py")
 
     result = runner.invoke(app, ["rollback", str(tmp_path), "--json"])
 
@@ -153,6 +158,24 @@ def test_rollback_json_says_what_became_of_the_post_migration_capture(tmp_path, 
     assert payload["files_restored"] == 1
     assert payload["post_migration_capture"] == "set_aside"
     assert "/archive/" in payload["post_migration_trace"]
+
+
+def _record_in_post(root, *names):
+    """The post-migration capture as one that had facts in ``names``: its source snapshot
+    records their text (a real capture records the files whose calls it saw)."""
+    import gzip
+    import hashlib
+    import json as _json
+
+    slot = verify_service.load_contract_state(root).post_migration
+    with gzip.open(slot.sources_path, "rt", encoding="utf-8") as fh:
+        data = _json.load(fh)
+    for name in names:
+        text = (root / name).read_text(encoding="utf-8")
+        data["files"][name] = {"sha256": hashlib.sha256(text.encode()).hexdigest(),
+                               "text": text}
+    with gzip.open(slot.sources_path, "wt", encoding="utf-8") as fh:
+        _json.dump(data, fh)
 
 
 def test_plan_json_is_machine_readable(tmp_path, monkeypatch):
@@ -323,8 +346,10 @@ def test_apply_of_a_plan_with_no_files_says_it_changed_nothing(tmp_path, monkeyp
     applied = runner.invoke(app, ["apply", str(tmp_path)])
 
     assert applied.exit_code == 0, applied.output
-    assert "it changed no file" in applied.output
+    assert "it changed no source file" in applied.output
+    assert "env-1 pinned the target versions in requirements.txt" in applied.output
     assert "Migration applied" not in applied.output
+    assert (tmp_path / "requirements.txt").read_text() == "flask==3.0.0\n"
 
 
 def test_plan_agent_prints_a_json_failure_when_the_resolver_fails(tmp_path, monkeypatch):

@@ -849,6 +849,18 @@ def apply_plan_cmd(
     plan_file: str | None = typer.Option(
         None, "--plan", help="Plan file (default: .pymolt/migration_plan.json)"
     ),
+    step: str | None = typer.Option(
+        None, "--step", help="Apply this step only (its dependencies must be in effect)"),
+    through: str | None = typer.Option(
+        None, "--through",
+        help="Apply every pymolt step up to this one that is not in effect"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Check and show the diff that would be written; write nothing"),
+    skip: bool = typer.Option(
+        False, "--skip", help="With --step and --reason: mark the step skipped"),
+    reason: str | None = typer.Option(None, "--reason", help="Why the step is skipped"),
+    brief: bool = typer.Option(
+        False, "--brief", help="With --step: print the step's brief; write nothing"),
     allow_no_baseline: bool = typer.Option(
         False,
         "--allow-no-baseline",
@@ -860,12 +872,14 @@ def apply_plan_cmd(
              "the write; undo the write if it breaks an import",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the receipt as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Apply the saved plan. Keeps the original files for `pymolt rollback`.
+    """Apply the saved plan's pymolt steps. Keeps the original files for `pymolt rollback`.
 
-    Refuses the plan if a planned file changed since `pymolt plan`, if the
-    baseline capture is missing or does not match the project, or if the plan's
-    new source does not compile on the target Python.
+    With no option, every pymolt step whose dependencies are in effect, in one transaction.
+    A step already in effect is a no-op. Refuses a stale step (its statements are gone), a
+    baseline that does not match the project, or new source that does not compile on the
+    target Python; nothing is written then.
     """
     import json
 
@@ -875,10 +889,11 @@ def apply_plan_cmd(
         MigrationEvidenceError,
         MigrationPlan,
         MigrationPlanError,
-        apply_migration_plan,
         plan_path,
     )
+    from pymolt.workorder.apply import StepRefusal, apply_steps, skip_step
 
+    json_output = json_output or agent
     project_path = require_project_dir(project_dir, json_output=json_output)
     migration_plan = MigrationPlan.load(project_path, plan_file)
     if migration_plan is None:
@@ -887,10 +902,20 @@ def apply_plan_cmd(
             hint="Create a fresh plan with `pymolt plan .`.",
             json_output=json_output,
         )
+    if (brief or skip) and not step:
+        fail(f"--{'brief' if brief else 'skip'} needs --step ID", json_output=json_output)
+    if reason and not skip:
+        fail("--reason goes with --skip", json_output=json_output)
+    if brief:
+        _print_brief(migration_plan, step, project_path, agent=agent)
+        return
     try:
-        receipt = apply_migration_plan(
-            project_path, migration_plan, allow_no_baseline=allow_no_baseline, smoke=smoke
-        )
+        if skip:
+            result = skip_step(project_path, migration_plan, step, reason or "", agent=agent)
+        else:
+            result = apply_steps(project_path, migration_plan, step=step, through=through,
+                                 dry_run=dry_run, allow_no_baseline=allow_no_baseline,
+                                 smoke=smoke, agent=agent)
     except MigrationCheckError as exc:
         if not json_output:
             console.print(f"[dim]Self-check: {escape(exc.check.summary())}[/dim]")
@@ -907,11 +932,13 @@ def apply_plan_cmd(
             json_output=json_output,
         )
     except MigrationConflictError as exc:
+        refused = getattr(exc, "refused", None) if isinstance(exc, StepRefusal) else None
         fail(
             f"migration plan conflicts with current state: {exc}",
             hint=exc.hint or "Review current files/run state and regenerate the plan if needed.",
             code=EXIT_USAGE,
             json_output=json_output,
+            extra={"refused": refused} if refused else None,
         )
     except (MigrationPlanError, OSError, RuntimeError) as exc:
         fail(
@@ -924,40 +951,121 @@ def apply_plan_cmd(
 
     advisories = [item.model_dump(mode="json") for item in migration_plan.advisories]
     manual = [item.model_dump(mode="json") for item in migration_plan.manual]
-    if json_output:
-        typer.echo(json.dumps({**receipt.model_dump(mode="json"), "outcome": receipt.outcome,
-                               "advisories": advisories, "manual": manual}, indent=2))
+    receipt = result.receipt
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.apply_view(result, migration_plan)))
         return
-    plan_label = f"[bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]"
-    if receipt.run_id != migration_plan.plan_id:
-        plan_label += f" as run [bold cyan]{receipt.run_id[:8]}[/bold cyan]"
-    if receipt.outcome == "already_applied":
+    if json_output:
+        payload = {**(receipt.model_dump(mode="json") if receipt is not None else {}),
+                   "outcome": result.outcome,
+                   **result.model_dump(mode="json", exclude={"receipt", "outcome"}),
+                   "advisories": advisories, "manual": manual}
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    _render_apply(result, migration_plan, project_path)
+    _render_left_to_you(migration_plan)
+    next_step(project_path)
+
+
+def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None:
+    from pymolt.workorder.render import brief_data, brief_markdown
+
+    target = plan.step(step_id)
+    if target is None:
+        fail(f"unknown step {step_id}: the plan has "
+             + (", ".join(s.id for s in plan.steps) or "no step"), json_output=agent)
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(brief_data(plan, target, project_path)))
+        return
+    typer.echo(brief_markdown(plan, target, project_path), nl=False)
+
+
+def _render_apply(result, plan, project_path: Path) -> None:
+    """The apply summary: what was applied (re-based steps marked), each step's checks, and
+    the steps that remain, by status."""
+    receipt = result.receipt
+    plan_label = f"[bold cyan]{plan.plan_id[:8]}[/bold cyan]"
+    if result.run_id and result.run_id != plan.plan_id:
+        plan_label += f" as run [bold cyan]{result.run_id[:8]}[/bold cyan]"
+    titles = {s.id: s.title for s in plan.steps}
+    if result.outcome == "dry_run":
         console.print(Panel(
-            f"Plan {plan_label} is already applied "
-            f"(at {receipt.applied_at}): its {len(receipt.files_changed)} file(s) still hold "
-            "the plan's changes. [bold]Nothing was written.[/bold]",
+            f"Dry run of plan {plan_label}: [bold]nothing was written[/bold].\n"
+            f"Would apply: {escape(', '.join(_marked(result)) or 'nothing')}\n"
+            f"Files: {len(result.files)}",
+            title="Dry run", border_style="cyan", expand=False))
+        for item in result.diff:
+            console.print(escape(item["diff"]), end="", markup=False, highlight=False)
+    elif result.outcome == "skipped":
+        console.print(Panel(
+            f"Skipped step [bold]{escape(', '.join(result.skipped))}[/bold] of plan "
+            f"{plan_label}. Its dependents stay blocked. [bold]Nothing was written.[/bold]",
+            title="Step skipped", border_style="yellow", expand=False))
+    elif result.outcome == "already_applied":
+        files = len(receipt.files_changed) if receipt is not None else 0
+        console.print(Panel(
+            f"Plan {plan_label} is already applied"
+            + (f" (at {receipt.applied_at})" if receipt is not None else "")
+            + f": its {files} file(s) still hold the plan's changes. "
+            "[bold]Nothing was written.[/bold]",
             title="Already applied", border_style="green", expand=False,
         ))
-    elif not receipt.files_changed:
+    elif result.outcome in ("present", "nothing"):
+        what = (f"the effect of {', '.join(result.present)} is already in the files, made by "
+                "hand: verify judges those lines as hand edits" if result.present
+                else "no step could be applied")
+        console.print(Panel(
+            f"Plan {plan_label}: {escape(what)}. [bold]Nothing was written.[/bold]",
+            title="Nothing applied", border_style="yellow", expand=False))
+    elif receipt is not None and not plan.changes:
+        pins = [f"{sid} pinned the target versions in {', '.join(by.files)}"
+                for sid in result.applied if (by := plan.step(sid)) is not None
+                and by.type == "manifest-pin"]
         console.print(Panel(
             f"Applied plan {plan_label}: "
-            "[bold]it changed no file[/bold] (0 files, 0 rewrite sites).\n"
-            "No call site needed a rewrite; the dependency moves still need testing: "
+            "[bold]it changed no source file[/bold] (0 files, 0 rewrite sites).\n"
+            + "".join(f"{escape(p)}.\n" for p in pins)
+            + "No call site needed a rewrite; the dependency moves still need testing: "
             "capture and verify decide.",
             title="Nothing to change", border_style="yellow", expand=False,
         ))
     else:
+        files = len(receipt.files_changed) if receipt is not None else len(result.files)
+        sites = receipt.patterns_applied if receipt is not None else 0
         console.print(Panel(
-            f"Applied plan {plan_label}\n"
-            f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
-            f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
+            f"Applied plan {plan_label}: "
+            f"[bold]{escape(', '.join(_marked(result)))}[/bold]\n"
+            f"Files changed: [bold]{files}[/bold]   rewrite sites: [bold]{sites}[/bold]\n"
             f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
             title="Migration applied", border_style="green", expand=False,
         ))
-    if receipt.outcome == "applied" and receipt.self_check is not None:
-        console.print(f"Self-check: {escape(receipt.self_check.summary())}")
-    _render_left_to_you(migration_plan)
-    next_step(project_path)
+        for sid in result.applied:
+            checks = result.checks.get(sid) or {}
+            console.print(f"  {escape(sid)} {escape(titles.get(sid, ''))}: "
+                          + escape(", ".join(f"{k} {v}" for k, v in checks.items())))
+    if result.self_check is not None and result.outcome in ("applied", "dry_run"):
+        console.print(f"Self-check: {escape(result.self_check.summary())}")
+    for sid, why in result.blocked.items():
+        console.print(f"[yellow]blocked[/yellow] {escape(sid)}: {escape('; '.join(why))}")
+    for note in result.notes:
+        console.print(f"[dim]note: {escape(note)}[/dim]")
+    if result.remaining:
+        by_id = {s.id: s for s in plan.steps}
+        console.print("\n[bold]Steps remaining:[/bold]")
+        for status, ids in result.remaining.items():
+            shown = ", ".join(f"{i} ({by_id[i].executor})" if i in by_id else i for i in ids)
+            console.print(f"  {escape(status)}: {escape(shown)}")
+
+
+def _marked(result) -> list[str]:
+    rebased, unwritten = set(result.rebased), set(result.unwritten)
+    return [sid + (" (re-based)" if sid in rebased else
+                   " (already at the reviewed text)" if sid in unwritten else "")
+            for sid in result.applied]
 
 
 def _render_left_to_you(plan) -> None:
@@ -981,34 +1089,39 @@ def _render_left_to_you(plan) -> None:
 def rollback(
     project_dir: str = typer.Argument(".", help="Project directory"),
     run_id: str | None = typer.Option(
-        None, "--run-id", help="Apply run to undo (default: the last)"
+        None, "--run-id", help="Apply run to undo (default: the open one)"
     ),
+    step: str | None = typer.Option(
+        None, "--step", help="Roll back this step only (it must be the last change to its files)"),
+    cascade: bool = typer.Option(
+        False, "--cascade", help="With --step: roll back the steps that depend on it first"),
     force: bool = typer.Option(
         False, "--force", help="Also discard edits made after apply"
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the result as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Undo the last apply: restore the files it changed.
+    """Undo the open run's apply: restore the files its steps changed.
 
-    Refuses if a file was edited after apply, unless --force.
+    Refuses if a file was edited after apply, unless --force. --step rolls back one step,
+    when it is the last change to its files.
     """
     import json
 
-    from pymolt.migration_plan import (
-        MigrationConflictError,
-        MigrationPlanError,
-        rollback_migration,
-    )
+    from pymolt.migration_plan import MigrationConflictError, MigrationPlanError
+    from pymolt.workorder.rollback import rollback_steps
 
+    json_output = json_output or agent
     project_path = require_project_dir(project_dir, json_output=json_output)
     try:
-        migration_plan, rolled_back_at, rolled_run = rollback_migration(
-            project_path, run_id=run_id, force=force
-        )
+        result = rollback_steps(project_path, run_id=run_id, step=step, force=force,
+                                cascade=cascade, agent=agent)
+        migration_plan, rolled_back_at, rolled_run = (result.plan, result.rolled_back_at,
+                                                      result.run_id)
     except MigrationConflictError as exc:
         fail(
             f"migration rollback conflicts with current state: {exc}",
-            hint="Post-apply edits are preserved unless you explicitly pass --force.",
+            hint=exc.hint or "Post-apply edits are preserved unless you explicitly pass --force.",
             code=EXIT_USAGE,
             json_output=json_output,
         )
@@ -1019,22 +1132,14 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
-    from pymolt.verify.service import load_contract_state, set_aside_capture
-
-    # What became of the post-migration capture: kept while the code it recorded is still on
-    # disk (the run had changed no file), set aside (kept among the diagnostics) otherwise.
-    contract = load_contract_state(project_path)
-    aside = set_aside_capture(contract)
-    post, post_trace = None, None
-    if contract.post_migration is not None:
-        post, post_trace = "kept", contract.post_migration.trace_path
-    elif aside is not None and aside.set_aside_by == rolled_run:
-        post, post_trace = "set_aside", aside.trace_path
+    post, post_trace = result.post, result.post_trace
     payload = {
         "run_id": rolled_run,
         "plan_id": migration_plan.plan_id,
         "rolled_back_at": rolled_back_at,
-        "files_restored": len(migration_plan.changes),
+        "files_restored": len(result.files_restored),
+        "steps": result.steps,
+        "kept": result.kept,
         "post_migration_capture": post,
         "post_migration_trace": post_trace,
     }
@@ -1042,12 +1147,15 @@ def rollback(
         typer.echo(json.dumps(payload, indent=2))
         return
     post_line = {
-        "kept": "\nPost-migration capture: kept (the run had changed no file)",
+        "kept": "\nPost-migration capture: kept (it did not record the code rolled back)",
         "set_aside": f"\nPost-migration capture: set aside, kept at {post_trace}",
     }.get(post or "", "")
+    kept = (f" (kept in effect: {', '.join(result.kept)}, it changed no file)"
+            if result.kept else "")
     console.print(Panel(
         f"Rolled back run [bold cyan]{rolled_run[:8]}[/bold cyan]\n"
-        f"Files restored: [bold]{len(migration_plan.changes)}[/bold]{escape(post_line)}",
+        f"Steps: {escape(', '.join(result.steps + result.kept) or 'none')}{escape(kept)}\n"
+        f"Files restored: [bold]{len(result.files_restored)}[/bold]{escape(post_line)}",
         title="Migration rolled back", border_style="yellow", expand=False,
     ))
     next_step(project_path)

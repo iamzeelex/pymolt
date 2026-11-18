@@ -105,24 +105,25 @@ def test_a_plan_applied_on_top_of_an_open_run_closes_it_and_both_stay_in_effect(
     assert service._applied_plan_impact_targets(tmp_path) == ["a.h", "a.f"]
 
 
-def test_a_rolled_back_attempt_leaves_the_chain_when_the_plan_applies_again(tmp_path):
+def test_a_rolled_back_step_applies_again_in_its_run(tmp_path):
+    """Design 4.1 row 7: the run stays open and in the chain; the step gets epoch 3."""
     plan = _plan(tmp_path, T0, T1, _pattern("a.f", "a.g"))
     first = apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
     rollback_migration(tmp_path)
     again = apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
 
     receipt = MigrationReceipt.load(tmp_path)
-    assert [(r.run_id, r.closed) for r in receipt.runs] == [
-        (first.run_id, True), (again.run_id, False)]
-    assert receipt.chain_run_ids() == [again.run_id]
+    assert again.run_id == first.run_id
+    assert [(r.run_id, r.closed) for r in receipt.runs] == [(first.run_id, False)]
+    assert receipt.chain_run_ids() == [first.run_id]
     [step_id] = [s.id for s in plan.steps if s.executor == "pymolt"]
-    assert receipt.steps[f"{again.run_id}:{step_id}"].epoch == 3
+    assert receipt.steps[f"{first.run_id}:{step_id}"].epoch == 3
     entries, _note, _ = in_effect_entries(tmp_path, receipt)
     assert {e.epoch for e in entries} == {3}
 
 
 def test_progress_counts_every_pymolt_step_of_the_plan(tmp_path):
-    """A pymolt step the whole-plan apply does not write (a manifest pin) leaves it partial."""
+    """A pymolt step apply cannot write (a manifest pin with no edit) leaves it partial."""
     from pymolt.workorder.models import ManifestPin, PlanStep, StepDo, StepRecipe
 
     plan = _plan(tmp_path, T0, T1, _pattern("a.f", "a.g"))

@@ -69,6 +69,33 @@ def _line_key(line: str) -> str:
     return hashlib.sha1(("req|" + " ".join(line.split())).encode()).hexdigest()[:16]
 
 
+def line_key(line: str) -> str:
+    """A requirements line's key: its text with whitespace runs collapsed (the effect of a
+    ``manifest-pin`` step is over these)."""
+    return _line_key(line)
+
+
+def rewrite_pins(text: str, pins: Iterable[ManifestPin]) -> tuple[str, int]:
+    """``text`` with each pin's line rewritten (re-basing, design 3.2 rule 3): the one line
+    whose key is the pin's old line's key, wherever it moved, gets the pin's new line with its
+    own line ending. Returns ``(text, pins rewritten)``; a pin whose old line is missing or not
+    unique is left out."""
+    lines = split_lines(text)
+    keys = [_line_key(line) for line in lines]
+    done = 0
+    for pin in pins:
+        found = [n for n, key in enumerate(keys) if key == _line_key(pin.old)]
+        if len(found) != 1:
+            continue
+        n = found[0]
+        line = lines[n]
+        ending = line[len(line.rstrip("\r\n")):]
+        lines[n] = pin.new.rstrip("\r\n") + ending
+        keys[n] = _line_key(lines[n])
+        done += 1
+    return "".join(lines), done
+
+
 def manifest_pins(source: str, pins: dict[str, str]
                   ) -> tuple[list[ManifestPin], list[tuple[int, str, str]]]:
     """``(pins pymolt writes, [(line, text, target pin)] for a person)`` over ``source``."""

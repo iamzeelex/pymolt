@@ -119,8 +119,30 @@ Each step also says how it will be judged and how big it is:
   change, the first site's statement, and pitfalls such as the warnings the baseline recorded
   there. Text from dependencies and from your code is data, not instructions.
 
+`apply` writes the pymolt steps (`apply --step ID` one, `apply --through ID` those up to one),
+in plan order, on the text the steps before it left. For each file a step changes:
+1. the file is at the step's reviewed before-text: it gets the plan's after-text;
+2. it is at the reviewed after-text already: nothing is written, and the step gets its epoch;
+3. the file moved on (an earlier step skipped or rolled back, an edit elsewhere, a reformat), but
+   every statement the step rewrites is still there, found by its anchor: the step's recipe runs
+   again at those statements, and its result is written when it makes the same change there
+   as the reviewed one and changes no other statement. The step is re-based;
+4. the step's old statements are gone, but its new ones stand in their place, between the same
+   neighbours, with every import it adds at module level: the step is `present`. Nothing is
+   written and no epoch recorded, so verify judges those lines as hand edits;
+5. anything else: the step is stale, and the command names each statement it lost, or says
+   that its recipe now makes another change there.
+
+So one stale step costs that step, not a re-plan: later steps that do not depend on it still
+apply, re-based where their lines moved.
+
+A step depends on the steps it builds on (`depends_on`); `apply .` leaves out a step whose
+dependency is not in effect, and `--step` refuses it. `apply --step ID --skip --reason TEXT`
+declines a step: it stays out, and so do its dependents.
+
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
-reason in the step's `why.evidence`. A plan saved by an earlier pymolt (`"schema_version": 1`)
+reason in the step's `why.evidence`. Such a step applies only to its own two texts: it has no
+recipe to run again. A plan saved by an earlier pymolt (`"schema_version": 1`)
 is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema.json`.
 
 ### PLAN.md
@@ -149,8 +171,14 @@ The plan's first steps, the `env` phase, name the bump:
   (pyproject, poetry, conda);
 - a `target-env` step for a person, with the commands that build the target environment.
 
-`apply` writes source only: it does not write the pin step. Moving the project's manifest to the
-target versions is yours to do:
+`apply` writes the pymolt pin step first: it rewrites those lines to the target's pins, records
+the step in the ledger with the manifest's text before and after, and `pymolt rollback` puts the
+lines back. A pin line that moved since the plan (a line added above it) is still found and
+rewritten; a manifest that already holds the target's pins on those lines is recorded as it is.
+Installs and environment builds stay with you (the `target-env` step).
+
+The person step is yours, and so is the bump when you apply steps one by one and want it at
+another time:
 - **After `plan`.** The plan compares the project's manifest with the target manifest. With the
   pins already bumped, a package the baseline did not record shows no move.
 - **Before the post-migration capture.** That capture must match the project as it is then; a bump
