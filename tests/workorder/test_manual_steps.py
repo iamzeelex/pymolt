@@ -4,6 +4,8 @@ advisories and compile findings become steps too."""
 
 from __future__ import annotations
 
+import pytest
+
 from pymolt.codemods.apply import preview_rules_repo
 from pymolt.codemods.client import DependencyMigration
 from pymolt.codemods.models import recipe_key
@@ -11,8 +13,12 @@ from pymolt.codemods.rules import CodemodRule
 from pymolt.migration_plan import PlannedAdvisory, PlannedManualItem, create_migration_plan
 from pymolt.verify.facts import CallWarning
 from pymolt.verify.predict import PredictedRisk, PredictionReport, RiskSite, RiskTier
+from pymolt.workorder.apply import StepRefusal
 from pymolt.workorder.builder import StepRecorder
-from pymolt.workorder.manual import link_and_manual_steps
+from pymolt.workorder.manual import T0, link_and_manual_steps
+from pymolt.workorder.record import check_claim
+from pymolt.workorder.render import brief_data, plan_markdown
+from pymolt.workorder.verify_effort import finish_steps
 from tests.workorder.test_step_builder import APPEND, _project, _pymolt, _walk
 from tests.workorder.test_step_builder import _plan as builder_plan
 
@@ -80,7 +86,8 @@ def test_every_risk_gets_a_step(tmp_path):
     assert sig.why.baseline.calls == 4 and sig.why.baseline.sites == 2
     assert [a.stmt for a in sig.where] == ["return df.ix[0]"]     # the static site has no line
     assert (sig.claim, sig.basis, sig.package, sig.from_, sig.to) == (
-        "preserve", "manual", "pandas", "1.5.3", "2.2.3")
+        "intended", "manual", "pandas", "1.5.3", "2.2.3")       # removed: another object
+    assert by_id["beh-1"].claim == "preserve"
     assert sig.title == "`DataFrame.ix`: removed in pandas 2.2.3"
     assert sig.do.manual.summary.startswith("No successor is known")
     assert imp.step_id == "sig-1" and by_id["sig-1"].scope == "python"
@@ -155,3 +162,127 @@ def test_a_plans_advisories_name_their_rule(tmp_path):
     assert plan.advisories[0].rule == recipe_key(LOOKUP)
     (step,) = plan.steps
     assert (step.type, step.executor, step.files) == ("manual-rewrite", "agent", ["m.py"])
+
+
+# ── the default claim follows the successor kind (owner decision 2026-11-18) ──────────────
+
+#: name -> (scope, symbol, fact or None, expected claim, expected expect, words in why.claim)
+KINDS = {
+    "moved": ("dependency", "pandas.util.testing.assert_series_equal",
+              {"kind": "MOVED", "successor": "pandas.testing.assert_series_equal",
+               "evidence": ["existence",
+                            "same object reachable as pandas.testing.assert_series_equal"]},
+              "preserve", None, "same object as `pandas.testing.assert_series_equal` (MOVED)"),
+    "signature": ("dependency", "pandas.read_csv",
+                  {"kind": "SIGNATURE", "param": "squeeze", "old": "POSITIONAL_OR_KEYWORD"},
+                  "preserve", None, "stays the same object; only its signature changes"),
+    "rebound": ("dependency", "pandas.io.json.json_normalize",
+                {"kind": "SIGNATURE", "param": "meta", "evidence": [
+                    "signature", "rebound: pandas.io.json.json_normalize -> "
+                                 "pandas.io.json._normalize.json_normalize"]},
+                "intended", "representation", "now names another object"),
+    "removed": ("dependency", "pandas.DataFrame.ix", {"kind": "REMOVED", "successor": None},
+                "intended", "representation", "removed and the same object is reachable "
+                                              "nowhere else (REMOVED), so its successor is"),
+    "removed with a successor": ("dependency", "pandas.DataFrame.iteritems",
+                                 {"kind": "REMOVED", "successor": "pandas.DataFrame.items"},
+                                 "intended", "representation",
+                                 "its successor `pandas.DataFrame.items` is another object"),
+    "deprecated with a successor": ("dependency", "pandas.DataFrame.swapaxes",
+                                    {"kind": "DEPRECATED", "successor": "pandas.DataFrame.T"},
+                                    "intended", "representation",
+                                    "names `pandas.DataFrame.T` as the successor of the "
+                                    "deprecated `DataFrame.swapaxes` (DEPRECATED)"),
+    "deprecated": ("dependency", "pandas.DataFrame.applymap",
+                   {"kind": "DEPRECATED", "successor": None}, "preserve", None,
+                   "not loosened for lack of evidence: the delta names no successor"),
+    "default": ("dependency", "pandas.DataFrame.mean",
+                {"kind": "DEFAULT", "param": "numeric_only", "old": "None", "new": "False"},
+                "preserve", None, "a behaviour change"),
+    "warned": ("dependency", "pandas.DataFrame.sum", None, "preserve", None,
+               "a behaviour change"),
+    "python removed": ("python", "inspect.getargspec", {"kind": "REMOVED"}, "intended",
+                       "representation", "so its successor is another object"),
+    "python behaviour": ("python", "re.sub", {"kind": "BEHAVIOR"}, "preserve", None,
+                         "a behaviour change"),
+    "python, no fact kind": ("python", "SyntaxWarning", {"kind": None}, "preserve", None,
+                             "not loosened for lack of evidence: no delta fact about a "
+                             "successor"),
+}
+
+
+def test_the_default_claim_follows_the_kind_of_successor(tmp_path):
+    root, plan = _automated(tmp_path)
+    risks = []
+    for i, (scope, symbol, fact, *_rest) in enumerate(KINDS.values()):
+        risks.append(_risk(symbol, "app.py", 11, "frame", scope=scope,
+                           package=None if scope == "python" else "pandas",
+                           fact=None if fact is None else {"symbol": symbol, **fact},
+                           rid=f"{i:012d}"))
+    report = PredictionReport(risks=risks)
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=report,
+                                  manual_items=[], advisories=[], compile_findings=[],
+                                  dependencies=PANDAS, python_move=("3.11", "3.12"))
+    by_id = {s.id: s for s in steps}
+    for risk, (name, (*_head, claim, expect, words)) in zip(report.risks, KINDS.items(),
+                                                            strict=True):
+        step = by_id[risk.step_id]
+        got = (step.claim, step.basis, step.verify.expect, step.verify.judge)
+        judge = "strict" if claim == "preserve" else "expectation"
+        assert got == (claim, "manual", expect, judge), name
+        assert words in step.why.claim, (name, step.why.claim)
+
+
+def test_rules_and_compile_findings_keep_preserve_and_say_why(tmp_path):
+    root, plan = _automated(tmp_path)
+    items = [PlannedManualItem(path="app.py", lines=[11], sites=1,
+                               rule="template:$DF.ix[$K]→$DF.loc[$K]", reason="not applied")]
+    advisories = [PlannedAdvisory(path="app.py", line=7, column=11, severity="precondition",
+                                  reason="applied, but requires x", rule=recipe_key(APPEND))]
+    findings = [{"file": "app.py", "line": 14, "kind": "SyntaxWarning",
+                 "message": "invalid escape sequence '\\d'", "base": None}]
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=None,
+                                  manual_items=items, advisories=advisories,
+                                  compile_findings=findings, python_move=("3.11", "3.12"))
+    manual = {s.type: s for s in steps if s.executor != "pymolt"}
+    assert {t: (s.claim, s.verify.judge, s.verify.expect) for t, s in manual.items()} == {
+        "manual-rewrite": ("preserve", "strict", None),
+        "python-manual": ("preserve", "strict", None),
+        "review": ("preserve", "strict", None)}
+    assert manual["manual-rewrite"].why.claim.startswith("not loosened for lack of evidence")
+    assert manual["python-manual"].why.claim.startswith("not loosened for lack of evidence")
+    assert "pymolt's rewrite" in manual["review"].why.claim
+
+
+def test_a_plan_keeps_the_representation_expectation_and_shows_why(tmp_path):
+    """The whole plan build: ``finish_steps`` keeps the expectation, PLAN.md and the brief
+    show the claim with its reason, and a recorded edit starts from it."""
+    root, plan = _automated(tmp_path)
+    risks = PredictionReport(risks=[_risk(
+        "pandas.DataFrame.iteritems", "app.py", 11, "frame",
+        fact={"kind": "REMOVED", "symbol": "pandas.DataFrame.iteritems",
+              "successor": "pandas.DataFrame.items"})])
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=risks,
+                                  manual_items=[], advisories=[], compile_findings=[],
+                                  dependencies=PANDAS)
+    finish_steps(steps, risks, root=root, t0=T0(root, plan.changes))
+    step = next(s for s in steps if s.executor == "agent")
+    assert (step.claim, step.verify.judge, step.verify.expect) == (
+        "intended", "expectation", "representation")
+    full = plan.model_copy(update={"steps": steps})
+    md = plan_markdown(full)
+    assert f"| {step.id} | " in md and "| agent | intended (representation) |" in md
+    assert "- **Claim:** intended (representation). The delta shows `DataFrame.iteritems` " \
+           "is removed" in md
+    assert "a change of type or representation only is drift" in md
+    data = brief_data(full, step, root)
+    assert (data["claim"], data["expect"]) == ("intended", "representation")
+    assert "is another object" in data["claim_why"]
+    assert data["constraints"][0].startswith("Keep the value of every call at these sites")
+    # An agent's record carries the step's claim and expectation; it may tighten them only.
+    assert check_claim(step, claim=None, expect=None, attested=False)[:2] == (
+        "intended", "representation")
+    assert check_claim(step, claim="preserve", expect=None, attested=False)[:2] == (
+        "preserve", None)
+    with pytest.raises(StepRefusal, match="loosens it"):
+        check_claim(step, claim=None, expect="any", attested=False)

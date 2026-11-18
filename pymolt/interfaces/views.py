@@ -756,10 +756,11 @@ def unknown_api_phrase(inconclusive: int, total: int) -> str:
 
 def step_row(step) -> str:
     """One step as a line: id, type, who, claim, effort, title, dependencies."""
-    from pymolt.workorder.render import clean
+    from pymolt.workorder.render import claim_label, clean
 
     deps = f" after {', '.join(step.depends_on)}" if step.depends_on else ""
-    return (f"{step.id} {step.type} [{step.executor}, {step.claim or 'no claim'}, effort "
+    claim = claim_label(step) if step.claim else "no claim"
+    return (f"{step.id} {step.type} [{step.executor}, {claim}, effort "
             f"{step.effort.size}] {clean(' '.join(step.title.split()), 160)}{deps}")
 
 

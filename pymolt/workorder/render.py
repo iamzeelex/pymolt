@@ -37,6 +37,28 @@ _JUDGE = {
     "expectation": "an expectation: a person attests the new outcome",
     "none": "no claim to judge: verify judges these lines as hand edits",
 }
+_REPRESENTATION = ("an expectation (representation): a change of type or representation only "
+                   "is drift; another value or a new raise fails until a person accepts it")
+
+
+def claim_label(step: PlanStep) -> str:
+    """The step's claim with its expectation: ``intended (representation)``, ``preserve``."""
+    if not step.claim:
+        return "none"
+    if step.claim == "intended" and step.verify.expect not in (None, "any"):
+        return f"intended ({step.verify.expect})"
+    return step.claim
+
+
+def _sentence(text: str) -> str:
+    return (text[:1].upper() + text[1:]).rstrip(".") + "."
+
+
+def judge_text(step: PlanStep) -> str:
+    """How verify judges the step, in words."""
+    if step.verify.judge == "expectation" and step.verify.expect == "representation":
+        return _REPRESENTATION
+    return _JUDGE.get(step.verify.judge, step.verify.judge)
 
 
 # ── untrusted text ────────────────────────────────────────────────────────────────────────
@@ -148,7 +170,7 @@ def plan_markdown(plan) -> str:
     lines += ["| Step | What | Who | Claim | Sites (run / not run) | Effort | Depends on |",
               "|---|---|---|---|---|---|---|"]
     for s in main:
-        lines.append(f"| {s.id} | {_cell(s.title)} | {s.executor} | {s.claim or 'none'} "
+        lines.append(f"| {s.id} | {_cell(s.title)} | {s.executor} | {claim_label(s)} "
                      f"| {_sites_cell(s)} | {s.effort.size} "
                      f"| {', '.join(s.depends_on) or 'none'} |")
     if low:
@@ -169,7 +191,8 @@ def plan_markdown(plan) -> str:
 
 
 def _section(s: PlanStep) -> list[str]:
-    out = [f"## {s.id} · {_plain(s.title, 160)} · {s.executor} · {s.claim or 'no claim'}"]
+    out = [f"## {s.id} · {_plain(s.title, 160)} · {s.executor} · "
+           f"{claim_label(s) if s.claim else 'no claim'}"]
     if s.where:
         out.append(f"- **Where** ({len(s.where)} site(s); lines at plan time):")
         for anchor in s.where[:LIST_CAP]:
@@ -189,8 +212,10 @@ def _section(s: PlanStep) -> list[str]:
         out.append(fence(s.why.evidence, "the dependency, the delta and the baseline",
                          indent="  "))
     out += _do(s)
+    if s.why.claim:
+        out.append(f"- **Claim:** {claim_label(s)}. {_sentence(_plain(s.why.claim))}")
     n, run, not_run, unknown = _coverage(s)
-    verify = _JUDGE.get(s.verify.judge, s.verify.judge)
+    verify = judge_text(s)
     if s.phase == "env":
         verify = "no code to compare"
     elif n:
@@ -282,6 +307,10 @@ def _constraints(step: PlanStep) -> list[str]:
     if step.claim == "preserve":
         out.append("Keep the outcome of every call at these sites: pymolt compares each one "
                    "with the baseline and fails on any difference.")
+    elif step.claim == "intended" and step.verify.expect == "representation":
+        out.append("Keep the value of every call at these sites: only its type or "
+                   "representation may change (verify reports it as drift). Another value or a "
+                   "new raise fails until a person accepts it.")
     elif step.claim == "intended":
         out.append("An agent cannot make this pass: a person attests the new outcome.")
     out.append("Edit only these statements unless the brief names more; other changes are "
@@ -305,7 +334,8 @@ def brief_data(plan, step: PlanStep, root: str | Path | None = None) -> dict:
     return {
         "step": step.id,
         "goal": _plain(step.title, 160) + (f" (tier {step.why.tier})" if step.why.tier else ""),
-        "executor": step.executor, "claim": step.claim,
+        "executor": step.executor, "claim": step.claim, "expect": step.verify.expect,
+        "claim_why": _plain(step.why.claim) if step.why.claim else None,
         "where": _resolved(step, root_path, python),
         "where_total": len(step.where),
         "do": {
@@ -342,7 +372,9 @@ def brief_markdown(plan, step: PlanStep, root: str | Path | None = None) -> str:
     """The step's brief as markdown: the same content, data in fences."""
     data = brief_data(plan, step, root)
     lines = [f"# Step {step.id}: {data['goal']}", "",
-             f"Who: {step.executor}. Claim: {step.claim or 'none'}.", "", "## Where"]
+             f"Who: {step.executor}. Claim: {claim_label(step)}."
+             + (f" {_sentence(data['claim_why'])}" if data["claim_why"] else ""), "",
+             "## Where"]
     for w in data["where"]:
         where = (f"line {w['line']}" if w["line"] else f"{w['status']}: {w['reason']}")
         lines.append(f"- {_plain(w['file'])}, `{_plain(w['func'])}()`, {where}:")
@@ -361,7 +393,7 @@ def brief_markdown(plan, step: PlanStep, root: str | Path | None = None) -> str:
     if items:
         lines.append(fence(items, "the dependency, your code and the baseline"))
     lines += ["", "## Constraints", *(f"- {c}" for c in data["constraints"]), "", "## Verify",
-              f"- {_JUDGE.get(step.verify.judge, step.verify.judge)}."]
+              f"- {judge_text(step)}."]
     for s in data["verify"]["sites"]:
         lines.append(f"- {_plain(s.get('file') or '?')} `{_plain(s.get('func') or '?')}()`: "
                      f"{s['coverage']}, {s['baseline_calls']} baseline call(s)")

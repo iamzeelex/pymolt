@@ -153,7 +153,10 @@ A line diff of the source each capture stored decides who edited a call's line:
   fails. A call with no partner is counted as an unverified edited site; it does not block PASS.
 
 A ledger entry is judged by its claim, whoever made the edit: pymolt, or an agent or a person
-who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls.
+who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls. A recorded
+edit carries its step's claim: `preserve`, or `intended` expecting `representation` for a step
+that moves to another object ([plan.md](plan.md#the-plan-as-steps)). `--claim` and `--expect`
+can only tighten it; loosening it needs a person's attestation.
 
 | Outcome on an edited line | hand edit | `preserve` | `intended` | `intended`, expectation attested by a person |
 |---|---|---|---|---|

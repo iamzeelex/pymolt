@@ -18,6 +18,11 @@ Each H5 item (a rule that matched but is not applied) becomes a ``manual-rewrite
 (rule, file); each rule advisory a ``manual-rewrite`` (``not-applied``) or a ``review``
 (``precondition``) step per (rule, file); the target's compile findings a ``python-manual``
 step per kind. Low BLIND risks are steps too (PLAN.md collapses them).
+
+A manual step's claim follows the kind of successor its delta fact shows (``default_claim``):
+``preserve`` for the same object, a behaviour change, or no fact about the successor;
+``intended`` with the expectation ``representation`` for another object. ``why.claim`` says
+which, so PLAN.md and the briefs show it.
 """
 
 from __future__ import annotations
@@ -283,6 +288,75 @@ def _hint(risk: Any) -> str:
     return ""
 
 
+# ── the claim a manual step defaults to ───────────────────────────────────────────────────
+#
+# Owner decision 2026-11-18: the default claim follows the kind of successor the step moves
+# to, read from the deciding delta fact only (``pymolt.delta/1``):
+# - the same object (MOVED), or the same object with a changed signature (SIGNATURE):
+#   ``preserve``. The outcome must stay the same, so any change fails;
+# - another object: REMOVED (the object is reachable nowhere in the new version, so whatever
+#   replaces it is another object), a DEPRECATED symbol whose successor the delta names, or a
+#   spelling the delta shows rebound to another object: ``intended`` with the expectation
+#   ``representation``. Verify (design 5.1) then reports a representation-only change as DRIFT
+#   and fails a different value or a new raise;
+# - a behaviour change: ``preserve``. The fix is expected to keep the old outcome;
+# - no fact about the successor (a DEPRECATED symbol with none named, a rule, a compile
+#   finding): ``preserve``, and the reason says the claim was not loosened.
+# A recorded edit starts from this claim; only a person's attestation can loosen it (record.py).
+
+REPRESENTATION = "representation"
+_NOT_LOOSENED = "not loosened for lack of evidence: "
+
+
+def _rebound(fact: Mapping[str, Any]) -> str | None:
+    for item in fact.get("evidence") or ():
+        if isinstance(item, str) and item.startswith("rebound: "):
+            return item[len("rebound: "):]
+    return None
+
+
+def default_claim(step_type: str, risk: Any | None) -> tuple[str, str | None, str]:
+    """``(claim, expect, reason)`` of an agent or person step, from the deciding delta fact of
+    its lead risk (``None`` for a step made from a rule or a compile finding). See above."""
+    if step_type == "behaviour-change":
+        return "preserve", None, "a behaviour change: the fix is expected to keep the old outcome"
+    if step_type == "review":
+        return "preserve", None, "a review of pymolt's rewrite, which claims to keep each outcome"
+    fact = _fact(risk) if risk is not None else {}
+    kind, successor = fact.get("kind"), fact.get("successor")
+    name = f"`{_short(risk.symbol)}`" if risk is not None else "?"
+    another = None
+    if kind == "MOVED":
+        return "preserve", None, _cap(f"the delta shows {name} is the same object as "
+                                      f"`{successor or fact.get('new') or '?'}` (MOVED)")
+    if kind == "SIGNATURE":
+        rebound = _rebound(fact)
+        if rebound is None:
+            return "preserve", None, (f"the delta shows {name} stays the same object; only its "
+                                      "signature changes (SIGNATURE)")
+        another = f"the delta shows the spelling {name} now names another object ({rebound})"
+    elif kind == "REMOVED":
+        another = (f"the delta shows {name} is removed and the same object is reachable nowhere "
+                   "else (REMOVED), so its successor"
+                   + (f" `{successor}`" if successor else "") + " is another object")
+    elif kind == "DEPRECATED" and successor:
+        another = (f"the delta names `{successor}` as the successor of the deprecated {name} "
+                   "(DEPRECATED): another object")
+    if another is not None:
+        return "intended", REPRESENTATION, _cap(another)
+    if kind == "DEPRECATED":
+        return "preserve", None, _cap(f"{_NOT_LOOSENED}the delta names no successor for the "
+                                      f"deprecated {name}")
+    return "preserve", None, _NOT_LOOSENED + "no delta fact about a successor"
+
+
+def _claimed(step_type: str, risk: Any | None) -> tuple[str, StepVerify, str]:
+    """A manual step's ``claim``, its ``verify`` (judge and expectation) and ``why.claim``."""
+    claim, expect, reason = default_claim(step_type, risk)
+    judge = "strict" if claim == "preserve" else "expectation"
+    return claim, StepVerify(judge=judge, expect=expect), reason
+
+
 def _delta(risk: Any) -> StepDelta | None:
     fact = _fact(risk)
     if not fact:
@@ -341,10 +415,11 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
     files = list(dict.fromkeys(r.site.file for r in group))
     from_, to = ((python_move or (None, None)) if scope == "python"
                  else versions.get(lead.package or "", (None, None)))
+    claim, verify, reason = _claimed(step_type, lead)
     return dict(
         key=step_key(step_type, ident), type=step_type, phase=_PHASE_OF[step_type],
         title=_title(step_type, lead, to), executor=_EXECUTOR_OF[step_type],
-        claim="preserve", basis="manual", scope=scope,
+        claim=claim, basis="manual", scope=scope,
         package=lead.package if scope == "dependency" else None, from_=from_, to=to,
         symbol={"old": lead.symbol, "new": fact.get("successor")},
         where=_where(group, t0),
@@ -352,10 +427,10 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
                     risk_ids=[r.id for r in group],
                     baseline=StepBaseline(calls=sum(r.calls for r in group), sites=len(group),
                                           warnings=_warnings(group)),
-                    delta=_delta(lead)),
+                    delta=_delta(lead), claim=reason),
         do=StepDo(manual=ManualDo(summary=_summary(step_type, lead, _hint(lead)),
                                   successor=fact.get("successor"))),
-        verify=StepVerify(judge="strict"),
+        verify=verify,
         effort=StepEffort(sites=len(group), files=len(files)),
     )
 
@@ -374,14 +449,15 @@ def _item_steps(manual_items: list[Any], advisories: list[Any], t0: T0) -> list[
     for item in manual_items:
         match, rewrite = _rule_parts(item.rule)
         where = [a for a in (t0.anchor(item.path, n) for n in item.lines) if a is not None]
+        claim, verify, reason = _claimed("manual-rewrite", None)
         out.append(dict(
             key=step_key("manual-rewrite", f"{item.rule}|{item.path}"), type="manual-rewrite",
             phase="mechanical", title=_cap(f"Rewrite by hand: `{match}`", 120),
-            executor="agent", claim="preserve", basis="manual", scope="dependency",
-            where=where, why=StepWhy(evidence=[_cap(item.reason)]),
+            executor="agent", claim=claim, basis="manual", scope="dependency",
+            where=where, why=StepWhy(evidence=[_cap(item.reason)], claim=reason),
             do=StepDo(manual=ManualDo(summary=_cap(item.reason),
                                       suggestion=_cap(rewrite) if rewrite else None)),
-            verify=StepVerify(judge="strict"),
+            verify=verify,
             effort=StepEffort(sites=item.sites or len(where), files=1 if item.path else 0),
         ))
     groups: dict[tuple, list[Any]] = defaultdict(list)
@@ -395,16 +471,18 @@ def _item_steps(manual_items: list[Any], advisories: list[Any], t0: T0) -> list[
         where = list({a.id: a for a in (t0.anchor(path, adv.line) for adv in items)
                       if a is not None}.values())
         label = f"`{match}`" if match else path
+        claim, verify, reason = _claimed(step_type, None)
         out.append(dict(
             key=step_key(step_type, f"{rule}|{path}|{severity}"), type=step_type,
             phase=_PHASE_OF[step_type],
             title=_cap(f"Review the rewrite of {label}" if review
                        else f"Rewrite by hand: {label}", 120),
-            executor=_EXECUTOR_OF[step_type], claim="preserve", basis="manual",
-            scope="dependency", where=where, why=StepWhy(evidence=reasons[:_EVIDENCE_CAP]),
+            executor=_EXECUTOR_OF[step_type], claim=claim, basis="manual",
+            scope="dependency", where=where,
+            why=StepWhy(evidence=reasons[:_EVIDENCE_CAP], claim=reason),
             do=StepDo(manual=ManualDo(summary=reasons[0],
                                       suggestion=_cap(rewrite) if rewrite else None)),
-            verify=StepVerify(judge="strict"),
+            verify=verify,
             effort=StepEffort(sites=len(items), files=1),
         ))
     return out
@@ -425,16 +503,17 @@ def _compile_steps(findings: list[Mapping[str, Any]], t0: T0,
                         + (" (it fails on the base too)" if f.get("base") else ""))
             if line not in evidence:
                 evidence.append(line)
+        claim, verify, reason = _claimed("python-manual", None)
         out.append(dict(
             key=step_key("python-manual", f"compile|{kind}"), type="python-manual",
             phase="signature",
             title=f"{kind} on Python {target or '?'}: {len(items)} site(s)",
-            executor="agent", claim="preserve", basis="manual", scope="python",
+            executor="agent", claim=claim, basis="manual", scope="python",
             from_=(python_move or (None, None))[0], to=(python_move or (None, None))[1],
-            where=where, why=StepWhy(evidence=evidence[:_EVIDENCE_CAP]),
+            where=where, why=StepWhy(evidence=evidence[:_EVIDENCE_CAP], claim=reason),
             do=StepDo(manual=ManualDo(summary=f"Make these files compile on Python "
                                               f"{target or 'the target'} without the {kind}.")),
-            verify=StepVerify(judge="strict"),
+            verify=verify,
             effort=StepEffort(sites=len(items),
                               files=len({f.get("file") for f in items})),
         ))

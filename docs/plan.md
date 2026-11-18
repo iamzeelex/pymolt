@@ -105,9 +105,18 @@ or the manual step that holds it. A step lists the risk ids it covers (`why.risk
 sites as anchors on the code the baseline ran (`where`).
 
 Each step also says how it will be judged and how big it is:
-- `verify.judge`: `strict` for a step that claims to keep each call's outcome (`preserve`), so
-  any difference fails; `none` for a pymolt step whose recipe makes no claim (its lines are
-  judged as hand edits).
+- `claim` and `verify.judge`: `strict` for a step that claims to keep each call's outcome
+  (`preserve`), so any difference fails; `none` for a pymolt step whose recipe makes no claim
+  (its lines are judged as hand edits). An agent or person step's claim follows what the delta
+  shows about the successor, and `why.claim` says which:
+  - the same object (a move), or the same object with a changed signature: `preserve`;
+  - another object (a removed symbol, a deprecated one whose successor the delta names, or a
+    name now bound to another object): `intended`, with `verify.expect: representation`. Verify
+    reports a change of type or representation only as drift, and fails another value or a new
+    raise ([verify.md](verify.md#edited-lines));
+  - a behaviour change: `preserve`. The fix is expected to keep the old outcome;
+  - no delta fact about the successor (a deprecated symbol with none named, a rule pymolt does
+    not apply, a compile finding): `preserve`, and `why.claim` says it was not loosened.
 - `verify.sites`: each site with the baseline's calls of the step's symbols there and whether
   the baseline recorded it: `recorded`, `ran-not-recorded` (a site known only statically whose
   function ran), `not-run` or `unknown` (no executed record). `uncovered` counts the sites no
