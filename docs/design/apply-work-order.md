@@ -77,10 +77,20 @@ composition exactly (1.5).
 | `mechanical` | `codemod` (`recipe.kind` ∈ `rewrite-import`, `rename-call`, `rule`) | pymolt | `preserve` / `same-object`, `same-signature`, `verified-rule` | adopted dependency patterns and rules | yes |
 | `mechanical` | `python-fix` (`recipe.kind` ∈ `rewrite-attr`, `replace-attr-path`, `rewrite-module`, `rewrite-import`, `rename-call`) | pymolt | `preserve` / `python-fixer` | adopted Python fixes | yes |
 | `mechanical` | `manual-rewrite` | agent | `preserve` / `manual` | H5 items (blocked or downgraded rules); rule advisories `not-applied` | no. The template is shown as a suggestion |
-| `signature` | `api-change` | agent | `preserve` / `manual` | risks needing attention: REMOVED/MOVED with no auto fix, SIGNATURE at a passed parameter, DEPRECATED with a successor | no |
-| `signature` | `python-manual` | agent | `preserve` / `manual` | Python risks with `fix: advisory`; compile findings on the target | no |
+| `signature` | `api-change` | agent | `preserve`, or `intended` + `representation` (below) / `manual` | risks needing attention: REMOVED/MOVED with no auto fix, SIGNATURE at a passed parameter, DEPRECATED with a successor | no |
+| `signature` | `python-manual` | agent | `preserve`, or `intended` + `representation` (below) / `manual` | Python risks with `fix: advisory`; compile findings on the target | no |
 | `behaviour` | `behaviour-change` | person | `preserve` (proposed) or `intended` | DEFAULT at a defaulted parameter; warning-only high risks; Python BEHAVIOR facts | no |
 | `behaviour` | `review` | person | `preserve` | rule advisories `precondition` | no |
+
+An agent or person step's default claim follows the kind of successor its deciding delta fact shows
+(owner decision, 2026-11-18; `workorder/manual.py::default_claim`), and `why.claim` says which:
+- the same object (MOVED), or the same object with a changed signature (SIGNATURE): `preserve`;
+- another object (REMOVED; DEPRECATED with a successor the delta names; a spelling the delta shows
+  rebound): `intended` with `expect: representation` (5.1: representation-only is DRIFT, another
+  value or a new raise FAILs);
+- a behaviour change: `preserve`;
+- no fact about the successor (DEPRECATED with none named, a rule, a compile finding): `preserve`,
+  with `why.claim` saying it was not loosened for lack of evidence.
 
 How sites group into steps:
 - **Automated step:** one recipe, or one move group, across every file it changes.
@@ -1040,6 +1050,10 @@ hand edits.
 - Agents run pymolt-checked steps after one person-attested approval per plan (variant A, decision 4).
 - Re-basing, stage 6, ad-hoc accepts and the text store stay in scope.
 - Decision 5 (an imports-only baseline) stays the optional stage 8.
+
+**Decided by the owner on 2026-11-18:** an agent or person step's default claim follows the kind of
+successor the delta shows (1.1): `intended` + `representation` for another object, `preserve`
+otherwise.
 
 The "if the owner decides otherwise" column is kept as a record of the alternatives.
 
