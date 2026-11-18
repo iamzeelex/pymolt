@@ -48,6 +48,9 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.8.0",
+    # Test only: the anchor perturbation guard reformats code with black (and ruff format)
+    # and checks every statement anchor still resolves.
+    "black>=24.1",
     # Test fixture only: a representative third-party "user app dependency" that the
     # contract tests trace at the code→dependency boundary (not a pymolt runtime dep).
     "requests>=2.0",
