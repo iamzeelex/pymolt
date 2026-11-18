@@ -681,3 +681,42 @@ def test_a_blocked_rule_is_never_a_recipe_claim_or_ledger_entry(tmp_path):
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
     assert {e["rule"] for e in ledger["entries"]} == set(change.recipes)
     assert [m.path for m in plan.manual] == ["app0.py"]
+
+
+def test_a_rule_blocked_by_the_preview_never_reaches_the_ledger(tmp_path):
+    """End to end through the real blocking path: an unverified LEGACY rule whose evidence
+    says "same object" matches in a file a verified rule rewrites. It is listed as manual
+    work, and neither the plan's recipes and claims nor the ledger mention it."""
+    import json
+
+    from pymolt.codemods.apply import preview_rules_repo
+    from pymolt.codemods.rules import CodemodRule
+
+    def legacy(old, new, confidence):
+        return CodemodRule(
+            library="flask", from_version="2.0.3", to_version="3.0.0", match=old,
+            rewrite=[new], kind="rewrite-import", old_qualname=old, new_qualname=new,
+            confidence=confidence, evidence=[f"pymolt.delta MOVED: {old} -> {new}"])
+
+    target = _project(tmp_path)
+    source = "from flask.helpers import escape\nfrom flask.helpers import safe_join\n"
+    (tmp_path / "app0.py").write_text(source, encoding="utf-8")
+    blocked = legacy("flask.helpers.escape", "markupsafe.escape", "heuristic")
+    verified = legacy("flask.helpers.safe_join", "werkzeug.utils.safe_join", "verified")
+    previews = [p for p in preview_rules_repo(tmp_path, [blocked, verified], verified_only=True)
+                if p.path.endswith("app0.py")]
+    plan = create_migration_plan(
+        tmp_path, previews, [DependencyMigration("flask", "2.0.3", "3.0.0")],
+        target_python="3.12", source_manifest="requirements.txt",
+        target_manifest_path=target, files_scanned=1, predict=False)
+
+    [change] = plan.changes
+    key = "rewrite-import:flask.helpers.safe_join→werkzeug.utils.safe_join"
+    assert change.recipes == [key] and change.claims == {key: "same-object"}
+    assert "from flask.helpers import escape" in change.new_source
+    [manual] = plan.manual
+    assert manual.rule == "rewrite-import:flask.helpers.escape→markupsafe.escape"
+    assert (manual.path, manual.lines) == ("app0.py", [1])
+    apply_migration_plan(tmp_path, plan)
+    ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
+    assert {(e["rule"], e["claim"]) for e in ledger["entries"]} == {(key, "same-object")}
