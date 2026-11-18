@@ -747,7 +747,8 @@ def plan(
 def _step_payload(step) -> dict:
     """A step in the plan's --json summary (the plan file has the whole step)."""
     return {"id": step.id, "type": step.type, "executor": step.executor,
-            "claim": step.claim, "title": step.title, "effort": step.effort.size,
+            "claim": step.claim, "expect": step.verify.expect, "title": step.title,
+            "effort": step.effort.size,
             "sites": len(step.verify.sites), "depends_on": step.depends_on,
             "risk_ids": step.why.risk_ids}
 
@@ -755,7 +756,7 @@ def _step_payload(step) -> dict:
 def _render_steps(plan, plan_md_path) -> None:
     """The plan summary by step, and where PLAN.md is."""
     from pymolt.interfaces.views import steps_summary
-    from pymolt.workorder.render import clean
+    from pymolt.workorder.render import claim_label, clean
 
     if plan.steps:
         table = Table(title="Steps", title_justify="left", border_style="cyan")
@@ -763,7 +764,7 @@ def _render_steps(plan, plan_md_path) -> None:
             table.add_column(column)
         for step in plan.steps:
             table.add_row(step.id, escape(clean(" ".join(step.title.split()), 100)),
-                          step.executor, step.claim or "none", step.effort.size,
+                          step.executor, claim_label(step), step.effort.size,
                           ", ".join(step.depends_on) or "")
         console.print(table)
         console.print(f"{steps_summary(plan)}.")

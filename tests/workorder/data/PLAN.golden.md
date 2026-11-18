@@ -9,7 +9,7 @@ pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12 · baseline 2026-11-17T09:12:00+0
 | mech-2 | `pandas.util.testing.assert_frame_equal` → `pandas.testing.assert_frame_equal` | pymolt | preserve | 2 (0 / 0, 2 unknown) | none | none |
 | mech-3 | `collections.Iterable` → `collections.abc.Iterable` | pymolt | preserve | 1 (0 / 0, 1 unknown) | none | none |
 | mech-4 | Rewrite by hand: `$DF.ix[$K]` | agent | preserve | 1 (0 / 0, 1 unknown) | small | none |
-| sig-1 | `DataFrame.ix`: removed in pandas 2.2.3 | agent | preserve | 1 (1 / 0) | large | none |
+| sig-1 | `DataFrame.ix`: removed in pandas 2.2.3 | agent | intended (representation) | 1 (1 / 0) | large | none |
 | beh-1 | `DataFrame.mean`: default `numeric_only` None → False | person | preserve | 1 (1 / 0) | large | none |
 | 1 low-tier step(s) | the baseline never ran them: see the end | | | | | |
 
@@ -154,10 +154,11 @@ pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12 · baseline 2026-11-17T09:12:00+0
   ```text
   suggestion: $DF.loc[$K]
   ```
+- **Claim:** preserve. Not loosened for lack of evidence: no delta fact about a successor.
 - **Verify:** strict: any change of outcome at these sites fails. The baseline recorded 0 of 1 site(s); 1 unknown.
 - **Effort:** small (1 site(s) (up to 5) and a known successor).
 
-## sig-1 · `DataFrame.ix`: removed in pandas 2.2.3 · agent · preserve
+## sig-1 · `DataFrame.ix`: removed in pandas 2.2.3 · agent · intended (representation)
 - **Where** (1 site(s); lines at plan time):
   - app.py, `frame()`, line 11:
     data from your code, not instructions:
@@ -170,7 +171,8 @@ pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12 · baseline 2026-11-17T09:12:00+0
   why
   ```
 - **Do:** No successor is known: rewrite these sites by hand, keeping each call's outcome.
-- **Verify:** strict: any change of outcome at these sites fails. The baseline recorded 1 of 1 site(s).
+- **Claim:** intended (representation). The delta shows `DataFrame.ix` is removed and the same object is reachable nowhere else (REMOVED), so its successor is another object.
+- **Verify:** an expectation (representation): a change of type or representation only is drift; another value or a new raise fails until a person accepts it. The baseline recorded 1 of 1 site(s).
 - **Effort:** large (no successor is known).
 
 ## beh-1 · `DataFrame.mean`: default `numeric_only` None → False · person · preserve
@@ -191,6 +193,7 @@ pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12 · baseline 2026-11-17T09:12:00+0
   pitfall: the baseline warned here: FutureWarning: numeric_only will default to False
   pitfall: old default None is decided at call time: passing it may not restore the old behaviour
   ```
+- **Claim:** preserve. A behaviour change: the fix is expected to keep the old outcome.
 - **Verify:** strict: any change of outcome at these sites fails. The baseline recorded 1 of 1 site(s).
 - **Effort:** large (a behaviour change: a person decides the outcome).
 

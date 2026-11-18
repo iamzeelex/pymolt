@@ -1929,10 +1929,23 @@
       "type": "object"
     },
     "StepWhy": {
-      "description": "Why the step exists. ``risk_ids``: the plan-time ids of the risks it addresses, persisted\n(they are the links calibration reads, never recomputed from a later plan).",
+      "description": "Why the step exists. ``risk_ids``: the plan-time ids of the risks it addresses, persisted\n(they are the links calibration reads, never recomputed from a later plan). ``claim``: why\nan agent or person step has its claim and expectation (``workorder.manual.default_claim``):\nthe kind of successor the delta facts show, or why the claim was not loosened.",
       "properties": {
         "baseline": {
           "$ref": "#/$defs/StepBaseline"
+        },
+        "claim": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim"
         },
         "delta": {
           "anyOf": [

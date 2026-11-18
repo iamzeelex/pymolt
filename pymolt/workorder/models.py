@@ -160,13 +160,16 @@ class StepDelta(_Model):
 
 class StepWhy(_Model):
     """Why the step exists. ``risk_ids``: the plan-time ids of the risks it addresses, persisted
-    (they are the links calibration reads, never recomputed from a later plan)."""
+    (they are the links calibration reads, never recomputed from a later plan). ``claim``: why
+    an agent or person step has its claim and expectation (``workorder.manual.default_claim``):
+    the kind of successor the delta facts show, or why the claim was not loosened."""
 
     evidence: list[CappedText] = Field(default_factory=list)
     tier: Tier | None = None
     risk_ids: list[str] = Field(default_factory=list)
     baseline: StepBaseline = Field(default_factory=StepBaseline)
     delta: StepDelta | None = None
+    claim: CappedText | None = None
 
 
 class ManifestPin(_Model):

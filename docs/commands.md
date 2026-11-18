@@ -139,8 +139,9 @@ the project's `.py` files (and the step's own files), the edit is made, and `--r
 records what changed since as the step's new epoch, with its claim, `basis: manual` and who made
 it. A run has one record open at a time, and while it is open `apply` and `rollback` write
 nothing. `--done` with no `--record` first diffs each of the step's files from its last known
-text and records only the statements inside the step's functions and classes; the other changes
-are listed and judged as hand edits. Recording a step again diffs from its previous epoch's
+text (its text after the latest ledger event on it, whatever the event, else its text at plan
+time; it refuses when that text is no longer kept) and records only the statements inside the
+step's functions and classes; the other changes are listed and judged as hand edits. Recording a step again diffs from its previous epoch's
 before-text, so the new epoch is the whole step. `rollback --step` restores a recorded step's
 before-text. The recorded Python files are compiled on the target: a failure is on the receipt,
 the edit stays, and the exit code is 1.
