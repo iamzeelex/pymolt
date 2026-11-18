@@ -797,6 +797,26 @@ def metric_f(scens: dict[str, dict]) -> dict:
             "import_errors": len(errs), "import_error_samples": errs[:10]}
 
 
+def step_counts(plan: dict) -> dict | None:
+    """The plan's work order: steps in all, by executor and by type (None: a plan with no
+    steps, e.g. one saved before plan schema 2)."""
+    steps = (plan or {}).get("steps")
+    if steps is None:
+        return None
+    out: dict = {"total": len(steps), "pymolt": 0, "agent": 0, "person": 0, "by_type": {}}
+    for step in steps:
+        out[step.get("executor")] = out.get(step.get("executor"), 0) + 1
+        kind = step.get("type")
+        out["by_type"][kind] = out["by_type"].get(kind, 0) + 1
+    return out
+
+
+def steps_cell(counts: dict | None) -> str:
+    if not counts:
+        return "-"
+    return f"{counts['total']} ({counts['pymolt']}/{counts['agent']}/{counts['person']})"
+
+
 def score_toy(toy: dict, out: Path) -> dict:
     key = toy["_key"]
     scens = {n: read_scenario(out / key / n) for n in SCENARIOS if (out / key / n).is_dir()}
@@ -825,6 +845,7 @@ def score_toy(toy: dict, out: Path) -> dict:
     row["D"] = metric_d(toy, scens)
     row["E"] = metric_e(toy, scens)
     row["F"] = metric_f(scens)
+    row["steps"] = {n: step_counts(s["plan"]) for n, s in scens.items()}
     row["seconds"] = {n: s["result"].get("seconds") for n, s in scens.items()}
     row["phase_seconds"] = {
         n: {k: v["seconds"] for k, v in (s["result"].get("steps") or {}).items()}
@@ -889,12 +910,14 @@ def write_scorecard(out: Path, rows: list[dict], meta: dict) -> None:
     lines = ["# Generalization scorecard", "",
              f"run: {meta.get('when')}  |  pymolt: `{meta.get('pymolt')}`", "",
              "| toy | A recall | B hit | C rewrites ok/prop | D equiv | D change | D exact | "
-             "E found (C-lvl) | F incon/imp.err | secs |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "E found (C-lvl) | F incon/imp.err | steps equiv / change (pymolt/agent/person) "
+             "| secs |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         if "A" not in r:
-            lines.append(f"| {r['toy']} | {r['status']} |  |  |  |  |  |  |  |  |")
+            lines.append(f"| {r['toy']} | {r['status']} |  |  |  |  |  |  |  |  |  |")
             continue
+        steps = r.get("steps") or {}
         ds = r["D"]["scenarios"]
 
         def v(n: str) -> str:
@@ -912,6 +935,7 @@ def write_scorecard(out: Path, rows: list[dict], meta: dict) -> None:
             f"| {frac(e['found'], e['total'])} "
             f"({frac(e['c_level']['found'], e['c_level']['total'])}) "
             f"| {len(r['F']['inconclusive'])}/{r['F']['import_errors']} "
+            f"| {steps_cell(steps.get('equiv'))} / {steps_cell(steps.get('change'))} "
             f"| {sum(x for x in r['seconds'].values() if x)} |")
     lines += ["", "## Skew signals", ""]
     sig = skew_signals(rows)
@@ -1071,6 +1095,8 @@ def flat(row: dict) -> dict:
     }
     for n, d in row.get("D", {}).get("scenarios", {}).items():
         keys[f"D.{n}.verdict"] = d["verdict"]
+    for n, counts in (row.get("steps") or {}).items():
+        keys[f"steps.{n}"] = steps_cell(counts)
     return keys
 
 

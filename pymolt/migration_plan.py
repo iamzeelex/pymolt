@@ -342,6 +342,7 @@ def create_migration_plan(
     python_move: tuple[str, str] | None = None,
     python_stage=None,
     downgraded: list[str] | None = None,
+    recorder=None,
 ) -> MigrationPlan:
     """Freeze a locally verified preview into an exact, portable project plan.
 
@@ -349,7 +350,9 @@ def create_migration_plan(
     the baseline's facts joined with ``delta_reports`` (the migrations' ``pymolt.delta/1``
     reports; computed offline with ``pymolt.delta.compute_deltas`` when not given).
     ``downgraded``: the provider's summaries of the rules it downgraded, which become manual
-    items with the blocked matches of the previews."""
+    items with the blocked matches of the previews. ``recorder``: the preview walk's recipe
+    chains (``workorder.builder.StepRecorder``), from which the automated steps are made; a
+    file with no recorded chain keeps its whole change in one step."""
     from pymolt.verify.service import (
         environment_fingerprint,
         environment_setup_fingerprint,
@@ -385,7 +388,8 @@ def create_migration_plan(
 
     stage = python_stage
     if stage is None and predict and python_move is not None:
-        stage = _python_stage(root, python_move, previews)
+        stage = _python_stage(root, python_move, previews,
+                              on_step=recorder.record if recorder is not None else None)
     if stage is not None:
         previews = stage.previews
 
@@ -418,6 +422,12 @@ def create_migration_plan(
             ))
 
     manual = _manual_items(root, previews, downgraded or [])
+    from pymolt.workorder.builder import automated_steps
+
+    steps = automated_steps(
+        changes, recorder, root=root, dependencies=list(migrations),
+        python_move=python_move, fix_checks=getattr(stage, "checks", None),
+        target_python=target_python)
 
     risks = None
     if predict and baseline_path is not None:
@@ -458,6 +468,7 @@ def create_migration_plan(
         type_relocations=type_relocations,
         python=python,
         compile_findings=compile_findings,
+        steps=steps,
     )
 
 
@@ -510,12 +521,13 @@ def _runs_on_base(preview) -> bool | None:
     return False if any(f is False for f in flags) else None
 
 
-def _python_stage(root: Path, move: tuple[str, str], previews: list[FilePreview]):
+def _python_stage(root: Path, move: tuple[str, str], previews: list[FilePreview],
+                  on_step=None):
     """The python move computed for ``previews``; None (with no raise) when it fails."""
     try:
         from pymolt.pyversion.plan import plan_python_stage
 
-        return plan_python_stage(root, move[0], move[1], previews=previews)
+        return plan_python_stage(root, move[0], move[1], previews=previews, on_step=on_step)
     except Exception:  # noqa: BLE001 - _python_part reports the failure
         return None
 

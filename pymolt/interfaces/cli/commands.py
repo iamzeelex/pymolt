@@ -2563,12 +2563,14 @@ def _save_succession_plan(project_dir: str, edges, files_scanned: int, json_outp
     from pymolt.codemods.service import PlanInputError, plan_inputs
     from pymolt.migration_plan import MigrationPlanError, create_migration_plan
     from pymolt.strategic.succession.service import in_place_previews
+    from pymolt.workorder.builder import StepRecorder
 
     try:
         config, target_path = plan_inputs(project_dir)
     except PlanInputError as exc:
         fail(str(exc), hint=exc.hint or None, json_output=json_output)
-    previews = in_place_previews(project_dir, edges)
+    recorder = StepRecorder()
+    previews = in_place_previews(project_dir, edges, on_step=recorder.record)
     if not any(p.old_source != p.new_source for p in previews):
         return None
     try:
@@ -2578,6 +2580,7 @@ def _save_succession_plan(project_dir: str, edges, files_scanned: int, json_outp
             source_manifest=config.selected_manifest or "unknown",
             target_manifest_path=target_path,
             files_scanned=files_scanned,
+            recorder=recorder,
         )
         return migration_plan.save(project_dir)
     except (MigrationPlanError, OSError) as exc:

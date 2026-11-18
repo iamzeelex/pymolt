@@ -44,8 +44,11 @@ from pymolt.codemods.models import (
     CodemodRunResult,
     FileChange,
     FilePreview,
+    FileStepObserver,
+    MoveGroup,
     PreviewProgress,
     ProgressSink,
+    StepObserver,
     recipe_key,
 )
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory, apply_rule_detailed
@@ -776,13 +779,15 @@ def apply_pattern(source: str, pattern: CodemodPattern, *,
 def apply_patterns(
     source: str, patterns: list[CodemodPattern], *,
     lines_for: Callable[[CodemodPattern], frozenset[int] | None] | None = None,
+    on_step: StepObserver = None,
 ) -> tuple[str, list[tuple[CodemodPattern, int]]]:
     """Apply a sequence of patterns. Returns (new_source, [(pattern, sites)…]).
 
     The import-move patterns (``rewrite-import``, python ``rename-call``) that share an old and
     a new module are applied together, so one ``from OLD import a, b, c`` statement becomes at
     most one statement per target module instead of one per name. ``lines_for(pattern)`` gives
-    the source lines a pattern may touch (None: anywhere)."""
+    the source lines a pattern may touch (None: anywhere). ``on_step(recipe, before, after)``
+    observes each pattern or move group (a ``MoveGroup``) that changes the text."""
     hits: list[tuple[CodemodPattern, int]] = []
     groups = _move_renames(patterns)
     done_groups: set[tuple[str, str]] = set()
@@ -800,17 +805,61 @@ def apply_patterns(
                 lines = (frozenset().union(*[f for f in found if f is not None])
                          if any(f is not None for f in found) else None)
             mover = MoveNamesCodemod(key[0], key[1], groups[key], lines=lines)
+            before = source
             source = MetadataWrapper(cst.parse_module(source)).visit(mover).code
+            group_hits = []
             for member in members:
                 n = mover.hits.get(_leaf(member.old_qualname), 0)
                 if n:
                     hits.append((member, n))
+                    group_hits.append((recipe_key(member), n))
+            if source != before:
+                _observe(on_step, MoveGroup(key[0], key[1], tuple(members), tuple(group_hits)),
+                         before, source)
             continue
+        before = source
         source, sites = apply_pattern(
             source, pattern, lines=lines_for(pattern) if lines_for else None)
         if sites:
             hits.append((pattern, sites))
+        if source != before:
+            _observe(on_step, pattern, before, source)
     return source, hits
+
+
+def _observe(on_step: StepObserver, recipe, before: str, after: str) -> None:
+    """Report one recipe's change to a step observer. A failing observer cannot change the
+    walk: the plan then misses that step's chain and keeps the file's change whole."""
+    if on_step is None:
+        return
+    try:
+        on_step(recipe, before, after)
+    except Exception:  # noqa: BLE001 - an observer cannot break the walk
+        log.warning("step observer raised", exc_info=True)
+
+
+class _FileSteps:
+    """Buffers one file's step events; the walker hands them on only for a file it keeps."""
+
+    def __init__(self, on_step: FileStepObserver, path: Path):
+        self.sink, self.path = on_step, str(path)
+        self.events: list[tuple] = []
+
+    @property
+    def hook(self) -> StepObserver:
+        if self.sink is None:
+            return None
+        return lambda recipe, before, after: self.events.append((recipe, before, after))
+
+    def flush(self) -> None:
+        if self.sink is None:
+            return
+        for recipe, before, after in self.events:
+            try:
+                self.sink(recipe, self.path, before, after)
+            except Exception:  # noqa: BLE001 - an observer cannot break the walk
+                log.warning("step observer raised on %s", self.path, exc_info=True)
+        self.events = []
 
 
 def _emit(sink: ProgressSink, path: Path, hits: list[tuple] | None = None) -> None:
@@ -1037,6 +1086,7 @@ def preview_repo(
     patterns: list[CodemodPattern],
     *,
     on_file: ProgressSink = None,
+    on_step: FileStepObserver = None,
 ) -> list[FilePreview]:
     """
     Compute per-file before/after for every file the patterns would change —
@@ -1046,7 +1096,8 @@ def preview_repo(
     `on_file`, if given, is called once per file *scanned* — including files
     that matched nothing or could not be parsed — so a live view can show the
     real denominator instead of only the handful of hits. It is a pure
-    observer: it can never change what the walk returns.
+    observer: it can never change what the walk returns. So is `on_step(recipe, path, before,
+    after)`, called for each recipe that changed a file the walk keeps, in application order.
     """
     root = Path(root)
     previews: list[FilePreview] = []
@@ -1056,8 +1107,9 @@ def preview_repo(
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
+        steps = _FileSteps(on_step, path)
         try:
-            new_source, hits = apply_patterns(original, patterns)
+            new_source, hits = apply_patterns(original, patterns, on_step=steps.hook)
         except Exception as exc:  # libcst parse error → skip
             log.warning("skip %s (parse error): %s", path, exc)
             _emit(on_file, path)
@@ -1074,6 +1126,7 @@ def preview_repo(
                 patterns=[p for p, _ in hits],
             )
         )
+        steps.flush()
         _emit(on_file, path, hits)
     return previews
 
@@ -1131,6 +1184,7 @@ def apply_rules(
     *,
     allow: Callable[[CodemodRule], bool] | None = None,
     blocked: list[BlockedRewrite] | None = None,
+    on_step: StepObserver = None,
 ) -> tuple[str, list[tuple[CodemodRule, int]], list[CodemodRule], list[RuleAdvisory]]:
     """
     Apply `rules` to `source` sequentially — each rule is fed the PREVIOUS
@@ -1150,7 +1204,8 @@ def apply_rules(
     detect-only when writing to disk. `allow=None` (the default; always used by
     `preview_rules_repo`) adopts every rewrite unconditionally. ``blocked``, when
     given, receives each rule whose rewrite matched but was not adopted, with the
-    lines it would have changed.
+    lines it would have changed. ``on_step(rule, before, after)`` observes each adopted rewrite
+    that changed the text. Each advisory names its rule (``RuleAdvisory.rule``).
     """
     hits: list[tuple[CodemodRule, int]] = []
     touched: list[CodemodRule] = []
@@ -1159,9 +1214,13 @@ def apply_rules(
         app = apply_rule_detailed(source, rule)
         if app.sites or app.advisories:
             touched.append(rule)
-        advisories.extend(app.advisories)
+        key = recipe_key(rule)
+        advisories.extend(a if a.rule else a.model_copy(update={"rule": key})
+                          for a in app.advisories)
         if app.sites and (allow is None or allow(rule)):
             hits.append((rule, app.sites))
+            if app.new_source != source:
+                _observe(on_step, rule, source, app.new_source)
             source = app.new_source
         elif app.sites and blocked is not None:
             blocked.append(BlockedRewrite(rule=rule, sites=app.sites,
@@ -1325,8 +1384,10 @@ def preview_mixed_repo(
     *,
     on_file: ProgressSink = None,
     verified_only: bool = False,
+    on_step: FileStepObserver = None,
 ) -> list[FilePreview]:
-    """Preview the exact chained output that :func:`apply_mixed_to_repo` writes."""
+    """Preview the exact chained output that :func:`apply_mixed_to_repo` writes. ``on_step``
+    observes each recipe's change to a kept file, as in :func:`preview_repo`."""
     root = Path(root)
     previews: list[FilePreview] = []
     allow = (lambda rule: rule.confidence == "verified") if verified_only else None
@@ -1337,11 +1398,13 @@ def preview_mixed_repo(
             _emit(on_file, path)
             continue
         blocked: list[BlockedRewrite] = []
+        steps = _FileSteps(on_step, path)
         try:
             after_rules, rule_hits, touched, advisories = apply_rules(
-                original, rules, allow=allow, blocked=blocked
+                original, rules, allow=allow, blocked=blocked, on_step=steps.hook
             )
-            new_source, pattern_hits = apply_patterns(after_rules, patterns)
+            new_source, pattern_hits = apply_patterns(after_rules, patterns,
+                                                      on_step=steps.hook)
         except Exception as exc:
             log.warning("skip %s (mixed preview error): %s", path, exc)
             _emit(on_file, path)
@@ -1362,6 +1425,7 @@ def preview_mixed_repo(
                 blocked=blocked,
             )
         )
+        steps.flush()
         _emit(on_file, path, [*rule_hits, *pattern_hits])
     return previews
 
@@ -1372,6 +1436,7 @@ def preview_rules_repo(
     *,
     on_file: ProgressSink = None,
     verified_only: bool = False,
+    on_step: FileStepObserver = None,
 ) -> list[FilePreview]:
     """
     Compute per-file before/after for every file the rules would change OR
@@ -1391,9 +1456,10 @@ def preview_rules_repo(
             _emit(on_file, path)
             continue
         blocked: list[BlockedRewrite] = []
+        steps = _FileSteps(on_step, path)
         try:
             new_source, hits, touched, advisories = apply_rules(
-                original, rules, allow=allow, blocked=blocked
+                original, rules, allow=allow, blocked=blocked, on_step=steps.hook
             )
         except Exception as exc:  # malformed rule / libcst parse error → skip
             log.warning("skip %s (rule error): %s", path, exc)
@@ -1413,4 +1479,5 @@ def preview_rules_repo(
                 blocked=blocked,
             )
         )
+        steps.flush()
     return previews
