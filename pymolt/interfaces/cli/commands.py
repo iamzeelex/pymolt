@@ -324,6 +324,10 @@ def verify_migration(
              "a terminal types the nonce printed"),
     strict: bool = typer.Option(
         False, "--strict", help="Review every accepted change instead of counting it equal"),
+    step: str | None = typer.Option(
+        None, "--step",
+        help="Also print this step's judgement and exit by it (0 verified, 1 failed, 4 needs "
+             "review or evidence, or not in the capture)"),
     json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
     verbose: bool = typer.Option(
@@ -504,14 +508,25 @@ def verify_migration(
             json_output=json_output,
         )
 
+    exit_code = _verification_exit(unified.verdict)
+    judged = None
+    if step:
+        judged, exit_code = _step_judgement(project_path, unified, step, json_output)
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(views.verify_view(unified, project_path, saved_path=saved_path)))
-        raise typer.Exit(code=_verification_exit(unified.verdict))
+        view = views.verify_view(unified, project_path, saved_path=saved_path)
+        if judged is not None:
+            view["data"]["step"] = judged
+            view["summary"] = f"step {step}: {judged['status']}; " + view["summary"]
+        typer.echo(views.dumps(view))
+        raise typer.Exit(code=exit_code)
     if json_output:
-        typer.echo(json.dumps(unified.model_dump(mode="json"), indent=2))
-        raise typer.Exit(code=_verification_exit(unified.verdict))
+        payload = unified.model_dump(mode="json")
+        if judged is not None:
+            payload["step"] = judged
+        typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(code=exit_code)
 
     _render_contract_report(contract_report, verbose=verbose)
     if canary is not None:
@@ -552,7 +567,47 @@ def verify_migration(
         f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
         title="Verdict", border_style=border, expand=False,
     ))
-    raise typer.Exit(code=_verification_exit(unified.verdict))
+    if judged is not None:
+        lines = [f"[bold]{escape(judged['status'])}[/bold]"
+                 + (f" (epoch {judged['epoch']})" if judged.get("epoch") else "")]
+        for key in ("failing", "review", "unexercised"):
+            for item in judged.get(key) or ():
+                lines.append(f"{key}: {escape(str(item))}")
+        for r in judged.get("risks") or ():
+            lines.append(f"risk {escape(r['id'])}: {escape(r['result'])}"
+                         + (f" ({escape(r['fix'])})" if r.get("fix") else ""))
+        if judged.get("note"):
+            lines.append(escape(judged["note"]))
+        console.print(Panel("\n".join(lines), title=f"Step {escape(step)}", expand=False,
+                            border_style={0: "green", 1: "red"}.get(exit_code, "yellow")))
+    raise typer.Exit(code=exit_code)
+
+
+def _step_judgement(project_path: Path, unified, step: str, json_output: bool
+                    ) -> tuple[dict, int]:
+    """``verify --step``: the step's judgement from this verify (a filter over the one
+    post-migration capture, design 5.3) and its exit code."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.workorder.judge import EXIT
+    from pymolt.workorder.state import project_steps
+
+    plan = MigrationPlan.load(project_path)
+    if plan is None or plan.step(step) is None:
+        fail(f"unknown step {step}: the plan has "
+             + (", ".join(s.id for s in plan.steps) if plan is not None else "no plan"),
+             json_output=json_output)
+    judged = unified.steps.get(step)
+    if judged is not None:
+        return {"id": step, **judged}, EXIT.get(judged.get("status"), 4)
+    state = project_steps(project_path, plan).step(step)
+    status = state.status if state is not None else "planned"
+    note = (f"step {step} is {status}: not in effect, so this verify does not judge it"
+            if state is None or state.epoch is None else
+            f"step {step} has no site this verify could judge")
+    if unified.contract.compared is None or unified.contract.compared.after_capture != \
+            "post-migration":
+        note = "this verify did not compare the post-migration capture: no step is judged"
+    return {"id": step, "status": status, "note": note}, 4
 
 
 @app.command(rich_help_panel="Migration")

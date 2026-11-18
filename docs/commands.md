@@ -187,6 +187,7 @@ the evidence. Details are in [verify.md](verify.md).
 | `--cascade` | A cascade report to include |
 | `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
 | `--strict` | Review every accepted change instead of counting it equal |
+| `--step` | Also print that step's judgement and exit by it: 0 verified, 1 failed, 4 needs review, needs evidence or not in the capture, 2 an unknown step. The verdict still covers the whole surface |
 
 ### `pymolt rollback [dir]`
 Restores the files the open run's steps changed, latest step first. It refuses to discard edits

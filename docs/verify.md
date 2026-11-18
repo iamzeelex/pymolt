@@ -321,11 +321,28 @@ The API paths the plan found changed only focus the report:
 When the migration was made with `plan` and `apply`, `verify` scores each risk the plan predicted:
 - **hit**: a failing change (CHANGED, DISAPPEARED, or REWRITTEN with a different outcome) was
   observed for that symbol at that call site. The mechanism the plan named is not checked;
-- **prevented by the plan**: the plan rewrote the call and the behaviour stayed the same;
+- **prevented**: the risk's step fixed it and the behaviour stayed the same. A fix is credited
+  when the step is in effect and, in the post-migration code, its change removed or replaced
+  the risk's statement (or the import that binds its symbol). A step in effect that did not
+  touch the statement is `recorded-not-fixing`, and a step skipped or rolled back leaves the risk
+  unfixed: both score as a hit or a miss, never prevented. A step a person recorded can prevent
+  a risk as well as one pymolt applied;
+- **accepted**: a person accepted the change at that site;
 - **miss**: the call site was compared and nothing changed, so the prediction did not come true;
 - **not exercised**: no capture compared that call site.
 
-Failing entries that no prediction covers are listed as **unpredicted**.
+Failing entries that no prediction covers are listed as **unpredicted**. The scores are also
+given per step.
+
+### One step
+
+Every `verify` judges each step in effect on the same comparison, and saves the judgements in
+`.pymolt/verification.json`, where `status` reads them. A step's entries are the facts on the
+lines its ledger entries cover and at its planned sites. It is `failed` when one fails,
+`needs_review` when one is a review item, `needs_evidence` when a site was not compared or an
+edited site could not be paired, `not_in_capture` when the capture predates it, and `verified`
+otherwise. `pymolt verify . --step ID` prints one step's judgement and exits by it; it takes no
+new capture. Only a verdict on the baseline and post-migration captures judges steps.
 
 ### Further oracles
 

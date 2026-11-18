@@ -344,8 +344,13 @@ def _judgements(root, run_id: str) -> dict[str, dict]:
     except (OSError, ValueError):
         return {}
     steps = data.get("steps") if isinstance(data, dict) else None
-    if not isinstance(steps, dict) or data.get("run_id") not in (None, run_id):
+    judged_run = (data.get("steps_run") or data.get("run_id")) if isinstance(data, dict) \
+        else None
+    if not isinstance(steps, dict) or judged_run not in (None, run_id):
         return {}
+    compared = ((data.get("contract") or {}).get("compared") or {})
+    if compared and compared.get("after_capture") not in (None, "post-migration"):
+        return {}                   # a verdict on another recording judges no step (5.4)
     return {k: v for k, v in steps.items() if isinstance(v, dict)}
 
 
