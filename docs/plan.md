@@ -171,8 +171,14 @@ The plan's first steps, the `env` phase, name the bump:
   (pyproject, poetry, conda);
 - a `target-env` step for a person, with the commands that build the target environment.
 
-`apply` writes source only: it does not write the pin step. Moving the project's manifest to the
-target versions is yours to do:
+`apply` writes the pymolt pin step first: it rewrites those lines to the target's pins, records
+the step in the ledger with the manifest's text before and after, and `pymolt rollback` puts the
+lines back. A pin line that moved since the plan (a line added above it) is still found and
+rewritten; a manifest that already holds the target's pins on those lines is recorded as it is.
+Installs and environment builds stay with you (the `target-env` step).
+
+The person step is yours, and so is the bump when you apply steps one by one and want it at
+another time:
 - **After `plan`.** The plan compares the project's manifest with the target manifest. With the
   pins already bumped, a package the baseline did not record shows no move.
 - **Before the post-migration capture.** That capture must match the project as it is then; a bump

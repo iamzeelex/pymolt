@@ -150,7 +150,7 @@ def test_rollback_json_says_what_became_of_the_post_migration_capture(tmp_path, 
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["files_restored"] == 1
+    assert payload["files_restored"] == 2          # app.py and the manifest pin
     assert payload["post_migration_capture"] == "set_aside"
     assert "/archive/" in payload["post_migration_trace"]
 
@@ -323,8 +323,10 @@ def test_apply_of_a_plan_with_no_files_says_it_changed_nothing(tmp_path, monkeyp
     applied = runner.invoke(app, ["apply", str(tmp_path)])
 
     assert applied.exit_code == 0, applied.output
-    assert "it changed no file" in applied.output
+    assert "it changed no source file" in applied.output
+    assert "env-1 pinned the target versions in requirements.txt" in applied.output
     assert "Migration applied" not in applied.output
+    assert (tmp_path / "requirements.txt").read_text() == "flask==3.0.0\n"
 
 
 def test_plan_agent_prints_a_json_failure_when_the_resolver_fails(tmp_path, monkeypatch):

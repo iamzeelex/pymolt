@@ -19,6 +19,11 @@ of the same invocation left) and returns the first rule that matches:
    every inserted import is at module scope and every inserted statement resolves. Write
    nothing and record no epoch: the person's text is judged as a hand edit.
 5. **stale**: anything else. The reasons name each lost or ambiguous anchor.
+
+A ``manifest-pin`` step's file is a requirements file, not Python: its effect is over the keys
+of the lines it pins (``workorder.env``). Rules 1 and 2 are the same; rule 3 rewrites each
+pinned line wherever it moved; rule 4 holds when every pinned line already reads the target's
+pin.
 """
 
 from __future__ import annotations
@@ -152,7 +157,44 @@ def decide(step: PlanStep, edit: StepEdit, current: str, *, pythons: Pythons = P
                 f"{file}: the plan's hunks do not rebuild its own before-text (the plan file "
                 "was changed)"])
         return FileDecision(file, REVIEWED, current, before=before, after=current)
+    if is_manifest(step):
+        return _decide_manifest(step, edit, current, rerun=rerun)
     return _decide_code(step, edit, current, pythons=pythons, rerun=rerun)
+
+
+# ── manifests ─────────────────────────────────────────────────────────────────────────────
+
+
+def _decide_manifest(step: PlanStep, edit: StepEdit, current: str, *,
+                     rerun: Rerun | None) -> FileDecision:
+    """Rules 3 to 5 for a ``manifest-pin`` step: its effect is over the lines it pins. Re-based:
+    each pinned line found once, wherever it moved, and rewritten to the target's pin. Present:
+    every pinned line already reads the target's pin. Stale: anything else."""
+    from pymolt.workorder.env import line_key, rewrite_pins
+
+    file = edit.file
+    pins = list(step.do.recipe.pins) if step.do.recipe is not None else []
+    want = {tuple(pair) for pair in edit.effect.replace}
+    if rerun is not None and pins:
+        after, done = rewrite_pins(current, pins)
+        got = {(line_key(p.old), line_key(p.new)) for p in pins}
+        if done == len(pins) and got == want:
+            return FileDecision(file, REBASE, current, before=current, after=after)
+    have = [line_key(line) for line in split_lines(current)]
+    if pins and all(have.count(line_key(p.new)) == 1 and line_key(p.old) not in have
+                    for p in pins):
+        return FileDecision(file, PRESENT, current)
+    reasons = []
+    for pin in pins:
+        count = have.count(line_key(pin.old))
+        if count != 1 and line_key(pin.new) not in have:
+            state = "gone" if count == 0 else f"there {count} times"
+            reasons.append(f"{file}: the line `{_short(pin.old.strip())}` is {state}, and "
+                           f"`{_short(pin.new.strip())}` is not there either")
+    if not reasons:
+        reasons.append(f"{file}: some of its lines already read the target's pin and some do "
+                       "not")
+    return FileDecision(file, STALE, current, reasons=reasons)
 
 
 # ── Python files ──────────────────────────────────────────────────────────────────────────

@@ -5,9 +5,9 @@ Its live status comes from the ledger of the run that applies the plan: a curren
 (``applied`` by an ``apply`` event, ``recorded`` by a ``record``), an ended one (``rolled_back``,
 ``skipped``), or none; and from its dependencies (``blocked`` while one is not in effect).
 
-``applicable_steps`` names the steps ``pymolt apply`` writes: the plan's pymolt code steps when
-their hunks rebuild every changed file from ``changes[].old_source`` to ``new_source``, else the
-plan's one whole-file step (``v1``).
+``applicable_steps`` names the steps ``pymolt apply`` writes: the manifest pin pymolt makes
+(decision 1), then the plan's pymolt code steps when their hunks rebuild every changed file from
+``changes[].old_source`` to ``new_source``, else the plan's one whole-file step (``v1``).
 """
 
 from __future__ import annotations
@@ -23,10 +23,13 @@ CODE_TYPES = ("codemod", "python-fix")
 
 
 def applicable_steps(plan) -> list[PlanStep]:
-    """The steps ``apply`` writes, in plan order (see the module docstring)."""
+    """The steps ``apply`` writes, in plan order (see the module docstring): the pymolt
+    ``manifest-pin`` steps of the env phase (decision 1), then the code steps."""
     from pymolt.migration_plan import _ledger_steps
 
-    return [step for step, _files in _ledger_steps(plan)]
+    pins = [s for s in plan.steps if s.executor == "pymolt" and s.type == "manifest-pin"
+            and s.edits and s.do.recipe is not None and s.do.recipe.kind == "manifest-pin"]
+    return pins + [step for step, _files in _ledger_steps(plan)]
 
 
 @dataclass

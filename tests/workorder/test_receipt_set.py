@@ -123,7 +123,7 @@ def test_a_rolled_back_step_applies_again_in_its_run(tmp_path):
 
 
 def test_progress_counts_every_pymolt_step_of_the_plan(tmp_path):
-    """A pymolt step the whole-plan apply does not write (a manifest pin) leaves it partial."""
+    """A pymolt step apply cannot write (a manifest pin with no edit) leaves it partial."""
     from pymolt.workorder.models import ManifestPin, PlanStep, StepDo, StepRecipe
 
     plan = _plan(tmp_path, T0, T1, _pattern("a.f", "a.g"))
