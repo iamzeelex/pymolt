@@ -136,8 +136,10 @@ def _pattern(old, new, **kw):
     return CodemodPattern(old_qualname=old, new_qualname=new, kind="rename-call", **kw)
 
 
-def _plan(tmp_path, files):
-    """A plan of ``{path: (old, new, [patterns])}``, applied without a baseline."""
+def _plan(tmp_path, files, recorder=None):
+    """A plan of ``{path: (old, new, [patterns])}``, applied without a baseline. Without a
+    ``recorder`` (the preview walk's recipe chains) the builder keeps each file's change in one
+    whole-file step."""
     previews = []
     for name, (old, new, patterns) in files.items():
         (tmp_path / name).write_text(old, encoding="utf-8")
@@ -146,30 +148,78 @@ def _plan(tmp_path, files):
     return create_migration_plan(
         tmp_path, previews, [DependencyMigration("a", "1.0", "2.0")], target_python="3.12",
         source_manifest="requirements.txt", target_manifest_path=None, files_scanned=len(files),
-        predict=False)
+        predict=False, recorder=recorder)
 
 
-def test_a_whole_file_step_attributes_each_region_to_its_recipe_with_its_claim(tmp_path):
+@pytest.mark.parametrize("steps", ["builder", "none"])
+def test_a_whole_file_step_attributes_each_region_to_its_recipe_with_its_claim(tmp_path, steps):
     """The v1 attribution, kept for the one case a step cannot say: a delta-checked rename
     vouches for its region, a bare pattern for nothing. (A region is a difflib opcode, as in
-    v1: two adjacent rewritten lines are one region, attributed to one recipe.)"""
+    v1: two adjacent rewritten lines are one region, attributed to one recipe.) Both kinds of
+    whole-file step: the builder's, for a file with no recorded chain, and the synthetic
+    ``v1`` of a plan with no steps."""
     old = "import a\nx = a.f()\nz = 1\ny = a.h()\n"
     new = "import a\nx = a.g()\nz = 1\ny = a.k()\n"
     checked = _pattern("a.f", "a.g", evidence=["pymolt.delta DEPRECATED: a.f -> a.g"])
     plan = _plan(tmp_path, {"m.py": (old, new, [checked, _pattern("a.h", "a.k")])})
+    [whole] = [s for s in plan.steps if s.executor == "pymolt"]
+    assert whole.do.recipe.kind == "whole-file"
+    if steps == "none":
+        plan.steps = []
     receipt = apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
 
     ledger = load_ledger(tmp_path)
     [event] = ledger.events
+    step_id = whole.id if steps == "builder" else "v1"
     assert (event.run_id, event.step_id, event.files[0].before) == (
-        receipt.run_id, "v1", plan.changes[0].old_sha256)
-    claims = {e.anchor_new.stmt: (e.rule, e.claim, e.basis) for e in ledger.entries}
+        receipt.run_id, step_id, plan.changes[0].old_sha256)
+    claims = {e.anchor_new.stmt: (e.step_id, e.rule, e.claim, e.basis) for e in ledger.entries}
     assert claims == {
-        "x = a.g()": ("rename-call:a.f→a.g", "preserve", "same-signature"),
-        "y = a.k()": ("rename-call:a.h→a.k", None, None),
+        "x = a.g()": (step_id, "rename-call:a.f→a.g", "preserve", "same-signature"),
+        "y = a.k()": (step_id, "rename-call:a.h→a.k", None, None),
     }
     v1 = build_entries("m.py", old, new, plan.changes[0].recipes, plan.changes[0].claims)
     assert [e["claim"] for e in v1] == ["same-signature", None]    # the same split as v1
+
+
+def test_the_builders_steps_are_recorded_each_with_its_own_claim_and_anchors(tmp_path):
+    """A plan built from the walk's recorded chain has one step per recipe. Each step's
+    event names its own before- and after-text, and each entry its own step, claim, basis,
+    symbols and anchors made on that step's texts."""
+    from pymolt.workorder.blobs import get_text
+    from pymolt.workorder.builder import StepRecorder
+
+    t0 = "import a\nx = a.f()\nz = 1\ny = a.h()\n"
+    t1 = "import a\nx = a.g()\nz = 1\ny = a.h()\n"
+    t2 = "import a\nx = a.g()\nz = 1\ny = a.k()\n"
+    checked = _pattern("a.f", "a.g", evidence=["pymolt.delta MOVED: a.f -> a.g"])
+    bare = _pattern("a.h", "a.k")
+    recorder = StepRecorder()
+    recorder.record(checked, str(tmp_path / "m.py"), t0, t1)
+    recorder.record(bare, str(tmp_path / "m.py"), t1, t2)
+    plan = _plan(tmp_path, {"m.py": (t0, t2, [checked, bare])}, recorder=recorder)
+    first, second = [s for s in plan.steps if s.executor == "pymolt"]
+    assert (first.do.recipe.kind, first.claim, second.claim) == ("pattern", "preserve", None)
+    assert [s.id for s, _files in _ledger_steps(plan)] == [first.id, second.id]
+    receipt = apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
+
+    ledger = load_ledger(tmp_path)
+    e1, e2 = ledger.events
+    assert [(e.seq, e.step_id) for e in ledger.events] == [(1, first.id), (2, second.id)]
+    assert (get_text(tmp_path, e1.files[0].before), get_text(tmp_path, e1.files[0].after),
+            get_text(tmp_path, e2.files[0].after)) == (t0, t1, t2)
+    assert e2.files[0].before == e1.files[0].after
+    assert [(e.epoch, e.step_id, e.claim, e.basis, e.old_symbol, e.new_symbol,
+             e.anchor_old.stmt, e.anchor_new.stmt) for e in ledger.entries] == [
+        (1, first.id, "preserve", "same-object", "a.f", "a.g", "x = a.f()", "x = a.g()"),
+        (2, second.id, None, None, "a.h", "a.k", "y = a.h()", "y = a.k()")]
+    # The anchors are the ones the plan made on each step's own texts.
+    assert ledger.entries[0].anchor_new.key == first.edits[0].anchors_new[0].key
+    assert ledger.entries[1].anchor_old.key == second.edits[0].anchors_old[0].key
+    saved = MigrationReceipt.load(tmp_path)
+    assert {k.split(":", 1)[1]: (r.epoch, r.claim) for k, r in saved.steps.items()} == {
+        first.id: (1, "preserve"), second.id: (2, None)}
+    assert saved.progress == "complete" and saved.run_id == receipt.run_id
 
 
 def test_steps_that_chain_are_recorded_one_event_each_and_attributed_by_step(tmp_path):
@@ -200,8 +250,9 @@ def test_steps_that_chain_are_recorded_one_event_each_and_attributed_by_step(tmp
     assert [s.id for s, _files in _ledger_steps(plan)] == ["v1"]
 
 
-def test_a_whole_file_step_that_cannot_be_anchored_never_refuses_the_apply(tmp_path,
-                                                                          monkeypatch):
+def test_a_plan_whose_whole_file_step_cannot_be_built_still_applies(tmp_path, monkeypatch):
+    """A plan with no steps gets the synthetic ``v1``; should building it fail, the step is
+    made without its anchors and the apply stands."""
     from pymolt.workorder import v1
 
     def broken(plan):
@@ -209,9 +260,25 @@ def test_a_whole_file_step_that_cannot_be_anchored_never_refuses_the_apply(tmp_p
 
     monkeypatch.setattr(v1, "v1_step", broken)
     plan = _plan(tmp_path, {"m.py": ("x = a.f()\n", "x = a.g()\n", [_pattern("a.f", "a.g")])})
+    plan.steps = []
     apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
     [event] = load_ledger(tmp_path).events
     assert event.step_id == "v1" and (tmp_path / "m.py").read_text() == "x = a.g()\n"
+
+
+def test_a_step_whose_statements_cannot_be_anchored_is_recorded_by_its_lines(tmp_path,
+                                                                            monkeypatch):
+    from pymolt import apply_ledger
+
+    def broken(text, python):
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(apply_ledger, "_index", broken)
+    plan = _plan(tmp_path, {"m.py": ("x = a.f()\n", "x = a.g()\n", [_pattern("a.f", "a.g")])})
+    apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
+    [entry] = load_ledger(tmp_path).entries
+    assert entry.step_id == plan.steps[0].id
+    assert (entry.anchor_old, entry.anchor_new, entry.new_lines) == (None, None, (1, 1))
 
 
 def test_rollback_ends_the_runs_epochs_and_a_no_op_run_keeps_its_own(tmp_path):

@@ -410,8 +410,12 @@ def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
     assert ledger["schema"] == "pymolt.apply_ledger/2"
     [event] = ledger["events"]
+    # Previews with no recorded recipe chain: the builder keeps the code change in one step
+    # (the plan's manifest pin, env-1, is not written by this apply).
+    [step] = [s for s in plan.steps if s.type in ("codemod", "python-fix")]
+    assert step.do.recipe.kind == "whole-file"
     assert (event["seq"], event["event"], event["run_id"], event["step_id"], event["wrote"]) == (
-        1, "apply", plan.plan_id, "v1", True)
+        1, "apply", plan.plan_id, step.id, True)
     assert [f["file"] for f in event["files"]] == ["app0.py", "app1.py"]
     assert event["files"][0]["after"] == plan.changes[0].new_sha256
     entries = ledger["entries"]
@@ -420,7 +424,7 @@ def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
     written = (tmp_path / "app0.py").read_text().splitlines()
     a, b = entry["new_lines"]
     assert "werkzeug.utils" in "\n".join(written[a - 1:b])
-    assert (entry["epoch"], entry["run_id"], entry["step_id"]) == (1, plan.plan_id, "v1")
+    assert (entry["epoch"], entry["run_id"], entry["step_id"]) == (1, plan.plan_id, step.id)
     assert entry["anchor_new"]["stmt"] == "from werkzeug.utils import safe_join"
     assert entry["anchor_old"]["stmt"] == "from flask.helpers import safe_join"
     assert (entry["kind"], entry["rule"], entry["old_symbol"], entry["new_symbol"]) == (
