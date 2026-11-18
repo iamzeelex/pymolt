@@ -23,10 +23,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from pydantic_core import ValidationError
 
-from pymolt.apply_ledger import claim_for
+from pymolt.apply_ledger import LedgerSnapshot, append_ledger, claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
 from pymolt.verify.predict import PredictionReport
-from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, PlanStep
+from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP_ID, PlanStep
 
 logger = logging.getLogger(__name__)
 
@@ -802,6 +802,10 @@ def _apply_migration_plan_unlocked(
         run_dir = _run_dir(root, run_id)
 
     check, smoke_before = _check_before_write(root, plan, smoke)
+    # What the ledger will say about the write, from the plan's own texts: one ``apply`` event
+    # per pymolt step, with its statements. Computed before any write, so a failure here
+    # costs nothing.
+    records = _apply_records(root, plan, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     frozen_plan_path = plan.save(root, run_dir / "plan.json")
     state = MigrationRunState(
@@ -842,7 +846,6 @@ def _apply_migration_plan_unlocked(
                      "without --smoke and let capture and verify judge it.")
 
     applied_at = _now()
-    _write_apply_ledger(root, plan, run_id, applied_at)
     receipt = MigrationReceipt(
         run_id=run_id,
         plan_id=plan.plan_id,
@@ -864,13 +867,17 @@ def _apply_migration_plan_unlocked(
         no_codemods_required=not plan.changes,
         plan_path=str(frozen_plan_path),
     )
+    ledger_before = LedgerSnapshot.take(root)
     try:
+        append_ledger(root, [(event.model_copy(update={"at": applied_at}), entries)
+                             for event, entries in records])
         _save_run_state(
             run_dir,
             state.model_copy(update={"status": "applied", "applied_at": applied_at}),
         )
         receipt.save(root)
     except BaseException as metadata_exc:
+        _restore_ledger(ledger_before)
         reverse = [
             FilePreview(
                 path=preview.path,
@@ -992,19 +999,166 @@ def _already_applied(root: Path, plan: MigrationPlan, state: MigrationRunState):
     return receipt
 
 
-def _write_apply_ledger(root: Path, plan: MigrationPlan, run_id: str, applied_at: str) -> None:
-    """Record what apply wrote, from the files as they are now. Never fails the apply."""
-    from pymolt.apply_ledger import write_ledger
+def _restore_ledger(snapshot) -> None:
+    """Put the ledger back as it was before a mutation whose metadata failed (best effort: the
+    mutation's own error is the one to report)."""
+    try:
+        snapshot.restore()
+    except OSError:
+        logger.warning("could not restore the apply ledger", exc_info=True)
+
+
+def _pythons(root: Path, plan: MigrationPlan) -> tuple[str | None, str | None]:
+    """The Python each side of the plan's texts is for: the base (before-texts) and the target
+    (after-texts). Anchors parse with them (a 3.6 text may use ``async`` as a name)."""
+    from pymolt.ingestion.config import EnvConfig
+
+    config = EnvConfig.load(root / ".pymolt" / "env_config.json")
+    base = (plan.python or {}).get("from") or (config.base_python if config else None)
+    return base, plan.target_python or (config.target_python if config else None)
+
+
+def _ledger_steps(plan: MigrationPlan) -> list[tuple[PlanStep, list[tuple[str, str, str]]]]:
+    """The pymolt code steps a whole-plan apply writes, in order, each with its files'
+    ``(path, before-text, after-text)``. The plan's own steps when their hunks chain every
+    changed file from ``old_source`` to ``new_source``; otherwise (a plan with no steps, or one
+    whose steps do not chain) its one whole-file step, ``v1``."""
+    from pymolt.workorder.edits import HunkMismatch, apply_hunks
+    from pymolt.workorder.edits import sha256 as text_sha
+
+    if not plan.changes:
+        return []
+    texts = {c.path: c.old_source for c in plan.changes}
+    chained: list[tuple[PlanStep, list[tuple[str, str, str]]]] = []
+    code = [s for s in plan.steps if s.executor == "pymolt" and s.edits
+            and s.type in ("codemod", "python-fix") and s.do.recipe is not None]
+    for step in code:
+        files = []
+        for edit in step.edits:
+            before = texts.get(edit.file)
+            if before is None or text_sha(before) != edit.before_sha256:
+                chained = []
+                break
+            try:
+                after = apply_hunks(before, edit.hunks)
+            except HunkMismatch:
+                chained = []
+                break
+            if text_sha(after) != edit.after_sha256:
+                chained = []
+                break
+            texts[edit.file] = after
+            files.append((edit.file, before, after))
+        else:
+            chained.append((step, files))
+            continue
+        break
+    if chained and all(texts[c.path] == c.new_source for c in plan.changes):
+        return chained
+    step = plan.step(V1_STEP_ID) or _whole_plan_step(plan)
+    return [(step, [(c.path, c.old_source, c.new_source) for c in plan.changes])]
+
+
+def _whole_plan_step(plan: MigrationPlan) -> PlanStep:
+    """The plan's one whole-file step (``workorder.v1.v1_step``). Its anchors are only
+    metadata here; should making them fail, the step is built without them, so the apply
+    is never refused for its provenance."""
+    from pymolt.workorder.models import StepDo, StepEffort, StepRecipe, step_key
+    from pymolt.workorder.v1 import v1_step
 
     try:
-        files = []
-        for change in plan.changes:
-            written = _project_file(root, change.path).read_text(encoding="utf-8")
-            files.append((change.path, change.old_source, written, change.recipes,
-                          change.claims))
-        write_ledger(root, run_id, applied_at, files)
-    except Exception:  # noqa: BLE001 - provenance is best effort; the migration stands
-        logger.warning("could not write the apply ledger", exc_info=True)
+        return v1_step(plan)
+    except Exception:  # noqa: BLE001 - provenance degrades, the apply stands
+        logger.warning("could not build the plan's whole-file step", exc_info=True)
+    recipes = list(dict.fromkeys(r for c in plan.changes for r in c.recipes))
+    claims = [c for change in plan.changes for c in change.claims.values()]
+    return PlanStep(
+        id=V1_STEP_ID, key=step_key("codemod", "v1|" + "|".join(sorted(recipes))),
+        phase="mechanical", type="codemod", title="The plan's rewrite", executor="pymolt",
+        claim="preserve" if claims else None,
+        do=StepDo(recipe=StepRecipe(kind="whole-file", keys=recipes, sites="all")),
+        effort=StepEffort(sites=sum(c.sites for c in plan.changes), files=len(plan.changes),
+                          why="pymolt applies it"))
+
+
+def _step_risk_ids(plan: MigrationPlan, step: PlanStep) -> list[str]:
+    """The plan-time ids of the risks the step addresses (persisted on its event, M4). A
+    whole-file step addresses every risk the plan fixes."""
+    if step.why.risk_ids:
+        return list(step.why.risk_ids)
+    risks = plan.risks.risks if plan.risks is not None else []
+    return [r.id for r in risks if r.step_id == step.id
+            or (step.id == V1_STEP_ID and r.step_id is None and r.fixed_by_plan)]
+
+
+def _apply_records(root: Path, plan: MigrationPlan, run_id: str):
+    """The ledger records of applying the whole plan as ``run_id``: one ``apply`` event per
+    pymolt step and the statements it changed (``apply_ledger.entries_for``). A whole-file
+    step attributes each changed region to the recipe that names it, with that recipe's
+    claim. A file whose statements cannot be anchored is recorded by its lines only."""
+    from pymolt.apply_ledger import (
+        EventFile,
+        LedgerEvent,
+        _recipe_for,
+        attrs_for_recipe,
+        entries_for,
+        step_attrs,
+    )
+
+    base, target = _pythons(root, plan)
+    changes = {c.path: c for c in plan.changes}
+    out = []
+    for step, files in _ledger_steps(plan):
+        whole = step.do.recipe is not None and step.do.recipe.kind == "whole-file"
+        entries = []
+        for path, before, after in files:
+            if whole:
+                change = changes.get(path)
+                recipes = list(change.recipes) if change else []
+                claims = dict(change.claims) if change else {}
+
+                def attrs(old_text, new_text, recipes=recipes, claims=claims):
+                    return attrs_for_recipe(_recipe_for(recipes, old_text, new_text), claims)
+            else:
+                attrs = step_attrs(step)
+            kwargs = {"run_id": run_id, "step_id": step.id, "python_before": base,
+                      "python_after": target}
+            try:
+                entries += entries_for(path, before, after, attrs, **kwargs)
+            except Exception:  # noqa: BLE001 - provenance degrades to lines, the apply stands
+                logger.warning("could not anchor the ledger entries of %s", path, exc_info=True)
+                entries += entries_for(path, before, after, attrs, anchored=False, **kwargs)
+        out.append((LedgerEvent(
+            event="apply", run_id=run_id, step_id=step.id, at=_now(), executor="pymolt",
+            actor="pymolt", wrote=True, risk_ids=_step_risk_ids(plan, step),
+            files=[EventFile(file=path, before=_sha256(before), after=_sha256(after))
+                   for path, before, after in files]), entries))
+    return out
+
+
+def _rollback_records(root: Path, run_id: str, rolled_back_at: str,
+                      texts: dict[str, tuple[str, str]]):
+    """The ledger's ``rollback`` events for every step of ``run_id`` with a current epoch, in
+    reverse order. ``texts``: each file the rollback wrote, ``(text before it, restored
+    text)``. A step whose files it did not rewrite keeps its epoch (``restored: false``)."""
+    from pymolt.apply_ledger import EventFile, LedgerEvent, load_ledger
+
+    ledger = load_ledger(root)
+    if ledger is None:
+        return []
+    out = []
+    current = ledger.current_epochs()
+    for (run, step_id), seq in sorted(current.items(), key=lambda kv: -kv[1]):
+        if run != run_id:
+            continue
+        event = next(e for e in ledger.events if e.seq == seq)
+        rewrote = [f.file for f in event.files if f.file in texts]
+        out.append((LedgerEvent(
+            event="rollback", run_id=run_id, step_id=step_id, at=rolled_back_at,
+            restored=bool(rewrote),
+            files=[EventFile(file=f, before=_sha256(texts[f][0]), after=_sha256(texts[f][1]))
+                   for f in rewrote]), []))
+    return out
 
 
 def rollback_migration(
@@ -1083,11 +1237,19 @@ def _rollback_migration_unlocked(
         if preview.old_source != preview.new_source
     ]
     rolled_back_at = _now()
+    records = _rollback_records(
+        root, effective_run_id, rolled_back_at,
+        {change.path: (preview.old_source, preview.new_source)
+         for change, preview in zip(plan.changes, previews, strict=True)
+         if preview.old_source != preview.new_source})
+    ledger_before = LedgerSnapshot.take(root)
     write_previews(previews)
     state_path = root / ".pymolt" / "contract_state.json"
     original_post = original_contract_state.post_migration
     archived: str | None = None
     try:
+        if records:
+            append_ledger(root, records)
         _save_run_state(
             run_dir,
             state.model_copy(update={
@@ -1106,6 +1268,7 @@ def _rollback_migration_unlocked(
             archived = set_aside_post_migration(root, contract_state, effective_run_id)
             contract_state.save(state_path)
     except BaseException as metadata_exc:
+        _restore_ledger(ledger_before)
         forward = [
             FilePreview(
                 path=preview.path,
