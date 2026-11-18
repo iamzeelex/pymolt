@@ -272,7 +272,7 @@ def _finding(group: list[FactEntry], **extra: Any) -> dict[str, Any]:
     site, text = _site(rep)
     levels = Counter((e.level.value if e.level else "none") for e in group)
     out: dict[str, Any] = {
-        "symbol": rep.symbol, "site": site, "site_text": text,
+        "id": rep.finding, "symbol": rep.symbol, "site": site, "site_text": text,
         "mechanism": mechanism(rep), "entries": len(group),
         "calls": {"old": sum(e.old_count for e in group),
                   "new": sum(e.new_count for e in group)},
@@ -430,7 +430,8 @@ def render_text(summary: dict[str, Any], *, explained: bool = False,
         for f in summary["failing"]:
             if budget <= 0:
                 break
-            out.append(f"  ✗ {f['symbol']} @ {f['site']}  ×{f['entries']}  {f['why']}")
+            out.append(f"  ✗ {f['symbol']} @ {f['site']}  ×{f['entries']}  {f['why']}"
+                       + (f"  [finding {f['id']}]" if f.get("id") else ""))
             if printed < _SAMPLED_FINDINGS:
                 out.extend(_sample_lines(f["sample"], "      "))
             budget -= 1
@@ -445,7 +446,8 @@ def render_text(summary: dict[str, Any], *, explained: bool = False,
         for f in r["findings"][:5]:
             if budget <= 0:
                 break
-            out.append(f"  ? {f['symbol']} @ {f['site']}  ×{f['entries']}")
+            out.append(f"  ? {f['symbol']} @ {f['site']}  ×{f['entries']}"
+                       + (f"  [finding {f['id']}]" if f.get("id") else ""))
             budget -= 1
         if r["findings_total"] > 5:
             out.append(f"  … {r['findings_total'] - 5} more site(s)")

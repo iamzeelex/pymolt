@@ -318,6 +318,12 @@ def verify_migration(
         "--auto-rollback",
         help="Run rollback when a required canary gate fails",
     ),
+    accept: str | None = typer.Option(
+        None, "--accept",
+        help="Accept a failing or review finding (its id) as an intended change: a person on "
+             "a terminal types the nonce printed"),
+    strict: bool = typer.Option(
+        False, "--strict", help="Review every accepted change instead of counting it equal"),
     json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
     verbose: bool = typer.Option(
@@ -368,6 +374,10 @@ def verify_migration(
     project_path = require_project_dir(project_dir, json_output=json_output)
     if agent:
         project_path = project_path.resolve()
+    if accept and json_output:
+        fail("--accept is a person's attested act: it is refused under --agent and --json",
+             hint="A person runs `pymolt verify . --accept ID` on a terminal.",
+             json_output=json_output)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
         if path_value:
@@ -394,14 +404,21 @@ def verify_migration(
             if comparator is None:
                 raise ComparatorError("--profile custom requires --comparator module:callable")
             load_custom_comparator(comparator)
-        contract_report = service.build_contract_report_from_state(
-            project_path,
-            trace_override=post_file,
-            against_override=baseline_file,
-            probe_python=probe_python,
-            comparator_profile=selected.value,
-            custom_comparator=comparator,
-        )
+        def build_report():
+            return service.build_contract_report_from_state(
+                project_path,
+                trace_override=post_file,
+                against_override=baseline_file,
+                probe_python=probe_python,
+                comparator_profile=selected.value,
+                custom_comparator=comparator,
+                strict=strict,
+            )
+
+        contract_report = build_report()
+        if accept:
+            _accept_finding(project_path, contract_report, accept)
+            contract_report = build_report()
 
         if bool(golden_before) != bool(golden_after):
             raise ValueError("--golden-before and --golden-after must be supplied together")
@@ -1005,6 +1022,23 @@ def apply_plan_cmd(
         _render_left_to_you(migration_plan)
     next_step(project_path)
     raise typer.Exit(code=code)
+
+
+def _accept_finding(project_path: Path, report, finding: str) -> None:
+    """``verify --accept``: a person accepts one finding (design 5.2), or the command fails."""
+    from pymolt.verify.accepts import AcceptRefusal, accept_finding
+
+    if report._fact_diff is None or report._accepts is None:
+        fail("--accept needs a behaviour diff of the two captures, and there is none",
+             code=EXIT_USAGE)
+    try:
+        done = accept_finding(project_path, report._fact_diff, finding,
+                              attester=_attester(False, False), ctx=report._accepts)
+    except AcceptRefusal as exc:
+        fail(f"finding {finding} was not accepted: {exc}", hint=exc.hint, code=EXIT_USAGE)
+    console.print(f"[green]Accepted[/green] finding {escape(done.finding)} ({escape(done.symbol)})"
+                  f" as {'ad-hoc ' if done.adhoc else ''}step {escape(done.step)}, attestation "
+                  f"{escape(done.attestation)}. It expires when the outcome or a capture changes.")
 
 
 def _attester(agent: bool, json_output: bool):
