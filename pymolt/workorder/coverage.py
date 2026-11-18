@@ -73,11 +73,14 @@ def _as_entry(item: LedgerEntry | Mapping[str, Any]) -> LedgerEntry:
 
 
 def _located(entry: LedgerEntry, old: Iterable[int], new: Iterable[int],
-             attested: Callable[[LedgerEntry], bool] | None) -> dict[str, Any]:
+             attested: Callable[[LedgerEntry], Any] | None) -> dict[str, Any]:
     out = entry.as_dict()
     out["recorded"] = {"old": out.pop("old_lines"), "new": out.pop("new_lines")}
     out["located"] = {"old": sorted(set(old)), "new": sorted(set(new))}
-    out["attested"] = bool(attested(entry)) if attested is not None else False
+    info = attested(entry) if attested is not None and entry.claim == "intended" else None
+    out["attested"] = bool(info)
+    if isinstance(info, Mapping):
+        out["attestation"] = dict(info)        # who attested, and when (the report prints it)
     return out
 
 
@@ -90,9 +93,11 @@ def _index(text: str, python: Any) -> StatementIndex | None:
 def ledger_coverage(old_sources: Mapping[str, str], new_sources: Mapping[str, str],
                     entries: Iterable[LedgerEntry | Mapping[str, Any]], *,
                     python_old: Any = None, python_new: Any = None,
-                    attested: Callable[[LedgerEntry], bool] | None = None) -> LedgerCoverage:
+                    attested: Callable[[LedgerEntry], Any] | None = None) -> LedgerCoverage:
     """Locate ``entries`` in the two snapshots (see the module docstring). ``python_old`` /
-    ``python_new``: the Python each snapshot's code is for (the base and the target)."""
+    ``python_new``: the Python each snapshot's code is for (the base and the target).
+    ``attested``: for an ``intended`` entry, the person attestation it carries, checked outside
+    the ledger (a mapping with ``id``, ``user`` and ``at``, or a truthy value), else None."""
     from pymolt.verify.facts import _line_map
 
     items = [_as_entry(e) for e in entries]
