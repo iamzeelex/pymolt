@@ -4,17 +4,28 @@ HOST side. A rollback is one transaction under the migration lock, like an apply
 named in the run's ``state.json`` before the first write, every text it writes or replaces is
 in the blob store, and a failure after the write puts the files back.
 
-**One step** (``--step ID``, phase 1, file-level): allowed when each of the step's files holds the
-after-text of the step's current epoch and no later step in effect changed it since; the epoch's
-before-text comes back from the blob store. Otherwise it is refused, naming the later steps or
-the edits on those files. A step in effect that depends on it is refused too, unless
-``--cascade`` (a person only), which rolls the dependents back first, latest first. A step of an
-earlier run is refused while a step of a later run in effect builds on its statements.
+**One step** (``--step ID``), per file of the step's current epoch, the first that applies:
+
+1. **file-level** (phase 1): the file holds the epoch's after-text and no later step in effect
+   changed it since. The epoch's before-text comes back from the blob store.
+2. **inverse effect** (phase 2, ``workorder.inverse``): the file moved on, through later steps or
+   hand edits elsewhere. Only the epoch's own change is undone, from its before- and after-text:
+   its lines must be in the file unchanged, its new statements must resolve in their slots
+   (their neighbours as the epoch left them, or as a later step in effect rewrote them), an
+   import it inserted goes only when nothing uses it any more, and the result must parse, give
+   back the epoch's old statements in their slots, and compile on the target (D).
+3. Otherwise the step is refused, naming the later steps or the edits on its files and why the
+   inverse could not be made. Nothing is written.
+
+A step in effect that depends on it is refused too, unless ``--cascade`` (a person only), which
+rolls the dependents back first, latest first. A step of an earlier run is refused while a step
+of a later run in effect builds on its statements.
 
 **The whole run** (``pymolt rollback .``: the open run; ``--run-id R``: another): every step of the
 run with a current epoch, latest first. Each file those steps touched goes back to its text
-before the first of them; the file must hold the last one's after-text and the steps' texts must
-chain, unless ``--force``, which restores the text before the run's first event on the file and
+before the run's events on it; the file must hold the text the run's last event on it left, and
+the run's events on it (its steps' epochs, and the rollbacks of its steps) must chain since,
+unless ``--force``, which restores the text before the run's first event on the file and
 discards everything since (files the run never touched are never written). A run is refused
 while a later run's step in effect touched one of its files: roll that run back first.
 
@@ -48,6 +59,7 @@ from pymolt.migration_plan import (
     _migration_lock,
     _now,
     _project_file,
+    _pythons,
     _restore_ledger,
     _run_dir,
     _save_run_state,
@@ -59,14 +71,17 @@ from pymolt.migration_plan import (
 @dataclass
 class RollbackResult:
     """What one rollback did. ``steps``: the steps whose epoch it ended or (``kept``) kept;
-    ``files_restored``: the project files it rewrote; ``post``: ``kept`` / ``set_aside`` / None
-    (there was no post-migration capture)."""
+    ``inverse``: of ``steps``, those undone by their inverse effect in a file that moved on
+    (``notes`` names the imports they inserted that stay); ``files_restored``: the project files
+    it rewrote; ``post``: ``kept`` / ``set_aside`` / None (there was no post-migration
+    capture)."""
 
     plan: MigrationPlan
     run_id: str
     rolled_back_at: str
     steps: list[str] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
+    inverse: list[str] = field(default_factory=list)
     files_restored: list[str] = field(default_factory=list)
     post: str | None = None
     post_trace: str | None = None
@@ -202,6 +217,7 @@ def _rollback(root: Path, *, run_id: str | None, force: bool) -> RollbackResult:
     _refuse_later_runs(ledger, receipt, effective, events)
     texts = _Texts(root, plan)
     restore: dict[str, tuple[str, str]] = {}           # file -> (current text, restored text)
+    whole: dict[tuple[int, str], tuple[str, str]] = {}  # events that name the whole write
     problems: list[str] = []
     for rel in dict.fromkeys(f.file for e in reversed(events) for f in e.files):
         mine = sorted((e for e in events if any(f.file == rel for f in e.files)),
@@ -212,31 +228,48 @@ def _rollback(root: Path, *, run_id: str | None, force: bool) -> RollbackResult:
             first = _first_event_on(ledger, effective, rel) or files[0]
             target = first.before
         else:
-            target = files[0].before
-            broken = [mine[i + 1].step_id for i in range(len(files) - 1)
-                      if files[i + 1].before != files[i].after]
-            if _sha256(current) != files[-1].after:
+            history = _history(ledger, effective, rel) or list(zip(mine, files, strict=True))
+            if _sha256(current) != history[-1][1].after:
                 problems.append(f"source changed after application: {rel}")
                 continue
-            if broken:
-                problems.append(f"{rel} was edited between steps (before {', '.join(broken)})")
+            # The run's own events on the file since the last edit that was not one of them,
+            # from the first epoch among them (a rollback's text before is not the run's start).
+            start = len(history) - 1
+            while start > 0 and history[start - 1][1].after == history[start][1].before:
+                start -= 1
+            while start < len(history) - 1 and history[start][0].event == "rollback":
+                start += 1
+            since = {e.seq for e, _f in history[start:]}
+            if any(e.seq not in since for e in mine):
+                event = history[start][0]
+                name = (event.step_id if event.event in ("apply", "record")
+                        else f"the rollback of {event.step_id}")
+                problems.append(f"{rel} was edited between steps (before {name})")
                 continue
+            target = history[start][1].before
         text = texts.get(target)
         if text is None:
             raise MigrationPlanError(
                 f"cannot restore {rel}: its text before run {effective[:8]} is not in the "
                 "store")
         restore[rel] = (current, text)
+        chained = files[0].before == target and files[-1].after == _sha256(current) and all(
+            files[i + 1].before == files[i].after for i in range(len(files) - 1))
+        if not force and not chained:
+            # A rollback by the inverse came between: each event names the one write.
+            whole.update({(e.seq, rel): (current, text) for e in mine})
     if problems:
         raise MigrationConflictError(
             "refusing to overwrite post-migration edits: " + "; ".join(problems)
             + "; pass --force only if discarding them is intentional")
-    return _commit(root, receipt, effective, state, plan, ledger, events, restore, force=force)
+    return _commit(root, receipt, effective, state, plan, ledger, events, restore, force=force,
+                   texts_of=whole)
 
 
 def _rollback_step(root: Path, step_id: str, *, run_id: str | None,
                    cascade: bool) -> RollbackResult:
-    """Phase 1 (file-level): the step, and with ``cascade`` its dependents first."""
+    """The step, and with ``cascade`` its dependents first: per file, file-level (phase 1), else
+    by the inverse of the epoch's effect (phase 2), else refused."""
     receipt, effective, state, plan = _load(root, run_id)
     ledger = _ledger(root, receipt)
     events = {e.step_id: e for e in _epoch_events(ledger, effective, state, plan)}
@@ -258,35 +291,204 @@ def _rollback_step(root: Path, step_id: str, *, run_id: str | None,
     order = sorted((events[sid] for sid in [*dependents, step_id]), key=lambda e: -e.seq)
     _refuse_built_on(root, ledger, receipt, effective, plan, order)
     texts = _Texts(root, plan)
+    inverse = _InverseContext(root, plan, texts)
     now: dict[str, str] = {}
     restore: dict[str, tuple[str, str]] = {}
+    written: dict[tuple[int, str], tuple[str, str]] = {}     # (epoch, file) -> (before, after)
+    inverted: set[str] = set()                                # files an inverse rewrote
+    undone: list[str] = []
     problems: list[str] = []
     rolled = {e.seq for e in order}
     for event in order:
         for f in event.files:
             if f.file not in now:
                 now[f.file] = _read(root, f.file)
-            later = _later_on(ledger, receipt, f.file, event.seq, rolled)
-            if later:
-                problems.append(f"{f.file}: {', '.join(later)} changed it after {event.step_id}")
-                continue
-            if _sha256(now[f.file]) != f.after:
-                problems.append(f"{f.file} was edited after {event.step_id} wrote it")
-                continue
-            text = texts.get(f.before)
-            if text is None:
-                raise MigrationPlanError(
-                    f"cannot restore {f.file}: the text before {event.step_id} is not in the "
-                    "store")
+            later = _later_events(ledger, receipt, f.file, event.seq, rolled)
+            if not later and _sha256(now[f.file]) == f.after:
+                text = texts.get(f.before)
+                if text is None:
+                    raise MigrationPlanError(
+                        f"cannot restore {f.file}: the text before {event.step_id} is not in "
+                        "the store")
+            else:
+                moved = (f"{f.file}: {', '.join(name for name, _e in later)} changed it after "
+                         f"{event.step_id}" if later else
+                         f"{f.file} was edited after {event.step_id} wrote it")
+                result = inverse.invert(event, f, now[f.file], [e for _n, e in later])
+                if not result.ok:
+                    problems.append(f"{moved}, and its own change cannot be undone alone: "
+                                    + "; ".join(result.reasons))
+                    continue
+                text = result.text
+                undone.append(event.step_id)
+                inverted.add(f.file)
+                inverse.notes += [f"{f.file}: `{imp}`, which {event.step_id} wrote, stays: "
+                                  "something else uses it now" for imp in result.kept]
             first = restore[f.file][0] if f.file in restore else now[f.file]
             restore[f.file] = (first, text)
+            written[(event.seq, f.file)] = (now[f.file], text)
             now[f.file] = text
     if problems:
         raise MigrationConflictError(
             f"step {step_id} is not the last change to its files: " + "; ".join(problems),
             hint="Roll back the later steps first (`--cascade` for its dependents), or the "
                  "whole run with `pymolt rollback . --force`, which discards the later edits.")
-    return _commit(root, receipt, effective, state, plan, ledger, order, restore, force=False)
+    inverse.compile(plan, {rel: restore[rel] for rel in inverted})
+    result = _commit(root, receipt, effective, state, plan, ledger, order, restore,
+                     force=False, texts_of=written)
+    result.inverse = [e.step_id for e in order if e.step_id in undone]
+    result.notes += inverse.notes
+    return result
+
+
+class _InverseContext:
+    """What phase 2 needs beyond the texts: the Pythons, the later steps' effects, and whether
+    another project file imports a name from a module."""
+
+    def __init__(self, root: Path, plan: MigrationPlan, texts: _Texts):
+        from pymolt.workorder.rules import Pythons
+
+        self.root, self.texts = root, texts
+        base, target = _pythons(root, plan)
+        self.pythons = Pythons(base=base, target=target)
+        self.notes: list[str] = []
+        self._effects: dict[tuple[str, str, str], Any] = {}
+
+    def invert(self, event, f, current: str, later: list):
+        from pymolt.workorder.inverse import Inverse, invert
+
+        before, after = self.texts.get(f.before), self.texts.get(f.after)
+        if before is None or after is None:
+            return Inverse(f.file, reasons=[f"{f.file}: the texts {event.step_id} saw are not "
+                                            "in the store"])
+        effects = [self._effect(f.file, other) for other in later]
+        try:
+            return invert(f.file, before, after, current, pythons=self.pythons,
+                          later=[e for e in effects if e is not None],
+                          imported_elsewhere=self.imported_elsewhere)
+        except Exception as exc:  # noqa: BLE001 - an inverse that cannot be made is refused
+            return Inverse(f.file, reasons=[f"{f.file}: the inverse could not be made "
+                                            f"({type(exc).__name__}: {str(exc)[:120]})"])
+
+    def _effect(self, rel: str, event):
+        """A later epoch's effect on ``rel``, from its texts (None: they are not in the store)."""
+        from pymolt.workorder.edits import make_edit
+
+        f = next((x for x in event.files if x.file == rel), None)
+        if f is None or not f.before or not f.after:
+            return None
+        key = (rel, f.before, f.after)
+        if key not in self._effects:
+            before, after = self.texts.get(f.before), self.texts.get(f.after)
+            effect = None
+            if before is not None and after is not None:
+                try:
+                    effect = make_edit(rel, before, after,
+                                       index_before=self.pythons.index(before),
+                                       index_after=self.pythons.index(after)).effect
+                except Exception:  # noqa: BLE001 - no translation: the slot check is stricter
+                    effect = None
+            self._effects[key] = effect
+        return self._effects[key]
+
+    def imported_elsewhere(self, rel: str, names: set[str]) -> set[str]:
+        """The ``names`` another project file imports from ``rel``'s module (a re-export)."""
+        return imported_elsewhere(self.root, rel, names)
+
+    def compile(self, plan: MigrationPlan, changed: dict[str, tuple[str, str]]) -> None:
+        """D's compile on the target, over the files an inverse rewrote: a failure refuses."""
+        from types import SimpleNamespace
+
+        from pymolt.apply_check import compile_changes
+
+        changes = [SimpleNamespace(path=rel, old_source=old, new_source=new, runs_on_base=None)
+                   for rel, (old, new) in changed.items() if rel.endswith(".py") and old != new]
+        if not changes:
+            return
+        checks = compile_changes(self.root, SimpleNamespace(
+            changes=changes, target_python=plan.target_python))
+        broken = [f"{path} ({error})" for c in checks for path, error in c.failed.items()]
+        self.notes += [f"{', '.join(c.path for c in changes)}: not compiled on the target "
+                       f"({check.reason})" for check in checks if check.status == "skipped"]
+        if broken:
+            raise MigrationConflictError(
+                "undoing the step's own change would leave source that does not compile on "
+                "the target: " + "; ".join(broken),
+                hint="Nothing was written. Roll back the later steps first, or the whole run "
+                     "with `pymolt rollback . --force`, which discards the later edits.")
+
+
+def imported_elsewhere(root: Path, rel: str, names: set[str]) -> set[str]:
+    """The ``names`` that another project ``.py`` file imports from the module ``rel`` is
+    (``from <module> import name``, relative or not, or a ``*`` import of it), or names as
+    ``<module>.name``. A file the host cannot parse counts when it mentions the name and the
+    module (it may import it)."""
+    import ast
+    import re
+
+    from pymolt.codemods.apply import _iter_py_files
+
+    module = _module_of(root, rel)
+    if not names or not module:
+        return set()
+    leaf = module.rsplit(".", 1)[-1]
+    words = {n: re.compile(rf"(?<!\w){re.escape(n)}(?!\w)") for n in names}
+    found: set[str] = set()
+    for path in _iter_py_files(root):
+        other = path.relative_to(root).as_posix()
+        if other == rel:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        hit = {n for n in names if words[n].search(text)}
+        if not hit or not re.search(rf"\b{re.escape(leaf)}\b|from\s+\.", text):
+            continue
+        found.update(n for n in hit if f"{module}.{n}" in text)
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            found.update(hit)
+            continue
+        importer = _module_of(root, other) or ""
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if _absolute(importer, other, node) != module:
+                continue
+            for alias in node.names:
+                if alias.name == "*":
+                    found.update(n for n in hit if not n.startswith("_"))
+                elif alias.name in hit:
+                    found.add(alias.name)
+        if found >= names:
+            break
+    return found
+
+
+def _module_of(root: Path, rel: str) -> str | None:
+    """The importable module name of a project file (``pkg/__init__.py`` -> ``pkg``)."""
+    from pymolt.apply_check import module_for
+
+    found = module_for(root, rel)
+    if isinstance(found, tuple):
+        return found[1]
+    stem = Path(rel).stem
+    return stem if stem.isidentifier() else None
+
+
+def _absolute(importer: str, rel: str, node) -> str | None:
+    """The absolute module a ``from ... import`` names, from the importing module's package."""
+    if not node.level:
+        return node.module
+    package = importer.split(".") if importer else []
+    if not rel.endswith("__init__.py"):
+        package = package[:-1]
+    if node.level - 1 > len(package):
+        return None
+    base = package[:len(package) - (node.level - 1)]
+    return ".".join([*base, *([node.module] if node.module else [])]) or None
 
 
 def _dependents(plan: MigrationPlan, step_id: str, live: set[str]) -> list[str]:
@@ -303,9 +505,9 @@ def _dependents(plan: MigrationPlan, step_id: str, live: set[str]) -> list[str]:
     return [s.id for s in plan.steps if s.id in found]
 
 
-def _later_on(ledger, receipt, rel: str, seq: int, rolled: set[int]) -> list[str]:
+def _later_events(ledger, receipt, rel: str, seq: int, rolled: set[int]) -> list[tuple]:
     """The steps in effect (of any run on disk) whose epoch touched ``rel`` after ``seq``,
-    leaving out the epochs this rollback ends."""
+    leaving out the epochs this rollback ends: ``(name, epoch event)``, in epoch order."""
     from pymolt.apply_ledger import chain_runs
 
     chain = chain_runs(receipt) if receipt is not None else set()
@@ -316,7 +518,8 @@ def _later_on(ledger, receipt, rel: str, seq: int, rolled: set[int]) -> list[str
         if event is None or current <= seq or current in rolled or (chain and run not in chain):
             continue
         if any(f.file == rel for f in event.files):
-            out.append(sid if not chain or len(chain) == 1 else f"{sid} of run {run[:8]}")
+            out.append((sid if not chain or len(chain) == 1 else f"{sid} of run {run[:8]}",
+                        event))
     return out
 
 
@@ -350,6 +553,19 @@ def _refuse_built_on(root: Path, ledger, receipt, run_id: str, plan: MigrationPl
                     f"step {sid} of run {run[:8]} is in effect and rewrote what "
                     f"{', '.join(e.step_id for e in order)} wrote in {edit.file}",
                     hint=f"Roll back run {run[:8]}'s step first.")
+
+
+def _history(ledger, run_id: str, rel: str) -> list[tuple]:
+    """The run's events that changed ``rel`` or named its texts (its steps' epochs, ended or
+    not, and their rollbacks): ``(event, its file)``, in order."""
+    out = []
+    for event in sorted(ledger.events, key=lambda e: e.seq):
+        if event.run_id != run_id or event.event not in ("apply", "record", "rollback"):
+            continue
+        for f in event.files:
+            if f.file == rel and f.before and f.after:
+                out.append((event, f))
+    return out
 
 
 def _first_event_on(ledger, run_id: str, rel: str):
@@ -402,7 +618,12 @@ def _post_now(root: Path) -> str | None:
 
 
 def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger, events,
-            restore: dict[str, tuple[str, str]], *, force: bool) -> RollbackResult:
+            restore: dict[str, tuple[str, str]], *, force: bool,
+            texts_of: dict[tuple[int, str], tuple[str, str]] | None = None) -> RollbackResult:
+    """Write ``restore`` (file -> (current, restored)) in one transaction, with a ``rollback``
+    event per step. ``texts_of``: ``(epoch, file) -> (text before, text after)`` this step's
+    rollback, when one rollback rewrites a file more than once (``--cascade``) or by an inverse;
+    by default each event goes from the epoch's after-text back to its before-text."""
     import uuid
 
     from pymolt.apply_ledger import EventFile, LedgerEvent, LedgerSnapshot, append_ledger
@@ -433,6 +654,9 @@ def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger
             executor="pymolt", actor="pymolt", restored=bool(event.files),
             files=[EventFile(file=f.file, before=_sha256(restore[f.file][0]),
                              after=_sha256(restore[f.file][1])) if force else
+                   EventFile(file=f.file, before=_sha256(texts_of[(event.seq, f.file)][0]),
+                             after=_sha256(texts_of[(event.seq, f.file)][1]))
+                   if texts_of and (event.seq, f.file) in texts_of else
                    EventFile(file=f.file, before=f.after, after=f.before)
                    for f in event.files if f.file in files]), []))
     invocation = Invocation(
@@ -440,7 +664,8 @@ def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger
         steps=[e.step_id for e in events], ledger_next_seq=ledger.next_seq(),
         files=[InvocationFile(file=rel, before=_sha256(old), after=_sha256(new))
                for rel, (old, new) in written.items()])
-    put_texts(root, [t for old, new in written.values() for t in (old, new)])
+    put_texts(root, [t for old, new in written.values() for t in (old, new)]
+              + [t for pair in (texts_of or {}).values() for t in pair])
     _save_run_state(run_dir, state.model_copy(update={"invocation": invocation}))
     previews = [FilePreview(path=str(_project_file(root, rel)), old_source=old,
                             new_source=new, sites=0) for rel, (old, new) in written.items()]

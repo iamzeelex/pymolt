@@ -171,10 +171,21 @@ the evidence. Details are in [verify.md](verify.md).
 ### `pymolt rollback [dir]`
 Restores the files the open run's steps changed, latest step first. It refuses to discard edits
 made after the apply unless given `--force`, which restores each file the run touched to its text
-before the run and never writes another file. `--run-id` picks an earlier run; it is refused
-while a later run's step in effect changed one of its files (roll that run back first). The plan
-stays valid: `apply` writes the rolled-back steps again in the same run, re-based when their
-lines moved. A step whose epoch changed no file stays in effect.
+before the run and never writes another file (a step rolled back alone before is not such an
+edit). `--run-id` picks an earlier run; it is refused while a later run's step in effect changed
+one of its files (roll that run back first). The plan stays valid: `apply` writes the
+rolled-back steps again in the same run, re-based when their lines moved. A step whose epoch
+changed no file stays in effect.
+
+`--step` rolls back one step. A file the step was the last change to gets back its text from
+before the step. A file a later step or a hand edit changed since gets only the step's own change
+undone, and keeps everything else byte for byte: the lines the step wrote must be there
+unchanged, each statement it wrote must still stand between the statements around it then (or
+what a later step rewrote them to), and the result must give back the step's old statements and
+compile on the target. An import the step wrote goes only when nothing uses it any more: no code
+in the file, no `__all__`, no other module importing it from this one. Otherwise it stays, and
+the output says so. Anything else refuses the step, names what changed the file and why its
+change cannot be undone alone, and writes nothing.
 
 The post-migration capture is set aside in the archive only when it recorded code the rollback
 took away: a rolled-back step's new statements are in its source snapshot, and it was taken
@@ -182,7 +193,7 @@ after that step. Otherwise it still describes the code and is kept.
 
 | Option | Meaning |
 |---|---|
-| `--step` | That step only. Allowed when each of its files still holds the text the step wrote and no later step changed it since; refused otherwise, naming the later steps or edits. Refused while a step in effect depends on it |
+| `--step` | That step only: each of its files gets back its text before the step, or, when later steps or edits changed the file, only the step's own change is undone (above). Refused when that cannot be done safely, naming the later steps or edits, and while a step in effect depends on it. `--json` lists the steps undone alone in `inverse`, and the imports that stay in `notes` |
 | `--cascade` | With `--step`: roll back the steps that depend on it first, latest first |
 | `--run-id` | The run to roll back (default: the open run) |
 | `--force` | Also discard edits made after apply (the whole run only) |
