@@ -190,20 +190,22 @@ def test_a_smoke_failure_the_write_caused_restores_the_files(tmp_path):
     # Design 3.2 step 8: the write was recorded, then rolled back: the ledger says both, and
     # the step's receipt says why.
     receipt = MigrationReceipt.load(tmp_path)
-    [step] = receipt.steps.values()
+    pin, step = receipt.steps.values()           # the manifest pin and the code step
     assert (step.status, step.epoch, step.files_restored) == ("rolled_back", None, ["app0.py"])
     assert step.checks["smoke_import"] == "failed: app0: RuntimeError: broken by the rewrite"
+    assert (pin.status, pin.files_restored) == ("rolled_back", ["requirements.txt"])
     assert (receipt.status, receipt.in_effect) == ("rolled_back", False)
+    assert (tmp_path / "requirements.txt").read_text() == "flask==2.0.3\n"
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
     assert [(e["event"], e.get("restored")) for e in ledger["events"]] == [
-        ("apply", None), ("rollback", True)]
+        ("apply", None), ("apply", None), ("rollback", True), ("rollback", True)]
     state = json.loads((tmp_path / ".pymolt" / "migrations" / plan.plan_id / "state.json")
                        .read_text())
     assert state["status"] == "rolled_back" and "smoke import failed" in state["error"]
     # Without --smoke the same plan applies again in the same run, with a new epoch.
     again = apply_migration_plan(tmp_path, plan)
     assert (again.status, again.run_id) == ("applied", plan.plan_id)
-    assert [s.epoch for s in again.steps.values()] == [3]
+    assert [s.epoch for s in again.steps.values()] == [5, 6]
 
 
 def test_an_import_that_already_failed_is_pre_existing_not_a_failure(tmp_path):

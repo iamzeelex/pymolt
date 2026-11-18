@@ -1021,11 +1021,15 @@ def _render_apply(result, plan, project_path: Path) -> None:
         console.print(Panel(
             f"Plan {plan_label}: {escape(what)}. [bold]Nothing was written.[/bold]",
             title="Nothing applied", border_style="yellow", expand=False))
-    elif receipt is not None and not receipt.files_changed and not result.files:
+    elif receipt is not None and not plan.changes:
+        pins = [f"{sid} pinned the target versions in {', '.join(by.files)}"
+                for sid in result.applied if (by := plan.step(sid)) is not None
+                and by.type == "manifest-pin"]
         console.print(Panel(
             f"Applied plan {plan_label}: "
-            "[bold]it changed no file[/bold] (0 files, 0 rewrite sites).\n"
-            "No call site needed a rewrite; the dependency moves still need testing: "
+            "[bold]it changed no source file[/bold] (0 files, 0 rewrite sites).\n"
+            + "".join(f"{escape(p)}.\n" for p in pins)
+            + "No call site needed a rewrite; the dependency moves still need testing: "
             "capture and verify decide.",
             title="Nothing to change", border_style="yellow", expand=False,
         ))

@@ -756,9 +756,11 @@ def receipt_after_apply(root: Path, prior, plan: MigrationPlan, run_id: str, app
 
 def summarize_run(root: Path, receipt, plan: MigrationPlan) -> None:
     """The schema-1 summary of the latest run: ``files_changed`` and ``patterns_applied`` over
-    its steps in effect (the v1 values while none is), ``status`` and ``progress``."""
+    its code steps in effect (the v1 values while none is: v1 counted the Python files the
+    rewrite changed, not the manifest a pin step rewrites), ``status`` and ``progress``."""
     steps = receipt.steps_of(receipt.run_id)
-    live = [(sid, st) for sid, st in steps.items() if st.in_effect]
+    env = {s.id for s in plan.steps if s.phase == "env"}
+    live = [(sid, st) for sid, st in steps.items() if st.in_effect and sid not in env]
     if live:
         files: list[str] = []
         for _sid, st in live:

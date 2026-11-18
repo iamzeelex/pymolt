@@ -59,7 +59,7 @@ pymolt verify .
 | `assess` | Resolves the dependencies under the target Python. Writes `requirements-target.txt`. |
 | `capture baseline` | Runs the command and records the calls. Run it before any code change: it cannot be recreated afterwards. With `--runs 2` it runs twice, to measure what varies between runs. |
 | `plan` | Lists the API changes your code uses, the rewrites and the predicted risks. Writes no source. |
-| `apply` | Writes the plan's rewrites. `pymolt rollback .` undoes them. |
+| `apply` | Writes the plan's rewrites, step by step, and the target's pins in a pinned requirements file. `pymolt rollback .` undoes them. |
 | `capture post-migration` | Runs the same command in the target environment. |
 | `verify` | Compares the two captures and prints the verdict. |
 

@@ -123,10 +123,14 @@ applied steps stay in effect, and a closed run applies nothing more. A later `ap
 run checks the baseline against the world the run started from. An invocation interrupted
 between its write and its records is undone by the next one.
 
+`apply` also writes the plan's pin step: each `name==version` line of a requirements manifest,
+with no hash, gets the target's pin, and `rollback` restores it. The other lines naming a moved
+package, and other kinds of manifest, are a step for a person.
+
 The plan stays valid while the setup (manifest file, base Python, toolset, container), the target
 manifest and the planned files are unchanged. Bumping the pins in the project's manifest does not
-make it stale. Bump them after `plan` and before the post-migration capture, before or after
-`apply` (see [plan.md](plan.md#when-to-bump-the-manifest)).
+make it stale. Bump the lines `apply` does not after `plan` and before the post-migration
+capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifest)).
 
 | Option | Meaning |
 |---|---|

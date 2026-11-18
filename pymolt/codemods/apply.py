@@ -1024,8 +1024,10 @@ def _commit_rewrites(rewrites: list[_PendingRewrite]) -> None:
                     f"file changed while codemods were being computed: {rewrite.path}"
                 )
 
-            # A generated module must parse before it is allowed into the write set.
-            cst.parse_module(rewrite.replacement.decode("utf-8"))
+            # A generated module must parse before it is allowed into the write set (a
+            # manifest the plan's pin step rewrites is not Python).
+            if rewrite.path.suffix in (".py", ".pyi"):
+                cst.parse_module(rewrite.replacement.decode("utf-8"))
             mode = stat.S_IMODE(rewrite.path.stat().st_mode)
             rollback = _write_transaction_file(
                 rewrite.path, rewrite.original, kind="rollback", mode=mode
