@@ -1,58 +1,116 @@
 name: Release
 
+# A release is a pushed tag vX.Y.Z (final) or vX.Y.ZrcN / aN / bN (pre-release).
+# The tag publishes to PyPI and then creates the GitHub Release; nothing else does.
+# See docs/RELEASING.md.
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
-  release:
-    types: [published]
+
+permissions: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - name: Verify package version matches git tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          fetch-depth: 0 # the ancestry check needs main and release/* history
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Check the tag
+        id: tag
         run: |
-          pkg_version=$(uv run python -c "import pymolt; print(pymolt.__version__)")
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [ "$pkg_version" != "$tag_version" ]; then
-            echo "::error::Tag version ($tag_version) does not match package version ($pkg_version)"
+          version="${GITHUB_REF_NAME#v}"
+          eval "$(uv run python - "$version" <<'PY'
+          import sys
+          from packaging.version import InvalidVersion, Version
+          import pymolt
+          raw = sys.argv[1]
+          try:
+              v = Version(raw)
+          except InvalidVersion:
+              print(f'echo "::error::{raw} is not a PEP 440 version"; exit 1')
+              raise SystemExit
+          print(f"canonical='{v}'")
+          print(f"package='{pymolt.__version__}'")
+          print(f"prerelease='{str(v.is_prerelease).lower()}'")
+          print(f"dev='{str(v.is_devrelease or v.local is not None).lower()}'")
+          print(f"line='{v.major}.{v.minor}'")
+          PY
+          )"
+          if [ "$version" != "$canonical" ]; then
+            echo "::error::Tag v$version is not canonical; the tag for this version is v$canonical"
             exit 1
           fi
-          echo "Verified tag version $tag_version matches package version $pkg_version"
+          if [ "$version" != "$package" ]; then
+            echo "::error::Tag version ($version) does not match pymolt.__version__ ($package)"
+            exit 1
+          fi
+          if [ "$dev" = "true" ]; then
+            echo "::error::.devN and local versions are never released"
+            exit 1
+          fi
+          # A release comes from main or from its own release/X.Y branch, never from a topic branch.
+          on_branch=""
+          for ref in origin/main "origin/release/$line"; do
+            if git rev-parse --verify --quiet "$ref" >/dev/null && git merge-base --is-ancestor HEAD "$ref"; then
+              on_branch="$ref"
+            fi
+          done
+          if [ -z "$on_branch" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME is on neither main nor release/$line"
+            exit 1
+          fi
+          echo "Releasing $version (pre-release: $prerelease) from $on_branch"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
       - name: Build sdist and wheel
         run: uv build
-      - name: Guard against non-package content in the sdist
-        # Axiom Graph is a separate service and must never ship in the pymolt sdist.
-        run: |
-          leaked=$(tar tzf dist/*.tar.gz | grep -E '/(services|bench|docs|integrations|plugin|tests)/' || true)
-          if [ -n "$leaked" ]; then
-            echo "::error::sdist contains files outside the pymolt package:"
-            echo "$leaked"
-            exit 1
-          fi
-      - name: twine check
-        run: uvx twine check dist/*
+      - name: Check the distributions
+        run: .github/scripts/check_dist.sh
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
 
   publish:
-    if: (github.event_name == 'release' && github.event.action == 'published') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write # required for PyPI trusted publishing (OIDC) — no token/secret needed
+      id-token: write # PyPI trusted publishing (OIDC): no token or secret
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          flags=""
+          if [ "$PRERELEASE" = "true" ]; then flags="--prerelease"; else flags="--latest"; fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "pymolt $VERSION" $flags
