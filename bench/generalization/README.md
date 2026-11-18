@@ -39,7 +39,9 @@ Output: `<out>/scorecard.json` and `<out>/scorecard.md` (one row per toy, skew s
 | E warnings | `expected_warnings` found on the baseline trace events (symbol plus category), split Python-level vs C-level (`from_c`, S2); `missed` lists the rest. |
 | F probe | Packages whose delta quality is `inconclusive` (or `partial`), and `import_errors` found in the probe cache (`.pymolt/cache/delta/probe-*.json`) (S3). |
 
-Plus seconds per step in `scorecard.json` (`phase_seconds`).
+Plus seconds per step in `scorecard.json` (`phase_seconds`), and the plan's work order per
+scenario (`steps`: steps in all, by executor and by type; `-` for a plan with no steps). The
+markdown table shows them as `total (pymolt/agent/person)`.
 
 ## Skew signals
 

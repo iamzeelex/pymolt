@@ -73,6 +73,20 @@ A codemod is a match/rewrite template applied with LibCST, for example
   dependency rewrites included, and `apply --smoke` imports the changed modules in the target
   environment ([commands.md](commands.md#pymolt-apply-dir)).
 
+## The plan as steps
+
+The saved plan (`"schema_version": 2`) lists the migration as ordered steps, `steps` in `--json`.
+A step pymolt applies is one recipe across every file it changes: a rule, a pattern, or a group
+of import moves applied together. Its `edits` hold, per file, the hunks between the text before
+and after that recipe, the statements it replaces, inserts or deletes, and anchors that name
+those statements by content rather than by line. Steps run in the order the plan built them:
+rules, then patterns, then Python fixes. Applied in that order they give exactly the file
+changes of `changes`, which `apply` writes.
+
+A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
+reason in the step's `why.evidence`. A plan saved by an earlier pymolt (`"schema_version": 1`)
+is read as one step, `v1`.
+
 ## When to bump the manifest
 
 `apply` writes source only. Moving the project's manifest to the target versions is yours to do:

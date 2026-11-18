@@ -59,10 +59,13 @@ def run_succession(
     return edges, result
 
 
-def in_place_previews(project_dir: str | Path, edges: list[SuccessionEdge]) -> list[FilePreview]:
-    """The in-place shims as before/after per file, verified rules only: what a plan holds."""
+def in_place_previews(project_dir: str | Path, edges: list[SuccessionEdge],
+                      on_step=None) -> list[FilePreview]:
+    """The in-place shims as before/after per file, verified rules only: what a plan holds.
+    ``on_step`` observes each recipe's change per file (the plan's steps)."""
     patterns = [p for e in edges if e.is_in_place for p in e.patterns]
     rules = [r for e in edges if e.is_in_place for r in e.rules]
     if not (patterns or rules):
         return []
-    return preview_mixed_repo(project_dir, rules, patterns, verified_only=True)
+    return preview_mixed_repo(project_dir, rules, patterns, verified_only=True,
+                              on_step=on_step)

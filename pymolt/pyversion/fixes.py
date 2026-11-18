@@ -299,17 +299,23 @@ class FixOutcome:
     patterns: list[CodemodPattern] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     dropped: dict[str, str] = field(default_factory=dict)
+    # Per kept file, the plan-time re-compile results: {"compile_target", "compile_base"} =
+    # "ok" | "failed: <error>" | "not checked: <reason>".
+    checks: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def apply_python_fixes(
     root: str | Path, previews: list[FilePreview], patterns: list[CodemodPattern],
     sites: Iterable[Any], *, target: str | None, target_executable: str | None = None,
     base_executable: str | None = None, base_runner: Any = None,
+    on_step: Any = None,
 ) -> FixOutcome:
     """Layer the python ``patterns`` onto ``previews`` (dependency rewrites), site files only.
 
     Nothing is written. The result's previews hold, per touched file, the dependency rewrite
-    followed by the python rewrite, so one diff shows both."""
+    followed by the python rewrite, so one diff shows both. ``on_step(recipe, path, before,
+    after)`` observes each fix (or move group) that changed a file, for the files the
+    minimal-diff and re-compile gates keep; a dropped file reports none."""
     from pymolt.codemods.apply import apply_patterns
 
     root = Path(root)
@@ -344,8 +350,12 @@ def apply_python_fixes(
                 return found
             return frozenset(n for line in found for n in moved.get(line, ()))
 
+        events: list[tuple] = []
         try:
-            new, hits = apply_patterns(start, wanted, lines_for=lines_for)
+            new, hits = apply_patterns(
+                start, wanted, lines_for=lines_for,
+                on_step=(lambda r, b, a, events=events: events.append((r, b, a)))
+                if on_step is not None else None)
         except Exception as exc:  # noqa: BLE001 - an unparseable file is skipped
             outcome.notes.append(f"python fixes skipped {rel}: {type(exc).__name__}: {exc}")
             continue
@@ -358,16 +368,22 @@ def apply_python_fixes(
             outcome.dropped[rel] = reason
             outcome.notes.append(f"python rewrite of {rel} dropped: {reason}")
             continue
-        staged[rel] = (prior, original, new, hits)
+        staged[rel] = (prior, original, new, hits, events)
 
     if staged:
         _recompile_gate(staged, outcome, target_executable, base_executable, base_runner)
 
     merged = {Path(p.path).resolve(): p for p in previews}
-    for rel, (prior, original, new, hits) in staged.items():
+    for rel, (prior, original, new, hits, events) in staged.items():
         if rel in outcome.dropped:
+            outcome.checks.pop(rel, None)
             continue
         path = root / rel
+        for recipe, before, after in events:
+            try:
+                on_step(recipe, str(path), before, after)
+            except Exception:  # noqa: BLE001 - an observer cannot change the fixes
+                pass
         used = [p for p, _ in hits]
         n = sum(c for _, c in hits)
         if prior is None:
@@ -404,27 +420,40 @@ def _line_map(old: str, new: str) -> dict[int, tuple[int, ...]]:
 def _recompile_gate(staged: dict, outcome: FixOutcome, target_exe: str | None,
                     base_exe: str | None, base_runner: Any) -> None:
     files = {rel: item[2] for rel, item in staged.items()}
+    checks = {rel: {"compile_target": "ok", "compile_base": "ok"} for rel in staged}
     if target_exe:
         bad, failure = recompile(files, target_exe)
         if failure:
             outcome.notes.append(f"re-compile on the target did not run ({failure})")
+            for rel in checks:
+                checks[rel]["compile_target"] = f"not checked: {failure}"
         for rel, error in bad.items():
             outcome.dropped[rel] = f"does not compile on the target: {error}"
             outcome.notes.append(f"python rewrite of {rel} dropped: {outcome.dropped[rel]}")
     else:
         outcome.notes.append("re-compile on the target skipped: no interpreter for it")
+        for rel in checks:
+            checks[rel]["compile_target"] = "not checked: no interpreter for the target Python"
+    outcome.checks.update(checks)
     on_base = {rel: staged[rel][2] for rel in staged
                if rel not in outcome.dropped
                and all(p.runs_on_base is True for p, _ in staged[rel][3])}
+    for rel in checks:
+        if rel not in on_base:
+            checks[rel]["compile_base"] = "not checked: the fix does not claim to run on the base"
     if not on_base:
         return
     if base_runner is None and not base_exe:
         outcome.notes.append("re-compile on the base skipped: no base interpreter or runner")
+        for rel in on_base:
+            checks[rel]["compile_base"] = "not checked: no base interpreter or runner"
         return
     exe = base_exe or getattr(base_runner, "executable", "python")
     bad, failure = recompile(on_base, str(exe), runner=base_runner)
     if failure:
         outcome.notes.append(f"re-compile on the base did not run ({failure})")
+        for rel in on_base:
+            checks[rel]["compile_base"] = f"not checked: {failure}"
     for rel, error in bad.items():
         outcome.dropped[rel] = f"does not compile on the base: {error}"
         outcome.notes.append(f"python rewrite of {rel} dropped: {outcome.dropped[rel]}")
