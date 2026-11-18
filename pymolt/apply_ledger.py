@@ -559,13 +559,6 @@ def _changed_nothing(receipt: Any, run: str) -> bool:
         getattr(receipt, "no_codemods_required", False))
 
 
-def ledger_in_effect(project_dir: str | Path, receipt: Any
-                     ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    """The in-effect entries as dicts (``in_effect_entries``), or None and the note."""
-    entries, note, _ledger = in_effect_entries(project_dir, receipt)
-    return ([e.as_dict() for e in entries] if entries is not None else None), note
-
-
 # ── schema 1 ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -669,6 +662,6 @@ __all__ = [
     "CLAIMS", "LEDGER_SCHEMA", "LEDGER_SCHEMA_V1", "V1_STEP", "EntryAttrs", "EventFile",
     "Ledger", "LedgerEntry", "LedgerEvent", "LedgerSnapshot", "append_ledger",
     "attrs_for_recipe", "build_entries", "chain_runs", "claim_for", "entries_for",
-    "in_effect_entries", "ledger_in_effect", "ledger_path", "load_ledger", "normalize_claim",
+    "in_effect_entries", "ledger_path", "load_ledger", "normalize_claim",
     "save_ledger", "step_attrs",
 ]

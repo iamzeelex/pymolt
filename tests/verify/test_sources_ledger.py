@@ -241,8 +241,12 @@ def test_the_plans_type_relocations_list_reaches_the_context_as_a_map(tmp_path, 
 def test_the_ledger_counts_only_while_its_run_is_in_effect(tmp_path):
     """A rollback that restored files leaves the ledger behind; a hand edit made after it on
     one of those lines must not be judged by the claim pymolt made for the rolled-back run."""
-    from pymolt.apply_ledger import ledger_in_effect
+    from pymolt.apply_ledger import in_effect_entries
     from pymolt.migration_state import MigrationReceipt
+
+    def in_effect(receipt):
+        entries, note, _ledger = in_effect_entries(tmp_path, receipt)
+        return ([e.run_id for e in entries] if entries is not None else None), note
 
     write_ledger(tmp_path, "r1", "2026-01-01T00:00:00",
                  [("m.py", "a.f()\n", "b.g()\n", ["rename-call:a.f→b.g"],
@@ -250,18 +254,17 @@ def test_the_ledger_counts_only_while_its_run_is_in_effect(tmp_path):
     applied = MigrationReceipt(run_id="r1", target_python="3.12",
                                source_manifest="requirements.txt")
 
-    entries, note = ledger_in_effect(tmp_path, applied)
-    assert [e["run_id"] for e in entries] == ["r1"] and note is None
+    assert in_effect(applied) == (["r1"], None)
     restored = applied.model_copy(update={"status": "rolled_back", "files_restored": ["m.py"]})
-    assert ledger_in_effect(tmp_path, restored) == (
+    assert in_effect(restored) == (
         None, "the apply ledger of run r1 is not used (no apply run is in effect): edits are "
               "judged as hand edits")
     noop = applied.model_copy(update={"status": "rolled_back", "files_restored": []})
-    assert ledger_in_effect(tmp_path, noop)[0] == entries    # it restored nothing: in effect
+    assert in_effect(noop) == (["r1"], None)            # it restored nothing: in effect
     other = applied.model_copy(update={"run_id": "r2"})
-    assert ledger_in_effect(tmp_path, other)[0] is None
-    assert "run r2 is the one in effect" in ledger_in_effect(tmp_path, other)[1]
-    assert ledger_in_effect(tmp_path, None)[0] is None
+    assert in_effect(other)[0] is None
+    assert "run r2 is the one in effect" in in_effect(other)[1]
+    assert in_effect(None)[0] is None
 
 
 def test_verify_says_when_it_left_the_ledger_out(tmp_path):

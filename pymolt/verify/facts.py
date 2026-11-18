@@ -147,8 +147,12 @@ class DiffContext:
     """What verify knows about the edit that separates the two captures (all optional).
 
     ``old_sources`` / ``new_sources``: project-relative path -> file text at each capture.
-    ``edits``: apply-ledger entries ``{"file", "old_lines": [a, b], "new_lines": [c, d],
-    "kind", "rule", "claim", "old_symbol", "new_symbol"}`` (1-based, inclusive).
+    ``edits``: the in-effect apply-ledger entries, each located by ``workorder.coverage``
+    (``"located": {"old": [lines], "new": [lines]}``, 1-based) with its ``"file"``, ``"claim"``,
+    ``"basis"``, ``"old_symbol"`` and ``"new_symbol"``; an entry handed over without
+    ``located`` covers its ``"old_lines"``/``"new_lines"`` ranges ([a, b], inclusive). A line
+    several entries cover takes the strictest claim. ``not_in_capture``: the steps in effect
+    that the post-migration capture predates (``"<run>:<step>"``).
     ``old_contacts`` / ``new_contacts``: file -> line -> static dependency symbols.
     ``successors``: old symbol -> new symbol (the plan's deltas). ``type_relocations``: old
     type name -> new type name. Without a context the diff falls back to line-text rules and
@@ -165,6 +169,7 @@ class DiffContext:
     predicted_symbols: set[str] | None = None
     # What the report should say about how the context was built (a ledger left unused).
     notes: list[str] = field(default_factory=list)
+    not_in_capture: list[str] = field(default_factory=list)
 
 
 class DiffProfile(StrEnum):
@@ -2728,6 +2733,30 @@ def _vouches(entry: Mapping) -> bool:
     return claim == "preserve" or claim in _STRICT_CLAIMS
 
 
+def _claim_rank(entry: Mapping) -> int:
+    """How strictly an entry's claim judges its lines, for a line several entries cover (the
+    strictest wins): ``preserve`` 3, ``intended`` unattested 2, no claim (a hand edit) 1,
+    ``intended`` with a person-attested expectation 0. ``attested`` is set by the coverage
+    computation from a check outside the ledger, never read from it."""
+    if _vouches(entry):
+        return 3
+    if entry.get("claim") == "intended":
+        return 0 if entry.get("attested") is True else 2
+    return 1
+
+
+def _entry_lines(entry: Mapping, side: int) -> Iterable[int]:
+    """The lines an entry covers on one side: where ``workorder.coverage`` located it
+    (``located``), or, for an entry handed over directly, the range it carries."""
+    located = entry.get("located")
+    if isinstance(located, Mapping):
+        return located.get("old" if side == 0 else "new") or ()
+    rng = entry.get("old_lines" if side == 0 else "new_lines")
+    if isinstance(rng, list | tuple) and len(rng) == 2:
+        return range(rng[0], rng[1] + 1)
+    return ()
+
+
 def _reloc_equiv(a: str, b: str) -> bool:
     """``a`` and ``b`` are an old/new spelling pair from the plan's type relocations (full
     names or their last segments)."""
@@ -2767,6 +2796,7 @@ class _Provenance:
         self.ledger_known = ctx is not None and (bool(self.maps) or ctx.edits is not None)
         self.no_ledger = self.ledger_known and ctx is not None and ctx.edits is None
         self._stmts: dict[tuple[int, str], dict[int, tuple] | None] = {}
+        self._cover: dict[tuple[str, int], dict[int, Mapping]] | None = None
 
     def status(self, file: str, line: int | None, side: int) -> str | None:
         """``same`` / ``edited`` / ``gone`` (deleted or inserted) / None (no line map)."""
@@ -3069,18 +3099,27 @@ class _Provenance:
             return None
         return m[side].get(line, ("gone", None))[1]
 
-    def ledger_covers(self, file: str, line: int | None, side: int) -> bool:
-        key = "old_lines" if side == 0 else "new_lines"
+    def covering(self, file: str, line: int | None, side: int) -> Mapping | None:
+        """The ledger entry that decides ``line`` (side 0: old, 1: new): of the entries that
+        cover it, the one with the strictest claim (``_claim_rank``); None: no entry does."""
         if line is None:
-            return False
-        for e in self.edits:
-            if not _vouches(e):
-                continue  # pymolt's heuristic edit (claim null) judges like a hand edit
-            rng = e.get(key)
-            if e.get("file") == file and isinstance(rng, list | tuple) and len(rng) == 2 \
-                    and rng[0] <= line <= rng[1]:
-                return True
-        return False
+            return None
+        if self._cover is None:
+            self._cover = {}
+            for e in self.edits:
+                for s in (0, 1):
+                    table = self._cover.setdefault((e.get("file"), s), {})
+                    for ln in _entry_lines(e, s):
+                        current = table.get(ln)
+                        if current is None or _claim_rank(e) > _claim_rank(current):
+                            table[ln] = e
+        return (self._cover.get((file, side)) or {}).get(line)
+
+    def ledger_covers(self, file: str, line: int | None, side: int) -> bool:
+        """pymolt vouches for the line: the entry that decides it claims ``preserve``. A
+        heuristic edit (no claim) or an ``intended`` one judges like a hand edit."""
+        entry = self.covering(file, line, side)
+        return entry is not None and _vouches(entry)
 
     def stmt_info(self, side: int, v: "_V") -> tuple | None:
         """``(kind, target, call leaf)`` of the one simple statement at the fact's line."""
