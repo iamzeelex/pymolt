@@ -448,7 +448,8 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
                           risks: Any, manual_items: list[Any], advisories: list[Any],
                           compile_findings: list[Mapping[str, Any]],
                           dependencies: Iterable[Any] = (),
-                          python_move: tuple[str, str] | None = None) -> list[PlanStep]:
+                          python_move: tuple[str, str] | None = None,
+                          t0: T0 | None = None) -> list[PlanStep]:
     """Link every risk to a step (setting ``PredictedRisk.step_id``) and return the whole
     work order: the automated steps, then the manual ones, ordered by phase and numbered per
     phase. The automated steps keep their order and ids."""
@@ -456,7 +457,7 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
                                          getattr(d, "to_version", None)) for d in dependencies}
     base = python_move[0] if python_move else None
     target_python = python_move[1] if python_move else None
-    t0 = T0(Path(root), changes, base)
+    t0 = t0 if t0 is not None else T0(Path(root), changes, base)
     linked: dict[str, list[Any]] = defaultdict(list)
     groups: dict[tuple, list[Any]] = {}
     for risk in getattr(risks, "risks", None) or ():
