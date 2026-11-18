@@ -1137,7 +1137,8 @@ def _findings_data(summary: dict) -> dict:
     """The fact diff's findings for an agent: failing findings (why each is not noise),
     review reasons with the one action that settles each, and the explained mechanisms."""
     def compact(f: dict) -> dict:
-        return {k: f[k] for k in ("symbol", "site", "entries", "change", "why", "explained")
+        return {k: f[k] for k in ("id", "symbol", "site", "entries", "change", "why",
+                                  "explained", "accepted")
                 if f.get(k) is not None}
     return {
         "ledger": summary.get("ledger"),
@@ -1147,6 +1148,7 @@ def _findings_data(summary: dict) -> dict:
                    for r in summary.get("review") or []],
         "explained": [{"mechanism": t["mechanism"], "entries": t["entries"]}
                       for t in summary.get("explained") or []],
+        "accepted": [compact(f) for f in (summary.get("accepted") or [])[:20]],
         "quality": summary.get("quality"),
     }
 

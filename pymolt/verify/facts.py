@@ -170,6 +170,8 @@ class DiffContext:
     # What the report should say about how the context was built (a ledger left unused).
     notes: list[str] = field(default_factory=list)
     not_in_capture: list[str] = field(default_factory=list)
+    # The accepts verify honours, and ``--strict`` (``verify.accepts.AcceptContext``).
+    accepts: Any = None
 
 
 class DiffProfile(StrEnum):
@@ -476,6 +478,10 @@ class FactEntry(BaseModel):
     # ``verify --accept``): ``{"how", "by", "at", "attestation", "step"}``. Counted as compared
     # equal by the verdict, and always reported.
     accepted: dict[str, Any] | None = None
+    # A failing or review entry's finding id and its finding's outcome fingerprint
+    # (``verify.accepts``): what ``verify --accept`` names and binds.
+    finding: str | None = None
+    fingerprint: str | None = None
     review: str | None = None       # a difference a person must look at: INCONCLUSIVE, not FAIL
     unverified: bool = False        # an edited site nothing could be paired with: counted only
     # Why an entry that is not a plain exact comparison came out as it did: ``<mechanism>:

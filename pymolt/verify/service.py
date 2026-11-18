@@ -2687,9 +2687,10 @@ def build_contract_report_from_state(
     changed_api_paths=None,
     comparator_profile: str = "exact",
     custom_comparator=None,
+    strict: bool = False,
 ) -> ContractReport:
     """The unified report, sourcing trace/against from the persisted state when
-    not explicitly overridden.
+    not explicitly overridden. ``strict``: every ACCEPTED change is a review item.
 
     Resolution: explicit overrides always win. Otherwise — both slots captured
     -> trace=post_migration, against=baseline (this is what answers "what
@@ -2774,8 +2775,8 @@ def build_contract_report_from_state(
             predictions = {"risks": [], "source": "baseline", "plan_id": None,
                            "notes": [f"predicted risks unavailable: {exc}"]}
 
-    diff_context = build_diff_context(project_dir, trace, against) if trace and against \
-        else None
+    diff_context = build_diff_context(project_dir, trace, against, strict=strict) \
+        if trace and against else None
     report = build_contract_report(
         project_dir,
         trace=trace,
@@ -2821,7 +2822,8 @@ def _compared_recordings(project_dir: str | Path, state: ContractState, trace: s
     )
 
 
-def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path):
+def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path, *,
+                       strict: bool = False):
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
@@ -2885,6 +2887,15 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     except Exception as exc:  # noqa: BLE001 - provenance is best effort
         logger.warning("could not read the applied plan for the diff context: %s", exc)
     ctx.successors = successors or None
+    try:
+        from pymolt.verify.accepts import context_for
+
+        ctx.accepts = context_for(root, trace, against, old_sources=ctx.old_sources,
+                                  new_sources=ctx.new_sources, strict=strict)
+    except Exception as exc:  # noqa: BLE001 - no accept is honoured, the diff stands
+        logger.warning("could not read the accepted findings: %s", exc, exc_info=True)
+        ctx.notes.append(f"accepted findings could not be read ({type(exc).__name__}): none "
+                         "is honoured")
     return ctx
 
 

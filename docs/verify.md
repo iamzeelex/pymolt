@@ -166,8 +166,21 @@ who recorded it (`apply --step ID --record`). Its old → new symbol pairs the c
 For every outcome, `preserve` is at least as strict as `intended`, and `intended` at least as
 strict as a hand edit, so recording an edit never judges it more leniently than leaving it
 unrecorded. Only a person's attestation does (an `intended` claim whose expectation a person
-attested), and a new raise fails unless one expects it. An ACCEPTED entry
+attested, or `verify --accept`), and a new raise fails unless one expects it. An ACCEPTED entry
 counts as compared equal, and the report prints each one with who accepted it and when.
+
+### Accepting a change
+
+Each failing or review finding has an id, printed after it. `pymolt verify . --accept ID` lets a
+person accept that change as intended: pymolt prints the finding and a nonce, and the person types
+the nonce back (see [agents.md](agents.md#what-a-person-attests)). The accept is bound to the
+finding, the statement it is on, a fingerprint of its new outcomes and both captures. On a line an
+`intended` step covers, it is that step's; on an unedited line or a hand edit it makes an ad-hoc
+step `x-<id>` that exists in the ledger only. A line a `preserve` claim covers cannot be accepted.
+
+Later verdicts honour the accept while it holds. It expires when the outcome changes, the
+statement changes, or either capture is replaced, and the finding stands again with the reason.
+`--strict` reviews every accepted change instead.
 
 The report prints the edited sites as equal, representation-only, need review and unverified,
 then failed and accepted when there are any.

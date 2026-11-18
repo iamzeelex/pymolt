@@ -877,7 +877,8 @@ def _decide_judged(status: FunnelStatus, projection) -> bool:
         status.next_step = review.id
         status.next_command = f"pymolt verify . --step {review.id}"
         status.next_reason = (f"Step {review.id} needs a person's review of what changed at "
-                              "its sites.")
+                              "its sites: the report names each finding's id, and a person "
+                              "accepts an intended one with `pymolt verify . --accept ID`.")
         return True
     evidence = projection.first("needs_evidence")
     if evidence is not None:

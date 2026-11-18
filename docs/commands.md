@@ -185,6 +185,8 @@ the evidence. Details are in [verify.md](verify.md).
 | `--policy`, `--metrics`, `--auto-rollback` | Canary policy and metrics, and rollback when a required gate fails |
 | `--shadow` | Shadow operations; unsafe writes are left out |
 | `--cascade` | A cascade report to include |
+| `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
+| `--strict` | Review every accepted change instead of counting it equal |
 
 ### `pymolt rollback [dir]`
 Restores the files the open run's steps changed, latest step first. It refuses to discard edits

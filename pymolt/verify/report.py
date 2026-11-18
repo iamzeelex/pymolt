@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from pymolt.core.stdlib import is_stdlib
 from pymolt.verify import identity_resolver
@@ -159,6 +159,10 @@ class ComparedRecordings(BaseModel):
 
 
 class ContractReport(BaseModel):
+    # The fact diff and its accept context, kept for `verify --accept` (not saved).
+    _fact_diff: Any = PrivateAttr(default=None)
+    _accepts: Any = PrivateAttr(default=None)
+
     root: str
     static_targets: int = 0
     observed_targets: int = 0
@@ -942,6 +946,12 @@ def build_contract_report(
                     from pymolt.verify.replicate import apply_noise_profile
 
                     apply_noise_profile(fdiff, dict(noise_profile[0]), noise_profile[1])
+                from pymolt.verify.accepts import apply_accepts, stamp_findings
+
+                stamp_findings(fdiff)
+                accepts = getattr(diff_context, "accepts", None)
+                report.notes.extend(apply_accepts(fdiff, accepts))
+                report._fact_diff, report._accepts = fdiff, accepts
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
                     report.calibration = _calibration(predictions, old_facts, fdiff, root)
