@@ -419,12 +419,13 @@ def create_migration_plan(
                 column=advisory.column,
                 severity=advisory.severity,
                 reason=advisory.reason,
+                rule=getattr(advisory, "rule", None),
             ))
 
     manual = _manual_items(root, previews, downgraded or [])
     from pymolt.workorder.builder import automated_steps
 
-    steps = automated_steps(
+    automated = automated_steps(
         changes, recorder, root=root, dependencies=list(migrations),
         python_move=python_move, fix_checks=getattr(stage, "checks", None),
         target_python=target_python)
@@ -436,6 +437,14 @@ def create_migration_plan(
     python, compile_findings = None, []
     if predict and python_move is not None:
         risks, python, compile_findings = _python_part(root, python_move, risks, stage)
+
+    from pymolt.workorder.manual import link_and_manual_steps
+
+    # Every risk gets a step: the pymolt step that fixes it, or a manual one (``step_id``).
+    steps = link_and_manual_steps(
+        automated, root=root, changes=changes, risks=risks, manual_items=manual,
+        advisories=advisories, compile_findings=compile_findings,
+        dependencies=list(migrations), python_move=python_move)
 
     return MigrationPlan(
         target_python=target_python,

@@ -87,6 +87,10 @@ def _walk(root, recorder):
     return outcome
 
 
+def _pymolt(plan):
+    return [s for s in plan.steps if s.executor == "pymolt"]
+
+
 def _plan(root, recorder, outcome):
     stage = SimpleNamespace(previews=outcome.previews, checks=outcome.checks, risks=None,
                             python={"from": "3.11", "to": "3.12"}, findings=[])
@@ -105,16 +109,16 @@ def test_the_steps_rebuild_every_planned_file_exactly(tmp_path):
     rebuilt = replay_changes(plan.changes, plan.steps)
     assert rebuilt == {c.path: c.new_source for c in plan.changes}
     # The order is the walk's: the rule, the move group, then the python fix.
-    assert [(s.id, s.type, s.do.recipe.kind) for s in plan.steps] == [
+    assert [(s.id, s.type, s.do.recipe.kind) for s in _pymolt(plan)] == [
         ("mech-1", "codemod", "rule"), ("mech-2", "codemod", "move-group"),
         ("mech-3", "python-fix", "pattern")]
-    rule, move, fix = plan.steps
+    rule, move, fix = _pymolt(plan)
     # One step per recipe across every file it changes; the blocked rule is in none.
     assert [e.file for e in rule.edits] == ["app.py", "c_only.py"]
     assert [e.file for e in move.edits] == ["app.py", "b_other.py"]
-    assert not any("ix" in k for s in plan.steps for k in s.do.recipe.keys)
+    assert not any("ix" in k for s in _pymolt(plan) for k in s.do.recipe.keys)
     # Claims per recipe: a verified rule, a same-object move, a python fixer.
-    assert [(s.claim, s.basis) for s in plan.steps] == [
+    assert [(s.claim, s.basis) for s in _pymolt(plan)] == [
         ("preserve", "verified-rule"), ("preserve", "same-object"),
         ("preserve", "python-fixer")]
     assert move.do.recipe.move == ("pandas.util.testing", "pandas.testing")
@@ -125,14 +129,17 @@ def test_the_steps_rebuild_every_planned_file_exactly(tmp_path):
     assert fix.runs_on_base is True
     assert fix.checks_at_plan == {"compile_target": "ok",
                                   "compile_base": "not checked: no base interpreter or runner"}
-    assert all(s.executor == "pymolt" and s.effort.size == "none" for s in plan.steps)
+    assert all(s.effort.size == "none" for s in _pymolt(plan))
+    # The blocked rule is left to an agent, after the pymolt steps of its phase.
+    assert [(s.id, s.type, s.executor) for s in plan.steps[3:]] == [
+        ("mech-4", "manual-rewrite", "agent")]
 
 
 def test_each_steps_anchors_are_made_on_its_own_before_text(tmp_path):
     root = _project(tmp_path)
     recorder = StepRecorder()
     plan = _plan(root, recorder, _walk(root, recorder))
-    rule, move, fix = plan.steps
+    rule, move, fix = _pymolt(plan)
     t0 = APP
     t1 = apply_hunks(t0, rule.edit_for("app.py").hunks)
     t2 = apply_hunks(t1, move.edit_for("app.py").hunks)
@@ -238,6 +245,6 @@ def test_a_dropped_python_fix_reports_no_step(tmp_path, monkeypatch):
     outcome = _walk(root, recorder)
     assert "app.py" in outcome.dropped and "app.py" not in outcome.checks
     plan = _plan(root, recorder, outcome)
-    assert [s.type for s in plan.steps] == ["codemod", "codemod"]
+    assert [s.type for s in _pymolt(plan)] == ["codemod", "codemod"]
     assert replay_changes(plan.changes, plan.steps) == {
         c.path: c.new_source for c in plan.changes}
