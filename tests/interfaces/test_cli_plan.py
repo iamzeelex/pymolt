@@ -145,14 +145,37 @@ def test_rollback_json_says_what_became_of_the_post_migration_capture(tmp_path, 
         tmp_path, "post_migration", CaptureMode.LIVE_COMMAND,
         command=[sys.executable, str(script)], target="json",
     )
+    kept = runner.invoke(app, ["rollback", str(tmp_path), "--step", "env-1", "--json"])
+    assert kept.exit_code == 0, kept.output
+    # The pin is not code: the capture still describes every file it recorded.
+    assert json.loads(kept.stdout)["post_migration_capture"] == "kept"
+    _record_in_post(tmp_path, "app.py")
 
     result = runner.invoke(app, ["rollback", str(tmp_path), "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["files_restored"] == 2          # app.py and the manifest pin
+    assert payload["files_restored"] == 1
     assert payload["post_migration_capture"] == "set_aside"
     assert "/archive/" in payload["post_migration_trace"]
+
+
+def _record_in_post(root, *names):
+    """The post-migration capture as one that had facts in ``names``: its source snapshot
+    records their text (a real capture records the files whose calls it saw)."""
+    import gzip
+    import hashlib
+    import json as _json
+
+    slot = verify_service.load_contract_state(root).post_migration
+    with gzip.open(slot.sources_path, "rt", encoding="utf-8") as fh:
+        data = _json.load(fh)
+    for name in names:
+        text = (root / name).read_text(encoding="utf-8")
+        data["files"][name] = {"sha256": hashlib.sha256(text.encode()).hexdigest(),
+                               "text": text}
+    with gzip.open(slot.sources_path, "wt", encoding="utf-8") as fh:
+        _json.dump(data, fh)
 
 
 def test_plan_json_is_machine_readable(tmp_path, monkeypatch):

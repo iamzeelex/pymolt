@@ -47,13 +47,17 @@ def _project(tmp_path):
 
 
 def _plan(tmp_path, *, files=1):
+    # The files exist before the baseline, so its source snapshot (and the post-migration
+    # capture's, which takes the baseline's files) records them.
+    for index in range(files):
+        (tmp_path / f"app{index}.py").write_text("from flask.helpers import safe_join\n",
+                                                 encoding="utf-8")
     target = _project(tmp_path)
     previews = []
     for index in range(files):
         path = tmp_path / f"app{index}.py"
         old = "from flask.helpers import safe_join\n"
         new = "from werkzeug.utils import safe_join\n"
-        path.write_text(old, encoding="utf-8")
         previews.append(FilePreview(
             path=str(path),
             old_source=old,
@@ -169,6 +173,7 @@ def test_rollback_invalidates_post_migration_capture(tmp_path):
         command=[sys.executable, str(script)],
         target="json",
     )
+    _record_in_post(tmp_path, "app0.py")
 
     rollback_migration(tmp_path)
 
@@ -187,6 +192,24 @@ def test_rollback_invalidates_post_migration_capture(tmp_path):
         command=[sys.executable, str(script)], target="json",
     )
     assert (tmp_path / aside.trace_path).read_bytes() == recorded
+
+
+def _record_in_post(root, *names):
+    """The post-migration capture as one that had facts in ``names``: its source snapshot
+    records their text (a real capture records the files whose calls it saw)."""
+    import gzip
+    import hashlib
+    import json as _json
+
+    slot = service.load_contract_state(root).post_migration
+    with gzip.open(slot.sources_path, "rt", encoding="utf-8") as fh:
+        data = _json.load(fh)
+    for name in names:
+        text = (root / name).read_text(encoding="utf-8")
+        data["files"][name] = {"sha256": hashlib.sha256(text.encode()).hexdigest(),
+                               "text": text}
+    with gzip.open(slot.sources_path, "wt", encoding="utf-8") as fh:
+        _json.dump(data, fh)
 
 
 def _post_capture(tmp_path):
@@ -236,6 +259,7 @@ def test_verify_names_the_post_migration_capture_a_rollback_set_aside(tmp_path):
     plan = _plan(tmp_path)
     apply_migration_plan(tmp_path, plan)
     _post_capture(tmp_path)
+    _record_in_post(tmp_path, "app0.py")
 
     rollback_migration(tmp_path)
 

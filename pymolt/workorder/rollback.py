@@ -4,16 +4,31 @@ HOST side. A rollback is one transaction under the migration lock, like an apply
 named in the run's ``state.json`` before the first write, every text it writes or replaces is
 in the blob store, and a failure after the write puts the files back.
 
-**The whole run** (``pymolt rollback .``, or ``--run-id R``): every step of the run with a current
-epoch, in reverse order. Each file those steps touched goes back to its text before the first
-of them; the file must hold the last one's after-text, and the steps' texts must chain (no edit
-between two of them), unless ``--force``, which restores the text before the run's first event
-on the file and discards everything since. A run is refused while a later run's step in effect
-touched one of its files: roll that run back first. A step whose epoch changed no file keeps
-it (``restored: false``), as v1 kept a run that changed nothing in effect.
+**One step** (``--step ID``, phase 1, file-level): allowed when each of the step's files holds the
+after-text of the step's current epoch and no later step in effect changed it since; the epoch's
+before-text comes back from the blob store. Otherwise it is refused, naming the later steps or
+the edits on those files. A step in effect that depends on it is refused too, unless
+``--cascade`` (a person only), which rolls the dependents back first, latest first. A step of an
+earlier run is refused while a step of a later run in effect builds on its statements.
 
-The post-migration capture is set aside (kept among the diagnostics) when the rollback restored
-a file, and stays otherwise.
+**The whole run** (``pymolt rollback .``: the open run; ``--run-id R``: another): every step of the
+run with a current epoch, latest first. Each file those steps touched goes back to its text
+before the first of them; the file must hold the last one's after-text and the steps' texts must
+chain, unless ``--force``, which restores the text before the run's first event on the file and
+discards everything since (files the run never touched are never written). A run is refused
+while a later run's step in effect touched one of its files: roll that run back first.
+
+A step whose epoch changed no file keeps it (``restored: false``), as v1 kept a run that changed
+nothing in effect.
+
+**The post-migration capture** (row 5) is set aside, kept among the diagnostics, only when a
+rolled-back step's new statements resolve in the capture's source snapshot and the capture was
+taken after the step's epoch: it recorded the code the rollback took away. Otherwise it still
+describes the code on disk and stays. ``--force`` sets it aside when a restored file is in its
+snapshot.
+
+Under ``--agent``, ``--force`` and ``--cascade`` are refused, and so is everything else: an agent
+rolls a step back only on a plan a person approved for agents, which this pymolt does not record.
 """
 
 from __future__ import annotations
@@ -58,19 +73,39 @@ class RollbackResult:
     notes: list[str] = field(default_factory=list)
 
 
+AGENT_REFUSAL = ("under --agent, pymolt rolls a step back only on a plan a person approved for "
+                 "agents, and this pymolt records no approval: a person runs `pymolt rollback`")
+
+
 def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
-                   force: bool = False) -> RollbackResult:
-    """Roll back the run's steps in effect (module docstring). Raises
+                   step: str | None = None, force: bool = False, cascade: bool = False,
+                   agent: bool = False) -> RollbackResult:
+    """Roll back one step (``step``) or the run's steps in effect (module docstring). Raises
     ``MigrationConflictError`` (exit 2) or ``MigrationPlanError`` / ``OSError`` (exit 3)."""
+    if agent and (force or cascade):
+        raise MigrationConflictError(
+            f"--{'force' if force else 'cascade'} is refused under --agent: a person discards "
+            "edits or rolls back dependent steps")
+    if agent:
+        raise MigrationConflictError(AGENT_REFUSAL)
+    if step is not None and force:
+        raise MigrationConflictError("--force rolls back a whole run: it does not go with --step")
+    if cascade and step is None:
+        raise MigrationConflictError("--cascade goes with --step")
     with _migration_lock(project_dir, "rollback"):
-        return _rollback(Path(project_dir).resolve(), run_id=run_id, force=force)
+        root = Path(project_dir).resolve()
+        if step is not None:
+            return _rollback_step(root, step, run_id=run_id, cascade=cascade)
+        return _rollback(root, run_id=run_id, force=force)
 
 
 def _load(root: Path, run_id: str | None):
     from pymolt.migration_state import MigrationReceipt
 
     receipt = MigrationReceipt.load(root)
-    effective = run_id or (receipt.run_id if receipt else None)
+    open_runs = [r.run_id for r in (receipt.runs if receipt else []) if not r.closed]
+    effective = run_id or (open_runs[-1] if open_runs else None) or (
+        receipt.run_id if receipt else None)
     if not effective:
         raise MigrationConflictError("no applied migration is available to roll back")
     run_dir = _run_dir(root, effective)
@@ -196,7 +231,125 @@ def _rollback(root: Path, *, run_id: str | None, force: bool) -> RollbackResult:
         raise MigrationConflictError(
             "refusing to overwrite post-migration edits: " + "; ".join(problems)
             + "; pass --force only if discarding them is intentional")
-    return _commit(root, receipt, effective, state, plan, ledger, events, restore)
+    return _commit(root, receipt, effective, state, plan, ledger, events, restore, force=force)
+
+
+def _rollback_step(root: Path, step_id: str, *, run_id: str | None,
+                   cascade: bool) -> RollbackResult:
+    """Phase 1 (file-level): the step, and with ``cascade`` its dependents first."""
+    receipt, effective, state, plan = _load(root, run_id)
+    ledger = _ledger(root, receipt)
+    events = {e.step_id: e for e in _epoch_events(ledger, effective, state, plan)}
+    if plan.step(step_id) is None and step_id not in events:
+        raise MigrationConflictError(
+            f"unknown step {step_id}: the plan of run {effective[:8]} has "
+            + (", ".join(s.id for s in plan.steps) or "no step"))
+    if step_id not in events:
+        last = ledger.step_states().get((effective, step_id), "planned")
+        raise MigrationConflictError(
+            f"step {step_id} of run {effective[:8]} is not in effect ({last}): there is nothing "
+            "to roll back")
+    dependents = _dependents(plan, step_id, set(events))
+    if dependents and not cascade:
+        raise MigrationConflictError(
+            f"step {step_id} has dependents in effect: {', '.join(dependents)}",
+            hint=f"Roll those back first, or `pymolt rollback --step {step_id} --cascade` "
+                 "rolls them back with it, latest first.")
+    order = sorted((events[sid] for sid in [*dependents, step_id]), key=lambda e: -e.seq)
+    _refuse_built_on(root, ledger, receipt, effective, plan, order)
+    texts = _Texts(root, plan)
+    now: dict[str, str] = {}
+    restore: dict[str, tuple[str, str]] = {}
+    problems: list[str] = []
+    rolled = {e.seq for e in order}
+    for event in order:
+        for f in event.files:
+            if f.file not in now:
+                now[f.file] = _read(root, f.file)
+            later = _later_on(ledger, receipt, f.file, event.seq, rolled)
+            if later:
+                problems.append(f"{f.file}: {', '.join(later)} changed it after {event.step_id}")
+                continue
+            if _sha256(now[f.file]) != f.after:
+                problems.append(f"{f.file} was edited after {event.step_id} wrote it")
+                continue
+            text = texts.get(f.before)
+            if text is None:
+                raise MigrationPlanError(
+                    f"cannot restore {f.file}: the text before {event.step_id} is not in the "
+                    "store")
+            first = restore[f.file][0] if f.file in restore else now[f.file]
+            restore[f.file] = (first, text)
+            now[f.file] = text
+    if problems:
+        raise MigrationConflictError(
+            f"step {step_id} is not the last change to its files: " + "; ".join(problems),
+            hint="Roll back the later steps first (`--cascade` for its dependents), or the "
+                 "whole run with `pymolt rollback . --force`, which discards the later edits.")
+    return _commit(root, receipt, effective, state, plan, ledger, order, restore, force=False)
+
+
+def _dependents(plan: MigrationPlan, step_id: str, live: set[str]) -> list[str]:
+    """The steps in effect that depend on ``step_id``, directly or not, in plan order."""
+    found: set[str] = set()
+    grew = True
+    while grew:
+        grew = False
+        for s in plan.steps:
+            if s.id in live and s.id not in found and s.id != step_id \
+                    and (step_id in s.depends_on or found & set(s.depends_on)):
+                found.add(s.id)
+                grew = True
+    return [s.id for s in plan.steps if s.id in found]
+
+
+def _later_on(ledger, receipt, rel: str, seq: int, rolled: set[int]) -> list[str]:
+    """The steps in effect (of any run on disk) whose epoch touched ``rel`` after ``seq``,
+    leaving out the epochs this rollback ends."""
+    from pymolt.apply_ledger import chain_runs
+
+    chain = chain_runs(receipt) if receipt is not None else set()
+    by_seq = {e.seq: e for e in ledger.events}
+    out = []
+    for (run, sid), current in sorted(ledger.current_epochs().items(), key=lambda kv: kv[1]):
+        event = by_seq.get(current)
+        if event is None or current <= seq or current in rolled or (chain and run not in chain):
+            continue
+        if any(f.file == rel for f in event.files):
+            out.append(sid if not chain or len(chain) == 1 else f"{sid} of run {run[:8]}")
+    return out
+
+
+def _refuse_built_on(root: Path, ledger, receipt, run_id: str, plan: MigrationPlan,
+                     order) -> None:
+    """Row 11: a step of a later run in effect whose old statements are this step's new ones
+    (it rewrote what this step wrote) keeps this step in place."""
+    from pymolt.apply_ledger import chain_runs
+
+    chain = chain_runs(receipt) if receipt is not None else set()
+    new_keys: dict[str, set[str]] = {}
+    for event in order:
+        step = plan.step(event.step_id)
+        for edit in (step.edits if step is not None else []):
+            new_keys.setdefault(edit.file, set()).update(edit.effect.new_keys())
+    if not new_keys:
+        return
+    first = min(e.seq for e in order)
+    by_seq = {e.seq: e for e in ledger.events}
+    for (run, sid), seq in ledger.current_epochs().items():
+        if run == run_id or seq < first or (chain and run not in chain):
+            continue
+        other = MigrationPlan.load(root, _run_dir(root, run) / "plan.json")
+        step = other.step(sid) if other is not None else None
+        event = by_seq.get(seq)
+        if step is None or event is None:
+            continue
+        for edit in step.edits:
+            if edit.effect.old_keys() & new_keys.get(edit.file, set()):
+                raise MigrationConflictError(
+                    f"step {sid} of run {run[:8]} is in effect and rewrote what "
+                    f"{', '.join(e.step_id for e in order)} wrote in {edit.file}",
+                    hint=f"Roll back run {run[:8]}'s step first.")
 
 
 def _first_event_on(ledger, run_id: str, rel: str):
@@ -249,7 +402,7 @@ def _post_now(root: Path) -> str | None:
 
 
 def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger, events,
-            restore: dict[str, tuple[str, str]]) -> RollbackResult:
+            restore: dict[str, tuple[str, str]], *, force: bool) -> RollbackResult:
     import uuid
 
     from pymolt.apply_ledger import EventFile, LedgerEvent, LedgerSnapshot, append_ledger
@@ -273,11 +426,15 @@ def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger
             kept.append(event.step_id)
         else:
             ended.append(event.step_id)
+        # Each event names its own texts: the epoch's after-text back to its before-text (a
+        # forced rollback: the file as it was, back to the text before the run).
         records.append((LedgerEvent(
             event="rollback", run_id=run_id, step_id=event.step_id, at=now,
             executor="pymolt", actor="pymolt", restored=bool(event.files),
-            files=[EventFile(file=rel, before=_sha256(restore[rel][0]),
-                             after=_sha256(restore[rel][1])) for rel in files]), []))
+            files=[EventFile(file=f.file, before=_sha256(restore[f.file][0]),
+                             after=_sha256(restore[f.file][1])) if force else
+                   EventFile(file=f.file, before=f.after, after=f.before)
+                   for f in event.files if f.file in files]), []))
     invocation = Invocation(
         id=uuid.uuid4().hex, operation="rollback", status="prepared", at=now,
         steps=[e.step_id for e in events], ledger_next_seq=ledger.next_seq(),
@@ -310,11 +467,12 @@ def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger
             "status": "applied" if live else "rolled_back", "rolled_back_at": now,
             "steps": steps_state,
             "invocation": invocation.model_copy(update={"status": "done"})}))
-        # The post-migration capture stays while the code it recorded is still on disk (the
-        # rollback restored no file); otherwise it is set aside, kept among the diagnostics.
+        # The post-migration capture stays while the code it recorded is still on disk;
+        # otherwise it is set aside, kept among the diagnostics (row 5).
         post = "kept" if contract.post_migration is not None else None
         post_trace = contract.post_migration.trace_path if contract.post_migration else None
-        if contract.post_migration is not None and restored:
+        if contract.post_migration is not None and restored and _capture_recorded(
+                contract.post_migration, plan, events, restored, force=force):
             archived = set_aside_post_migration(root, contract, run_id)
             contract.save(state_path)
             aside = contract.diagnostic_captures[-1]
@@ -341,6 +499,53 @@ def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger
         raise
     return RollbackResult(plan=plan, run_id=run_id, rolled_back_at=now, steps=ended,
                           kept=kept, files_restored=restored, post=post, post_trace=post_trace)
+
+
+def _capture_recorded(post, plan: MigrationPlan, events, restored: list[str], *,
+                      force: bool) -> bool:
+    """Whether the post-migration capture recorded code this rollback took away (module
+    docstring). A capture with no source snapshot cannot tell: it is set aside when it was taken
+    after one of the steps, as before snapshots existed."""
+    from pymolt.verify.service import load_sources
+
+    snapshot = load_sources(post.sources_path) if post.sources_path else None
+    if force:
+        return snapshot is None or any(rel in snapshot for rel in restored)
+    for event in events:
+        if not event.files or not any(f.file in restored for f in event.files):
+            continue
+        if not _postdates(post.captured_at, event.at):
+            continue
+        if snapshot is None:
+            return True
+        step = plan.step(event.step_id)
+        for edit in (step.edits if step is not None else []):
+            text = snapshot.get(edit.file)
+            if text is None:
+                continue
+            if edit.anchors_new:
+                from pymolt.workorder.rules import Pythons
+
+                index = Pythons(target=plan.target_python).index(text)
+                if index is not None and any(index.resolve(a).ok for a in edit.anchors_new):
+                    return True
+            elif _sha256(text) == edit.after_sha256:
+                return True
+    return False
+
+
+def _postdates(captured_at: str | None, at: str | None) -> bool:
+    from datetime import UTC, datetime
+
+    if not captured_at or not at:
+        return True
+    try:
+        captured, done = datetime.fromisoformat(captured_at), datetime.fromisoformat(at)
+    except ValueError:
+        return True
+    captured = captured if captured.tzinfo else captured.replace(tzinfo=UTC)
+    done = done if done.tzinfo else done.replace(tzinfo=UTC)
+    return captured >= done
 
 
 def receipt_after_rollback(root: Path, receipt, plan: MigrationPlan, run_id: str, now: str,

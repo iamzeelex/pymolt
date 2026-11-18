@@ -1089,31 +1089,39 @@ def _render_left_to_you(plan) -> None:
 def rollback(
     project_dir: str = typer.Argument(".", help="Project directory"),
     run_id: str | None = typer.Option(
-        None, "--run-id", help="Apply run to undo (default: the last)"
+        None, "--run-id", help="Apply run to undo (default: the open one)"
     ),
+    step: str | None = typer.Option(
+        None, "--step", help="Roll back this step only (it must be the last change to its files)"),
+    cascade: bool = typer.Option(
+        False, "--cascade", help="With --step: roll back the steps that depend on it first"),
     force: bool = typer.Option(
         False, "--force", help="Also discard edits made after apply"
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the result as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Undo the last apply: restore the files it changed.
+    """Undo the open run's apply: restore the files its steps changed.
 
-    Refuses if a file was edited after apply, unless --force.
+    Refuses if a file was edited after apply, unless --force. --step rolls back one step,
+    when it is the last change to its files.
     """
     import json
 
     from pymolt.migration_plan import MigrationConflictError, MigrationPlanError
     from pymolt.workorder.rollback import rollback_steps
 
+    json_output = json_output or agent
     project_path = require_project_dir(project_dir, json_output=json_output)
     try:
-        result = rollback_steps(project_path, run_id=run_id, force=force)
+        result = rollback_steps(project_path, run_id=run_id, step=step, force=force,
+                                cascade=cascade, agent=agent)
         migration_plan, rolled_back_at, rolled_run = (result.plan, result.rolled_back_at,
                                                       result.run_id)
     except MigrationConflictError as exc:
         fail(
             f"migration rollback conflicts with current state: {exc}",
-            hint="Post-apply edits are preserved unless you explicitly pass --force.",
+            hint=exc.hint or "Post-apply edits are preserved unless you explicitly pass --force.",
             code=EXIT_USAGE,
             json_output=json_output,
         )
@@ -1124,23 +1132,14 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
-    from pymolt.verify.service import load_contract_state, set_aside_capture
-
-    # What became of the post-migration capture: kept while the code it recorded is still on
-    # disk (the run had changed no file), set aside (kept among the diagnostics) otherwise.
-    contract = load_contract_state(project_path)
-    aside = set_aside_capture(contract)
-    post, post_trace = None, None
-    if contract.post_migration is not None:
-        post, post_trace = "kept", contract.post_migration.trace_path
-    elif aside is not None and aside.set_aside_by == rolled_run:
-        post, post_trace = "set_aside", aside.trace_path
+    post, post_trace = result.post, result.post_trace
     payload = {
         "run_id": rolled_run,
         "plan_id": migration_plan.plan_id,
         "rolled_back_at": rolled_back_at,
         "files_restored": len(result.files_restored),
         "steps": result.steps,
+        "kept": result.kept,
         "post_migration_capture": post,
         "post_migration_trace": post_trace,
     }
@@ -1148,12 +1147,14 @@ def rollback(
         typer.echo(json.dumps(payload, indent=2))
         return
     post_line = {
-        "kept": "\nPost-migration capture: kept (the run had changed no file)",
+        "kept": "\nPost-migration capture: kept (it did not record the code rolled back)",
         "set_aside": f"\nPost-migration capture: set aside, kept at {post_trace}",
     }.get(post or "", "")
+    kept = (f" (kept in effect: {', '.join(result.kept)}, it changed no file)"
+            if result.kept else "")
     console.print(Panel(
         f"Rolled back run [bold cyan]{rolled_run[:8]}[/bold cyan]\n"
-        f"Steps: {escape(', '.join(result.steps + result.kept) or 'none')}\n"
+        f"Steps: {escape(', '.join(result.steps + result.kept) or 'none')}{escape(kept)}\n"
         f"Files restored: [bold]{len(result.files_restored)}[/bold]{escape(post_line)}",
         title="Migration rolled back", border_style="yellow", expand=False,
     ))
