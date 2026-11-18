@@ -84,7 +84,8 @@ from pymolt.workorder.state import (
 
 logger = logging.getLogger(__name__)
 
-Outcome = Literal["applied", "already_applied", "nothing", "present", "dry_run", "skipped"]
+Outcome = Literal["applied", "already_applied", "nothing", "present", "dry_run", "skipped",
+                  "in_progress", "recorded", "aborted"]
 
 
 class StepRefusal(MigrationConflictError):
@@ -101,7 +102,10 @@ class ApplyResult(BaseModel):
     those, re-based onto another text; ``unwritten``: already at the reviewed text, so nothing
     was written); ``noop``: already in effect; ``present``: effect already in its slots, no
     epoch; ``blocked``: left out by ``apply .`` (a dependency not in effect), with why;
-    ``remaining``: the plan's steps not in effect afterwards, by status."""
+    ``remaining``: the plan's steps not in effect afterwards, by status. A record
+    (``workorder.record``) sets ``in_progress`` (``--record``, with its ``snapshot``),
+    ``recorded`` (``--done``, with the changes it left ``unrecorded``, the ``attestation`` id
+    and ``check_failed`` when the compile check failed on the recorded files)."""
 
     outcome: Outcome
     plan_id: str
@@ -120,6 +124,12 @@ class ApplyResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
     self_check: SelfCheck | None = None
     receipt: MigrationReceipt | None = None
+    in_progress: list[str] = Field(default_factory=list)
+    recorded: list[str] = Field(default_factory=list)
+    unrecorded: list[dict] = Field(default_factory=list)
+    snapshot: str | None = None
+    attestation: str | None = None
+    check_failed: bool = False
 
 
 AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a person approved for "
@@ -403,6 +413,10 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
     if state is not None:
         state = recover_invocation(root, state, plan) or state
         receipt = MigrationReceipt.load(root)
+    if not dry_run:
+        from pymolt.workorder.record import refuse_open_record
+
+        refuse_open_record(receipt, "apply")
     ledger = _load_ledger(root, receipt)
     start_fp, start_setup, baseline = _preconditions(
         root, plan, receipt, run_id, allow_no_baseline=allow_no_baseline)
@@ -940,6 +954,10 @@ def _receipt_with_run(root: Path, receipt, plan: MigrationPlan, run_id: str, now
         receipt = MigrationReceipt(
             run_id=run_id, plan_id=plan.plan_id, applied_at=now, status="rolled_back",
             target_python=plan.target_python, source_manifest=plan.source_manifest,
+            target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
+                                  if plan.target_manifest_path else None),
+            baseline_trace_path=plan.baseline_trace_path,
+            baseline_captured_at=plan.baseline_captured_at,
             no_codemods_required=not plan.changes,
             plan_path=str(_run_dir(root, run_id) / "plan.json"))
     if receipt.run(run_id) is None:

@@ -118,7 +118,8 @@ def ledger_coverage(old_sources: Mapping[str, str], new_sources: Mapping[str, st
             ref = (entry.run_id, entry.step_id)
             lines_old: set[int] = set()
             lines_new: set[int] = set()
-            if entry.anchor_old is None and entry.anchor_new is None:
+            if entry.anchor_old is None and entry.anchor_new is None \
+                    and entry.kind != "pair":     # a recorded pairing anchor has no statement
                 unanchored += 1
             if entry.anchor_new is not None and index_new is not None:
                 found = index_new.resolve(entry.anchor_new)

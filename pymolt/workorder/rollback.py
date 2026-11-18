@@ -94,9 +94,17 @@ def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
         raise MigrationConflictError("--cascade goes with --step")
     with _migration_lock(project_dir, "rollback"):
         root = Path(project_dir).resolve()
+        _refuse_open_record(root)
         if step is not None:
             return _rollback_step(root, step, run_id=run_id, cascade=cascade)
         return _rollback(root, run_id=run_id, force=force)
+
+
+def _refuse_open_record(root: Path) -> None:
+    from pymolt.migration_state import MigrationReceipt
+    from pymolt.workorder.record import refuse_open_record
+
+    refuse_open_record(MigrationReceipt.load(root), "rollback")
 
 
 def _load(root: Path, run_id: str | None):

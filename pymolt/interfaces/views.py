@@ -780,8 +780,10 @@ def apply_view(result, plan) -> dict:
     titles = {s.id: s.title for s in plan.steps}
     done = {"applied": "applied", "already_applied": "already in effect", "nothing":
             "nothing applied", "present": "already present by hand", "dry_run": "dry run",
-            "skipped": "skipped"}[result.outcome]
-    summary = f"{done}: " + (", ".join(result.applied) or ", ".join(result.noop)
+            "skipped": "skipped", "in_progress": "record open", "recorded": "recorded",
+            "aborted": "record aborted"}[result.outcome]
+    summary = f"{done}: " + (", ".join(result.applied) or ", ".join(result.recorded)
+                             or ", ".join(result.in_progress) or ", ".join(result.noop)
                              or ", ".join(result.present) or ", ".join(result.skipped)
                              or "no step")
     remaining = {status: lists.cap(f"remaining.{status}", ids)
@@ -793,6 +795,9 @@ def apply_view(result, plan) -> dict:
         "rebased": list(result.rebased), "noop": list(result.noop),
         "present": list(result.present), "skipped": list(result.skipped),
         "blocked": dict(result.blocked), "checks": dict(result.checks),
+        "recorded": list(result.recorded), "in_progress": list(result.in_progress),
+        "unrecorded": lists.cap("unrecorded", list(result.unrecorded)),
+        "attestation": result.attestation, "check_failed": result.check_failed,
         "remaining": remaining, "files": lists.cap("files", list(result.files)),
         "diff": [{"file": d["file"], "diff": d["diff"][:ANSWER_BUDGET_CHARS]}
                  for d in lists.cap("diff", list(result.diff))],
