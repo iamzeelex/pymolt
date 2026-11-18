@@ -187,12 +187,23 @@ def test_a_smoke_failure_the_write_caused_restores_the_files(tmp_path):
     assert smoke.status == "failed"
     assert smoke.failed == {"app0": "RuntimeError: broken by the rewrite"}
     assert (tmp_path / "app0.py").read_text(encoding="utf-8") == GOOD_OLD
-    assert MigrationReceipt.load(tmp_path) is None
+    # Design 3.2 step 8: the write was recorded, then rolled back: the ledger says both, and
+    # the step's receipt says why.
+    receipt = MigrationReceipt.load(tmp_path)
+    [step] = receipt.steps.values()
+    assert (step.status, step.epoch, step.files_restored) == ("rolled_back", None, ["app0.py"])
+    assert step.checks["smoke_import"] == "failed: app0: RuntimeError: broken by the rewrite"
+    assert (receipt.status, receipt.in_effect) == ("rolled_back", False)
+    ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
+    assert [(e["event"], e.get("restored")) for e in ledger["events"]] == [
+        ("apply", None), ("rollback", True)]
     state = json.loads((tmp_path / ".pymolt" / "migrations" / plan.plan_id / "state.json")
                        .read_text())
-    assert state["status"] == "failed" and "smoke import failed" in state["error"]
-    # Without --smoke the same plan applies: the failed run is recovered and retried.
-    assert apply_migration_plan(tmp_path, plan).status == "applied"
+    assert state["status"] == "rolled_back" and "smoke import failed" in state["error"]
+    # Without --smoke the same plan applies again in the same run, with a new epoch.
+    again = apply_migration_plan(tmp_path, plan)
+    assert (again.status, again.run_id) == ("applied", plan.plan_id)
+    assert [s.epoch for s in again.steps.values()] == [3]
 
 
 def test_an_import_that_already_failed_is_pre_existing_not_a_failure(tmp_path):

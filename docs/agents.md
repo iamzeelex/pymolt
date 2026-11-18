@@ -26,7 +26,9 @@ With `--json` or `--agent`, no command asks a question or takes a default for yo
 choices returns the valid manifests, tools and Python versions and saves nothing; with all four it
 saves; with some of them it is an error. An existing capture needs `--force`.
 
-`apply` and `rollback` have no agent view: they write source, and a person runs them.
+`apply` and `rollback` write source, and a person runs them. `apply --agent` writes nothing: it
+refuses a pymolt step, and with `--dry-run` returns the diff the steps would write, or with
+`--step ID --brief` the step's brief.
 
 `plan --agent` lists the plan's steps (`data.steps`, with who does each) and, under
 `data.next.brief`, the brief of the first step for an agent: where its sites are now (resolved on

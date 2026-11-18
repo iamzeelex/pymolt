@@ -113,7 +113,7 @@ def test_plan_apply_rollback_cli_lifecycle(tmp_path, monkeypatch):
     reapplied = runner.invoke(app, ["apply", str(tmp_path)])
 
     assert reapplied.exit_code == 0, reapplied.output
-    assert "Migration applied" in reapplied.output and " as run " in reapplied.output
+    assert "Migration applied" in reapplied.output and " as run " not in reapplied.output
     assert "werkzeug.utils" in source_path.read_text(encoding="utf-8")
 
 

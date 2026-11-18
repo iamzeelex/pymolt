@@ -451,22 +451,28 @@ def test_apply_again_on_an_applied_plan_is_a_no_op_that_says_so(tmp_path):
     assert MigrationReceipt.load(tmp_path) == first
 
 
-def test_apply_again_after_a_later_edit_refuses_and_points_at_rollback(tmp_path):
-    """The old message called the plan stale and its hint led to a second, stacked plan."""
+def test_apply_again_after_a_later_edit_is_a_no_op_that_names_the_hand_edit(tmp_path):
+    """Design 4.1 row 4: a step in effect is a no-op. The edit made since is the person's:
+    nothing is written over it, and the summary says verify judges it as a hand edit."""
+    from pymolt.workorder.apply import apply_steps
+
     plan = _plan(tmp_path)
-    apply_migration_plan(tmp_path, plan)
+    first = apply_migration_plan(tmp_path, plan)
     path = tmp_path / "app0.py"
     path.write_text(path.read_text(encoding="utf-8") + "# later edit\n", encoding="utf-8")
 
-    with pytest.raises(MigrationConflictError, match="already applied") as caught:
-        apply_migration_plan(tmp_path, plan)
+    again = apply_steps(tmp_path, plan)
 
-    assert "stale" not in str(caught.value)
-    assert "rollback" in caught.value.hint and "stack" in caught.value.hint
+    assert again.outcome == "already_applied" and again.applied == []
+    assert again.noop == [s.id for s in plan.steps if s.type == "codemod"]
+    assert any("app0.py changed since" in note and "hand edits" in note for note in again.notes)
     assert path.read_text(encoding="utf-8").endswith("# later edit\n")
+    assert MigrationReceipt.load(tmp_path) == first
 
 
-def test_a_rolled_back_plan_applies_again_as_a_new_run(tmp_path):
+def test_a_rolled_back_plan_applies_again_in_its_run_with_a_new_epoch(tmp_path):
+    """Design 4.1 row 7: a rolled-back step applies again in the same run; its old epoch stays
+    ended."""
     import json
 
     plan = _plan(tmp_path, files=2)
@@ -476,38 +482,42 @@ def test_a_rolled_back_plan_applies_again_as_a_new_run(tmp_path):
     again = apply_migration_plan(tmp_path, plan)
 
     assert again.outcome == "applied" and again.status == "applied"
-    assert again.run_id != first.run_id and again.plan_id == plan.plan_id
+    assert again.run_id == first.run_id == plan.plan_id
     for index, change in enumerate(plan.changes):
         assert (tmp_path / f"app{index}.py").read_text(encoding="utf-8") == change.new_source
     run_dir = tmp_path / ".pymolt" / "migrations" / again.run_id
     state = json.loads((run_dir / "state.json").read_text())
-    assert (state["status"], state["plan_id"], state["attempt"]) == ("applied", plan.plan_id, 2)
+    assert (state["status"], state["attempt"]) == ("applied", 1)
     assert MigrationPlan.load(tmp_path, run_dir / "plan.json") == plan
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
-    assert [(e["event"], e["run_id"], e.get("restored")) for e in ledger["events"]] == [
-        ("apply", first.run_id, None), ("rollback", first.run_id, True),
-        ("apply", again.run_id, None)]
-    # The first run stays rolled back; the default rollback undoes the run in effect.
-    with pytest.raises(MigrationConflictError, match="not rollback-ready"):
-        rollback_migration(tmp_path, run_id=first.run_id)
+    assert [(e["seq"], e["event"], e["run_id"], e.get("restored")) for e in ledger["events"]] \
+        == [(1, "apply", first.run_id, None), (2, "rollback", first.run_id, True),
+            (3, "apply", first.run_id, None)]
+    [step] = [s for s in again.steps.values()]
+    assert step.epoch == 3
+    assert [r.run_id for r in again.runs] == [first.run_id]
     _plan_again, _at, rolled = rollback_migration(tmp_path)
-    assert rolled == again.run_id
+    assert rolled == first.run_id
     assert (tmp_path / "app0.py").read_text(encoding="utf-8") == plan.changes[0].old_source
+    with pytest.raises(MigrationConflictError, match="not rollback-ready"):
+        rollback_migration(tmp_path)
     third = apply_migration_plan(tmp_path, plan)
-    assert third.run_id not in (first.run_id, again.run_id)
+    assert third.run_id == first.run_id
     assert apply_migration_plan(tmp_path, plan).outcome == "already_applied"
 
 
 def test_re_apply_after_rollback_refuses_a_file_changed_since(tmp_path):
+    """The plan's whole-file step cannot be applied to another text (no recorded recipe)."""
     plan = _plan(tmp_path)
     apply_migration_plan(tmp_path, plan)
     rollback_migration(tmp_path)
     path = tmp_path / "app0.py"
     path.write_text("# user edit\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
 
-    with pytest.raises(MigrationConflictError, match="source changed after planning"):
+    with pytest.raises(MigrationConflictError, match="stale migration plan") as caught:
         apply_migration_plan(tmp_path, plan)
 
+    assert "app0.py" in str(caught.value) and "whole-file" in str(caught.value)
     assert path.read_text(encoding="utf-8").startswith("# user edit")
 
 
