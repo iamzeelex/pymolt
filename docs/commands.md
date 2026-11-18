@@ -96,7 +96,10 @@ The original files are kept for `rollback`. Run again on an applied plan whose f
 changes, it writes nothing and says so. The receipt, `.pymolt/migration_state.json`, keeps every
 run and, per run, each step it applied: its status, its checks and the predicted risks it
 addresses. A plan applied while an earlier run's code is still on disk closes that run; both
-runs' edits stay in effect for `verify`. Its summary and `--json` list what the plan leaves to you:
+runs' edits stay in effect for `verify`. Each file's text before and after a step is kept once, by
+its hash, in `.pymolt/blobs/`. These are copies of your source, so pymolt writes
+`.pymolt/.gitignore` for them; it does not change your own `.gitignore`. `plan` and `apply` delete
+the texts that no run on disk, and neither of the two runs closed last, still needs. Its summary and `--json` list what the plan leaves to you:
 the advisories (a site not rewritten, a rewrite with a caveat to check) and the manual items, each
 with its file and line.
 

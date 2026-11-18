@@ -272,7 +272,7 @@ def plan(project_dir: str = ".", endpoint: str | None = None) -> dict:
         except PlanInputError as exc:
             raise views.AgentInputError(str(exc), exc.hint or None) from exc
         return views.plan_view(migration_plan, by_pkg, source_desc,
-                               plan_path=migration_plan.save(p))
+                               plan_path=migration_plan.save_planned(p))
 
     return _run("plan", project_dir, build,
                 "Check that setup and assess ran and the codemod endpoint answers.")

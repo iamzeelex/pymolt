@@ -589,7 +589,7 @@ def plan(
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
                 online=online,
             )
-        saved_path = migration_plan.save(project_path, output)
+        saved_path = migration_plan.save_planned(project_path, output)
     except PlanInputError as exc:
         fail(str(exc), hint=exc.hint or None, json_output=json_output)
     except (AxiomGraphError, OSError, RuntimeError, ValueError) as exc:
