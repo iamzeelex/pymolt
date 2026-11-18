@@ -138,8 +138,15 @@ then compares the two sides.
 A line diff of the source each capture stored decides who edited a call's line:
 - **unedited**: compared strictly, as above;
 - **edited by `pymolt apply`** (its ledger records each edit): strict. The plan claimed a drop-in
-  replacement, so any different outcome fails. The ledger counts only while the apply run it
-  records is in effect: after a rollback that restored files, edits are judged by hand;
+  replacement, so any different outcome fails. The ledger names the statements each step
+  changed, not their lines. `verify` finds each statement in the two captures' source and
+  credits it only with lines the same line diff marks as edited. A statement that later edits
+  moved is still found; one that a later edit replaced is not, and that line counts as edited
+  by hand. Where two steps' statements share a line, the stricter claim decides. Only steps
+  whose last apply is still in effect count: after a rollback that restored files, or once a
+  later apply of the same step replaced them, the earlier edits are judged by hand. When the
+  post-migration capture predates a step (its source still has the statements from before
+  the step), the report says so: capture post-migration again;
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
   symbol from the plan, or by a one-statement edit. An equal outcome is REWRITTEN equal. A
   different value is a review item, which makes the verdict inconclusive. A new raise fails. A

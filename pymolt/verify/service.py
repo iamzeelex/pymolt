@@ -313,21 +313,17 @@ def _normalize_impact_targets(values: list[str] | tuple[str, ...] | None) -> lis
 
 
 def _applied_plan_impact_targets(project_dir: str | Path) -> list[str]:
-    """Resolve old and replacement API paths from the plan whose code is on disk."""
-    from pymolt.migration_plan import MigrationPlan
-    from pymolt.migration_state import MigrationReceipt
+    """Resolve old and replacement API paths from the plans whose code is on disk (every run
+    in effect, latest first)."""
+    from pymolt.migration_state import MigrationReceipt, plans_in_effect
 
     receipt = MigrationReceipt.load(project_dir)
-    if receipt is None or not receipt.in_effect or not receipt.plan_path:
-        return []
-    plan = MigrationPlan.load(project_dir, receipt.plan_path)
-    if plan is None:
-        return []
     paths: list[str] = []
-    for impact in plan.impacts:
-        for value in (impact.path, impact.replacement_path):
-            if value and value not in paths:
-                paths.append(value)
+    for plan in plans_in_effect(project_dir, receipt):
+        for impact in plan.impacts:
+            for value in (impact.path, impact.replacement_path):
+                if value and value not in paths:
+                    paths.append(value)
     return paths
 
 
@@ -415,29 +411,29 @@ def _read_project_text(root: Path, rel: str) -> str | None:
 def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
     """Stdlib modules imported on lines that changed since the baseline.
 
-    Where an apply receipt exists the plan's frozen ``old_source`` is the baseline text of
-    every file the plan touched. Any other file is compared best effort against the baseline
-    trace's recorded site text: a recorded call line that no longer reads the same marks the
-    nearby line that now reads most like it as edited."""
+    Where an apply receipt exists the frozen ``old_source`` of the oldest plan in effect that
+    touched a file is the baseline text of that file. Any other file is compared best effort
+    against the baseline trace's recorded site text: a recorded call line that no longer reads
+    the same marks the nearby line that now reads most like it as edited."""
     root = Path(os.path.abspath(project_dir))
     found: set[str] = set()
     covered: set[str] = set()
     try:
-        from pymolt.migration_plan import MigrationPlan
-        from pymolt.migration_state import MigrationReceipt
+        from pymolt.migration_state import MigrationReceipt, plans_in_effect
 
-        receipt = MigrationReceipt.load(root)
-        plan = (MigrationPlan.load(root, receipt.plan_path)
-                if receipt is not None and receipt.in_effect and receipt.plan_path
-                else None)
+        plans = plans_in_effect(root, MigrationReceipt.load(root))
     except Exception as exc:  # noqa: BLE001 - best effort
         logger.info("stdlib tracing: could not read the apply receipt: %s", exc)
-        plan = None
-    for change in (plan.changes if plan is not None else ()):
-        current = _read_project_text(root, change.path)
-        covered.add(change.path)
-        if current is not None:
-            found |= _stdlib_modules_on_lines(current, _changed_lines(change.old_source, current))
+        plans = []
+    for plan in reversed(plans):                          # oldest first: the baseline text
+        for change in plan.changes:
+            if change.path in covered:
+                continue
+            current = _read_project_text(root, change.path)
+            covered.add(change.path)
+            if current is not None:
+                found |= _stdlib_modules_on_lines(current,
+                                                  _changed_lines(change.old_source, current))
     baseline = load_contract_state(root).baseline
     if baseline is None:
         return found
@@ -2706,12 +2702,12 @@ def build_contract_report_from_state(
     receipt = MigrationReceipt.load(project_dir)
 
     if changed_api_paths is None:
-        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import plans_in_effect
 
-        if receipt is not None and receipt.in_effect and receipt.plan_path:
-            applied_plan = MigrationPlan.load(project_dir, receipt.plan_path)
-            if applied_plan is not None and applied_plan.impacts:
-                changed_api_paths = applied_plan.impacts
+        impacts = [impact for applied_plan in plans_in_effect(project_dir, receipt)
+                   for impact in applied_plan.impacts]
+        if impacts:
+            changed_api_paths = impacts
 
     def _slot_trace(slot) -> str | None:
         """A slot's trace, resolved against the project.
@@ -2829,13 +2825,14 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
-    diff then falls back to line-text rules); the apply ledger from ``.pymolt/apply_ledger.json``
-    while the run it records is the one in effect (``apply_ledger.ledger_in_effect``);
-    the static contact maps are built from the snapshots; ``successors`` (old -> new symbol)
-    from the applied plan's impacts, its risks' delta facts and the ledger; and
-    ``type_relocations`` from the plan when it carries them. Never raises: a part that
+    diff then falls back to line-text rules). The apply ledger's in-effect entries (the
+    current epochs of the runs whose code is on disk, ``apply_ledger.in_effect_entries``) are
+    located in the two snapshots once, through the one line alignment provenance uses
+    (``workorder.coverage.ledger_coverage``); without snapshots, by the lines they were
+    written at. The static contact maps are built from the snapshots; ``successors`` (old ->
+    new symbol) from the applied plans' impacts, their risks' delta facts and the ledger; and
+    ``type_relocations`` from the plans when they carry them. Never raises: a part that
     cannot be built is left None."""
-    from pymolt.apply_ledger import ledger_in_effect
     from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.contact_map import contacts_by_line
     from pymolt.verify.facts import DiffContext
@@ -2845,9 +2842,13 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     ctx.old_sources = load_sources(sources_path(against))
     ctx.new_sources = load_sources(sources_path(trace))
     receipt = MigrationReceipt.load(root)
-    ctx.edits, ledger_note = ledger_in_effect(root, receipt)
-    if ledger_note:
-        ctx.notes.append(ledger_note)
+    try:
+        _ledger_context(root, receipt, ctx)
+    except Exception as exc:  # noqa: BLE001 - provenance degrades to hand edits
+        logger.warning("could not read the apply ledger: %s", exc, exc_info=True)
+        ctx.edits = None
+        ctx.notes.append(f"the apply ledger could not be read ({type(exc).__name__}): edits are "
+                         "judged as hand edits")
     for side, sources in (("old", ctx.old_sources), ("new", ctx.new_sources)):
         if sources:
             try:
@@ -2859,16 +2860,14 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
         if entry.get("old_symbol") and entry.get("new_symbol"):
             successors.setdefault(entry["old_symbol"], entry["new_symbol"])
     try:
-        from pymolt.migration_plan import MigrationPlan
+        from pymolt.migration_state import plans_in_effect
 
-        plan = (MigrationPlan.load(root, receipt.plan_path)
-                if receipt is not None and receipt.in_effect and receipt.plan_path
-                else None)
-        if plan is not None:
+        predicted: set[str] = set()
+        relocated: dict[str, str] = {}
+        for plan in plans_in_effect(root, receipt):       # every run in effect, latest first
             for impact in plan.impacts:
                 if impact.replacement_path:
                     successors.setdefault(impact.path, impact.replacement_path)
-            predicted: set[str] = set()
             for risk in plan.risks.risks if plan.risks is not None else ():
                 if getattr(risk, "symbol", None):
                     predicted.add(risk.symbol)
@@ -2877,14 +2876,47 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
                         predicted.add(fact["symbol"])
                     if fact and fact.get("symbol") and fact.get("successor"):
                         successors.setdefault(fact["symbol"], fact["successor"])
-            ctx.predicted_symbols = predicted or None
             relocations = getattr(plan, "type_relocations", None)
-            if relocations:
-                ctx.type_relocations = _relocation_map(relocations)
+            for old, new in (_relocation_map(relocations) or {}).items() if relocations else ():
+                relocated.setdefault(old, new)
+        ctx.predicted_symbols = predicted or None
+        if relocated:
+            ctx.type_relocations = relocated
     except Exception as exc:  # noqa: BLE001 - provenance is best effort
         logger.warning("could not read the applied plan for the diff context: %s", exc)
     ctx.successors = successors or None
     return ctx
+
+
+def _ledger_context(root: Path, receipt, ctx) -> None:
+    """``ctx.edits`` (the in-effect ledger entries, located), ``ctx.not_in_capture`` and the
+    notes that say what the ledger could not do."""
+    from pymolt.apply_ledger import in_effect_entries
+    from pymolt.workorder.coverage import (
+        ledger_coverage,
+        located_by_recorded_lines,
+        setup_pythons,
+    )
+
+    entries, note, ledger = in_effect_entries(root, receipt)
+    if note:
+        ctx.notes.append(note)
+    if entries is None:
+        ctx.edits = None
+        return
+    ctx.notes.extend(ledger.notes if ledger is not None else ())
+    if ctx.old_sources is None or ctx.new_sources is None:
+        ctx.edits = located_by_recorded_lines(entries)
+        if entries:
+            ctx.notes.append("the captures carry no source snapshot, so the apply ledger's "
+                             "entries are located by the lines they were written at")
+        return
+    base, target = setup_pythons(root)
+    coverage = ledger_coverage(ctx.old_sources, ctx.new_sources, entries, python_old=base,
+                               python_new=target)
+    ctx.edits = coverage.entries
+    ctx.not_in_capture = [f"{run}:{step}" for run, step in coverage.not_in_capture]
+    ctx.notes.extend(coverage.notes)
 
 
 def _relocation_map(relocations: object) -> dict[str, str] | None:
@@ -2920,10 +2952,9 @@ def _predictions_to_calibrate(project_dir: str | Path, state, against: str) -> d
         slot = Path(baseline.trace_path)
         slot = slot if slot.is_absolute() else root / slot
         is_baseline = slot.resolve() == Path(against).resolve()
-    candidates = []
-    receipt = MigrationReceipt.load(root)
-    if receipt is not None and receipt.in_effect and receipt.plan_path:
-        candidates.append(MigrationPlan.load(root, receipt.plan_path))
+    from pymolt.migration_state import plans_in_effect
+
+    candidates = list(plans_in_effect(root, MigrationReceipt.load(root)))
     candidates.append(MigrationPlan.load(root))
     bound = [plan for plan in candidates if plan is not None and is_baseline
              and same_slot_path(root, plan.baseline_trace_path, baseline.trace_path)

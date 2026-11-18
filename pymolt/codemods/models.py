@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -152,6 +153,26 @@ class PreviewProgress:
 
 #: Observer invoked once per scanned file by the preview walkers.
 ProgressSink = Callable[[PreviewProgress], None] | None
+
+
+@dataclass(frozen=True)
+class MoveGroup:
+    """The import-move patterns ``apply_patterns`` applies together: those that share an old and
+    a new module (``MoveNamesCodemod``), so ``from OLD import a, b`` becomes one statement per
+    target module. ``hits``: ``(recipe_key, sites)`` of each member that changed something."""
+
+    old_module: str
+    new_module: str
+    members: tuple[CodemodPattern, ...]
+    hits: tuple[tuple[str, int], ...] = ()
+
+
+#: Observer of one recipe's change to one text: ``(recipe, before, after)``. The recipe is a
+#: ``CodemodRule``, a ``CodemodPattern`` or a ``MoveGroup``; it is called each time one of them
+#: changes the text, in application order, and changes nothing the caller returns.
+StepObserver = Callable[[Any, str, str], None] | None
+#: The same with the file: ``(recipe, path, before, after)`` (the plan's step builder).
+FileStepObserver = Callable[[Any, str, str, str], None] | None
 
 
 class BlockedRewrite(BaseModel):

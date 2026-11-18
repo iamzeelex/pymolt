@@ -4,11 +4,32 @@ from __future__ import annotations
 
 import json
 
-from pymolt.apply_ledger import build_entries, claim_for, load_ledger, write_ledger
+from pymolt.apply_ledger import (
+    LEDGER_SCHEMA,
+    EntryAttrs,
+    LedgerEvent,
+    append_ledger,
+    build_entries,
+    claim_for,
+    entries_for,
+    load_ledger,
+)
 from pymolt.codemods.models import CodemodPattern
 from pymolt.verify import service
 from pymolt.verify.contact_map import contacts_by_line
 from pymolt.verify.models import CaptureMode, ContractSlot, ContractState
+
+
+def write_ledger(root, run_id, applied_at, files):
+    """A schema-1 ledger, as ``pymolt apply`` wrote it before ledger v2 (read through the
+    v1 adapter): ``files`` = ``(path, before, after, recipes, claims)``."""
+    entries = [{**entry, "run_id": run_id}
+               for rel, before, after, recipes, claims in files
+               for entry in build_entries(rel, before, after, recipes, claims)]
+    path = root / ".pymolt" / "apply_ledger.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": "pymolt.apply_ledger/1", "run_id": run_id,
+                                "applied_at": applied_at, "entries": entries}))
 
 
 def _trace(path, *files):
@@ -68,14 +89,21 @@ class TestApplyLedger:
                 rewrite["new_symbol"], rewrite["kind"]) == (
             "rename-call:a.f→b.g", "same-signature", "a.f", "b.g", "rename-call")
 
-    def test_a_reapply_archives_the_previous_ledger(self, tmp_path):
-        files = [("m.py", "a\n", "b\n", [], {})]
-        write_ledger(tmp_path, "r1", "2026-01-01T00:00:00", files)
-        write_ledger(tmp_path, "r2", "2026-01-02T00:00:00", files)
-        assert len(list((tmp_path / ".pymolt" / "archive").glob("apply_ledger-*.json"))) == 1
+    def test_a_reapply_appends_to_the_ledger_and_archives_nothing(self, tmp_path):
+        def apply(run, at):
+            event = LedgerEvent(event="apply", run_id=run, step_id="v1", at=at)
+            return event, entries_for("m.py", "a = 1\n", "b = 1\n", EntryAttrs(),
+                                      run_id=run, step_id="v1")
+
+        append_ledger(tmp_path, [apply("r1", "2026-01-01T00:00:00")])
+        append_ledger(tmp_path, [apply("r2", "2026-01-02T00:00:00")])
+        assert not (tmp_path / ".pymolt" / "archive").exists()
         current = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
-        assert current["run_id"] == "r2"
-        assert load_ledger(tmp_path)[0]["new_lines"] == [1, 1]
+        assert current["schema"] == LEDGER_SCHEMA
+        assert [(e["seq"], e["run_id"]) for e in current["events"]] == [(1, "r1"), (2, "r2")]
+        ledger = load_ledger(tmp_path, receipt=None)
+        assert [(e.epoch, e.run_id, e.new_lines) for e in ledger.entries] == [
+            (1, "r1", (1, 1)), (2, "r2", (1, 1))]
 
     def test_claims_follow_the_pattern(self):
         def pat(**kw):
@@ -113,7 +141,7 @@ def test_the_context_is_built_from_slots_ledger_and_plan_and_reaches_the_diff(
     ctx = service.build_diff_context(tmp_path, new, old)
     assert ctx.old_sources == ctx.new_sources == {"m.py": "import requests\nrequests.get('u')\n"}
     assert ctx.old_contacts == {"m.py": {2: {"requests.get"}}}
-    assert ctx.edits[0]["claim"] == "same-object"
+    assert (ctx.edits[0]["claim"], ctx.edits[0]["basis"]) == ("preserve", "same-object")
     assert ctx.successors == {"a.f": "b.g"}
     # an older capture without snapshots: no sources, no contacts
     old.with_name("baseline.jsonl.sources.json.gz").unlink()
@@ -213,8 +241,12 @@ def test_the_plans_type_relocations_list_reaches_the_context_as_a_map(tmp_path, 
 def test_the_ledger_counts_only_while_its_run_is_in_effect(tmp_path):
     """A rollback that restored files leaves the ledger behind; a hand edit made after it on
     one of those lines must not be judged by the claim pymolt made for the rolled-back run."""
-    from pymolt.apply_ledger import ledger_in_effect
+    from pymolt.apply_ledger import in_effect_entries
     from pymolt.migration_state import MigrationReceipt
+
+    def in_effect(receipt):
+        entries, note, _ledger = in_effect_entries(tmp_path, receipt)
+        return ([e.run_id for e in entries] if entries is not None else None), note
 
     write_ledger(tmp_path, "r1", "2026-01-01T00:00:00",
                  [("m.py", "a.f()\n", "b.g()\n", ["rename-call:a.f→b.g"],
@@ -222,18 +254,17 @@ def test_the_ledger_counts_only_while_its_run_is_in_effect(tmp_path):
     applied = MigrationReceipt(run_id="r1", target_python="3.12",
                                source_manifest="requirements.txt")
 
-    entries, note = ledger_in_effect(tmp_path, applied)
-    assert [e["run_id"] for e in entries] == ["r1"] and note is None
+    assert in_effect(applied) == (["r1"], None)
     restored = applied.model_copy(update={"status": "rolled_back", "files_restored": ["m.py"]})
-    assert ledger_in_effect(tmp_path, restored) == (
+    assert in_effect(restored) == (
         None, "the apply ledger of run r1 is not used (no apply run is in effect): edits are "
               "judged as hand edits")
     noop = applied.model_copy(update={"status": "rolled_back", "files_restored": []})
-    assert ledger_in_effect(tmp_path, noop)[0] == entries    # it restored nothing: in effect
+    assert in_effect(noop) == (["r1"], None)            # it restored nothing: in effect
     other = applied.model_copy(update={"run_id": "r2"})
-    assert ledger_in_effect(tmp_path, other)[0] is None
-    assert "run r2 is the one in effect" in ledger_in_effect(tmp_path, other)[1]
-    assert ledger_in_effect(tmp_path, None)[0] is None
+    assert in_effect(other)[0] is None
+    assert "run r2 is the one in effect" in in_effect(other)[1]
+    assert in_effect(None)[0] is None
 
 
 def test_verify_says_when_it_left_the_ledger_out(tmp_path):

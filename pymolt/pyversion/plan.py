@@ -26,6 +26,8 @@ class PythonStage:
     risks: Any
     findings: list[dict[str, Any]]
     previews: list[Any] = field(default_factory=list)
+    # Per fixed file, the plan-time re-compile results (``FixOutcome.checks``).
+    checks: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def plan_python(project_dir: str | Path, base_python: str, target_python: str,
@@ -40,9 +42,11 @@ def plan_python(project_dir: str | Path, base_python: str, target_python: str,
 
 def plan_python_stage(project_dir: str | Path, base_python: str, target_python: str,
                       sites: list[Any] | None = None,
-                      previews: list[Any] | None = None) -> PythonStage:
+                      previews: list[Any] | None = None,
+                      on_step: Any = None) -> PythonStage:
     """The python move for a plan. With ``previews`` (the dependency rewrites) the python
     fixes are layered onto them and the risks they fix are marked ``fixed_by_plan``.
+    ``on_step`` observes each fix that changed a kept file (``apply_python_fixes``).
     Never raises: a failed piece becomes a note and a lower quality."""
     from pymolt.pyversion.compile_check import compile_check
     from pymolt.pyversion.facts import find_target_interpreter, python_delta
@@ -76,13 +80,16 @@ def plan_python_stage(project_dir: str | Path, base_python: str, target_python: 
         notes.append("compile check skipped: no interpreter for the target Python")
     out_previews = list(previews) if previews is not None else []
     fixes: dict[str, Any] = {"patterns": 0, "files": 0}
+    checks: dict[str, dict[str, str]] = {}
     try:
         patterns = python_patterns(report, sites)
         if patterns:
             outcome = apply_python_fixes(
                 root, out_previews, patterns, sites, target=target_python,
-                target_executable=exe, base_executable=base_exe, base_runner=base_runner)
+                target_executable=exe, base_executable=base_exe, base_runner=base_runner,
+                on_step=on_step)
             out_previews = outcome.previews
+            checks = outcome.checks
             notes.extend(outcome.notes)
             fixes = {"patterns": len(outcome.patterns), "files": len(outcome.files)}
     except Exception as exc:  # noqa: BLE001 - the plan stands without python fixes
@@ -96,7 +103,7 @@ def plan_python_stage(project_dir: str | Path, base_python: str, target_python: 
         "sides": dict(report.sides), "sites": len(sites), "fixes": fixes,
         "notes": [*report.notes, *notes],
     }
-    return PythonStage(python, risks, findings, out_previews)
+    return PythonStage(python, risks, findings, out_previews, checks)
 
 
 def _inherited_stdlib_spellings(root: Path, notes: list[str]) -> set[str]:

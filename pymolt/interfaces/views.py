@@ -737,9 +737,30 @@ def unknown_api_phrase(inconclusive: int, total: int) -> str:
     return f"API changes unknown for {inconclusive} of {total} package(s)"
 
 
-def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) -> dict:
-    """A saved ``MigrationPlan`` -> view. The full report is the plan file itself."""
+def step_row(step) -> str:
+    """One step as a line: id, type, who, claim, effort, title, dependencies."""
+    from pymolt.workorder.render import clean
+
+    deps = f" after {', '.join(step.depends_on)}" if step.depends_on else ""
+    return (f"{step.id} {step.type} [{step.executor}, {step.claim or 'no claim'}, effort "
+            f"{step.effort.size}] {clean(' '.join(step.title.split()), 160)}{deps}")
+
+
+def steps_summary(plan) -> str:
+    """"N steps: a by pymolt, b for an agent, c for a person"."""
+    counts = {who: sum(1 for s in plan.steps if s.executor == who)
+              for who in ("pymolt", "agent", "person")}
+    label = {"pymolt": "by pymolt", "agent": "for an agent", "person": "for a person"}
+    parts = ", ".join(f"{n} {label[who]}" for who, n in counts.items() if n)
+    return f"{len(plan.steps)} step(s)" + (f": {parts}" if parts else "")
+
+
+def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
+              plan_md: str | Path | None = None, project_dir: str | Path | None = None) -> dict:
+    """A saved ``MigrationPlan`` -> view. The full report is the plan file itself.
+    ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines."""
     from pymolt.codemods.models import CodemodPattern
+    from pymolt.workorder.render import brief_data, next_agent_step, next_command
 
     full_path = str(plan_path)
     lists = _Lists()
@@ -800,6 +821,17 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
         "compile_findings": lists.cap("compile_findings",
                                       list(getattr(plan, "compile_findings", None) or [])),
         "compile_findings_total": len(getattr(plan, "compile_findings", None) or []),
+        "steps": lists.fit("steps", [step_row(s) for s in plan.steps]),
+        "steps_total": len(plan.steps),
+        "steps_by_executor": {who: sum(1 for s in plan.steps if s.executor == who)
+                              for who in ("pymolt", "agent", "person")},
+        "plan_md": str(plan_md) if plan_md else None,
+    }
+    agent_step = next_agent_step(plan)
+    data["next"] = {
+        "command": next_command(plan),
+        "step": agent_step.id if agent_step else None,
+        "brief": brief_data(plan, agent_step, project_dir) if agent_step else None,
     }
     warnings: list[str] = []
     if plan.baseline_trace_path is None:
@@ -845,6 +877,11 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path) ->
                      f"{unknown_tail}.")
     if "diffs" in lists.truncated:
         lines.append(f"{lists.truncated['diffs']} diff(s) omitted; the plan file has every change.")
+    if plan.steps:
+        lines.append(f"{steps_summary(plan)} (data.steps"
+                     + (f"; PLAN.md: {plan_md}" if plan_md else "") + ")."
+                     + (f" The first for an agent is {agent_step.id}; its brief is "
+                        "data.next.brief." if agent_step else ""))
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
     return ok("\n".join(lines), lists.finish(data, warnings), full_report_path=full_path,

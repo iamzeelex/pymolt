@@ -130,6 +130,9 @@ class PredictedRisk(BaseModel):
     reached_at: Literal["import", "call"] | None = None   # python sites: when it fails
     guard: dict[str, Any] | None = None      # python sites: the syntactic guard, if any
     fix: str | None = None                   # python sites: curated fix kind (advisory: manual)
+    # The plan step that addresses the risk (a pymolt step) or leaves it to an agent or a
+    # person (a manual step); None outside a plan, or in a plan made before steps.
+    step_id: str | None = None
 
 
 class ListedSite(BaseModel):

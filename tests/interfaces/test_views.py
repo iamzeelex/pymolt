@@ -408,6 +408,7 @@ _PLAN_KEYS = {
     "risks_status", "risks_attention",
     "risks_attention_total", "risks_fixed", "risks_fixed_total",
     "python", "compile_findings", "compile_findings_total",
+    "steps", "steps_total", "steps_by_executor", "plan_md", "next",
 }
 
 

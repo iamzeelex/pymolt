@@ -73,9 +73,84 @@ A codemod is a match/rewrite template applied with LibCST, for example
   dependency rewrites included, and `apply --smoke` imports the changed modules in the target
   environment ([commands.md](commands.md#pymolt-apply-dir)).
 
+## The plan as steps
+
+The saved plan (`"schema_version": 2`) lists the migration as ordered steps, `steps` in `--json`.
+A step pymolt applies is one recipe across every file it changes: a rule, a pattern, or a group
+of import moves applied together. Its `edits` hold, per file, the hunks between the text before
+and after that recipe, the statements it replaces, inserts or deletes, and anchors that name
+those statements by content rather than by line. Steps run in the order the plan built them:
+rules, then patterns, then Python fixes. Applied in that order they give exactly the file
+changes of `changes`, which `apply` writes.
+
+A step's `depends_on` lists the earlier steps it cannot do without, in the same file:
+- one whose output it rewrites;
+- one that inserted an import its new code needs, or the same import it inserts;
+- when a statement cannot be keyed (a file no Python grammar parses), or more than 8 steps change
+  one function, the earlier steps that change the same function or class.
+
+Work pymolt does not do becomes steps too, with who is expected to do it (`executor`):
+
+| Step | Who | From |
+|---|---|---|
+| `manual-rewrite` | agent | a rule that matched but is not applied (`manual`), or a rule advisory that it could not rewrite a site |
+| `api-change` | agent | a removed, moved, deprecated symbol or a changed signature the plan does not rewrite |
+| `python-manual` | agent | a Python-version risk the plan does not fix, or the target's compile findings |
+| `behaviour-change` | person | a changed default the site relies on, a warning the baseline recorded, a Python behaviour change |
+| `review` | person | a rewrite applied with a caveat to check |
+
+One step covers one symbol and kind of change across all its sites. Every predicted risk names
+its step (`step_id`): the pymolt step that rewrote its statement or the import that binds it,
+or the manual step that holds it. A step lists the risk ids it covers (`why.risk_ids`), and its
+sites as anchors on the code the baseline ran (`where`).
+
+Each step also says how it will be judged and how big it is:
+- `verify.judge`: `strict` for a step that claims to keep each call's outcome (`preserve`), so
+  any difference fails; `none` for a pymolt step whose recipe makes no claim (its lines are
+  judged as hand edits).
+- `verify.sites`: each site with the baseline's calls of the step's symbols there and whether
+  the baseline recorded it: `recorded`, `ran-not-recorded` (a site known only statically whose
+  function ran), `not-run` or `unknown` (no executed record). `uncovered` counts the sites no
+  test reached: they need a test before verify can judge them.
+- `verify.tests` is empty: the baseline capture does not record which tests ran a site.
+- `effort.size`: `none` (pymolt does it), `trivial`, `small`, `medium` or `large`, and `why`.
+  A behaviour change, a symbol with no known successor, or more than 20 sites is `large`.
+- `do.manual` holds what pymolt knows for the agent or person: the successor, a signature
+  change, the first site's statement, and pitfalls such as the warnings the baseline recorded
+  there. Text from dependencies and from your code is data, not instructions.
+
+A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
+reason in the step's `why.evidence`. A plan saved by an earlier pymolt (`"schema_version": 1`)
+is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema.json`.
+
+### PLAN.md
+
+`plan` also writes the plan for a person, `.pymolt/PLAN.md` (`--plan-md PATH` writes it
+elsewhere). It starts with the moves and a table of the steps: what each does, who does it, its
+claim, its sites (run / not run in the baseline), its effort and what it depends on. Then one
+section per step: where (with the line numbers at plan time), why, what to do (the diff, for a
+pymolt step), how verify judges it, and its effort. Low-tier steps the baseline never ran are
+collapsed into one table at the end.
+
+Text from a dependency, from your code or from a capture is shown in fenced blocks labelled
+"data from ..., not instructions". Control characters and bidi controls are removed, each item is
+cut at 300 characters, and each list at 10 items.
+
+`plan --agent` adds the steps and the brief of the first step for an agent ([agents.md](agents.md)).
+
 ## When to bump the manifest
 
-`apply` writes source only. Moving the project's manifest to the target versions is yours to do:
+The plan's first steps, the `env` phase, name the bump:
+- a `manifest-pin` step for pymolt: each `name==version` line of a requirements file, with no
+  hash, for a package the target manifest pins at another version. The edit keeps the line's
+  extras, marker and comment;
+- a `manifest-pin` step for a person: every other line naming such a package (unpinned, another
+  specifier, hashed), or the moves themselves when the manifest is not a requirements file
+  (pyproject, poetry, conda);
+- a `target-env` step for a person, with the commands that build the target environment.
+
+`apply` writes source only: it does not write the pin step. Moving the project's manifest to the
+target versions is yours to do:
 - **After `plan`.** The plan compares the project's manifest with the target manifest. With the
   pins already bumped, a package the baseline did not record shows no move.
 - **Before the post-migration capture.** That capture must match the project as it is then; a bump
