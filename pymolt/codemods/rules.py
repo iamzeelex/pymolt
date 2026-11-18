@@ -110,6 +110,8 @@ class RuleAdvisory(BaseModel):
     `precondition` (applied, but a runtime caveat must be verified)."""
     reason: str
     snippet: str | None = None
+    # The rule that raised it (``recipe_key``), set by ``apply_rules``; None when not known.
+    rule: str | None = None
 
 
 class RuleApplication(BaseModel):

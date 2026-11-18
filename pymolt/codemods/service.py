@@ -515,6 +515,7 @@ def preview_codemods(
     auto_apply_only: bool = False,
     online: bool = False,
     on_downgraded: Callable[[list[str]], None] | None = None,
+    on_step=None,
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], list[FilePreview]]:
     """
     Fetch patterns/rules for `migrations` and compute per-file before/after
@@ -536,8 +537,9 @@ def preview_codemods(
     reports every file the walk scans. ``on_impacts`` exposes the structured
     API-change paths for persistence in the local migration plan, and
     ``on_downgraded`` the summaries of the rules the provider downgraded (the plan
-    lists them for a person). All five are pure observers — none of
-    them changes what is returned.
+    lists them for a person). ``on_step(recipe, path, before, after)`` sees each
+    recipe's change to each kept file, in application order (the plan's steps).
+    All six are pure observers — none of them changes what is returned.
 
     The provider is local unless `base_url` names a configured Axiom endpoint.
     Raises AxiomGraphError if a configured service is unreachable (caller decides UX).
@@ -557,15 +559,15 @@ def preview_codemods(
         progress(f"Previewing {n} codemod(s) under {root} via LibCST…")
 
     if not rules_flat:
-        return by_pkg, preview_repo(root, patterns_flat, on_file=on_file)
+        return by_pkg, preview_repo(root, patterns_flat, on_file=on_file, on_step=on_step)
 
     if patterns_flat:
         return by_pkg, preview_mixed_repo(
             root, rules_flat, patterns_flat, on_file=on_file,
-            verified_only=auto_apply_only,
+            verified_only=auto_apply_only, on_step=on_step,
         )
     return by_pkg, preview_rules_repo(
-        root, rules_flat, on_file=on_file, verified_only=auto_apply_only
+        root, rules_flat, on_file=on_file, verified_only=auto_apply_only, on_step=on_step
     )
 
 
@@ -632,8 +634,11 @@ def build_migration_plan(
     service is unreachable.
     """
     from pymolt.migration_plan import create_migration_plan
+    from pymolt.workorder.builder import StepRecorder
 
     root = Path(project_dir)
+    # Each recipe's change to each file, in application order: the plan's automated steps.
+    recorder = StepRecorder()
     config, target_path = plan_inputs(root, target_file)
     notes: list[str] = []
     migrations, source_desc = resolve_codemod_migrations(
@@ -654,8 +659,9 @@ def build_migration_plan(
         by_pkg, previews = preview_codemods(
             root, migrations, client=provider, progress=progress,
             on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
-            auto_apply_only=True, on_downgraded=downgraded.extend,
+            auto_apply_only=True, on_downgraded=downgraded.extend, on_step=recorder.record,
         )
+        recorder.note_packages(by_pkg)
     # The local provider's delta reports feed the plan's risk prediction as-is, so the
     # facts are computed once; a remote provider has none and prediction computes them.
     delta_reports = getattr(provider, "reports", None) or None
@@ -672,7 +678,8 @@ def build_migration_plan(
         from pymolt.pyversion.plan import plan_python_stage
 
         try:
-            python_stage = plan_python_stage(root, *python_move, previews=previews)
+            python_stage = plan_python_stage(root, *python_move, previews=previews,
+                                             on_step=recorder.record)
             previews = python_stage.previews
         except Exception:  # noqa: BLE001 - create_migration_plan reports a failed python part
             python_stage = None
@@ -687,5 +694,6 @@ def build_migration_plan(
         python_move=python_move,
         python_stage=python_stage,
         downgraded=downgraded,
+        recorder=recorder,
     )
     return plan, previews, source_desc, by_pkg

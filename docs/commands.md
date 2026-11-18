@@ -76,7 +76,9 @@ before any code change, because it cannot be recreated later. Details are in
 ### `pymolt plan [dir]`
 Computes which APIs your code uses changed between the base and the target, which Python-version
 changes affect it, the codemods for both and the predicted risk at each call site. Saves this as a
-plan and shows the diff. It writes no source file. Details are in [plan.md](plan.md).
+plan of ordered steps, writes it for a person as `.pymolt/PLAN.md`, and shows the diff and the
+steps. It writes no source file. Its `--json` adds `steps` and `plan_md`. Details are in
+[plan.md](plan.md).
 
 | Option | Meaning |
 |---|---|
@@ -84,6 +86,7 @@ plan and shows the diff. It writes no source file. Details are in [plan.md](plan
 | `--online` | Read intermediate releases from PyPI for successor hints (package names and versions only) |
 | `--endpoint` | Use a remote Axiom at this URL instead of the local engine (or set `PYMOLT_AXIOM_ENDPOINT`) |
 | `--output`, `--patch` | Where to save the plan; also write the diff to a file |
+| `--plan-md` | Where to write the plan for a person (default: `.pymolt/PLAN.md`) |
 
 ### `pymolt apply [dir]`
 Writes exactly the saved plan. It refuses if a planned file changed since the plan was made. Every
@@ -93,7 +96,13 @@ base Python where the change claims to run there; it refuses a file that compile
 rewrite and does not after. A file that already failed is recorded, not refused. The receipt and
 `status` show the result, and "not checked" with the reason when no interpreter was found.
 The original files are kept for `rollback`. Run again on an applied plan whose files still hold its
-changes, it writes nothing and says so. Its summary and `--json` list what the plan leaves to you:
+changes, it writes nothing and says so. The receipt, `.pymolt/migration_state.json`, keeps every
+run and, per run, each step it applied: its status, its checks and the predicted risks it
+addresses. A plan applied while an earlier run's code is still on disk closes that run; both
+runs' edits stay in effect for `verify`. Each file's text before and after a step is kept once, by
+its hash, in `.pymolt/blobs/`. These are copies of your source, so pymolt writes
+`.pymolt/.gitignore` for them; it does not change your own `.gitignore`. `plan` and `apply` delete
+the texts that no run on disk, and neither of the two runs closed last, still needs. Its summary and `--json` list what the plan leaves to you:
 the advisories (a site not rewritten, a rewrite with a caveat to check) and the manual items, each
 with its file and line.
 

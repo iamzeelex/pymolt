@@ -408,17 +408,25 @@ def test_apply_writes_the_ledger_from_the_written_files(tmp_path):
     apply_migration_plan(tmp_path, plan)
 
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
-    assert ledger["run_id"] == plan.plan_id
+    assert ledger["schema"] == "pymolt.apply_ledger/2"
+    [event] = ledger["events"]
+    assert (event["seq"], event["event"], event["run_id"], event["step_id"], event["wrote"]) == (
+        1, "apply", plan.plan_id, "v1", True)
+    assert [f["file"] for f in event["files"]] == ["app0.py", "app1.py"]
+    assert event["files"][0]["after"] == plan.changes[0].new_sha256
     entries = ledger["entries"]
     assert {e["file"] for e in entries} == {"app0.py", "app1.py"}
     entry = next(e for e in entries if e["file"] == "app0.py")
     written = (tmp_path / "app0.py").read_text().splitlines()
     a, b = entry["new_lines"]
     assert "werkzeug.utils" in "\n".join(written[a - 1:b])
+    assert (entry["epoch"], entry["run_id"], entry["step_id"]) == (1, plan.plan_id, "v1")
+    assert entry["anchor_new"]["stmt"] == "from werkzeug.utils import safe_join"
+    assert entry["anchor_old"]["stmt"] == "from flask.helpers import safe_join"
     assert (entry["kind"], entry["rule"], entry["old_symbol"], entry["new_symbol"]) == (
         "rewrite-import", "rewrite-import:flask.helpers.safe_join→werkzeug.utils.safe_join",
         "flask.helpers.safe_join", "werkzeug.utils.safe_join")
-    assert entry["claim"] is None          # a bare pattern makes no claim
+    assert entry["claim"] is None and entry["basis"] is None   # a bare pattern makes no claim
 
 
 def test_apply_again_on_an_applied_plan_is_a_no_op_that_says_so(tmp_path):
@@ -472,7 +480,9 @@ def test_a_rolled_back_plan_applies_again_as_a_new_run(tmp_path):
     assert (state["status"], state["plan_id"], state["attempt"]) == ("applied", plan.plan_id, 2)
     assert MigrationPlan.load(tmp_path, run_dir / "plan.json") == plan
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
-    assert ledger["run_id"] == again.run_id
+    assert [(e["event"], e["run_id"], e.get("restored")) for e in ledger["events"]] == [
+        ("apply", first.run_id, None), ("rollback", first.run_id, True),
+        ("apply", again.run_id, None)]
     # The first run stays rolled back; the default rollback undoes the run in effect.
     with pytest.raises(MigrationConflictError, match="not rollback-ready"):
         rollback_migration(tmp_path, run_id=first.run_id)
@@ -719,4 +729,5 @@ def test_a_rule_blocked_by_the_preview_never_reaches_the_ledger(tmp_path):
     assert (manual.path, manual.lines) == ("app0.py", [1])
     apply_migration_plan(tmp_path, plan)
     ledger = json.loads((tmp_path / ".pymolt" / "apply_ledger.json").read_text())
-    assert {(e["rule"], e["claim"]) for e in ledger["entries"]} == {(key, "same-object")}
+    assert {(e["rule"], e["claim"], e["basis"]) for e in ledger["entries"]} == {
+        (key, "preserve", "same-object")}
