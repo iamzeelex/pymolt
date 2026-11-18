@@ -26,6 +26,7 @@ from pydantic_core import ValidationError
 from pymolt.apply_ledger import LedgerSnapshot, append_ledger, claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
 from pymolt.verify.predict import PredictionReport
+from pymolt.workorder.blobs import put_texts
 from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP_ID, PlanStep
 
 logger = logging.getLogger(__name__)
@@ -312,6 +313,16 @@ class MigrationPlan(BaseModel):
         return _atomic_json(
             plan_path(project_dir, path), self.model_dump(mode="json")
         )
+
+    def save_planned(self, project_dir: str | Path, path: str | Path | None = None) -> Path:
+        """Save the plan ``pymolt plan`` made, then drop the blobs retention no longer keeps
+        (``plan`` and ``apply`` collect the store; it waits when another operation holds the
+        migration lock)."""
+        from pymolt.workorder.blobs import collect_after_plan
+
+        saved = self.save(project_dir, path)
+        collect_after_plan(project_dir)
+        return saved
 
 
 class MigrationRunState(BaseModel):
@@ -873,9 +884,12 @@ def _apply_migration_plan_unlocked(
     ledger_before = LedgerSnapshot.take(root)
     prior = MigrationReceipt.load(root)
     try:
+        # The texts first: an event names its files' texts by hash, and the store holds them.
+        put_texts(root, (text for *_rest, files in records
+                         for _path, before, after in files for text in (before, after)))
         ledger = append_ledger(root, [(event.model_copy(update={"at": applied_at}), entries)
-                                      for _step, event, entries in records])
-        appended = list(zip([step for step, _e, _n in records],
+                                      for _step, event, entries, _files in records])
+        appended = list(zip([step for step, *_rest in records],
                             ledger.events[len(ledger.events) - len(records):], strict=True))
         _receipt_set_after_apply(receipt, prior, plan, appended, check)
         _save_run_state(
@@ -912,7 +926,18 @@ def _apply_migration_plan_unlocked(
         except OSError:
             pass
         raise
+    _collect_blobs(root)
     return receipt
+
+
+def _collect_blobs(root: Path) -> None:
+    """Drop the blobs retention no longer keeps (we hold the lock). Never fails the command."""
+    from pymolt.workorder.blobs import collect_blobs
+
+    try:
+        collect_blobs(root)
+    except Exception:  # noqa: BLE001 - housekeeping
+        logger.warning("could not collect the blob store", exc_info=True)
 
 
 def _check_before_write(root: Path, plan: MigrationPlan, smoke: bool):
@@ -1100,8 +1125,8 @@ def _step_risk_ids(plan: MigrationPlan, step: PlanStep) -> list[str]:
 
 
 def _apply_records(root: Path, plan: MigrationPlan, run_id: str):
-    """The ledger records of applying the whole plan as ``run_id``: one ``apply`` event per
-    pymolt step and the statements it changed (``apply_ledger.entries_for``). A whole-file
+    """The ledger records of applying the whole plan as ``run_id``: per pymolt step, ``(step,
+    apply event, the statements it changed, its files' (path, before, after))``. A whole-file
     step attributes each changed region to the recipe that names it, with that recipe's
     claim. A file whose statements cannot be anchored is recorded by its lines only."""
     from pymolt.apply_ledger import (
@@ -1140,7 +1165,7 @@ def _apply_records(root: Path, plan: MigrationPlan, run_id: str):
             event="apply", run_id=run_id, step_id=step.id, at=_now(), executor="pymolt",
             actor="pymolt", wrote=True, risk_ids=_step_risk_ids(plan, step),
             files=[EventFile(file=path, before=_sha256(before), after=_sha256(after))
-                   for path, before, after in files]), entries))
+                   for path, before, after in files]), entries, files))
     return out
 
 
@@ -1314,6 +1339,9 @@ def _rollback_migration_unlocked(
     archived: str | None = None
     try:
         if records:
+            put_texts(root, (text for preview in previews
+                             if preview.old_source != preview.new_source
+                             for text in (preview.old_source, preview.new_source)))
             append_ledger(root, records)
         _save_run_state(
             run_dir,
