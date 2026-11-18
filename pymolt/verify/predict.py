@@ -34,6 +34,11 @@ and did not change; **not exercised** when the post-migration capture never comp
 The other calls on a hit risk's line count as its consequences; failing entries no risk
 covers are listed as **unpredicted**.
 
+Each risk's ``id`` names it without a line number (``risk_id``): symbol, file, function,
+the site's line text and ``site.nth``, its ordinal among the report's sites that share those,
+so an edit that moves lines keeps the ids. The plan persists the ids it predicted; a plan
+saved before (``schema: pymolt.risks/1``) keeps its line-based ones.
+
 Never fabricates: without delta facts the prediction rests on the baseline warnings alone
 and says so (``status``/``notes``); a trace that predates warning capture is noted too.
 """
@@ -66,7 +71,7 @@ from pymolt.verify.facts import (
 
 logger = logging.getLogger(__name__)
 
-RISKS_SCHEMA = "pymolt.risks/1"
+RISKS_SCHEMA = "pymolt.risks/2"     # /2: ids without line numbers (``risk_id``)
 CALIBRATION_SCHEMA = "pymolt.calibration/1"
 _RECEIVERS = ("self", "cls")
 _ABSENT = (None, "", "<absent>", "absent", "missing", "<missing>")
@@ -95,15 +100,18 @@ TIER_ORDER = {RiskTier.CERTAIN: 0, RiskTier.HIGH: 1, RiskTier.MEDIUM: 2, RiskTie
 class RiskSite(BaseModel):
     file: str
     func: str
-    line: int | None = None
+    line: int | None = None                  # where it is: never part of the risk's id
     text: str | None = None
+    # The site's ordinal among the report's sites with the same symbol, file, func and text
+    # (in line order, dependency sites first): it tells two equal call lines apart in the id.
+    nth: int = 0
 
     def label(self) -> str:
         return f"{self.file}:{self.line if self.line is not None else '?'}"
 
 
 class PredictedRisk(BaseModel):
-    id: str                                  # stable: symbol + site
+    id: str                                  # ``risk_id``: symbol + site, no line number
     tier: RiskTier
     symbol: str
     package: str | None = None
@@ -630,9 +638,28 @@ def _rate(group: _SiteGroup, package: str, fact: dict, how: str
     return None
 
 
-def _risk_id(symbol: str, site: RiskSite) -> str:
-    raw = "|".join((symbol, site.file, site.func, str(site.line), site.text or ""))
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+def risk_id(symbol: str, site: RiskSite) -> str:
+    """``sha1("v2|" + symbol|file|func|site_text|nth)[:12]``: the risk named by its call and the
+    text of its line (an anchor's ``site_text``), not the line number, so lines moving (a hand
+    edit above, an earlier step) keep it. A static site (no line) has no text and ``nth`` 0."""
+    raw = "|".join((symbol, site.file, site.func, site.text or "", str(site.nth)))
+    return hashlib.sha1(("v2|" + raw).encode("utf-8")).hexdigest()[:12]
+
+
+def assign_risk_ids(risks: Iterable[PredictedRisk]) -> None:
+    """Set every risk's ``site.nth`` and ``id``. ``nth`` counts the sites that share symbol,
+    file, func and text in line order, dependency risks before python ones, so the ids are
+    unique within ``risks``, two equal call lines in one function keep theirs when lines
+    shift, and a dependency risk's id never depends on the python risks beside it."""
+    same: dict[tuple[str, str, str, str], list[PredictedRisk]] = defaultdict(list)
+    for risk in risks:
+        same[(risk.symbol, risk.site.file, risk.site.func, risk.site.text or "")].append(risk)
+    for group in same.values():
+        group.sort(key=lambda r: (r.scope != "dependency",
+                                  -1 if r.site.line is None else r.site.line))
+        for n, risk in enumerate(group):
+            risk.site.nth = n
+            risk.id = risk_id(risk.symbol, risk.site)
 
 
 def _warning_texts(acc: Mapping[tuple[str, str], int]) -> list[str]:
@@ -721,7 +748,7 @@ def predict_risks(
             reason += "; it warned in the baseline"
         site = group.site()
         report.risks.append(PredictedRisk(
-            id=_risk_id(group.symbol, site), tier=tier, symbol=group.symbol,
+            id="", tier=tier, symbol=group.symbol,
             package=package or (_package_of(facts) if facts else None), site=site,
             basis="trace", reason=reason, fact=fact, facts=facts, evidence=evidence,
             warnings=[CallWarning(category=c, message=m, count=n)
@@ -730,6 +757,7 @@ def predict_risks(
 
     if index and static_contacts is not None:
         _add_static_risks(report, index, matched_facts, static_contacts, root)
+    assign_risk_ids(report.risks)
 
     rebinds = planned_rebinds(changes or (), rewrites) if rewrites else {}
     for risk in report.risks:
@@ -792,7 +820,7 @@ def _add_static_risks(report: PredictionReport, index: _DeltaIndex, matched: set
             if how != "symbol":
                 evidence.append(f"matched by {how}")
         report.risks.append(PredictedRisk(
-            id=_risk_id(target, site), tier=RiskTier.LOW, symbol=target,
+            id="", tier=RiskTier.LOW, symbol=target,
             package=hits[0][0] or None, site=site, basis="static",
             reason=f"{hits[0][1].get('kind')} on a symbol the baseline never exercised",
             fact=hits[0][1], facts=facts, evidence=evidence))
@@ -1103,7 +1131,7 @@ def predict_python_risks(
         evidence = [*evidence, f"site: {file}:{line} ({_attr(site, 'kind') or '?'}, "
                     f"reaches the target at {reached or '?'})"]
         out.risks.append(PredictedRisk(
-            id=_risk_id(spelling, risk_site), tier=tier, symbol=spelling, package="python",
+            id="", tier=tier, symbol=spelling, package="python",
             site=risk_site, basis="static", reason=reason, fact=fact, facts=[fact],
             evidence=evidence, scope="python", reached_at=reached, guard=guard,
             fix=_fix_kind(fact)))
@@ -1130,7 +1158,7 @@ def predict_python_risks(
         else:
             tier, reason = RiskTier.LOW, f"{kind} on Python {target}: {message}"
         out.risks.append(PredictedRisk(
-            id=_risk_id(kind, risk_site), tier=tier, symbol=kind, package="python",
+            id="", tier=tier, symbol=kind, package="python",
             site=risk_site, basis="static", reason=reason, scope="python",
             reached_at="import",
             evidence=[f"compile check on Python {finding.get('python') or target}"]))
@@ -1138,6 +1166,7 @@ def predict_python_risks(
     if runtime_facts:
         _python_runtime_risks(out, runtime_facts, index, target, target_version, root,
                               {(sp, f, ln) for sp, f, ln in seen})
+    assign_risk_ids(out.risks)
 
     rewrites = planned_rewrites(changes or ())
     for risk in out.risks:
@@ -1186,7 +1215,7 @@ def _behavior_risks(out: PredictionReport, facts: Iterable[Mapping[str, Any]],
                         "medium: the order matters only where it reaches bytes or text",
                         *(e for e in fact.get("evidence") or () if str(e).startswith("hint: "))]
             out.risks.append(PredictedRisk(
-                id=_risk_id(str(fact.get("symbol")), risk_site), tier=RiskTier.MEDIUM,
+                id="", tier=RiskTier.MEDIUM,
                 symbol=str(fact.get("symbol")), package="python", site=risk_site,
                 basis="static", scope="python", reached_at="call", fact=dict(fact),
                 facts=[dict(fact)], evidence=evidence, fix=_fix_kind(fact),
@@ -1295,7 +1324,7 @@ def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: d
         evidence = [*evidence, f"baseline: {group.calls} call(s) observed at this site"]
         site = group.site()
         out.risks.append(PredictedRisk(
-            id=_risk_id(group.symbol, site), tier=tier, symbol=group.symbol, package="python",
+            id="", tier=tier, symbol=group.symbol, package="python",
             site=site, basis="trace", reason=reason, fact=delta, facts=[delta],
             evidence=evidence, scope="python", reached_at="call", calls=group.calls,
             warnings=[CallWarning(category=c, message=m, count=n)
@@ -1311,6 +1340,9 @@ def merge_python_risks(dependency: PredictionReport | None,
     else:
         merged = dependency
     merged.risks.extend(python.risks)
+    # Unique over both: a stdlib call both deltas name (``asyncio.Queue(loop=...)``) is a risk in
+    # each scope at the same site, and the python one takes an ``nth`` after the dependency's.
+    assign_risk_ids(merged.risks)
     merged.deltas.extend(python.deltas)
     merged.guarded.extend(python.guarded)
     merged.pre_existing.extend(python.pre_existing)

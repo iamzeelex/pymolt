@@ -453,6 +453,7 @@ def test_plan_stores_risks_and_verify_calibrates_them(captured):
     assert cal.source == "plan" and cal.plan_id == plan.plan_id
     (scored,) = cal.risks
     assert scored.result is CalibrationResult.HIT
+    assert scored.id == risk["id"]                  # the id the plan persisted, not a new one
     assert report.model_dump(mode="json")["calibration"]["schema"] == CALIBRATION_SCHEMA
 
 
@@ -759,3 +760,80 @@ def test_an_import_the_plan_leaves_bound_to_the_same_target_credits_nothing():
                            changes=changes, root=ROOT)
 
     assert not _risk(report, SAFE_JOIN, 10).fixed_by_plan
+
+
+# ── risk ids: no line numbers ───────────────────────────────────────────────────────────────
+
+
+def _shiftable(shift=0):
+    """Two equal ``mean`` lines in one function and an ``append`` elsewhere, moved by
+    ``shift`` lines (a hand edit above them)."""
+    lines = {13 + shift: "return s1.append(s2, ignore_index=True)",
+             24 + shift: "total = df.mean()", 27 + shift: "total = df.mean()"}
+    fs = fold_facts([
+        _ev(APPEND, 13 + shift, "combine", warnings=[APPEND_WARNING]),
+        _ev(MEAN, 24 + shift, "average", defaulted=["numeric_only"]),
+        _ev(MEAN, 27 + shift, "average", defaulted=["numeric_only"], result=2),
+    ], root=ROOT, site_text={f"{CORE}:{n}": t for n, t in lines.items()},
+        source="baseline.jsonl")
+    fs.warnings_capture = "on"
+    return predict_risks(fs, [_delta(DEFAULT_MEAN, REMOVED_APPEND)], root=ROOT)
+
+
+def test_risk_ids_survive_lines_moving():
+    from pymolt.verify.predict import risk_id
+
+    before, after = _shiftable(), _shiftable(shift=7)
+    ids = {(r.symbol, r.site.nth): r.id for r in before.risks}
+    assert ids == {(r.symbol, r.site.nth): r.id for r in after.risks}
+    assert sorted(ids) == [(MEAN, 0), (MEAN, 1), (APPEND, 0)]
+    assert len(set(ids.values())) == 3                       # equal lines, distinct ids
+    first, second = sorted((r for r in before.risks if r.symbol == MEAN),
+                           key=lambda r: r.site.line)
+    assert (first.site.nth, second.site.nth) == (0, 1)
+    assert first.id == risk_id(MEAN, first.site)
+    moved = first.site.model_copy(update={"line": 999})
+    assert risk_id(MEAN, moved) == first.id                  # the line is never part of it
+
+
+def test_python_risk_ids_survive_lines_moving():
+    fact = _pyfact("collections.Iterable", "MOVED", successor="collections.abc.Iterable")
+    ids = []
+    for shift in (0, 40):
+        out = _python_risks(_pyreport(fact), [_site("collections.Iterable", 3 + shift),
+                                              _site("collections.Iterable", 9 + shift)])
+        ids.append([r.id for r in sorted(out.risks, key=lambda r: r.site.line)])
+    assert ids[0] == ids[1] and len(set(ids[0])) == 2
+
+
+def test_risk_ids_are_unique_across_a_merged_report():
+    """A site both scopes rate (a stdlib call the dependency delta names too) had one id for
+    two risks when the id was line-based; ``nth`` now tells them apart."""
+    from pymolt.verify.predict import PredictedRisk, merge_python_risks
+
+    python = _python_risks(_pyreport(_pyfact("imp")), [_site("imp", kind="import"),
+                                                      _site("imp", 30, kind="import")])
+    dependency = _shiftable()
+    alone = sorted(r.id for r in dependency.risks)
+    mean = next(r for r in dependency.risks if r.symbol == MEAN)
+    python.risks.append(PredictedRisk(id="", tier=RiskTier.MEDIUM, symbol=MEAN, reason="r",
+                                      site=mean.site.model_copy(), scope="python"))
+    merged = merge_python_risks(dependency, python)
+    assert len({r.id for r in merged.risks}) == len(merged.risks) == 6
+    twins = [r for r in merged.risks if r.symbol == MEAN and r.site.line == mean.site.line]
+    assert [(r.scope, r.site.nth) for r in twins] == [("dependency", 0), ("python", 2)]
+    assert sorted(r.id for r in merged.risks if r.scope == "dependency") == alone
+
+
+def test_a_plan_saved_with_line_based_ids_keeps_them():
+    """A ``pymolt.risks/1`` report (saved before ids lost their line) loads, and calibrates,
+    with the ids it was saved with: nothing recomputes them."""
+    old = {"schema": "pymolt.risks/1", "status": "complete", "risks": [{
+        "id": "1f0e2d3c4b5a", "tier": "high", "symbol": MEAN, "reason": "r",
+        "site": {"file": "toyapp/core.py", "func": "average", "line": 24,
+                 "text": "return df.mean().to_dict()"}}]}
+    report = PredictionReport.model_validate(old)
+    assert report.schema_ == "pymolt.risks/1" and report.risks[0].id == "1f0e2d3c4b5a"
+    assert report.risks[0].site.nth == 0
+    assert [r.id for r in calibrate(report.risks, None).risks] == ["1f0e2d3c4b5a"]
+    assert PredictionReport().schema_ == RISKS_SCHEMA == "pymolt.risks/2"

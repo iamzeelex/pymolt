@@ -107,6 +107,11 @@ reads a name of the same spelling bound otherwise, such as a parameter, is not. 
 `verify` scores every prediction as hit, prevented by the plan, miss or not exercised (see
 [verify.md](verify.md#predicted-risks)).
 
+Each risk has an `id` built from its symbol, file, function, the text of the call's line and
+its rank among equal lines there (`site.nth`), not from the line number, so an edit that moves
+lines keeps it. The plan saves the ids it predicted, and `verify` scores those; a plan saved by an
+earlier pymolt (`"schema": "pymolt.risks/1"`) keeps its line-based ids.
+
 ## A remote Axiom (optional)
 
 A remote Axiom service is used only when you configure one with `plan --endpoint URL` or
