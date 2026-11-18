@@ -8,7 +8,8 @@ the chain T0 → T1 → … → Tn, and Tn is the file's ``changes[].new_source`
 ``automated_steps`` makes one step per recipe, or per move group, across every file it changes,
 ordered by phase and then by application order (a merge of the per-file orders, so every file's
 composition is reproduced). Each step's edits are made on the step's own before-text and
-after-text (``workorder.edits.make_edit``). A file whose chain was not recorded, or does not run
+after-text (``workorder.edits.make_edit``), and its ``depends_on`` comes from effect overlap
+(``workorder.depends``). A file whose chain was not recorded, or does not run
 from its ``old_source`` to its ``new_source``, keeps its whole change in one ``whole-file`` step,
 with the reason in the step's evidence: the plan never guesses where one recipe ended.
 """
@@ -25,6 +26,7 @@ from typing import Any
 from pymolt.anchors import StatementIndex
 from pymolt.codemods.models import CodemodPattern, MoveGroup, recipe_key
 from pymolt.codemods.rules import CodemodRule
+from pymolt.workorder.depends import assign_depends_on
 from pymolt.workorder.edits import apply_hunks, build_index, make_edit, sha256
 from pymolt.workorder.models import (
     TEXT_CAP,
@@ -292,11 +294,16 @@ def automated_steps(changes: list[Any], recorder: StepRecorder | None, *, root: 
 
     order = _merge_order(sequences, {i: r.stage for i, r in recipes.items()})
     steps: list[PlanStep] = []
+    befores: dict[tuple[str, str], str] = {}
     for ident in order:
-        steps.append(_step(recipes[ident], len(steps) + 1, texts, t0_of, recorder,
-                           dependencies, python_move, fix_checks))
+        step = _step(recipes[ident], len(steps) + 1, texts, t0_of, recorder, dependencies,
+                     python_move, fix_checks)
+        steps.append(step)
+        for rel, before, _after in recipes[ident].files:
+            befores[(step.id, rel)] = before
     for group in _whole_groups(whole):
         steps.append(_whole_step(group, len(steps) + 1, recorder is not None, base, target))
+    assign_depends_on(steps, lambda sid, rel: befores.get((sid, rel)))
     return steps
 
 

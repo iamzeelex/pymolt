@@ -83,6 +83,12 @@ those statements by content rather than by line. Steps run in the order the plan
 rules, then patterns, then Python fixes. Applied in that order they give exactly the file
 changes of `changes`, which `apply` writes.
 
+A step's `depends_on` lists the earlier steps it cannot do without, in the same file:
+- one whose output it rewrites;
+- one that inserted an import its new code needs, or the same import it inserts;
+- when a statement cannot be keyed (a file no Python grammar parses), or more than 8 steps change
+  one function, the earlier steps that change the same function or class.
+
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
 reason in the step's `why.evidence`. A plan saved by an earlier pymolt (`"schema_version": 1`)
 is read as one step, `v1`.
