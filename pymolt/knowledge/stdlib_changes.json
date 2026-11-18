@@ -1,0 +1,1492 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "version": "2026-11-15",
+  "description": "Curated stdlib changes. Cross-checked against the sweep by tests/core/test_stdlib_sweep.py.",
+  "entries": [
+    {
+      "id": "collections-abc",
+      "symbols": [
+        "collections.Awaitable",
+        "collections.Coroutine",
+        "collections.AsyncIterable",
+        "collections.AsyncIterator",
+        "collections.AsyncGenerator",
+        "collections.Hashable",
+        "collections.Iterable",
+        "collections.Iterator",
+        "collections.Generator",
+        "collections.Reversible",
+        "collections.Sized",
+        "collections.Container",
+        "collections.Callable",
+        "collections.Collection",
+        "collections.Set",
+        "collections.MutableSet",
+        "collections.Mapping",
+        "collections.MutableMapping",
+        "collections.MappingView",
+        "collections.KeysView",
+        "collections.ItemsView",
+        "collections.ValuesView",
+        "collections.Sequence",
+        "collections.MutableSequence",
+        "collections.ByteString"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.3",
+      "warns_since": "3.7",
+      "removed_in": "3.10",
+      "successor": "collections.abc.{name}",
+      "same_object": true,
+      "successor_since": "3.3",
+      "fix": "rewrite-attr",
+      "hint": "Use collections.abc.X (add 'import collections.abc'); 'from collections import X' becomes 'from collections.abc import X'. Python 3.6 does not warn.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.10: Removed; bpo-37324",
+      "date": "2021-10-04"
+    },
+    {
+      "id": "imp-reload",
+      "symbols": [
+        "imp.reload"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.4",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "importlib.reload",
+      "same_object": false,
+      "successor_since": "3.4",
+      "fix": "replace-attr-path",
+      "hint": "importlib.reload(module) is the same operation; add 'import importlib'.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (imp); gh-98040",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "imp-new-module",
+      "symbols": [
+        "imp.new_module"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.4",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "types.ModuleType",
+      "same_object": false,
+      "successor_since": "3.0",
+      "fix": "replace-attr-path",
+      "hint": "types.ModuleType(name) builds the same empty module; add 'import types'.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (imp); gh-98040",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "imp-find-load",
+      "symbols": [
+        "imp.find_module",
+        "imp.load_module",
+        "imp.load_source",
+        "imp.load_compiled",
+        "imp.load_dynamic"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.4",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "No 1:1 rename. Use importlib.util.spec_from_file_location + module_from_spec + spec.loader.exec_module (or importlib.import_module).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (imp); gh-98040",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "imp-suffixes",
+      "symbols": [
+        "imp.get_suffixes",
+        "imp.get_magic",
+        "imp.get_tag",
+        "imp.cache_from_source",
+        "imp.source_from_cache"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.4",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "importlib.machinery.all_suffixes(), importlib.util.MAGIC_NUMBER, sys.implementation.cache_tag, importlib.util.cache_from_source/source_from_cache.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (imp); gh-98040",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "imp",
+      "symbols": [
+        "imp"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.4",
+      "warns_since": "3.4",
+      "removed_in": "3.12",
+      "successor": "importlib",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "The imp module is gone. Most uses map to importlib; see the entries for imp.reload and imp.find_module.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed; gh-98040, PEP 594-adjacent",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "distutils",
+      "symbols": [
+        "distutils"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.10",
+      "warns_since": "3.10",
+      "removed_in": "3.12",
+      "successor": "setuptools",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Gone from the stdlib in 3.12. setuptools>=60 installs a distutils shim, so 'import distutils' keeps working when setuptools is present in the environment (it is not on a bare 3.12). Prefer setuptools, packaging, shutil or sysconfig.",
+      "shimmed_by": "setuptools>=60",
+      "source": "What's New In Python 3.12: Removed; PEP 632",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "distutils-version",
+      "symbols": [
+        "distutils.version.LooseVersion",
+        "distutils.version.StrictVersion"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.10",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "packaging.version.Version",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "packaging.version.Version (a third-party dependency) is stricter than LooseVersion; compare behaviour before swapping.",
+      "shimmed_by": "setuptools>=60",
+      "source": "What's New In Python 3.12: Removed; PEP 632",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "distutils-spawn",
+      "symbols": [
+        "distutils.spawn.find_executable"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.10",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "shutil.which",
+      "same_object": false,
+      "successor_since": "3.3",
+      "fix": "replace-attr-path",
+      "hint": "shutil.which(cmd) returns the same path (or None).",
+      "shimmed_by": "setuptools>=60",
+      "source": "What's New In Python 3.12: Removed; PEP 632",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "distutils-dir-util",
+      "symbols": [
+        "distutils.dir_util.copy_tree"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.10",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "shutil.copytree",
+      "same_object": false,
+      "successor_since": "3.8",
+      "fix": "advisory",
+      "hint": "shutil.copytree(src, dst, dirs_exist_ok=True) (3.8+).",
+      "shimmed_by": "setuptools>=60",
+      "source": "What's New In Python 3.12: Removed; PEP 632",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "distutils-util",
+      "symbols": [
+        "distutils.util.strtobool"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.10",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "No stdlib replacement; inline the small yes/no table or use a helper.",
+      "shimmed_by": "setuptools>=60",
+      "source": "What's New In Python 3.12: Removed; PEP 632",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "distutils-sysconfig",
+      "symbols": [
+        "distutils.sysconfig"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.10",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "sysconfig",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "sysconfig.get_path('purelib')/get_config_var cover most uses.",
+      "shimmed_by": "setuptools>=60",
+      "source": "What's New In Python 3.12: Removed; PEP 632",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "asynchat",
+      "symbols": [
+        "asynchat"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.6",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "asyncio",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Removed in 3.12; migrate to asyncio streams.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (asynchat); PEP 594 follow-up, gh-96580",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "asyncore",
+      "symbols": [
+        "asyncore"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.6",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "asyncio",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Removed in 3.12; migrate to asyncio.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (asyncore); PEP 594 follow-up, gh-96580",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "smtpd",
+      "symbols": [
+        "smtpd"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.6",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "aiosmtpd",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Removed in 3.12; migrate to aiosmtpd (third party).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (smtpd); PEP 594 follow-up, gh-96580",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertEquals",
+      "symbols": [
+        "unittest.TestCase.assertEquals",
+        "unittest.TestCase.failUnlessEqual"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertEqual",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertEqual; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertNotEquals",
+      "symbols": [
+        "unittest.TestCase.assertNotEquals",
+        "unittest.TestCase.failIfEqual"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertNotEqual",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertNotEqual; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertAlmostEquals",
+      "symbols": [
+        "unittest.TestCase.assertAlmostEquals",
+        "unittest.TestCase.failUnlessAlmostEqual"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertAlmostEqual",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertAlmostEqual; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertNotAlmostEquals",
+      "symbols": [
+        "unittest.TestCase.assertNotAlmostEquals",
+        "unittest.TestCase.failIfAlmostEqual"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertNotAlmostEqual",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertNotAlmostEqual; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assert_",
+      "symbols": [
+        "unittest.TestCase.assert_",
+        "unittest.TestCase.failUnless"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertTrue",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertTrue; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-failIf",
+      "symbols": [
+        "unittest.TestCase.failIf"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertFalse",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertFalse; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-failUnlessRaises",
+      "symbols": [
+        "unittest.TestCase.failUnlessRaises"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertRaises",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertRaises; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertRegexpMatches",
+      "symbols": [
+        "unittest.TestCase.assertRegexpMatches"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertRegex",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertRegex; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertNotRegexpMatches",
+      "symbols": [
+        "unittest.TestCase.assertNotRegexpMatches"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertNotRegex",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertNotRegex; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertRaisesRegexp",
+      "symbols": [
+        "unittest.TestCase.assertRaisesRegexp"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "unittest.TestCase.assertRaisesRegex",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename the method call to assertRaisesRegex; same arguments.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-assertDictContainsSubset",
+      "symbols": [
+        "unittest.TestCase.assertDictContainsSubset"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.2",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "No replacement; assert on the sub-dict with assertEqual({k: d[k] for k in sub}, sub) or use ==.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (unittest); bpo-45162",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "unittest-loader-funcs",
+      "symbols": [
+        "unittest.makeSuite",
+        "unittest.findTestCases",
+        "unittest.getTestCaseNames"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.11",
+      "warns_since": "3.11",
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use unittest.TestLoader().loadTestsFromTestCase / loadTestsFromModule / getTestCaseNames.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed (unittest); gh-50096",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "xml-etree-cElementTree",
+      "symbols": [
+        "xml.etree.cElementTree"
+      ],
+      "kind": "deprecated",
+      "deprecated_in": "3.3",
+      "warns_since": null,
+      "removed_in": null,
+      "successor": "xml.etree.ElementTree",
+      "same_object": false,
+      "successor_since": "3.3",
+      "fix": "rewrite-import",
+      "hint": "Its removal in 3.9 was reverted: it is still importable on 3.14, only a redundant alias. ElementTree uses the C accelerator automatically since 3.3.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (xml.etree.cElementTree), then restored; bpo-36543",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "configparser-SafeConfigParser",
+      "symbols": [
+        "configparser.SafeConfigParser"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "configparser.ConfigParser",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "ConfigParser is the same class behaviour since 3.2 (interpolation-safe).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (configparser); gh-89336",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "configparser-readfp",
+      "symbols": [
+        "configparser.RawConfigParser.readfp",
+        "configparser.ConfigParser.readfp"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.12",
+      "successor": "configparser.RawConfigParser.read_file",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "read_file(f) takes the same file object; the filename argument is not needed.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (configparser); gh-89336",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "inspect-getargspec",
+      "symbols": [
+        "inspect.getargspec"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.0",
+      "warns_since": "3.0",
+      "removed_in": "3.11",
+      "successor": "inspect.getfullargspec",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "getfullargspec returns a 7-field result (adds kwonlyargs etc.) and raises on keyword-only args; inspect.signature is the modern API. Unpacking sites must change.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.11: Removed (inspect); bpo-45320",
+      "date": "2022-10-24"
+    },
+    {
+      "id": "inspect-formatargspec",
+      "symbols": [
+        "inspect.formatargspec"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.5",
+      "warns_since": null,
+      "removed_in": "3.11",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use str(inspect.signature(f)).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.11: Removed (inspect); bpo-45320",
+      "date": "2022-10-24"
+    },
+    {
+      "id": "ssl-wrap-socket",
+      "symbols": [
+        "ssl.wrap_socket"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.7",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "ssl.SSLContext.wrap_socket",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Build an ssl.SSLContext (ssl.create_default_context()), then ctx.wrap_socket(sock, server_hostname=...). Hostname and certificate verification defaults differ, so this is a manual change.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (ssl); gh-94199",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "ssl-match-hostname",
+      "symbols": [
+        "ssl.match_hostname"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.7",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "SSLContext with check_hostname=True verifies the hostname during the handshake.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (ssl); gh-94199",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "ssl-rand-pseudo-bytes",
+      "symbols": [
+        "ssl.RAND_pseudo_bytes"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.6",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "os.urandom",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "replace-attr-path",
+      "hint": "os.urandom(n) (or ssl.RAND_bytes) returns n cryptographically secure bytes.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (ssl); gh-94199",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "asyncio-coroutine",
+      "symbols": [
+        "asyncio.coroutine"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.8",
+      "warns_since": "3.8",
+      "removed_in": "3.11",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Replace '@asyncio.coroutine' + 'yield from' with 'async def' + 'await'.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.11: Removed (asyncio); bpo-43216",
+      "date": "2022-10-24"
+    },
+    {
+      "id": "asyncio-child-watchers",
+      "symbols": [
+        "asyncio.get_child_watcher",
+        "asyncio.set_child_watcher",
+        "asyncio.AbstractChildWatcher",
+        "asyncio.SafeChildWatcher",
+        "asyncio.FastChildWatcher",
+        "asyncio.MultiLoopChildWatcher",
+        "asyncio.ThreadedChildWatcher",
+        "asyncio.PidfdChildWatcher"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.12",
+      "warns_since": "3.12",
+      "removed_in": "3.14",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Child watchers are no longer needed; asyncio.run and subprocess APIs manage it.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.14: Removed (asyncio); gh-94597",
+      "date": "2025-10-07"
+    },
+    {
+      "id": "asyncio-task-class-funcs",
+      "symbols": [
+        "asyncio.Task.current_task",
+        "asyncio.Task.all_tasks"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.7",
+      "warns_since": "3.7",
+      "removed_in": "3.9",
+      "successor": "asyncio.{name}",
+      "same_object": false,
+      "successor_since": "3.7",
+      "fix": "replace-attr-path",
+      "hint": "Use asyncio.current_task() / asyncio.all_tasks().",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (asyncio); bpo-40967",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "pep594-modules",
+      "symbols": [
+        "aifc",
+        "audioop",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "crypt",
+        "imghdr",
+        "mailcap",
+        "msilib",
+        "nis",
+        "nntplib",
+        "ossaudiodev",
+        "pipes",
+        "sndhdr",
+        "spwd",
+        "sunau",
+        "telnetlib",
+        "uu",
+        "xdrlib"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.11",
+      "warns_since": "3.11",
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Removed dead batteries (PEP 594); each has a PyPI backport or a modern replacement.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed; PEP 594",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "pep594-pipes-quote",
+      "symbols": [
+        "pipes.quote"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.11",
+      "warns_since": null,
+      "removed_in": "3.13",
+      "successor": "shlex.quote",
+      "same_object": true,
+      "successor_since": "3.3",
+      "fix": "replace-attr-path",
+      "hint": "shlex.quote is the identical function (pipes re-exports it).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed; PEP 594",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "pep594-cgi",
+      "symbols": [
+        "cgi.FieldStorage",
+        "cgi.parse_header",
+        "cgi.parse_multipart"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.11",
+      "warns_since": null,
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "parse_header: email.message.Message or a small helper; FieldStorage: use a framework/multipart library.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed; PEP 594",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "pep594-telnetlib",
+      "symbols": [
+        "telnetlib"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.11",
+      "warns_since": null,
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use telnetlib3 or pexpect.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed; PEP 594",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "pep594-imghdr",
+      "symbols": [
+        "imghdr"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.11",
+      "warns_since": null,
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use filetype, puremagic or Pillow.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed; PEP 594",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "lib2to3",
+      "symbols": [
+        "lib2to3"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.11",
+      "warns_since": "3.11",
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use libcst or the standalone 2to3 backport.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed; PEP 594 / lib2to3 deprecation",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "parser-symbol",
+      "symbols": [
+        "parser",
+        "symbol"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.9",
+      "warns_since": "3.9",
+      "removed_in": "3.10",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use the ast module.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.10: Removed; bpo-37268",
+      "date": "2021-10-04"
+    },
+    {
+      "id": "formatter",
+      "symbols": [
+        "formatter"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.4",
+      "warns_since": null,
+      "removed_in": "3.10",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "No replacement.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.10: Removed; bpo-42299",
+      "date": "2021-10-04"
+    },
+    {
+      "id": "binhex",
+      "symbols": [
+        "binhex"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.9",
+      "warns_since": "3.9",
+      "removed_in": "3.11",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use base64 or binascii.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.11: Removed; bpo-45085",
+      "date": "2022-10-24"
+    },
+    {
+      "id": "binascii-hqx",
+      "symbols": [
+        "binascii.a2b_hqx",
+        "binascii.b2a_hqx",
+        "binascii.rlecode_hqx",
+        "binascii.rledecode_hqx"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.9",
+      "warns_since": null,
+      "removed_in": "3.11",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "BinHex 4 is gone; use base64.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.11: Removed; bpo-45085",
+      "date": "2022-10-24"
+    },
+    {
+      "id": "gettext-l-functions",
+      "symbols": [
+        "gettext.lgettext",
+        "gettext.ldgettext",
+        "gettext.lngettext",
+        "gettext.ldngettext",
+        "gettext.bind_textdomain_codeset"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.8",
+      "warns_since": null,
+      "removed_in": "3.11",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use the non-l variants; translations are always unicode.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.11: Removed; bpo-44235",
+      "date": "2022-10-24"
+    },
+    {
+      "id": "pkgutil-imp",
+      "symbols": [
+        "pkgutil.ImpImporter",
+        "pkgutil.ImpLoader"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.3",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use importlib's finders and loaders.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (pkgutil); gh-98040",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "find-loader",
+      "symbols": [
+        "importlib.find_loader"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.4",
+      "warns_since": null,
+      "removed_in": "3.12",
+      "successor": "importlib.util.find_spec",
+      "same_object": false,
+      "successor_since": "3.4",
+      "fix": "advisory",
+      "hint": "importlib.util.find_spec(name) returns a spec (use spec.loader).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (importlib.find_loader); gh-98040",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "pkgutil-find-loader",
+      "symbols": [
+        "pkgutil.find_loader",
+        "pkgutil.get_loader"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.12",
+      "warns_since": "3.12",
+      "removed_in": "3.14",
+      "successor": "importlib.util.find_spec",
+      "same_object": false,
+      "successor_since": "3.4",
+      "fix": "advisory",
+      "hint": "importlib.util.find_spec(name) returns a spec (use spec.loader).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.14: Removed (pkgutil); gh-97850",
+      "date": "2025-10-07"
+    },
+    {
+      "id": "sys-checkinterval",
+      "symbols": [
+        "sys.setcheckinterval",
+        "sys.getcheckinterval"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.2",
+      "warns_since": null,
+      "removed_in": "3.9",
+      "successor": "sys.setswitchinterval",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "The unit changed from bytecode instructions to seconds; setswitchinterval/getswitchinterval.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (sys); bpo-37392",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "sys-set-coroutine-wrapper",
+      "symbols": [
+        "sys.set_coroutine_wrapper",
+        "sys.get_coroutine_wrapper"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.7",
+      "warns_since": "3.7",
+      "removed_in": "3.8",
+      "successor": "sys.set_coroutine_origin_tracking_depth",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use sys.set_coroutine_origin_tracking_depth.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.8: Removed (sys); bpo-36933",
+      "date": "2019-10-14"
+    },
+    {
+      "id": "thread-isalive",
+      "symbols": [
+        "threading.Thread.isAlive"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.8",
+      "warns_since": null,
+      "removed_in": "3.9",
+      "successor": "threading.Thread.is_alive",
+      "same_object": false,
+      "successor_since": "3.0",
+      "fix": "rewrite-attr",
+      "hint": "Rename to is_alive().",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (threading); bpo-37804",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "threading-camelcase",
+      "symbols": [
+        "threading.currentThread",
+        "threading.activeCount",
+        "threading.Event.isSet"
+      ],
+      "kind": "deprecated",
+      "deprecated_in": "3.10",
+      "warns_since": "3.10",
+      "removed_in": null,
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "rewrite-attr",
+      "hint": "Use current_thread(), active_count(), Event.is_set(). Still present on 3.14.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.10: Deprecated (threading); bpo-39314",
+      "date": "2021-10-04"
+    },
+    {
+      "id": "base64-encodestring",
+      "symbols": [
+        "base64.encodestring"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.1",
+      "warns_since": "3.1",
+      "removed_in": "3.9",
+      "successor": "base64.encodebytes",
+      "same_object": false,
+      "successor_since": "3.1",
+      "fix": "replace-attr-path",
+      "hint": "base64.encodebytes has the same behaviour (bytes in, bytes out).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (base64); bpo-39351",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "base64-decodestring",
+      "symbols": [
+        "base64.decodestring"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.1",
+      "warns_since": "3.1",
+      "removed_in": "3.9",
+      "successor": "base64.decodebytes",
+      "same_object": false,
+      "successor_since": "3.1",
+      "fix": "replace-attr-path",
+      "hint": "base64.decodebytes has the same behaviour (bytes in, bytes out).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (base64); bpo-39351",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "array-tostring",
+      "symbols": [
+        "array.array.tostring"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.9",
+      "successor": "array.array.tobytes",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename to tobytes().",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (array); bpo-39350",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "array-fromstring",
+      "symbols": [
+        "array.array.fromstring"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.9",
+      "successor": "array.array.frombytes",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "rewrite-attr",
+      "hint": "Rename to frombytes().",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (array); bpo-39350",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "etree-getchildren",
+      "symbols": [
+        "xml.etree.ElementTree.Element.getchildren",
+        "xml.etree.ElementTree.Element.getiterator",
+        "xml.etree.ElementTree.ElementTree.getiterator"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.9",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "list(elem) replaces getchildren(); elem.iter() replaces getiterator().",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (xml.etree); bpo-36543",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "fractions-gcd",
+      "symbols": [
+        "fractions.gcd"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.5",
+      "warns_since": "3.5",
+      "removed_in": "3.9",
+      "successor": "math.gcd",
+      "same_object": false,
+      "successor_since": "3.5",
+      "fix": "replace-attr-path",
+      "hint": "math.gcd returns a non-negative result; fractions.gcd took the sign of the second argument.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (fractions); bpo-39350",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "time-clock",
+      "symbols": [
+        "time.clock"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.3",
+      "warns_since": "3.3",
+      "removed_in": "3.8",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "time.perf_counter() for wall-clock timing, time.process_time() for CPU time.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.8: Removed (time); bpo-36895",
+      "date": "2019-10-14"
+    },
+    {
+      "id": "platform-dist",
+      "symbols": [
+        "platform.linux_distribution",
+        "platform.dist"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.5",
+      "warns_since": "3.5",
+      "removed_in": "3.8",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use the 'distro' package.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.8: Removed (platform); bpo-28167",
+      "date": "2019-10-14"
+    },
+    {
+      "id": "cgi-escape",
+      "symbols": [
+        "cgi.escape"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.8",
+      "successor": "html.escape",
+      "same_object": false,
+      "successor_since": "3.2",
+      "fix": "replace-attr-path",
+      "hint": "html.escape escapes quotes by default (quote=True); cgi.escape did not unless asked.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.8: Removed (cgi); bpo-33361",
+      "date": "2019-10-14"
+    },
+    {
+      "id": "cgi-parse-qs",
+      "symbols": [
+        "cgi.parse_qs",
+        "cgi.parse_qsl"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.2",
+      "warns_since": "3.2",
+      "removed_in": "3.8",
+      "successor": "urllib.parse.{name}",
+      "same_object": false,
+      "successor_since": "3.0",
+      "fix": "replace-attr-path",
+      "hint": "urllib.parse.parse_qs / parse_qsl.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.8: Removed (cgi); bpo-33361",
+      "date": "2019-10-14"
+    },
+    {
+      "id": "htmlparser-unescape",
+      "symbols": [
+        "html.parser.HTMLParser.unescape"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.4",
+      "warns_since": "3.4",
+      "removed_in": "3.9",
+      "successor": "html.unescape",
+      "same_object": false,
+      "successor_since": "3.4",
+      "fix": "replace-attr-path",
+      "hint": "html.unescape(s).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (html.parser); bpo-41989",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "plistlib-legacy",
+      "symbols": [
+        "plistlib.readPlist",
+        "plistlib.writePlist",
+        "plistlib.readPlistFromBytes",
+        "plistlib.writePlistToBytes"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.4",
+      "warns_since": "3.4",
+      "removed_in": "3.9",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "readPlist->load, writePlist->dump, readPlistFromBytes->loads, writePlistToBytes->dumps (file objects must be binary).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.9: Removed (plistlib); bpo-39351",
+      "date": "2020-10-05"
+    },
+    {
+      "id": "locale-format",
+      "symbols": [
+        "locale.format"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.7",
+      "warns_since": "3.7",
+      "removed_in": "3.12",
+      "successor": "locale.format_string",
+      "same_object": false,
+      "successor_since": "3.0",
+      "fix": "replace-attr-path",
+      "hint": "locale.format_string(fmt, val, grouping, monetary).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (locale); gh-90370",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "locale-resetlocale",
+      "symbols": [
+        "locale.resetlocale"
+      ],
+      "kind": "name-removed",
+      "deprecated_in": "3.11",
+      "warns_since": "3.11",
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "locale.setlocale(locale.LC_ALL, '').",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed (locale); gh-90817",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "pathlib-link-to",
+      "symbols": [
+        "pathlib.Path.link_to"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.10",
+      "warns_since": "3.10",
+      "removed_in": "3.12",
+      "successor": "pathlib.Path.hardlink_to",
+      "same_object": false,
+      "successor_since": "3.10",
+      "fix": "advisory",
+      "hint": "hardlink_to has the opposite argument order: a.link_to(b) becomes b.hardlink_to(a).",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Removed (pathlib); gh-88915",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "ast-constants",
+      "symbols": [
+        "ast.Num",
+        "ast.Str",
+        "ast.Bytes",
+        "ast.NameConstant",
+        "ast.Ellipsis"
+      ],
+      "kind": "name-moved",
+      "deprecated_in": "3.8",
+      "warns_since": "3.12",
+      "removed_in": "3.14",
+      "successor": "ast.Constant",
+      "same_object": false,
+      "successor_since": "3.8",
+      "fix": "advisory",
+      "hint": "Visit/check ast.Constant and inspect .value; isinstance tests change meaning.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.14: Removed (ast); gh-119562",
+      "date": "2025-10-07"
+    },
+    {
+      "id": "collections-abc-bytestring",
+      "symbols": [
+        "collections.abc.ByteString",
+        "typing.ByteString"
+      ],
+      "kind": "deprecated",
+      "deprecated_in": "3.12",
+      "warns_since": "3.12",
+      "removed_in": null,
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use bytes | bytearray | memoryview, or collections.abc.Buffer (3.12+). Still present on 3.14.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Deprecated; removal postponed to 3.17; gh-91896",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "datetime-utcnow",
+      "symbols": [
+        "datetime.datetime.utcnow",
+        "datetime.datetime.utcfromtimestamp"
+      ],
+      "kind": "deprecated",
+      "deprecated_in": "3.12",
+      "warns_since": "3.12",
+      "removed_in": null,
+      "successor": "datetime.datetime.now",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use datetime.now(timezone.utc) (aware) and fromtimestamp(ts, timezone.utc). Still present on 3.14.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.12: Deprecated (datetime); gh-103857",
+      "date": "2023-10-02"
+    },
+    {
+      "id": "logging-warn",
+      "symbols": [
+        "logging.warn",
+        "logging.Logger.warn"
+      ],
+      "kind": "deprecated",
+      "deprecated_in": "3.3",
+      "warns_since": "3.3",
+      "removed_in": null,
+      "successor": "logging.warning",
+      "same_object": false,
+      "successor_since": null,
+      "fix": "rewrite-attr",
+      "hint": "Use warning(). Removal was planned for 3.13 and reverted; still present.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Deprecated (logging); gh-105376",
+      "date": "2024-10-07"
+    },
+    {
+      "id": "abc-abstract-descriptors",
+      "symbols": [
+        "abc.abstractproperty",
+        "abc.abstractclassmethod",
+        "abc.abstractstaticmethod"
+      ],
+      "kind": "deprecated",
+      "deprecated_in": "3.3",
+      "warns_since": null,
+      "removed_in": null,
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Stack @property / @classmethod / @staticmethod over @abstractmethod. Still present.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.10: Deprecated (abc)",
+      "date": "2021-10-04"
+    },
+    {
+      "id": "tkinter-tix",
+      "symbols": [
+        "tkinter.tix"
+      ],
+      "kind": "module-removed",
+      "deprecated_in": "3.6",
+      "warns_since": "3.6",
+      "removed_in": "3.13",
+      "successor": null,
+      "same_object": false,
+      "successor_since": null,
+      "fix": "advisory",
+      "hint": "Use tkinter.ttk widgets.",
+      "shimmed_by": null,
+      "source": "What's New In Python 3.13: Removed (tkinter.tix); gh-75552",
+      "date": "2024-10-07"
+    }
+  ]
+}

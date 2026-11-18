@@ -76,10 +76,11 @@ class TestVcsEdges:
 # ── which manifest is "the project"? ──────────────────────────────────────────
 
 class _Src:
-    def __init__(self, name, is_lock=False):
+    def __init__(self, name, is_lock=False, subroot=False):
         from pathlib import Path
         self.path = Path(name)
         self.is_lock = is_lock
+        self.subroot = subroot
 
 
 class TestManifestRanking:
@@ -103,8 +104,9 @@ class TestManifestRanking:
         assert picked.path.name == "uv.lock"
 
     def test_setup_py_is_a_last_resort(self):
-        # pymolt does not classify setup.py's edges yet, so it must not be the
-        # assumed source of truth when a real manifest is present.
+        # setup.py's requirements are read statically and can be computed (not
+        # read at all), so it is not the assumed source of truth when a real
+        # manifest is present.
         assert self._pick("setup.py", "requirements-strict.txt") == "requirements-strict.txt"
         assert self._pick("setup.py", "setup.cfg") == "setup.py"   # nothing better
 

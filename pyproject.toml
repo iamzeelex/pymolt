@@ -48,6 +48,9 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.8.0",
+    # Test only: the anchor perturbation guard reformats code with black (and ruff format)
+    # and checks every statement anchor still resolves.
+    "black>=24.1",
     # Test fixture only: a representative third-party "user app dependency" that the
     # contract tests trace at the code→dependency boundary (not a pymolt runtime dep).
     "requests>=2.0",
@@ -57,7 +60,8 @@ dev = [
     "fastapi>=0.110",
 ]
 mcp = [
-    "mcp>=1.2",
+    # Pinned below 2: the server is built on FastMCP's 1.x API (mcp.server.fastmcp).
+    "mcp>=1.2,<2",
 ]
 
 [project.scripts]
@@ -113,6 +117,7 @@ select = ["E", "F", "I", "UP"]
 "pymolt/verify/__init__.py" = ["UP"]
 "tests/verify/test_normalize.py" = ["UP"]
 "tests/verify/test_sinks.py" = ["UP"]
+"tests/verify/test_sink_backpressure.py" = ["UP"]
 "tests/verify/test_backend.py" = ["UP"]
 
 [tool.pytest.ini_options]

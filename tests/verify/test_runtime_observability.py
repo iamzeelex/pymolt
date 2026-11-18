@@ -102,7 +102,10 @@ def test_runtime_metadata_propagates_to_result_slot_and_sidecar(tmp_path):
     assert metadata["deployment_id"] == "release-42"
     assert metadata["request_id"] == "request-7"
     assert metadata["correlation_id"] == "correlation-9"
-    assert metadata["sample_rate"] == 1.0
+    # A long-run capture with no explicit rate samples values (every call is still
+    # counted): the effective policy is recorded, and its source says it was the default.
+    assert metadata["sample_rate"] == 0.1
+    assert metadata["sampling"]["source"] == "default"
     assert metadata["counters"]["dropped_events"] == 0
     assert service.load_contract_state(tmp_path).baseline == slot
 
@@ -120,7 +123,9 @@ def test_sink_counts_sampling_and_backpressure_drops(tmp_path, monkeypatch):
     assert sampled_metadata["counters"]["dropped_events"] == 1
 
     monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "1")
-    pressured = JsonlSink(str(tmp_path / "pressured-{pid}.jsonl"))
+    # The ``drop`` policy: a full queue counts the event instead of waiting for the writer
+    # (the default ``block`` policy is covered by test_sink_backpressure).
+    pressured = JsonlSink(str(tmp_path / "pressured-{pid}.jsonl"), backpressure="drop")
 
     def full(_event):
         raise queue.Full
@@ -133,6 +138,32 @@ def test_sink_counts_sampling_and_backpressure_drops(tmp_path, monkeypatch):
     assert pressured_metadata["counters"]["events_seen"] == 1
     assert pressured_metadata["counters"]["backpressure_dropped"] == 1
     assert pressured_metadata["counters"]["dropped_events"] == 1
+
+
+def test_a_capture_through_a_one_slot_queue_keeps_every_event_and_states_the_wait(
+        tmp_path, monkeypatch):
+    """The locust drop path end to end: a JSONL capture whose writer cannot keep up (a
+    one-slot queue) used to lose events to ``backpressure_dropped``; it now keeps all of
+    them, and the result and sidecar say how long the program waited for the writer."""
+    monkeypatch.setenv("PYMOLT_TRACE_QUEUE_SIZE", "1")
+    monkeypatch.delenv("PYMOLT_TRACE_BACKPRESSURE", raising=False)
+    script = tmp_path / "burst.py"
+    script.write_text("import json\nfor i in range(3000):\n    json.loads('[%d]' % i)\n",
+                      encoding="utf-8")
+    out = tmp_path / "trace.jsonl"
+
+    result = service.capture_trace("json", [sys.executable, str(script)], out, "auto")
+
+    assert result.dropped_events == 0 and result.backpressure_dropped == 0
+    records = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    assert sorted(r["in"]["bound"]["s"] for r in records if r["q"] == "json.loads") == \
+        sorted(f"[{i}]" for i in range(3000))
+    metadata = json.loads(service.Path(result.metadata_path).read_text())
+    assert metadata["backpressure"]["waits"] >= 1
+    assert metadata["backpressure"]["writer_stalls"] == 0
+    assert result.backpressure_wait_seconds == metadata["backpressure"]["wait_ms"] / 1000.0
+    (process,) = metadata["processes"]
+    assert process["backpressure"]["policy"] == "block"
 
 
 def test_sink_counts_observable_write_failures(tmp_path, monkeypatch):
@@ -211,3 +242,54 @@ def test_attached_capture_without_runtime_sidecar_keeps_loss_unknown(tmp_path):
     assert slot.backpressure_dropped is None
     assert slot.write_failures is None
     assert slot.sink_failures is None
+
+
+def test_a_capture_counts_compiled_calls_past_the_site_cap_and_lists_the_site(tmp_path):
+    """The locust ``msgpack.unpackb`` path end to end: a compiled call made 2,500 times from
+    one line records its first 2,000 and counts the rest; the sidecar lists the capped site
+    and the host reads it back onto the FactSet (no silent evidence drop)."""
+    from pymolt.verify.facts import load_facts
+
+    script = tmp_path / "hot.py"
+    script.write_text(
+        "import collections\n"
+        "d = collections.deque(range(5))\n"
+        "def spin():\n"
+        "    for _ in range(2500):\n"
+        "        d.rotate(1)\n"
+        "spin()\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "trace.jsonl"
+
+    result = service.capture_trace("collections", [sys.executable, str(script)], out, "auto")
+
+    records = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    assert sum(1 for r in records if r["q"] == "collections.deque.rotate") == 2000
+    metadata = json.loads(service.Path(result.metadata_path).read_text())
+    (process,) = metadata["processes"]
+    cap = process["c_site_cap"]
+    assert cap["max"] == 2000 and cap["muted"] == 500 and cap["exact"] is True
+    (site,) = cap["sites"]
+    assert site["sym"] == "collections.deque.rotate" and site["func"] == "spin"
+    assert site["line"] == 5 and site["muted"] == 500
+
+    fs = load_facts(out, root=tmp_path)
+    assert fs.c_cap_reported == 1 and fs.c_cap_unreported == 0 and fs.c_muted == 500
+    (capped,) = fs.c_capped
+    assert (capped.symbol, capped.file, capped.func, capped.line) == (
+        "collections.deque.rotate", "hot.py", "spin", 5)
+    (fact,) = [f for f in fs.facts if f.symbol == "collections.deque.rotate"]
+    assert capped.text == fact.text and capped.recorded == 2000 and fact.count == 2000
+
+
+def test_a_capture_with_no_capped_site_still_states_its_account(tmp_path):
+    """An account is always written, so its absence means an older runtime (unknown)."""
+    script = tmp_path / "cool.py"
+    script.write_text("import collections\ncollections.deque(range(3)).rotate(1)\n",
+                      encoding="utf-8")
+    out = tmp_path / "trace.jsonl"
+    result = service.capture_trace("collections", [sys.executable, str(script)], out, "auto")
+    (process,) = json.loads(service.Path(result.metadata_path).read_text())["processes"]
+    assert process["c_site_cap"] == {"max": 2000, "muted": 0, "exact": True, "sites": [],
+                                     "sites_omitted": 0, "unsited": 0}

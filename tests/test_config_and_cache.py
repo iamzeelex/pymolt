@@ -1,37 +1,31 @@
 """
 tests/test_config_and_cache.py
 
-Unit and integration tests for PyMolt configuration, endpoint resolution,
-local offline delta cache, and CLI config/auth commands.
+Unit and integration tests for PyMolt configuration, endpoint resolution (no
+default endpoint: a remote Axiom is used only when explicitly configured), the
+local cache of remote bundles, and the removed config/auth/axiom commands.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from pymolt.codemods.client import AxiomGraphClient, DependencyMigration
-from pymolt.codemods.models import CodemodBundle, CodemodPattern
 from pymolt.config import (
-    DEFAULT_ENDPOINT,
     ENV_ENDPOINT,
     ENV_TOKEN,
+    _write,
     cache_stats,
     clear_delta_cache,
-    clear_endpoint,
     clear_token,
     config_show,
     get_cached_delta,
     load_endpoint,
     load_token,
     save_cached_delta,
-    save_endpoint,
     save_token,
 )
 from pymolt.interfaces.cli.commands import app
@@ -53,25 +47,22 @@ def isolated_config_and_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.delenv(ENV_ENDPOINT, raising=False)
 
 
-def test_endpoint_resolution_hierarchy(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 1. Default when nothing is set
-    assert load_endpoint() == DEFAULT_ENDPOINT
+def test_endpoint_resolution_has_no_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. No endpoint is the default state: pymolt computes API changes locally.
+    assert load_endpoint() is None
 
-    # 2. Config file
-    save_endpoint("https://custom.axiom.corp")
-    assert load_endpoint() == "https://custom.axiom.corp"
+    # 2. An endpoint an older release saved is reported, never silently used.
+    _write({"endpoint": "https://custom.axiom.corp"})
+    assert load_endpoint() is None
+    assert config_show()["stored_endpoint_ignored"] == "https://custom.axiom.corp"
 
-    # 3. Environment variable overrides config file
-    monkeypatch.setenv(ENV_ENDPOINT, "http://localhost:9000")
+    # 3. The environment variable configures one explicitly.
+    monkeypatch.setenv(ENV_ENDPOINT, "http://localhost:9000/")
     assert load_endpoint() == "http://localhost:9000"
 
-    # 4. Explicit override argument wins over env var
+    # 4. The explicit --endpoint argument wins over the environment.
     assert load_endpoint("http://override:5000") == "http://override:5000"
-
-    # 5. Clear endpoint resets back to env / default
-    monkeypatch.delenv(ENV_ENDPOINT, raising=False)
-    clear_endpoint()
-    assert load_endpoint() == DEFAULT_ENDPOINT
+    assert config_show()["remote"] is True
 
 
 def test_token_save_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,51 +142,31 @@ def test_client_local_cache_hit_bypasses_http() -> None:
     assert res["pandas"].patterns[0].new_qualname == "pandas.concat"
 
 
-def test_cli_config_commands() -> None:
-    # 1. Config show
-    result = runner.invoke(app, ["config", "show", "--json"])
-    assert result.exit_code == 0
-    data = json.loads(result.output)
-    assert data["endpoint"] == DEFAULT_ENDPOINT
-    assert data["token_configured"] is False
-
-    # 2. Config set-endpoint
-    result = runner.invoke(app, ["config", "set-endpoint", "http://localhost:8000"])
-    assert result.exit_code == 0
-    assert "Set Axiom endpoint to http://localhost:8000" in result.output
-    assert load_endpoint() == "http://localhost:8000"
-
-    # 3. Config reset-endpoint
-    result = runner.invoke(app, ["config", "reset-endpoint"])
-    assert result.exit_code == 0
-    assert DEFAULT_ENDPOINT in result.output
-    assert load_endpoint() == DEFAULT_ENDPOINT
-
-    # 4. Config clear-cache
-    result = runner.invoke(app, ["config", "clear-cache"])
-    assert result.exit_code == 0
-    assert "Cleared local delta cache" in result.output
+def test_cli_axiom_group_is_a_hidden_stub_naming_the_replacement() -> None:
+    for argv, new in (
+        (["axiom", "status", "--json"], "pymolt plan"),
+        (["axiom", "endpoint", "http://localhost:8000"], "--endpoint URL"),
+        (["axiom", "login", "--token", "pmk_test_auth_123456789"], "PYMOLT_API_TOKEN"),
+        (["axiom", "logout"], "unset PYMOLT_API_TOKEN"),
+        (["axiom", "clear-cache"], ".pymolt/cache/delta"),
+        (["axiom"], "pymolt plan"),
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 2, argv
+        assert "was removed" in result.output and new in result.output, (argv, result.output)
+    assert load_token() is None  # the stub never stores anything
+    assert "axiom" not in runner.invoke(app, ["--help"]).output
 
 
-def test_cli_auth_commands() -> None:
-    # 1. Status when logged out
-    result = runner.invoke(app, ["auth", "status"])
-    assert result.exit_code == 0
-    assert "Anonymous / Community" in result.output
-
-    # 2. Login with token
-    result = runner.invoke(app, ["auth", "login", "--token", "pmk_test_auth_123456789"])
-    assert result.exit_code == 0
-    assert "Successfully authenticated" in result.output
-    assert load_token() == "pmk_test_auth_123456789"
-
-    # 3. Status when logged in
-    result = runner.invoke(app, ["auth", "status"])
-    assert result.exit_code == 0
-    assert "Logged in" in result.output
-
-    # 4. Logout
-    result = runner.invoke(app, ["auth", "logout"])
-    assert result.exit_code == 0
-    assert "Logged out" in result.output
+def test_old_config_and_auth_commands_name_their_replacements() -> None:
+    for argv, new in (
+        (["config", "set-endpoint", "http://x"], "PYMOLT_AXIOM_ENDPOINT"),
+        (["config", "show"], "pymolt plan"),
+        (["auth", "login", "--token", "pmk_x"], "PYMOLT_API_TOKEN"),
+        (["login", "--token", "pmk_x"], "PYMOLT_API_TOKEN"),
+        (["logout"], "unset PYMOLT_API_TOKEN"),
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 2, argv
+        assert new in result.output, argv
     assert load_token() is None

@@ -1,18 +1,21 @@
 # MCP server (`pymolt mcp`)
 
-A stdio [Model Context Protocol](https://modelcontextprotocol.io) server that
-exposes PyMolt's migration funnel as native agent tools. It is the same
-scan → setup → assess → contract → codemods logic the CLI runs, reshaped so an
-agent gets compact, verified, token-disciplined facts instead of re-discovering
-the repo and trusting its memory of APIs that moved since training.
+A stdio [Model Context Protocol](https://modelcontextprotocol.io) server for
+clients that have no shell. It is optional: agents with a shell use the CLI
+(`pymolt <command> --agent` for the compact view, `--json` for the full payload),
+and the Claude Code plugin does so without any MCP server.
 
-The server is a thin interface: every tool calls the same service function the
-matching CLI command calls and never re-implements analysis.
+The server is a thin adapter over the CLI view layer
+(`pymolt/interfaces/views.py`). Each tool calls the same service function as the
+matching CLI command and returns exactly what `pymolt <command> --agent` prints
+for the same project; a parity test asserts this. It has no analysis logic of its
+own.
 
 ## Install
 
 The MCP SDK is an optional extra (it pulls in starlette/uvicorn, too heavy for
-the offline-first core), so install PyMolt with the `mcp` extra:
+the offline-first core), so install PyMolt with the `mcp` extra. It pins `mcp>=1.2,<2`, because the server
+uses the 1.x FastMCP API:
 
 ```bash
 uv tool install 'pymolt[mcp]'          # or: pipx install 'pymolt[mcp]'
@@ -32,28 +35,28 @@ server whose command is `pymolt mcp`. The server name is `pymolt`.
 
 ## Tools
 
-Every tool takes `dir: str = "."` (the project directory).
+The tools have the names of the CLI commands. Every tool takes
+`project_dir: str = "."` (the project directory).
 
-| Tool | Mirrors | What it does |
+| Tool | Same as | What it does |
 |------|---------|--------------|
-| `scan` | `pymolt scan` | Project roots, Python-version evidence + divergence, dependency edges (offline, no resolution). Use instead of reading Dockerfiles/lockfiles/tox by hand. |
-| `setup_options` | `pymolt setup` (detection) | Lists the exact manifest / tool / interpreter / target-Python strings `setup_apply` accepts. |
-| `setup_apply` | `pymolt setup` (apply) | Writes `.pymolt/env_config.json`. Deterministic: an invalid choice returns `ok:false` with the valid values. |
-| `assess` | `pymolt assess` | Resolves baseline vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest. `risk=true` does cached network calls. |
-| `env_create` | `pymolt env create` | Provisions the target migration environment (uv venv or derived Dockerfile) from the assess target manifest. Run assess first. |
-| `contract_map` | `pymolt contract map` | Static dependency boundary: calls, attributes, decorators, bases, contexts, constants and protocols. |
-| `contract_capture` | `pymolt contract capture` | Runs YOUR command with the boundary tracer injected; post-migration automatically targets APIs from the applied Axiom plan and records runtime/loss metadata. |
-| `contract_report` | `pymolt contract report` | The verification oracle: static × dynamic → confirmed / BLIND / trust %, plus the behavioral verdict (result_changed / raise_changed / disappeared) across the migration. |
-| `codemods_preview` | `pymolt codemods` (dry-run) | Dry-run preview of the codemods that would rewrite call sites. Never writes files. |
+| `status` | `pymolt status` | Where the project stands, whether the configured environments exist, and the one tool to run next. |
+| `scan` | `pymolt scan` | Project roots, Python-version evidence + divergence, dependency edges, and every call site into a dependency (offline, no resolution). Use instead of reading Dockerfiles/lockfiles or grepping imports. |
+| `setup` | `pymolt setup` | With no choices: the exact manifest / tool / interpreter / target-Python strings it accepts. With them: writes `.pymolt/env_config.json`; an invalid choice returns `ok:false` with the valid values. |
+| `assess` | `pymolt assess` | Resolves base vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest, and returns how to build the target environment. `risk=true` does cached network calls. |
+| `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Runs a host process, so it is opt-in: set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment. |
+| `plan` | `pymolt plan` | Saves the API changes, codemods and predicted risks for the target manifest as the migration plan and returns the diffs. Writes no source. |
+| `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND, coverage and recall % with their granularity, and the calls that changed, plus how the plan's predicted risks fared. Saved like the CLI's. |
 
 ### Workflow
 
 ```
-scan  ->  (setup_options -> setup_apply)  ->  assess  ->  env_create
-->  [human/agent edits the project's code]
-->  contract_capture(when='baseline'  BEFORE editing)
-->  contract_capture(when='post-migration'  AFTER editing)
-->  pymolt verify .   (CLI: unified persisted verdict and optional canary policy)
+status (any time: which tool is next)
+scan  ->  setup  ->  assess
+->  capture(when='baseline'  BEFORE editing)
+->  plan  ->  [a person runs `pymolt apply .`]   (or the agent edits the code)
+->  capture(when='post-migration'  AFTER editing)
+->  verify
 ```
 
 This is also encoded in the server's `instructions`, which the client surfaces
@@ -79,15 +82,17 @@ On any failure the tool catches the exception and returns:
 { "ok": false, "error": "<one-line actionable message>", "hint": "<how to fix>" }
 ```
 
-Exceptions never cross the MCP boundary. Lists in `data` are capped at 20 items,
-with a sibling `"truncated": <N>` when cut; the full payload is written under
-`.pymolt/mcp/<tool>.json` and its path returned in `full_report_path`. Output is
-plain text — no rich/ANSI.
+Exceptions never cross the MCP boundary. Lists that are context around an answer
+are capped at 20 items; lists the agent answers from (which packages change, which
+calls changed) are cut by size, not by count. Counts are always the true totals,
+`complete` says whether every list is whole, and `truncated` gives the number
+omitted per list. The full report is written to `.pymolt/agent/<command>.json`
+(the same file `--agent` writes) and its path returned in `full_report_path`.
+Output is plain text, with no rich/ANSI.
 
-## The preview rule
+## No source writes
 
-`codemods_preview` is a **dry run**: it never writes files to disk. Applying
-codemods always requires explicit human approval through the CLI plan/apply
-workflow (`pymolt plan .` then `pymolt apply .`), outside this server. Agents
-preview and recommend; humans apply. The applied plan retains durable rollback
-data (`pymolt rollback .`).
+`plan` saves the plan and returns the diffs; no tool writes a source file.
+Applying a plan always requires explicit human approval through the CLI
+(`pymolt apply .`), outside this server. Agents plan and recommend; humans
+apply. The applied plan retains rollback data (`pymolt rollback .`).

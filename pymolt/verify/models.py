@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, computed_field
 
+from pymolt.adapters.python_runner import RunnerSpec
 from pymolt.core.enums import EvidenceLevel, TestStatus, TraceScope, Verdict
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,9 @@ class ContractSlot(BaseModel):
     # "baseline → container abc123" or "running locally"). Defaults so OLD
     # .pymolt/contract_state.json files (written before this existed) still load.
     env_note: str | None = None
+    # The container this capture ran in (None = it ran locally): lets later phases reach the
+    # same interpreter and map its paths back to the project.
+    runner: RunnerSpec | None = None
     # Coverage-based gap summary (TEST_SUITE captures only) — what fraction of the
     # project's static dependency-usage sites the test suite actually exercised. None/0
     # when unavailable (coverage not installed, non-TEST_SUITE capture, or the second
@@ -205,6 +209,11 @@ class ContractSlot(BaseModel):
     # re-check them at report time. None on old state files, and on projects
     # with no config to fingerprint — absence is "unknown", never "fresh".
     env_fingerprint: str | None = None
+    # The same without the manifest's contents: which manifest file, base Python,
+    # toolset and container. A baseline whose setup is unchanged while only the
+    # manifest's contents moved is still the starting point of a migration that
+    # bumped pins (see ``service.environment_setup_fingerprint``). None = unknown.
+    env_setup_fingerprint: str | None = None
     # The previous recording this one displaced, if any: overwriting a capture
     # archives it instead of deleting it, and this is where it went.
     archived_previous: str | None = None
@@ -223,14 +232,37 @@ class ContractSlot(BaseModel):
     correlation_id: str | None = None
     backend: str | None = None
     impact_targets: list[str] = Field(default_factory=list)
+    # Stdlib top-level modules traced as dependencies (PYMOLT_TRACE_STDLIB; Python moves).
+    traced_stdlib: list[str] = Field(default_factory=list)
     metadata_path: str | None = None
+    # ``<trace>.sources.json``: text + sha256 of every project file with a fact (None: an older
+    # capture, or none could be written).
+    sources_path: str | None = None
     events_seen: int | None = None
     dropped_events: int | None = None
     sampling_dropped: int | None = None
     backpressure_dropped: int | None = None
     write_failures: int | None = None
     sink_failures: int | None = None
+    # Seconds the traced program waited for a JSONL trace writer that fell behind (summed over
+    # threads and processes): every event was kept, at that cost in timing. None = unknown.
+    backpressure_wait_seconds: float | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
+    # Processes where tracing was requested but the watcher could not load (untraced).
+    activation_failures: list[dict] = Field(default_factory=list)
+    # A "red" baseline: the command exited non-zero (failing tests) but recorded events,
+    # and the capture was accepted on purpose (``--accept-failing``). Holds
+    # ``{"returncode": int, "failed": int | None, "summary": str}``; None = not red.
+    # The slot is still ``valid``; the stamp only says the run was not green.
+    red: dict | None = None
+    # A baseline replicate: the ``captured_at`` of the baseline whose command it re-ran on the
+    # same code in the same environment (None for every other slot). A replicate whose
+    # baseline was replaced is stale and ignored.
+    replicate_of: str | None = None
+    # A post-migration capture set aside by ``pymolt rollback``: the run id of the migration
+    # whose rollback restored the code it recorded (None for every other slot). Kept among the
+    # diagnostic captures, its recording moved to the archive so no later capture overwrites it.
+    set_aside_by: str | None = None
 
 
 class ContractState(BaseModel):
@@ -239,9 +271,38 @@ class ContractState(BaseModel):
     schema_version: int = CONTRACT_STATE_SCHEMA_VERSION
     baseline: ContractSlot | None = None
     post_migration: ContractSlot | None = None
+    # The baseline's command run a second time (``pymolt capture baseline --replicate``):
+    # what differs between the two runs is run-to-run noise (``verify.replicate``).
+    baseline_replicate: ContractSlot | None = None
     # Failed/empty/corrupt attempts are durable diagnostics, but never replace
     # either active evidence slot above.
     diagnostic_captures: list[ContractSlot] = Field(default_factory=list)
+
+    def _anchored(self, root: Path) -> dict:
+        """The state as JSON with every slot path stored relative to the project root
+        (``root``), so the file stays valid whatever directory pymolt runs from."""
+        payload = self.model_dump(mode="json")
+        base = Path(root).resolve()
+
+        def relative(value):
+            if not value:
+                return value
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                return value
+            try:
+                return candidate.resolve().relative_to(base).as_posix()
+            except (ValueError, OSError):
+                return value
+
+        slots = [payload.get("baseline"), payload.get("post_migration"),
+                 payload.get("baseline_replicate"),
+                 *(payload.get("diagnostic_captures") or [])]
+        for slot in slots:
+            if isinstance(slot, dict):
+                for key in ("trace_path", "metadata_path", "command_log", "sources_path"):
+                    slot[key] = relative(slot.get(key))
+        return payload
 
     @classmethod
     def load(cls, path: Path) -> "ContractState | None":
@@ -272,7 +333,7 @@ class ContractState(BaseModel):
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.model_dump(mode="json"), stream, indent=2)
+                json.dump(self._anchored(path.parent.parent), stream, indent=2)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())

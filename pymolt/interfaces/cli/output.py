@@ -60,17 +60,20 @@ def fail(
     hint: str | None = None,
     code: int = EXIT_USAGE,
     json_output: bool = False,
+    extra: dict | None = None,
 ) -> NoReturn:
     """Report a failure on the right stream, in the right shape, and exit.
 
     Under ``--json`` the failure envelope goes to *stdout* — it is the
     machine-readable answer, and keeping stdout parseable in both directions is
-    the whole point. In human mode it goes to stderr.
+    the whole point. In human mode it goes to stderr. ``extra``: more keys for the
+    JSON envelope.
     """
     if json_output:
         payload: dict[str, object] = {"ok": False, "error": message}
         if hint:
             payload["hint"] = hint
+        payload.update(extra or {})
         typer.echo(json.dumps(payload, indent=2))
     else:
         err.print(f"[bold red]Error:[/bold red] {message}")
@@ -126,8 +129,9 @@ def next_step(project_dir: str | Path, *, json_output: bool = False) -> None:
 def require_file(path: str | Path, *, what: str = "file", json_output: bool = False) -> Path:
     """Resolve an input file argument, or fail with EXIT_USAGE.
 
-    Used for recordings fed to ``contract diff``: a missing artifact used to fold
-    into an empty diff and report "no behavior change" — a false all-clear.
+    Used for recordings fed to ``verify --baseline/--post-migration``: a missing
+    artifact used to fold into an empty diff and report "no behavior change" — a
+    false all-clear.
     """
     resolved = Path(path)
     if not resolved.is_file():

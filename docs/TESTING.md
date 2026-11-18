@@ -5,7 +5,7 @@ Hands-on commands to exercise pymolt against real projects. The sample projects 
 
 | Project    | Shape | Good for testing |
 |------------|-------|------------------|
-| `flasgger` | requirements + dev + Dockerfile + tox + `.python-version` + nested `demo_app/` + named contract captures (create via `pymolt contract capture`) | scan (monorepo, version divergence, edges), contact map, **contract report** |
+| `flasgger` | requirements + dev + Dockerfile + tox + `.python-version` + nested `demo_app/` + named captures (create via `pymolt capture`) | scan (monorepo, version divergence, edges, contact map), **verify** |
 | `pyfolio`  | `setup.py` / `setup.cfg` + conda | scan of a setup.py project |
 | `blaze`    | many `requirements-*.txt` + `etc/requirements_*.txt` + conda `blaze_env.yml` | scan (edge inventory at scale), assess |
 | `odo`      | `setup.py` + one `etc/requirements_*.txt` per backend + conda recipe | scan (extras per backend), assess |
@@ -56,10 +56,10 @@ pymolt scan tests/artifacts/flasgger --json | jq '.surfaces.project_roots[].path
 
 ---
 
-## B — `contract map`: the static denominator (where our code touches third-party code)
+## B — the contact map in `scan`: the static denominator (where our code touches third-party code)
 
 ```bash
-pymolt contract map tests/artifacts/flasgger
+pymolt scan tests/artifacts/flasgger      # the "Calls into dependencies" section
 ```
 Expect: **≈60 files**, **≈230 contacts** across ≈19 deps (flask, click, werkzeug, …).
 Counts drift with the submodule state — an order-of-magnitude check, not a pin
@@ -67,29 +67,33 @@ Counts drift with the submodule state — an order-of-magnitude check, not a pin
 pymolt's own injected watcher bundle (`pymolt_trace`) is filtered out.
 
 ```bash
-pymolt contract map tests/artifacts/pyfolio --json | jq '.by_dep | keys'
+pymolt scan tests/artifacts/pyfolio --json | jq '.contact_map.by_dep | keys'
 ```
 
 ---
 
-## C — `contract report`: static × dynamic (capture a trace first)
+## C — `verify`: static × dynamic (capture a trace first)
 
 No trace is committed with the artifact — capture one yourself (any command that
-imports flasgger will do; its own pytest suite is the richest source):
+imports flasgger will do; its own pytest suite is the richest source). A capture
+needs a setup, because it records the environment it ran in:
 
 ```bash
-pymolt contract capture --when baseline --mode tests \
+pymolt setup tests/artifacts/flasgger --manifest requirements.txt --tool uv \
+    --base-python 3.6 --target-python 3.12
+pymolt capture baseline --mode tests \
     --project-dir tests/artifacts/flasgger -- python -c "import flasgger"
-pymolt contract report tests/artifacts/flasgger        # auto-sources the capture
+pymolt verify tests/artifacts/flasgger        # one side captured: coverage, no diff yet
 ```
-Expect: a narrow (import-time) capture → **confirmed** small, **trust** low —
-that's honest. Any **dynamic-only** rows are symbols the static map *missed*
+Expect: a narrow (import-time) capture → **confirmed** small, **coverage** low
+(most contacts are in code the import never runs), **recall** near 100% — that's honest. Any **dynamic-only** rows are symbols the static map *missed*
 (flasgger's heavy decorators / metaclasses → static under-approximation):
 exactly why static is the *map* and dynamic is the *confirmation*.
 
 ```bash
-pymolt contract report tests/artifacts/flasgger --json \
-  | jq '{static:.static_targets, confirmed, blind, dynamic_only, trust}'
+pymolt verify tests/artifacts/flasgger --json \
+  | jq '.contract | {static:.static_targets, confirmed, blind, dynamic_only, coverage, recall,
+                     coverage_granularity}'
 ```
 
 ---
@@ -104,11 +108,12 @@ this venv, so on flasgger the probes report `error`/`opaque-inputs`. To see a re
 T=$(mktemp -d); mkdir -p "$T/app"; : > "$T/app/__init__.py"
 printf 'import yaml\ndef load():\n    return yaml.safe_load("a: 1")\ndef dump():\n    return yaml.dump({})\n' > "$T/app/m.py"
 printf '{"q":"yaml.safe_load","in":{"bound":{"stream":"a: 1"}},"result":{"__dict__":[["a",1]]},"t":"return"}\n' > "$T/trace.jsonl"
-pymolt contract report "$T" --trace "$T/trace.jsonl" --probe-python "$(which python)"
+pymolt verify "$T" --post-migration "$T/trace.jsonl" --probe-python "$(which python)"
 rm -rf "$T"
 ```
 Expect: `yaml.safe_load` → **confirmed, probe: stable**; `yaml.dump` → **BLIND** (no inputs);
-trust 0.5. Change the `result` in `trace.jsonl` to anything else → the probe reports **CHANGED**.
+coverage 100% and recall 50% at file granularity (a hand-written trace has no executed-code
+record, so both contacts in `app/m.py` count as run). Change the `result` in `trace.jsonl` to anything else → the probe reports **CHANGED**.
 On a real migration, point `--probe-python` at a venv that has the **new** dependency version.
 
 ---

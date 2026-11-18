@@ -67,7 +67,9 @@ def test_resolve_codemod_migrations_prefers_cached_assess(monkeypatch):
         called = True
         return []
 
-    monkeypatch.setattr("pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file)
+    monkeypatch.setattr(
+        "pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file
+    )
 
     migrations, source_desc = resolve_codemod_migrations("/tmp/project", assess_result=result)
     assert not called
@@ -76,12 +78,16 @@ def test_resolve_codemod_migrations_prefers_cached_assess(monkeypatch):
 
 
 def test_resolve_codemod_migrations_uses_target_file_fallback(monkeypatch):
-    def fake_dependency_file(project_dir, target_dependency_file, *, config=None, use_cache=True, warnings=None):
+    def fake_dependency_file(
+        project_dir, target_dependency_file, *, config=None, use_cache=True, warnings=None
+    ):
         assert project_dir == "/tmp/project"
         assert target_dependency_file == "requirements-target.txt"
         return [DependencyMigration("flask", "2.0.3", "3.0.0")]
 
-    monkeypatch.setattr("pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file)
+    monkeypatch.setattr(
+        "pymolt.codemods.service.migrations_from_dependency_file", fake_dependency_file
+    )
 
     migrations, source_desc = resolve_codemod_migrations(
         "/tmp/project",
@@ -97,7 +103,8 @@ def _node(name, version) -> Node:
 
 def _graph(nodes: dict[str, Node]) -> DependencyGraph:
     return DependencyGraph(
-        nodes=nodes, resolution_quality=ResolutionQuality.RESOLVED, source_fixation=SourceFixation.PINNED,
+        nodes=nodes, resolution_quality=ResolutionQuality.RESOLVED,
+        source_fixation=SourceFixation.PINNED,
     )
 
 
@@ -131,7 +138,8 @@ class TestContainerDegrade:
                               constraint_file=None, force_recompile=False):
             if container_id:
                 raise ValueError(
-                    f"Specified Docker container '{container_id}' was not found running or is not matching."
+                    f"Specified Docker container '{container_id}' was not found running "
+                    "or is not matching."
                 )
             if chosen_source is not None and chosen_source.path.name == "requirements-target.txt":
                 return target_graph, report
@@ -168,7 +176,8 @@ class TestContainerDegrade:
                               constraint_file=None, force_recompile=False):
             if container_id:
                 raise ValueError(
-                    f"Specified Docker container '{container_id}' was not found running or is not matching."
+                    f"Specified Docker container '{container_id}' was not found running "
+                    "or is not matching."
                 )
             if chosen_source is not None and chosen_source.path.name == "requirements-target.txt":
                 return target_graph, report
@@ -263,3 +272,120 @@ def test_run_codemods_dry_run_default(tmp_path):
     )
     assert result.dry_run is True
     assert "flask.helpers" in (tmp_path / "app.py").read_text()  # untouched
+
+
+# ── provider choice: local by default, Axiom only when configured ────────────
+
+def test_codemod_provider_is_local_without_an_endpoint(tmp_path):
+    from pymolt.codemods.client import AxiomGraphClient
+    from pymolt.codemods.service import codemod_provider
+    from pymolt.delta.provider import LocalDeltaProvider
+
+    local = codemod_provider(tmp_path, None, online=True)
+    assert isinstance(local, LocalDeltaProvider) and local.online is True
+    assert isinstance(codemod_provider(tmp_path, "http://axiom.test"), AxiomGraphClient)
+
+
+def test_preview_codemods_defaults_to_the_local_provider(tmp_path, monkeypatch):
+    from pymolt.codemods import service
+    from pymolt.delta import provider as provider_mod
+
+    seen = {}
+
+    class _Local:
+        def __init__(self, project_dir, *, online=False, symbols=None):
+            seen["project_dir"], seen["online"] = project_dir, online
+
+        def fetch_bundle(self, migrations, *, progress=None, use_cache=None):
+            return {"flask": CodemodBundle()}
+
+    monkeypatch.setattr(provider_mod, "LocalDeltaProvider", _Local)
+    (tmp_path / "app.py").write_text("x = 1\n")
+    by_pkg, previews = service.preview_codemods(
+        tmp_path, [DependencyMigration("flask", "2.0.3", "3.0.0")], online=True,
+    )
+    assert seen == {"project_dir": tmp_path, "online": True}
+    assert by_pkg == {"flask": []} and previews == []
+
+
+# ── from-versions witnessed by the baseline capture ─────────────────────────
+
+
+def test_the_baseline_capture_version_beats_a_reresolved_unpinned_manifest():
+    from pymolt.codemods.service import migrations_from_rows, witness_rows
+
+    rows = [
+        {"name": "pandas", "status": "upgrade", "baseline_version": "3.1.1",
+         "target_version": "2.2.3"},
+        {"name": "Requests", "status": "unchanged", "baseline_version": "2.34.2",
+         "target_version": "2.34.2"},
+        {"name": "pytz", "status": "unchanged", "baseline_version": "2026.6",
+         "target_version": "2026.6"},
+        {"name": "attrs", "status": "upgrade", "baseline_version": "23.1",
+         "target_version": "24.2"},
+    ]
+    witnessed = {"pandas": "1.5.3", "requests": "2.31.0", "pytz": "2026.6"}
+    out, notes = witness_rows(rows, witnessed)
+    assert [(m.name, m.from_version, m.to_version) for m in migrations_from_rows(out)] == [
+        ("pandas", "1.5.3", "2.2.3"), ("Requests", "2.31.0", "2.34.2"),
+        ("attrs", "23.1", "24.2")]
+    assert notes == [
+        "pandas: the baseline capture ran 1.5.3 (the baseline manifest resolves to 3.1.1 today)",
+        "Requests: the baseline capture ran 2.31.0 (the baseline manifest resolves to "
+        "2.34.2 today)"]
+    assert witness_rows(rows, None) == (rows, [])
+
+
+def test_witnessed_distributions_reads_the_baseline_capture_record(tmp_path):
+    import json
+
+    from pymolt.verify.models import ContractSlot, ContractState
+    from pymolt.verify.service import _state_path, witnessed_distributions
+
+    traces = tmp_path / ".pymolt" / "contract_traces"
+    traces.mkdir(parents=True)
+    meta = traces / "baseline.jsonl.meta.json"
+    meta.write_text(json.dumps({"processes": [
+        {"pid": 1, "distributions": {"pandas": "1.5.3", "NumPy": "1.26.4"}},
+        {"pid": 2, "distributions": {"pandas": "1.5.3", "numpy": "2.0.0"}},
+        {"pid": 3},
+    ]}))
+    state = ContractState(baseline=ContractSlot(
+        trace_path=".pymolt/contract_traces/baseline.jsonl", captured_at="now",
+        mode="test_suite", metadata_path=".pymolt/contract_traces/baseline.jsonl.meta.json"))
+    state.save(_state_path(tmp_path))
+    # numpy ran at two versions across processes: ambiguous, left out.
+    assert witnessed_distributions(tmp_path) == {"pandas": "1.5.3"}
+    meta.write_text(json.dumps({"processes": [{"pid": 1}]}))
+    assert witnessed_distributions(tmp_path) is None      # a capture that predates it
+
+
+def test_a_resolver_failure_while_planning_is_a_plan_input_error(tmp_path):
+    """B3: a uv failure on the target manifest is a summary + hint, not a traceback."""
+    import subprocess
+
+    import pytest
+
+    from pymolt.codemods.service import PlanInputError
+
+    (tmp_path / "requirements.txt").write_text("empyrical==0.5.5\n")
+    target = tmp_path / "requirements-target.txt"
+    target.write_text("empyrical==0.5.5\n")
+    stderr = (
+        "  \x1b[31m\u00d7\x1b[0m Failed to build `empyrical==0.5.5`\n"
+        "  \u251c\u2500\u25b6 The build backend returned an error\n"
+        "      AttributeError: module 'configparser' has no attribute 'SafeConfigParser'\n"
+    )
+
+    def boom(*args, **kwargs):
+        raise subprocess.CalledProcessError(2, ["uv", "pip", "compile"], stderr=stderr)
+
+    cfg = EnvConfig(selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+                    base_python="3.11", target_python="3.12")
+    with patch("pymolt.codemods.service.orchestrate_ingestion", side_effect=boom):
+        with pytest.raises(PlanInputError) as caught:
+            migrations_from_dependency_file(tmp_path, target, config=cfg)
+
+    assert "does not resolve: Failed to build `empyrical==0.5.5`" in str(caught.value)
+    assert "Culprit(s): empyrical" in caught.value.hint
+    assert "No source files were changed" in caught.value.hint

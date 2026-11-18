@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -29,9 +30,17 @@ class CodemodPattern(BaseModel):
     old_qualname: str
     new_qualname: str
     kind: str
-    """'rewrite-import' (module moved) | 'rename-call' (symbol renamed)."""
+    """'rewrite-import' (module moved) | 'rename-call' (symbol renamed) | 'rewrite-attr' (a
+    module segment inserted into an attribute chain) | 'replace-attr-path' (a cross-module
+    rename such as ``imp.reload`` → ``importlib.reload``) | 'rewrite-module'."""
     confidence: str = "medium"
     evidence: list[str] = Field(default_factory=list)
+    requires_import: str | None = None
+    """A module the rewritten code needs imported, e.g. ``collections.abc``."""
+    scope: str = "dependency"
+    """``"dependency"`` (a package's API) or ``"python"`` (a stdlib fix for the Python move)."""
+    runs_on_base: bool | None = None
+    """Whether the rewritten code also runs on the base Python (None: not known/applicable)."""
 
     def summary(self) -> str:
         return f"[{self.kind}] {self.old_qualname} → {self.new_qualname}  ({self.confidence})"
@@ -146,6 +155,35 @@ class PreviewProgress:
 ProgressSink = Callable[[PreviewProgress], None] | None
 
 
+@dataclass(frozen=True)
+class MoveGroup:
+    """The import-move patterns ``apply_patterns`` applies together: those that share an old and
+    a new module (``MoveNamesCodemod``), so ``from OLD import a, b`` becomes one statement per
+    target module. ``hits``: ``(recipe_key, sites)`` of each member that changed something."""
+
+    old_module: str
+    new_module: str
+    members: tuple[CodemodPattern, ...]
+    hits: tuple[tuple[str, int], ...] = ()
+
+
+#: Observer of one recipe's change to one text: ``(recipe, before, after)``. The recipe is a
+#: ``CodemodRule``, a ``CodemodPattern`` or a ``MoveGroup``; it is called each time one of them
+#: changes the text, in application order, and changes nothing the caller returns.
+StepObserver = Callable[[Any, str, str], None] | None
+#: The same with the file: ``(recipe, path, before, after)`` (the plan's step builder).
+FileStepObserver = Callable[[Any, str, str, str], None] | None
+
+
+class BlockedRewrite(BaseModel):
+    """A rule that matched in a file but was not adopted: it is not verified, and only verified
+    rules are applied automatically. ``lines``: the 1-based lines its rewrite would change."""
+
+    rule: CodemodRule
+    sites: int
+    lines: list[int] = Field(default_factory=list)
+
+
 class FilePreview(BaseModel):
     """Before/after for one file — the unit the engineer reviews and decides on."""
 
@@ -162,3 +200,14 @@ class FilePreview(BaseModel):
     """Advisories raised on this file. A file with advisories but no rewrite
     (old_source == new_source, sites == 0) still yields a preview — the
     manual-review card."""
+    blocked: list[BlockedRewrite] = Field(default_factory=list)
+    """Rules that matched here but were not adopted (``verified_only``): they changed
+    nothing, and the plan lists them for a person. Their keys are not among the recipes
+    that changed the file (``applied_recipes``)."""
+
+    def applied_recipes(self) -> list[CodemodPattern | CodemodRule]:
+        """The patterns and rules that changed this file or advised on it: ``rules`` and
+        ``patterns`` without the blocked ones."""
+        blocked = {recipe_key(b.rule) for b in self.blocked}
+        return [item for item in [*self.rules, *self.patterns]
+                if recipe_key(item) not in blocked]

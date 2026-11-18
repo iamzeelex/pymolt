@@ -23,6 +23,7 @@ see rules.py's module docstring).
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import stat
@@ -32,16 +33,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import libcst as cst
-from libcst.metadata import MetadataWrapper, ScopeProvider
+from libcst.codemod import CodemodContext
+from libcst.codemod.visitors import AddImportsVisitor, RemoveImportsVisitor
+from libcst.metadata import MetadataWrapper, PositionProvider, ScopeProvider
 from libcst.metadata.scope_provider import ImportAssignment
 
 from pymolt.codemods.models import (
+    BlockedRewrite,
     CodemodPattern,
     CodemodRunResult,
     FileChange,
     FilePreview,
+    FileStepObserver,
+    MoveGroup,
     PreviewProgress,
     ProgressSink,
+    StepObserver,
     recipe_key,
 )
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory, apply_rule_detailed
@@ -340,6 +347,18 @@ def _attr_chain(node: cst.BaseExpression) -> tuple[cst.Name | None, str]:
     return cur, ".".join(parts)
 
 
+def _covers(transformer: cst.MetadataDependent, node: cst.CSTNode,
+            lines: frozenset[int] | None) -> bool:
+    """True when ``lines`` is None (no restriction) or one of them falls inside ``node``."""
+    if lines is None:
+        return True
+    try:
+        pos = transformer.get_metadata(PositionProvider, node)
+    except KeyError:
+        return False
+    return any(pos.start.line <= n <= pos.end.line for n in lines)
+
+
 class RewriteAttrCodemod(cst.CSTTransformer):
     """Insert/rewrite a module segment inside an attribute chain: ``m.OLD_TAIL`` →
     ``m.NEW_TAIL`` where ``m`` is bound to ``import ROOT [as m]``. This is the form
@@ -347,35 +366,27 @@ class RewriteAttrCodemod(cst.CSTTransformer):
     ``tensorflow.compat.v1.Session`` rewrites ``tf.Session(...)`` to
     ``tf.compat.v1.Session(...)`` (what tf_upgrade_v2 does for TF1→TF2). Binding-aware
     (ScopeProvider): only true references to the imported module are moved.
+
+    ``lines`` restricts the rewrite to nodes covering one of those source lines (python
+    fixes only touch flagged, unguarded sites). ``needed_imports`` collects the modules the
+    rewritten code needs (``requires_import``), for :func:`_finish_imports`.
     """
 
-    METADATA_DEPENDENCIES = (ScopeProvider,)
+    METADATA_DEPENDENCIES = (ScopeProvider, PositionProvider)
 
-    def __init__(self, old_qualname: str, new_qualname: str) -> None:
+    def __init__(self, old_qualname: str, new_qualname: str, *,
+                 requires_import: str | None = None,
+                 lines: frozenset[int] | None = None) -> None:
         self.root = _common_module(old_qualname, new_qualname)
         self.old_tail = old_qualname[len(self.root) + 1:] if self.root else ""
         self.new_tail = new_qualname[len(self.root) + 1:] if self.root else ""
+        self.requires_import = requires_import
+        self.lines = lines
+        self.needed_imports: set[tuple[str, str | None]] = set()
         self.sites = 0
 
     def _bound_to_root(self, name_node: cst.Name) -> bool:
-        try:
-            scope = self.get_metadata(ScopeProvider, name_node)
-        except KeyError:
-            return False
-        if scope is None:
-            return False
-        try:
-            bindings = list(scope[name_node.value])
-        except KeyError:
-            return False
-        for b in bindings:
-            node = getattr(b, "node", None)
-            if isinstance(b, ImportAssignment) and isinstance(node, cst.Import):
-                for alias in node.names:
-                    bound = alias.evaluated_alias or alias.evaluated_name
-                    if alias.evaluated_name == self.root and bound == name_node.value:
-                        return True
-        return False
+        return _bound_to_module(self, name_node, self.root)
 
     def leave_Attribute(
         self, original_node: cst.Attribute, updated_node: cst.Attribute
@@ -385,33 +396,378 @@ class RewriteAttrCodemod(cst.CSTTransformer):
         base, tail = _attr_chain(original_node)
         if base is None or tail != self.old_tail or not self._bound_to_root(base):
             return updated_node
+        if not _covers(self, original_node, self.lines):
+            return updated_node
         self.sites += 1
+        if self.requires_import:
+            self.needed_imports.add((self.requires_import, None))
         expr: cst.BaseExpression = cst.Name(base.value)
         for seg in self.new_tail.split("."):
             expr = cst.Attribute(value=expr, attr=cst.Name(seg))
-        return expr
+        return expr.with_changes(lpar=updated_node.lpar, rpar=updated_node.rpar)
 
 
-def apply_pattern(source: str, pattern: CodemodPattern) -> tuple[str, int]:
-    """Apply one pattern to source. Returns (new_source, sites_changed)."""
+def _bound_to_module(transformer: cst.MetadataDependent, name_node: cst.Name,
+                     module: str) -> bool:
+    """Is ``name_node`` bound by ``import MODULE [as name]`` (and by nothing else)?"""
+    try:
+        scope = transformer.get_metadata(ScopeProvider, name_node)
+    except KeyError:
+        return False
+    if scope is None:
+        return False
+    try:
+        bindings = list(scope[name_node.value])
+    except KeyError:
+        return False
+    found = False
+    for b in bindings:
+        node = getattr(b, "node", None)
+        if isinstance(b, ImportAssignment) and isinstance(node, cst.Import):
+            for alias in node.names:
+                bound = alias.evaluated_alias or alias.evaluated_name
+                if alias.evaluated_name == module and bound == name_node.value:
+                    found = True
+    return found
+
+
+class _NameCollector(cst.CSTVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Name(self, node: cst.Name) -> None:
+        self.names.add(node.value)
+
+    def visit_Attribute(self, node: cst.Attribute) -> bool:
+        node.value.visit(self)      # ``a.current_task``: the attribute is not a binding
+        return False
+
+    # Import statements name modules, not variables: only the names they bind (``as x``,
+    # ``from m import x``) count.
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool:
+        if not isinstance(node.names, cst.ImportStar):
+            for alias in node.names:
+                self.names.add(alias.evaluated_alias or alias.evaluated_name)
+        return False
+
+    def visit_Import(self, node: cst.Import) -> bool:
+        for alias in node.names:
+            if alias.evaluated_alias:
+                self.names.add(alias.evaluated_alias)
+        return False
+
+
+def _from_binding(transformer: cst.MetadataDependent,
+                  name_node: cst.Name) -> tuple[str, str, str | None] | None:
+    """``(module, name, asname)`` when ``name_node`` is bound only by ``from MODULE import name
+    [as asname]`` (absolute import), else None."""
+    try:
+        scope = transformer.get_metadata(ScopeProvider, name_node)
+        bindings = list(scope[name_node.value]) if scope is not None else []
+    except KeyError:
+        return None
+    found: tuple[str, str, str | None] | None = None
+    for b in bindings:
+        node = getattr(b, "node", None)
+        if not (isinstance(b, ImportAssignment) and isinstance(node, cst.ImportFrom)):
+            return None
+        if node.module is None or node.relative or isinstance(node.names, cst.ImportStar):
+            return None
+        for alias in node.names:
+            bound = alias.evaluated_alias or alias.evaluated_name
+            if bound == name_node.value:
+                found = (_dotted(node.module) or "", alias.evaluated_name,
+                         alias.evaluated_alias)
+    return found
+
+
+class ReplaceAttrPathCodemod(cst.CSTTransformer):
+    """A cross-module rename of an attribute path: ``imp.reload`` → ``importlib.reload``,
+    ``asyncio.Task.current_task`` → ``asyncio.current_task``.
+
+    The leftmost name must be bound to ``import OLD_ROOT [as a]``, or to a ``from M import N``
+    whose ``M.N`` leads the old path (``from asyncio import Task`` + ``Task.current_task()``;
+    the new path must then be ``MODULE.name``, written as ``name`` plus ``from MODULE import
+    name``). When the new path lives in the same root module the alias is kept
+    (``a.current_task``); otherwise the new root is named in full and imported
+    (``requires_import``, default the new root). ``needed_imports`` and ``dropped`` (imports that
+    may now be unused) feed :func:`_finish_imports`.
+    """
+
+    METADATA_DEPENDENCIES = (ScopeProvider, PositionProvider)
+
+    def __init__(self, old_qualname: str, new_qualname: str, *,
+                 requires_import: str | None = None,
+                 lines: frozenset[int] | None = None) -> None:
+        self.old_qualname = old_qualname
+        self.old_root = old_qualname.split(".")[0]
+        self.old_tail = old_qualname[len(self.old_root) + 1:]
+        self.new_qualname = new_qualname
+        self.new_root = new_qualname.split(".")[0]
+        self.new_tail = new_qualname[len(self.new_root) + 1:]
+        self.requires_import = requires_import
+        self.lines = lines
+        self.needed_imports: set[tuple[str, str | None]] = set()
+        self.dropped: set[tuple[str, str | None, str | None]] = set()
+        self.sites = 0
+        self._identifiers: set[str] = set()
+
+    def visit_Module(self, node: cst.Module) -> None:
+        # every identifier in the file: a new bare name must not collide with one of them
+        collector = _NameCollector()
+        node.visit(collector)
+        self._identifiers = collector.names
+
+    def leave_Attribute(
+        self, original_node: cst.Attribute, updated_node: cst.Attribute
+    ) -> cst.BaseExpression:
+        base, tail = _attr_chain(original_node)
+        if base is None or not tail or not _covers(self, original_node, self.lines):
+            return updated_node
+        expr: cst.BaseExpression | None = None
+        if tail == self.old_tail and _bound_to_module(self, base, self.old_root):
+            expr = self._via_import(base)
+        else:
+            bound = _from_binding(self, base)
+            if bound is not None and f"{bound[0]}.{bound[1]}.{tail}" == self.old_qualname:
+                expr = self._via_from_import(bound)
+        if expr is None:
+            return updated_node
+        self.sites += 1
+        return expr.with_changes(lpar=updated_node.lpar, rpar=updated_node.rpar)
+
+    def _via_import(self, base: cst.Name) -> cst.BaseExpression:
+        if self.new_root == self.old_root and self.new_tail:
+            expr: cst.BaseExpression = cst.Name(base.value)
+            for seg in self.new_tail.split("."):
+                expr = cst.Attribute(value=expr, attr=cst.Name(seg))
+            return expr
+        self.needed_imports.add((self.requires_import or self.new_root, None))
+        self.dropped.add((self.old_root, None, None if base.value == self.old_root
+                          else base.value))
+        return cst.parse_expression(self.new_qualname)
+
+    def _via_from_import(self, bound: tuple[str, str, str | None]) -> cst.BaseExpression | None:
+        new_module, new_leaf = _module(self.new_qualname), _leaf(self.new_qualname)
+        if not new_module:
+            return None
+        self.dropped.add((bound[0], bound[1], bound[2]))
+        if new_leaf not in self._identifiers:
+            self.needed_imports.add((new_module, new_leaf))
+            return cst.Name(new_leaf)
+        # the bare name is already used here (``current_task = Task.current_task()``): name the
+        # module instead, unless that name is taken too
+        if new_module.split(".")[0] in self._identifiers:
+            self.dropped.discard((bound[0], bound[1], bound[2]))
+            return None
+        self.needed_imports.add((new_module, None))
+        return cst.parse_expression(self.new_qualname)
+
+
+class _LocatedRewriteModule(RewriteModuleCodemod):
+    """``RewriteModuleCodemod`` limited to statements covering ``lines``."""
+
+    METADATA_DEPENDENCIES = (PositionProvider,)
+
+    def __init__(self, old_module: str, new_module: str, lines: frozenset[int] | None) -> None:
+        super().__init__(old_module, new_module)
+        self.lines = lines
+
+    def leave_ImportFrom(self, original_node, updated_node):
+        if not _covers(self, original_node, self.lines):
+            return updated_node
+        return super().leave_ImportFrom(original_node, updated_node)
+
+    def leave_Import(self, original_node, updated_node):
+        if not _covers(self, original_node, self.lines):
+            return updated_node
+        return super().leave_Import(original_node, updated_node)
+
+
+class MoveNamesCodemod(cst.CSTTransformer):
+    """Move (and optionally rename) names out of ``from OLD import ...`` in ONE pass.
+
+    ``renames`` maps each old leaf to its new leaf. Every statement ``from OLD import a, b, c``
+    is rewritten as a whole, so the names that move to ``NEW`` land in one statement and the
+    rest stay in the original:
+
+      from OLD import a, b, c     →  from OLD import c      (the names left behind)
+                                     from NEW import a, b    (the moved names, in order)
+
+    When every name moves, the statement is edited in place (module swapped), keeping its
+    parentheses, line breaks and comments. A leaf rename without ``as`` also renames every
+    reference to the bound name, found through the scope graph; if the name is rebound
+    elsewhere in its scope the alias is left alone (a half-rewrite would break the file).
+    ``lines`` restricts the rewrite to statements covering one of those source lines.
+    """
+
+    METADATA_DEPENDENCIES = (ScopeProvider, PositionProvider)
+
+    def __init__(self, old_module: str, new_module: str, renames: dict[str, str], *,
+                 lines: frozenset[int] | None = None) -> None:
+        self.old_module = old_module
+        self.new_module = new_module
+        self.renames = renames
+        self.lines = lines
+        self.hits: dict[str, int] = {}
+        self.sites = 0
+        self._ref_renames: dict[cst.Name, str] = {}
+        self._movable: dict[cst.ImportFrom, set[str]] = {}
+
+    # a statement's movable leaves are decided on the way in, with the scope in hand
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> bool | None:
+        if node.module is None or isinstance(node.names, cst.ImportStar) or node.relative:
+            return None
+        if _dotted(node.module) != self.old_module or not _covers(self, node, self.lines):
+            return None
+        movable: set[str] = set()
+        for alias in node.names:
+            leaf = alias.name.value if isinstance(alias.name, cst.Name) else None
+            if leaf not in self.renames:
+                continue
+            new_leaf = self.renames[leaf]
+            if new_leaf != leaf and alias.asname is None:
+                refs = self._references(node, leaf)
+                if refs is None:
+                    continue
+                for ref in refs:
+                    self._ref_renames[ref] = new_leaf
+            movable.add(leaf)
+        if movable:
+            self._movable[node] = movable
+        return None
+
+    def _references(self, node: cst.ImportFrom, name: str) -> list[cst.Name] | None:
+        try:
+            scope = self.get_metadata(ScopeProvider, node)
+            assignments = list(scope[name])
+        except KeyError:
+            return None
+        mine = [a for a in assignments if getattr(a, "node", None) is node]
+        if not mine or len(mine) != len(assignments):
+            return None            # rebound elsewhere in the scope
+        return [acc.node for a in mine for acc in a.references
+                if isinstance(acc.node, cst.Name)]
+
+    def leave_Name(self, original_node: cst.Name, updated_node: cst.Name) -> cst.Name:
+        new = self._ref_renames.get(original_node)
+        return updated_node.with_changes(value=new) if new else updated_node
+
+    def _moved_alias(self, alias: cst.ImportAlias) -> cst.ImportAlias:
+        leaf = alias.name.value
+        return _clean_last_comma(alias.with_changes(name=cst.Name(self.renames[leaf])))
+
+    def leave_ImportFrom(self, original_node: cst.ImportFrom,
+                         updated_node: cst.ImportFrom) -> cst.ImportFrom:
+        movable = self._movable.get(original_node)
+        if not movable or isinstance(updated_node.names, cst.ImportStar):
+            return updated_node
+        if all(a.name.value in movable for a in updated_node.names):
+            names = [a.with_changes(name=cst.Name(self.renames[a.name.value]))
+                     if a.name.value in movable else a for a in updated_node.names]
+            self._count(movable)
+            module = (updated_node.module if self.new_module == self.old_module
+                      else _module_expr(self.new_module))
+            return updated_node.with_changes(module=module, names=names)
+        return updated_node
+
+    def _count(self, leaves) -> None:
+        for leaf in leaves:
+            self.hits[leaf] = self.hits.get(leaf, 0) + 1
+            self.sites += 1
+
+    def leave_SimpleStatementLine(
+        self, original: cst.SimpleStatementLine, updated: cst.SimpleStatementLine
+    ) -> cst.SimpleStatementLine | cst.FlattenSentinel:
+        if len(original.body) != 1 or not isinstance(original.body[0], cst.ImportFrom):
+            return updated
+        movable = self._movable.get(original.body[0])
+        imp = updated.body[0]
+        if (not movable or not isinstance(imp, cst.ImportFrom)
+                or isinstance(imp.names, cst.ImportStar)
+                or imp.module is None or _dotted(imp.module) != self.old_module):
+            return updated          # nothing to do, or leave_ImportFrom already moved it all
+        moved = [a for a in imp.names if a.name.value in movable]
+        kept = [a for a in imp.names if a.name.value not in movable]
+        if not moved or not kept:
+            return updated
+        self._count(movable)
+        old_line = updated.with_changes(
+            body=[imp.with_changes(names=[*kept[:-1], _clean_last_comma(kept[-1])],
+                                   lpar=imp.lpar if len(kept) > 1 else None,
+                                   rpar=imp.rpar if len(kept) > 1 else None)])
+        new_line = cst.SimpleStatementLine(body=[cst.ImportFrom(
+            module=_module_expr(self.new_module),
+            names=[self._moved_alias(a).with_changes(comma=cst.MaybeSentinel.DEFAULT)
+                   if i == len(moved) - 1 else self._moved_alias(a).with_changes(
+                       comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" ")))
+                   for i, a in enumerate(moved)])])
+        return cst.FlattenSentinel([old_line, new_line])
+
+
+def _finish_imports(module: cst.Module, needed: set[tuple[str, str | None]],
+                    dropped: set[tuple[str, str | None, str | None]]) -> cst.Module:
+    """Add the imports the rewrite needs ``(module, name-or-None)``, then drop the imports it
+    left unused ``(module, name-or-None, asname)``."""
+    if not needed and not dropped:
+        return module
+    context = CodemodContext()
+    for name, obj in sorted(needed, key=lambda t: (t[0], t[1] or "")):
+        AddImportsVisitor.add_needed_import(context, name, obj)
+    for name, obj, asname in sorted(dropped, key=lambda t: (t[0], t[1] or "", t[2] or "")):
+        RemoveImportsVisitor.remove_unused_import(context, name, obj, asname)
+    if needed:
+        module = AddImportsVisitor(context).transform_module(module)
+    if dropped:
+        module = RemoveImportsVisitor(context).transform_module(module)
+    return module
+
+
+def _move_renames(patterns: list[CodemodPattern]) -> dict[tuple[str, str], dict[str, str]]:
+    """``{(old_module, new_module): {old_leaf: new_leaf}}`` for the import-move patterns."""
+    groups: dict[tuple[str, str], dict[str, str]] = {}
+    for p in patterns:
+        if p.kind == "rewrite-import" or (p.kind == "rename-call" and p.scope == "python"):
+            groups.setdefault((_module(p.old_qualname), _module(p.new_qualname)), {})[
+                _leaf(p.old_qualname)] = _leaf(p.new_qualname)
+    return groups
+
+
+def apply_pattern(source: str, pattern: CodemodPattern, *,
+                  lines: frozenset[int] | None = None) -> tuple[str, int]:
+    """Apply one pattern to source. Returns (new_source, sites_changed).
+
+    ``lines`` (python fixes) restricts the rewrite to nodes covering those source lines."""
     module = cst.parse_module(source)
     if pattern.kind == "rewrite-attr":
         # Attribute-path insertion (m.OLD_TAIL → m.NEW_TAIL); binding-aware.
-        transformer = RewriteAttrCodemod(pattern.old_qualname, pattern.new_qualname)
-        return MetadataWrapper(module).visit(transformer).code, transformer.sites
+        transformer = RewriteAttrCodemod(pattern.old_qualname, pattern.new_qualname,
+                                         requires_import=pattern.requires_import, lines=lines)
+        out = MetadataWrapper(module).visit(transformer)
+        if transformer.sites:
+            out = _finish_imports(out, transformer.needed_imports, set())
+        return out.code, transformer.sites
+    if pattern.kind == "replace-attr-path":
+        transformer = ReplaceAttrPathCodemod(pattern.old_qualname, pattern.new_qualname,
+                                             requires_import=pattern.requires_import,
+                                             lines=lines)
+        out = MetadataWrapper(module).visit(transformer)
+        if transformer.sites:
+            out = _finish_imports(out, transformer.needed_imports, transformer.dropped)
+        return out.code, transformer.sites
     if pattern.kind == "rewrite-module":
         # Module-scoped: old_qualname/new_qualname are module names (not module.leaf).
+        if lines is not None:
+            located = _LocatedRewriteModule(pattern.old_qualname, pattern.new_qualname, lines)
+            return MetadataWrapper(module).visit(located).code, located.sites
         transformer = RewriteModuleCodemod(pattern.old_qualname, pattern.new_qualname)
         return module.visit(transformer).code, transformer.sites
-    if pattern.kind == "rewrite-import":
-        # Module-scoped (matches `from old_module import leaf`) — no over-match,
-        # so it needs no scope metadata.
-        transformer = RewriteImportCodemod(
-            _module(pattern.old_qualname),
-            _module(pattern.new_qualname),
-            _leaf(pattern.old_qualname),
-        )
-        return module.visit(transformer).code, transformer.sites
+    if pattern.kind == "rewrite-import" or (
+            pattern.kind == "rename-call" and pattern.scope == "python"):
+        mover = MoveNamesCodemod(_module(pattern.old_qualname), _module(pattern.new_qualname),
+                                 {_leaf(pattern.old_qualname): _leaf(pattern.new_qualname)},
+                                 lines=lines)
+        return MetadataWrapper(module).visit(mover).code, mover.sites
 
     # rename-call is binding-aware → run through a MetadataWrapper so the
     # ScopeProvider is resolved and only true bindings are rewritten.
@@ -420,16 +776,135 @@ def apply_pattern(source: str, pattern: CodemodPattern) -> tuple[str, int]:
     return new_module.code, rename.sites
 
 
+def line_map(old: str, new: str) -> dict[int, tuple[int, ...]]:
+    """Each 1-based line of ``old`` -> the lines of ``new`` holding its text: itself where the
+    text is unchanged, the same position in a block replaced line for line, and the whole new
+    block where one changed into another number of lines. A deleted line maps to none."""
+    out: dict[int, tuple[int, ...]] = {}
+    matcher = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines(), autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            for k in range(i2 - i1):
+                out[i1 + k + 1] = (j1 + k + 1,)
+        elif tag == "replace":
+            for k in range(i1, i2):
+                out[k + 1] = tuple(range(j1 + 1, j2 + 1))
+    return out
+
+
+def carry_lines(lines: frozenset[int] | None,
+                moved: dict[int, tuple[int, ...]] | None) -> frozenset[int] | None:
+    """``lines`` of one text, on the text ``moved`` (a ``line_map``) leads to. None stays None
+    (anywhere); ``moved`` None is no change."""
+    if lines is None or moved is None:
+        return lines
+    return frozenset(n for line in lines for n in moved.get(line, ()))
+
+
+def _then(moved: dict[int, tuple[int, ...]] | None,
+          step: dict[int, tuple[int, ...]]) -> dict[int, tuple[int, ...]]:
+    """The line map of two edits in a row: ``moved`` (None: none yet), then ``step``."""
+    if moved is None:
+        return step
+    return {line: tuple(sorted({m for n in ns for m in step.get(n, ())}))
+            for line, ns in moved.items()}
+
+
 def apply_patterns(
-    source: str, patterns: list[CodemodPattern]
+    source: str, patterns: list[CodemodPattern], *,
+    lines_for: Callable[[CodemodPattern], frozenset[int] | None] | None = None,
+    on_step: StepObserver = None,
 ) -> tuple[str, list[tuple[CodemodPattern, int]]]:
-    """Apply a sequence of patterns. Returns (new_source, [(pattern, sites)…])."""
+    """Apply a sequence of patterns. Returns (new_source, [(pattern, sites)…]).
+
+    The import-move patterns (``rewrite-import``, python ``rename-call``) that share an old and
+    a new module are applied together, so one ``from OLD import a, b, c`` statement becomes at
+    most one statement per target module instead of one per name. ``lines_for(pattern)`` gives
+    the lines of ``source`` a pattern may touch (None: anywhere). Each pattern applies to the
+    text the ones before it left, so those lines are carried through every change before it
+    (an import one fix adds moves the next fix's site down). ``on_step(recipe, before, after)``
+    observes each pattern or move group (a ``MoveGroup``) that changes the text."""
     hits: list[tuple[CodemodPattern, int]] = []
+    groups = _move_renames(patterns)
+    done_groups: set[tuple[str, str]] = set()
+    # ``source``'s lines -> the current text's; None while nothing has changed
+    moved: dict[int, tuple[int, ...]] | None = None
+
+    def lines_of(pattern: CodemodPattern) -> frozenset[int] | None:
+        return carry_lines(lines_for(pattern), moved) if lines_for is not None else None
+
     for pattern in patterns:
-        source, sites = apply_pattern(source, pattern)
+        key = (_module(pattern.old_qualname), _module(pattern.new_qualname))
+        if _move_renames([pattern]):
+            if key in done_groups:
+                continue
+            done_groups.add(key)
+            members = [p for p in patterns if _move_renames([p]) and (
+                _module(p.old_qualname), _module(p.new_qualname)) == key]
+            lines: frozenset[int] | None = None
+            if lines_for is not None:
+                found = [lines_of(p) for p in members]
+                lines = (frozenset().union(*[f for f in found if f is not None])
+                         if any(f is not None for f in found) else None)
+            mover = MoveNamesCodemod(key[0], key[1], groups[key], lines=lines)
+            before = source
+            source = MetadataWrapper(cst.parse_module(source)).visit(mover).code
+            group_hits = []
+            for member in members:
+                n = mover.hits.get(_leaf(member.old_qualname), 0)
+                if n:
+                    hits.append((member, n))
+                    group_hits.append((recipe_key(member), n))
+            if source != before:
+                if lines_for is not None:
+                    moved = _then(moved, line_map(before, source))
+                _observe(on_step, MoveGroup(key[0], key[1], tuple(members), tuple(group_hits)),
+                         before, source)
+            continue
+        before = source
+        source, sites = apply_pattern(source, pattern, lines=lines_of(pattern))
         if sites:
             hits.append((pattern, sites))
+        if source != before:
+            if lines_for is not None:
+                moved = _then(moved, line_map(before, source))
+            _observe(on_step, pattern, before, source)
     return source, hits
+
+
+def _observe(on_step: StepObserver, recipe, before: str, after: str) -> None:
+    """Report one recipe's change to a step observer. A failing observer cannot change the
+    walk: the plan then misses that step's chain and keeps the file's change whole."""
+    if on_step is None:
+        return
+    try:
+        on_step(recipe, before, after)
+    except Exception:  # noqa: BLE001 - an observer cannot break the walk
+        log.warning("step observer raised", exc_info=True)
+
+
+class _FileSteps:
+    """Buffers one file's step events; the walker hands them on only for a file it keeps."""
+
+    def __init__(self, on_step: FileStepObserver, path: Path):
+        self.sink, self.path = on_step, str(path)
+        self.events: list[tuple] = []
+
+    @property
+    def hook(self) -> StepObserver:
+        if self.sink is None:
+            return None
+        return lambda recipe, before, after: self.events.append((recipe, before, after))
+
+    def flush(self) -> None:
+        if self.sink is None:
+            return
+        for recipe, before, after in self.events:
+            try:
+                self.sink(recipe, self.path, before, after)
+            except Exception:  # noqa: BLE001 - an observer cannot break the walk
+                log.warning("step observer raised on %s", self.path, exc_info=True)
+        self.events = []
 
 
 def _emit(sink: ProgressSink, path: Path, hits: list[tuple] | None = None) -> None:
@@ -549,8 +1024,10 @@ def _commit_rewrites(rewrites: list[_PendingRewrite]) -> None:
                     f"file changed while codemods were being computed: {rewrite.path}"
                 )
 
-            # A generated module must parse before it is allowed into the write set.
-            cst.parse_module(rewrite.replacement.decode("utf-8"))
+            # A generated module must parse before it is allowed into the write set (a
+            # manifest the plan's pin step rewrites is not Python).
+            if rewrite.path.suffix in (".py", ".pyi"):
+                cst.parse_module(rewrite.replacement.decode("utf-8"))
             mode = stat.S_IMODE(rewrite.path.stat().st_mode)
             rollback = _write_transaction_file(
                 rewrite.path, rewrite.original, kind="rollback", mode=mode
@@ -656,6 +1133,7 @@ def preview_repo(
     patterns: list[CodemodPattern],
     *,
     on_file: ProgressSink = None,
+    on_step: FileStepObserver = None,
 ) -> list[FilePreview]:
     """
     Compute per-file before/after for every file the patterns would change —
@@ -665,7 +1143,8 @@ def preview_repo(
     `on_file`, if given, is called once per file *scanned* — including files
     that matched nothing or could not be parsed — so a live view can show the
     real denominator instead of only the handful of hits. It is a pure
-    observer: it can never change what the walk returns.
+    observer: it can never change what the walk returns. So is `on_step(recipe, path, before,
+    after)`, called for each recipe that changed a file the walk keeps, in application order.
     """
     root = Path(root)
     previews: list[FilePreview] = []
@@ -675,8 +1154,9 @@ def preview_repo(
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
+        steps = _FileSteps(on_step, path)
         try:
-            new_source, hits = apply_patterns(original, patterns)
+            new_source, hits = apply_patterns(original, patterns, on_step=steps.hook)
         except Exception as exc:  # libcst parse error → skip
             log.warning("skip %s (parse error): %s", path, exc)
             _emit(on_file, path)
@@ -693,6 +1173,7 @@ def preview_repo(
                 patterns=[p for p, _ in hits],
             )
         )
+        steps.flush()
         _emit(on_file, path, hits)
     return previews
 
@@ -749,6 +1230,8 @@ def apply_rules(
     rules: list[CodemodRule],
     *,
     allow: Callable[[CodemodRule], bool] | None = None,
+    blocked: list[BlockedRewrite] | None = None,
+    on_step: StepObserver = None,
 ) -> tuple[str, list[tuple[CodemodRule, int]], list[CodemodRule], list[RuleAdvisory]]:
     """
     Apply `rules` to `source` sequentially — each rule is fed the PREVIOUS
@@ -766,7 +1249,10 @@ def apply_rules(
     blocked rewrite is simply discarded (the chain continues from the
     unmodified source). Used by `apply_rules_to_repo` to keep unverified rules
     detect-only when writing to disk. `allow=None` (the default; always used by
-    `preview_rules_repo`) adopts every rewrite unconditionally.
+    `preview_rules_repo`) adopts every rewrite unconditionally. ``blocked``, when
+    given, receives each rule whose rewrite matched but was not adopted, with the
+    lines it would have changed. ``on_step(rule, before, after)`` observes each adopted rewrite
+    that changed the text. Each advisory names its rule (``RuleAdvisory.rule``).
     """
     hits: list[tuple[CodemodRule, int]] = []
     touched: list[CodemodRule] = []
@@ -775,11 +1261,29 @@ def apply_rules(
         app = apply_rule_detailed(source, rule)
         if app.sites or app.advisories:
             touched.append(rule)
-        advisories.extend(app.advisories)
+        key = recipe_key(rule)
+        advisories.extend(a if a.rule else a.model_copy(update={"rule": key})
+                          for a in app.advisories)
         if app.sites and (allow is None or allow(rule)):
             hits.append((rule, app.sites))
+            if app.new_source != source:
+                _observe(on_step, rule, source, app.new_source)
             source = app.new_source
+        elif app.sites and blocked is not None:
+            blocked.append(BlockedRewrite(rule=rule, sites=app.sites,
+                                          lines=_changed_lines(source, app.new_source)))
     return source, hits, touched, advisories
+
+
+def _changed_lines(old: str, new: str) -> list[int]:
+    """The 1-based lines of ``old`` that ``new`` changes (an insertion: the line after)."""
+    old_lines = old.splitlines()
+    out: list[int] = []
+    matcher = difflib.SequenceMatcher(None, old_lines, new.splitlines(), autojunk=False)
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag != "equal":
+            out.extend(range(i1 + 1, i2 + 1) if i2 > i1 else [i1 + 1])
+    return sorted(set(out))
 
 
 def apply_rules_to_repo(
@@ -927,8 +1431,10 @@ def preview_mixed_repo(
     *,
     on_file: ProgressSink = None,
     verified_only: bool = False,
+    on_step: FileStepObserver = None,
 ) -> list[FilePreview]:
-    """Preview the exact chained output that :func:`apply_mixed_to_repo` writes."""
+    """Preview the exact chained output that :func:`apply_mixed_to_repo` writes. ``on_step``
+    observes each recipe's change to a kept file, as in :func:`preview_repo`."""
     root = Path(root)
     previews: list[FilePreview] = []
     allow = (lambda rule: rule.confidence == "verified") if verified_only else None
@@ -938,11 +1444,14 @@ def preview_mixed_repo(
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
+        blocked: list[BlockedRewrite] = []
+        steps = _FileSteps(on_step, path)
         try:
             after_rules, rule_hits, touched, advisories = apply_rules(
-                original, rules, allow=allow
+                original, rules, allow=allow, blocked=blocked, on_step=steps.hook
             )
-            new_source, pattern_hits = apply_patterns(after_rules, patterns)
+            new_source, pattern_hits = apply_patterns(after_rules, patterns,
+                                                      on_step=steps.hook)
         except Exception as exc:
             log.warning("skip %s (mixed preview error): %s", path, exc)
             _emit(on_file, path)
@@ -960,8 +1469,10 @@ def preview_mixed_repo(
                 patterns=[pattern for pattern, _ in pattern_hits],
                 rules=touched,
                 advisories=advisories,
+                blocked=blocked,
             )
         )
+        steps.flush()
         _emit(on_file, path, [*rule_hits, *pattern_hits])
     return previews
 
@@ -972,6 +1483,7 @@ def preview_rules_repo(
     *,
     on_file: ProgressSink = None,
     verified_only: bool = False,
+    on_step: FileStepObserver = None,
 ) -> list[FilePreview]:
     """
     Compute per-file before/after for every file the rules would change OR
@@ -990,9 +1502,11 @@ def preview_rules_repo(
         except (OSError, UnicodeDecodeError):
             _emit(on_file, path)
             continue
+        blocked: list[BlockedRewrite] = []
+        steps = _FileSteps(on_step, path)
         try:
             new_source, hits, touched, advisories = apply_rules(
-                original, rules, allow=allow
+                original, rules, allow=allow, blocked=blocked, on_step=steps.hook
             )
         except Exception as exc:  # malformed rule / libcst parse error → skip
             log.warning("skip %s (rule error): %s", path, exc)
@@ -1009,6 +1523,8 @@ def preview_rules_repo(
                 sites=sum(n for _, n in hits),
                 rules=touched,
                 advisories=advisories,
+                blocked=blocked,
             )
         )
+        steps.flush()
     return previews

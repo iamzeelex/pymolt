@@ -11,35 +11,46 @@ Docker image, the 3.6 devcontainer, …) and the watcher auto-activates from the
       sitecustomize.py            # auto-imported at interpreter startup -> activate()
       pymolt_trace/
         __init__.py
-        _normalize.py _backend.py _sinks.py boundary_tracer.py   # verbatim, stdlib-only
+        _rawthreads.py _normalize.py _identity.py _backend.py _monitoring.py _sinks.py
+        _wrap.py
+        boundary_tracer.py                                       # verbatim, stdlib-only
 
-CLI: ``pymolt verify export-watcher <dir>``
+Written by ``pymolt capture … --mode attach`` (and injected by every capture).
 Standalone: ``python -m pymolt.verify.export_watcher <dir>``
 """
 import shutil
 from pathlib import Path
 
-from pymolt.verify import _backend, _normalize, _sinks, _wrap, boundary_tracer
+from pymolt.verify import (
+    _backend,
+    _identity,
+    _monitoring,
+    _normalize,
+    _rawthreads,
+    _sinks,
+    _wrap,
+    boundary_tracer,
+)
 
 # The injected runtime modules, copied verbatim. Their intra-package relative imports
 # (``from ._backend import ...``) resolve inside the ``pymolt_trace`` package unchanged.
-_RUNTIME_MODULES = (_normalize, _backend, _sinks, _wrap, boundary_tracer)
+# ``_monitoring`` is imported by the runtime only on 3.12+, but always ships (it parses on 3.6).
+_RUNTIME_MODULES = (_rawthreads, _normalize, _identity, _backend, _monitoring, _sinks, _wrap,
+                    boundary_tracer)
 
-_SITECUSTOMIZE = '''\
-"""Auto-activate the pymolt boundary watcher at interpreter startup.
+_SITECUSTOMIZE_SRC = Path(__file__).with_name("sitecustomize.py")
+_IMPORT_LINE = "from pymolt.verify.boundary_tracer import activate"
 
-Python imports a top-level ``sitecustomize`` automatically when it is on the path. This calls
-``pymolt_trace.boundary_tracer.activate()``, which is itself a no-op unless PYMOLT_TRACE_TARGET
-is set — so the bundle is safe to leave on PYTHONPATH permanently.
-"""
-try:
-    from pymolt_trace.boundary_tracer import activate
 
-    activate()
-except Exception:
-    # Startup hooks must never break the interpreter; run untraced on any failure.
-    pass
-'''
+def _bundle_sitecustomize(package_name: str) -> str:
+    """The bundle's startup hook is the in-repo ``sitecustomize.py`` re-pointed at the bundle
+    package — one source, so the bundle inherits its failure policy (an activation error is
+    reported on stderr and as ``<trace>.activation-error.json`` instead of a silently
+    untraced run)."""
+    text = _SITECUSTOMIZE_SRC.read_text()
+    if _IMPORT_LINE not in text:  # pragma: no cover - guards a refactor of sitecustomize.py
+        raise RuntimeError("sitecustomize.py no longer imports the tracer the expected way")
+    return text.replace(_IMPORT_LINE, f"from {package_name}.boundary_tracer import activate")
 
 
 def export_watcher(dest: str | Path, package_name: str = "pymolt_trace") -> Path:
@@ -57,7 +68,7 @@ def export_watcher(dest: str | Path, package_name: str = "pymolt_trace") -> Path
     for module in _RUNTIME_MODULES:
         src = Path(module.__file__)
         shutil.copyfile(src, pkg / src.name)
-    (dest / "sitecustomize.py").write_text(_SITECUSTOMIZE)
+    (dest / "sitecustomize.py").write_text(_bundle_sitecustomize(package_name))
     return dest
 
 

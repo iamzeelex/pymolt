@@ -14,9 +14,10 @@ Pure functions over an AST scan + a coverage.py JSON report; unit-tested without
 """
 import ast
 import os
-import sys
 
 from pydantic import BaseModel, Field
+
+from pymolt.verify.contact_map import prune_walk_dirs
 
 
 class UsageSite(BaseModel):
@@ -66,10 +67,11 @@ def _attr_chain(node):
 
 def _is_dependency(top: str, local: set, deps: set | None) -> bool:
     from pymolt.core.legacy_stdlib import is_py2_stdlib
+    from pymolt.core.stdlib import is_stdlib
 
     if not top or top in local:
         return False
-    if top in sys.stdlib_module_names:
+    if is_stdlib(top):
         return False
     # Python 2's stdlib is missing from this interpreter's list, so it would
     # otherwise count as a third-party usage site to cover with tests.
@@ -180,7 +182,7 @@ def scan_usage_sites(project_dir: str, deps=None, exclude_dirs=None, packages=No
     sites: list = []
     for base in scan_dirs:
         for root, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if d not in excludes]
+            dirs[:] = prune_walk_dirs(root, dirs, excludes)
             for fn in files:
                 if not fn.endswith(".py"):
                     continue

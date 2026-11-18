@@ -1,31 +1,19 @@
-"""CLI for verify/ — the external boundary tracer + diff (Component 6, interfaces layer).
+"""CLI for verify/ — `pymolt capture`, and the contract report `pymolt verify` renders.
 
 Everything here runs *outside* the target project: the watcher is injected via PYTHONPATH +
-PYMOLT_TRACE_* env (zero edits to the target), and rendering of the structured BoundaryDiff
+PYMOLT_TRACE_* env (zero edits to the target), and rendering of the structured reports
 lives here in interfaces/, not in the non-interactive core (spec: render is not the core's job).
-
-Commands:
-  pymolt contract export-watcher DEST          write the standalone stdlib bundle (no deps)
-  pymolt contract trace --target P --out F -- CMD...   run CMD with the watcher injected
-  pymolt contract capture --when W --mode M -- CMD...  run CMD, name it baseline/post-mig.
-  pymolt contract diff OLD NEW [--json]        fold two recordings into a BoundaryDiff
-  pymolt contract boundary                     interactive orchestrator (both ends + diff)
-  pymolt contract report DIR                   unified report (auto-sources the named slots)
 
 Capture/injection itself lives in ``pymolt.verify.service`` (so callers can drive the same
 mechanism) — this file is CLI rendering + interactive prompting only.
 """
 import json
-import os
-import shlex
-import tempfile
-from pathlib import Path
 
 import typer
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from pymolt.core.enums import Verdict
 from pymolt.interfaces.cli.output import (
     EXIT_FINDING,
     EXIT_INCONCLUSIVE,
@@ -34,33 +22,14 @@ from pymolt.interfaces.cli.output import (
     err,
     fail,
     next_step,
-    require_file,
     require_project_dir,
 )
 from pymolt.verify import service
-from pymolt.verify.cascade import _verdict_from_boundary
-from pymolt.verify.comparators import (
-    ComparatorError,
-    ComparatorProfile,
-    compare_traces,
-    load_custom_comparator,
-)
-from pymolt.verify.diff import build_boundary_diff
-from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.models import (
-    BoundaryDiff,
     CaptureMode,
     CaptureValidity,
     VerificationVerdict,
 )
-
-app = typer.Typer(help="Behavioral boundary tracing & diff (runs entirely outside the target).")
-
-_VERDICT_STYLE = {
-    Verdict.BEHAVIOR_STABLE: "bold green",
-    Verdict.BEHAVIOR_CHANGED: "bold red",
-    Verdict.NEEDS_ACTION: "bold yellow",
-}
 
 
 def _verification_exit(verdict: VerificationVerdict) -> int:
@@ -71,159 +40,7 @@ def _verification_exit(verdict: VerificationVerdict) -> int:
     }[verdict]
 
 
-# ── shared helpers ────────────────────────────────────────────────────────────
-def _trace_command(target: str, command: list[str], out_path: Path, backend: str,
-                   container: str | None = None, workdir: str | None = None,
-                   exclude: str = "", source: str = "", include_internal: bool = False,
-                   privacy: str = "shape", sample_rate: float = 1.0,
-                   impact_targets: list[str] | None = None,
-                   deployment_id: str | None = None,
-                   request_id: str | None = None,
-                   correlation_id: str | None = None) -> int:
-    """Render-and-run wrapper over ``service.capture_trace``: prints progress/result, returns
-    the number of events captured (the CLI commands below all key off this)."""
-    where = f"container [cyan]{container}[/cyan]" if container else "local"
-    scope = "internal+boundary" if include_internal else "boundary"
-    err.print(f"[dim]tracing[/dim] target=[cyan]{target}[/cyan] ({scope}) in {where} "
-              f"cmd=[white]{' '.join(command)}[/white]")
-    result = service.capture_trace(
-        target, command, out_path, backend, container=container, workdir=workdir,
-        exclude=exclude, source=source, include_internal=include_internal,
-        privacy=privacy, sample_rate=sample_rate,
-        impact_targets=impact_targets, deployment_id=deployment_id,
-        request_id=request_id, correlation_id=correlation_id,
-    )
-    err.print(f"[green]captured[/green] {result.events} events from "
-              f"{result.processes} process(es) -> {result.out_path}")
-    return result.events
-
-
-def render_boundary_diff(diff: BoundaryDiff, full: bool = False) -> None:
-    """Render a BoundaryDiff for humans (the formatting the core deliberately omits)."""
-    verdict = _verdict_from_boundary(diff)
-    counts = diff.counts()
-    console.print(Panel(
-        f"verdict: [{_VERDICT_STYLE[verdict]}]{verdict.value}[/]\n"
-        f"comparable behavior changed: "
-        f"{'[red]yes[/]' if not diff.is_clean() else '[green]no[/]'}\n"
-        f"disappeared={counts['disappeared']}  result_changed={counts['result_changed']}  "
-        f"raise_changed={counts['raise_changed']}  appeared={counts['appeared']}  "
-        f"[yellow]skipped_opaque={counts['skipped_opaque']}[/]",
-        title="Boundary diff", expand=False,
-    ))
-
-    def _cell(r, c):
-        if c == "where":
-            w = r.get("where")
-            return f"{os.path.basename(w['file'])}:{w['line']}" if isinstance(w, dict) else ""
-        return str(r.get(c, ""))
-
-    def _table(title, rows, cols, style):
-        if not rows:
-            return
-        shown = rows if full else rows[:15]
-        t = Table(title=f"{title} ({len(rows)})", header_style=style)
-        for c in cols:
-            t.add_column("call site" if c == "where" else c)
-        for r in shown:
-            t.add_row(*[_cell(r, c) for c in cols])
-        if not full and len(rows) > len(shown):
-            t.caption = f"… {len(rows) - len(shown)} more (use --full)"
-        console.print(t)
-
-    _table("BREAKING — disappeared", diff.disappeared, ["qualname", "where"], "red")
-    _table("BREAKING — result_changed", diff.result_changed,
-           ["qualname", "where", "old", "new"], "red")
-    _table("BREAKING — raise_changed", diff.raise_changed,
-           ["qualname", "where", "old_raised", "new_raised"], "red")
-    _table("NEEDS-ACTION — skipped_opaque", diff.skipped_opaque, ["qualname", "where", "reason"],
-           "yellow")
-    _table("INFO — appeared", diff.appeared, ["qualname", "where"], "cyan")
-
-
-# ── composable subcommands ────────────────────────────────────────────────────
-@app.command("export-watcher")
-def export_watcher_cmd(
-    dest: str = typer.Argument(..., help="Directory to write the standalone bundle into"),
-):
-    """Write the pure-stdlib watcher bundle to drop onto PYTHONPATH (no pymolt/pydantic needed)."""
-    out = export_watcher(dest)
-    console.print(Panel(
-        f"Bundle written to [cyan]{out}[/cyan]\n\n"
-        f"Use it anywhere (venv, Docker image, the 3.6 devcontainer):\n"
-        f"  [white]PYTHONPATH={out} PYMOLT_TRACE_TARGET=flask \\\n"
-        f"  PYMOLT_TRACE_OUT=/tmp/trace-{{pid}}.jsonl  <your command>[/white]\n\n"
-        f"Pure stdlib, Python 3.6+; the target app is never modified.",
-        title="export-watcher", expand=False, border_style="green",
-    ))
-
-
-@app.command("trace")
-def trace_cmd(
-    command: list[str] = typer.Argument(..., help="Command to run after --, e.g. -- python app.py"),
-    target: str = typer.Option(
-        "all", "--target", "-t",
-        help="Dependency to trace: 'all'/'*' (every installed dep), 'flask', or 'flask,werkzeug'"),
-    out: str = typer.Option(..., "--out", "-o", help="Output JSONL artifact path"),
-    backend: str = typer.Option(
-        "auto", "--backend", help="auto | setprofile | monitoring | wrap | hybrid"),
-    wrap: str = typer.Option(
-        "", "--wrap",
-        help="Targeted-wrap mode: comma-list of dependency symbols to wrap "
-             "(e.g. flask.jsonify,flask.views.MethodView,flask.app.Flask.add_url_rule). Implies "
-             "--backend wrap (low overhead). Add --backend hybrid to also run setprofile for "
-             "completeness (the C-remainder + dynamic usage)."),
-    impact_targets: str | None = typer.Option(
-        None, "--impact-targets",
-        help="Comma-separated affected API symbols; exact paths use low-overhead wrapping",
-    ),
-    exclude: str = typer.Option(
-        "", "--exclude", "-x", help="Comma-separated top-levels to skip (e.g. your own package)"),
-    source: str = typer.Option(
-        "", "--source", "-s",
-        help="YOUR code (near side, caller). Default: auto-detect. Records only 'source -> dep'"),
-    include_internal: bool = typer.Option(
-        False, "--include-internal",
-        help="Also record internal dependency<->dependency calls (full audit; default off)"),
-    container: str | None = typer.Option(
-        None, "--container", "-c",
-        help="Run CMD inside an ALREADY-RUNNING container (docker exec), not locally"),
-    workdir: str | None = typer.Option(
-        None, "--workdir", "-w", help="Working dir inside the container (default: image WORKDIR)"),
-    privacy: str = typer.Option(
-        "shape", "--privacy", help="shape (safe default) | values (exact, may contain sensitive data)"
-    ),
-    sample_rate: float = typer.Option(
-        1.0, "--sample-rate", min=0.000001, max=1.0,
-        help="Fraction of completed calls to retain",
-    ),
-    deployment_id: str | None = typer.Option(None, "--deployment-id"),
-    request_id: str | None = typer.Option(None, "--request-id"),
-    correlation_id: str | None = typer.Option(None, "--correlation-id"),
-):
-    """Run a command with the watcher injected externally; write a JSONL recording.
-
-    Records the boundary YOUR code -> dependency. By default --target (the dependency side, 'all')
-    is observed via sys.setprofile. With --wrap, only the listed symbols are wrapped (low,
-    targeted overhead — fit for prod). With --container the command runs via `docker exec` in a
-    running container (bundle copied in and removed; no `docker run`).
-    """
-    if privacy not in {"values", "shape"}:
-        fail(f"--privacy must be 'values' or 'shape' (got {privacy!r})")
-    if wrap:
-        target = wrap                       # wrap list goes through PYMOLT_TRACE_TARGET
-        backend = "hybrid" if backend == "hybrid" else "wrap"
-    parsed_impacts = (
-        [item.strip() for item in impact_targets.split(",") if item.strip()]
-        if impact_targets else None
-    )
-    _trace_command(target, command, Path(out), backend, container=container, workdir=workdir,
-                   exclude=exclude, source=source, include_internal=include_internal,
-                   privacy=privacy, sample_rate=sample_rate,
-                   impact_targets=parsed_impacts, deployment_id=deployment_id,
-                   request_id=request_id, correlation_id=correlation_id)
-
-
+# ── capture ───────────────────────────────────────────────────────────────────
 _CAPTURE_WHEN = {"baseline": "baseline", "post-migration": "post_migration"}
 _CAPTURE_MODE = {
     "tests": CaptureMode.TEST_SUITE,
@@ -232,83 +49,160 @@ _CAPTURE_MODE = {
 }
 
 
-@app.command("capture")
+def _emit_capture(slot, when: str, project_dir: str, *, agent: bool, invalid_code: int) -> None:
+    """--json prints the capture's slot, --agent the view; exits as the human path does."""
+    from pymolt.interfaces import views
+
+    if agent:
+        typer.echo(views.dumps(views.capture_view(
+            slot, when=when, state=service.load_contract_state(project_dir),
+            project_dir=project_dir)))
+    else:
+        typer.echo(json.dumps(slot.model_dump(mode="json"), indent=2))
+    if slot.validity is not CaptureValidity.VALID:
+        raise typer.Exit(code=invalid_code)
+
+
 def capture_cmd(
+    when: str = typer.Argument(..., help="baseline (before the migration) | post-migration"),
     command: list[str] = typer.Argument(
         None, help="Command to run after --, e.g. -- pytest tests/ (omit for --mode attach)"),
-    when: str = typer.Option(..., "--when", help="'baseline' (pre-migration) or 'post-migration'"),
     mode: str = typer.Option(
-        "command", "--mode", help="tests (run your suite) | command (run your app) | attach "
-                                   "(you run it yourself, pymolt just watches)"),
+        "command", "--mode", help="tests (your test suite) | command (your app) | attach "
+                                   "(you run the command; pymolt records)"),
     project_dir: str = typer.Option(
-        ".", "--project-dir", help="Project root (state lives in .pymolt/)"),
+        ".", "--project-dir", help="Project directory"),
     target: str = typer.Option(
-        "all", "--target", "-t", help="Dependency to trace (see `trace --help`)"),
+        "all", "--target", "-t",
+        help="Dependencies to record: all (default), or a list such as flask,werkzeug"),
     backend: str = typer.Option(
-        "auto", "--backend", help="auto | setprofile | monitoring | wrap | hybrid"),
-    exclude: str = typer.Option("", "--exclude", "-x", help="Comma-separated top-levels to skip"),
+        "auto", "--backend", help="Tracer: auto | setprofile | monitoring | wrap | hybrid"),
+    exclude: str = typer.Option(
+        "", "--exclude", "-x", help="Top-level packages not to record, comma-separated"),
     source: str = typer.Option(
-        "", "--source", "-s", help="YOUR code (near side). Default: auto-detect"),
+        "", "--source", "-s", help="Your code's top-level packages (default: detected)"),
     container: str | None = typer.Option(
         None, "--container", "-c",
-        help="Run CMD in a running container. Defaults to the configured env for "
-             "this slot (.pymolt/env_config.json) when omitted."),
+        help="Running container to run CMD in (default: the one setup configured)"),
     workdir: str | None = typer.Option(
-        None, "--workdir", "-w", help="Working dir inside the container"),
+        None, "--workdir", "-w", help="Working directory inside the container"),
     collect: bool = typer.Option(
-        False, "--collect", help="Finalize a --mode attach capture (reads whatever was written)"),
+        False, "--collect", help="Finish a --mode attach capture"),
     force: bool = typer.Option(
-        False, "--force", help="Overwrite an existing baseline/post-migration capture, no prompt"),
+        False, "--force", help="Replace an existing capture without asking"),
+    accept_failing: bool = typer.Option(
+        False, "--accept-failing",
+        help="Keep the capture even if CMD exits non-zero (failing tests), provided it "
+             "recorded calls; it is stamped RED. A run that recorded nothing is still refused"),
     privacy: str = typer.Option(
         "auto", "--privacy",
-        help="auto (values for tests, shape for live) | values | shape",
+        help="auto (values for tests, shape otherwise) | values | shape (types, no data)",
     ),
-    sample_rate: float = typer.Option(
-        1.0, "--sample-rate", min=0.000001, max=1.0,
-        help="Fraction of completed calls to retain (sampled reports stay inconclusive)",
+    sample_rate: float | None = typer.Option(
+        None, "--sample-rate", min=0.000001, max=1.0,
+        help="Fraction of calls whose values are kept. Every call is still counted. Default: "
+             "1.0 for tests; 0.1 for command/attach, with the first 32 calls of each call "
+             "site always kept",
     ),
     impact_targets: str | None = typer.Option(
         None, "--impact-targets",
-        help="Affected API symbols; post-migration defaults to the applied Axiom plan",
+        help="Dependency symbols to focus on (post-migration default: the applied plan's)",
     ),
-    deployment_id: str | None = typer.Option(None, "--deployment-id"),
-    request_id: str | None = typer.Option(None, "--request-id"),
-    correlation_id: str | None = typer.Option(None, "--correlation-id"),
+    stdlib: str | None = typer.Option(
+        None, "--stdlib",
+        help="Stdlib modules to trace (comma list), or 'none' to disable. Default: during a "
+             "Python move, every stdlib module your project imports; not applied when "
+             "--target names dependencies unless --stdlib is given too"),
+    deployment_id: str | None = typer.Option(
+        None, "--deployment-id", help="Deployment id to store with the capture (stage/canary)"),
+    request_id: str | None = typer.Option(
+        None, "--request-id", help="Request id to store with the capture"),
+    correlation_id: str | None = typer.Option(
+        None, "--correlation-id", help="Correlation id to store with the capture"),
+    replicate: bool = typer.Option(
+        False, "--replicate",
+        help="baseline only: run the baseline's own command again, on the same code in the "
+             "same environment (no command needed). What differs between the two runs is "
+             "run-to-run noise, which verify then tells apart from the migration"),
+    runs: int = typer.Option(
+        1, "--runs", min=1, max=2,
+        help="baseline only: 2 records the baseline and then its replicate (--replicate)"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the capture as JSON (asks nothing)"),
+    agent: bool = typer.Option(
+        False, "--agent", help="Print the compact agent view as JSON (what the MCP tool returns)"),
 ):
-    """Capture a dynamic trace and name it 'baseline' or 'post-migration' — the same watcher
-    injection `trace` uses, but persisted to .pymolt/contract_state.json so `report` (run with
-    no flags) can auto-diff baseline against post-migration without you tracking file paths.
+    """Record the calls your code makes into its dependencies while CMD runs.
 
-    Three ways to capture: --mode tests/command run CMD yourself here and block until it exits
-    (a test suite naturally exits on its own; for a long-running app, Ctrl+C ends it and whatever
-    was captured up to that point is kept). --mode attach instead prints a command for YOU to run
-    in your own terminal/devcontainer/server — call `capture --when W --mode attach --collect`
-    afterwards to finalize whatever it wrote.
+    `baseline` is recorded before the migration, `post-migration` after it;
+    `pymolt verify` compares the two. --mode tests and --mode command run CMD here
+    and wait for it to exit (Ctrl+C ends a long-running app and keeps what was
+    recorded). --mode attach prints a command to run yourself, for example in a
+    container or on a server; finish it with --mode attach --collect.
+    With --json or --agent it never asks: an existing capture needs --force.
+    `baseline --replicate` runs the baseline's command a second time (`--runs 2` records
+    both in one go): verify then measures run-to-run noise instead of guessing at it.
     """
-    require_project_dir(project_dir)
+    machine = json_output or agent
+    require_project_dir(project_dir, json_output=machine)
+    if agent:
+        from pathlib import Path
+
+        project_dir = str(Path(project_dir).resolve())
     when_key = _CAPTURE_WHEN.get(when)
     if when_key is None:
-        fail(f"--when must be 'baseline' or 'post-migration' (got {when!r})")
+        fail(f"capture what: 'baseline' or 'post-migration' (got {when!r})", json_output=machine)
+    if (replicate or runs > 1) and when_key != "baseline":
+        fail("a replicate measures the baseline's run-to-run noise: use "
+             "`pymolt capture baseline --replicate` (or `--runs 2`)", json_output=machine)
+    if runs > 1 and mode == "attach":
+        fail("--runs 2 runs the command twice; pymolt does not run an attach capture",
+             json_output=machine)
+    if runs > 1 and machine:
+        fail("--json/--agent print one capture: run `pymolt capture baseline ... --json`, then "
+             "`pymolt capture baseline --replicate --json`", json_output=True)
+    if replicate and runs > 1:
+        fail("--replicate re-runs an existing baseline; --runs 2 records a new baseline and "
+             "its replicate: pass one of them", json_output=machine)
+    if replicate:
+        _capture_replicate(project_dir, command, force=force, accept_failing=accept_failing,
+                           machine=machine, agent=agent)
+        return
     capture_mode = _CAPTURE_MODE.get(mode)
     if capture_mode is None:
-        fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})")
+        fail(f"--mode must be 'tests', 'command', or 'attach' (got {mode!r})",
+             json_output=machine)
     if privacy not in {"auto", "values", "shape"}:
-        fail(f"--privacy must be 'auto', 'values', or 'shape' (got {privacy!r})")
+        fail(f"--privacy must be 'auto', 'values', or 'shape' (got {privacy!r})",
+             json_output=machine)
     effective_privacy = (
         "values" if capture_mode is CaptureMode.TEST_SUITE else "shape"
     ) if privacy == "auto" else privacy
+    if service.environment_fingerprint(project_dir) is None:
+        # Without a config the capture records no environment, so nothing can later
+        # tell whether it still describes the project, and `apply` rejects it.
+        fail(
+            "pymolt is not configured for this project",
+            hint="Run `pymolt setup .` first. A capture records the environment it was "
+                 "taken in.",
+            json_output=machine,
+        )
 
     if collect:
         out_path = service.pending_attach_path(project_dir, when_key)
         if not out_path.is_file():
             fail(
                 f"no pending attach capture at {out_path}",
-                hint=f"Start one first: pymolt contract capture --when {when} --mode attach",
+                hint=f"Start one first: pymolt capture {when} --mode attach",
+                json_output=machine,
             )
         slot = service.finalize_attached_capture(
             project_dir, when_key, out_path, target=target,
             privacy=effective_privacy, sample_rate=sample_rate,
         )
+        if machine:
+            _emit_capture(slot, when, project_dir, agent=agent, invalid_code=EXIT_INCONCLUSIVE)
+            return
         if slot.validity is CaptureValidity.VALID:
             err.print(f"[green]collected[/green] {slot.events} events -> {slot.trace_path}")
             next_step(project_dir)
@@ -321,6 +215,12 @@ def capture_cmd(
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
 
     existing = getattr(service.load_contract_state(project_dir), when_key)
+    if existing is not None and not force and machine:
+        fail(
+            f"'{when}' already has a capture from {existing.captured_at}",
+            hint="Pass --force to replace it (the old one is archived, not deleted).",
+            json_output=True,
+        )
     if existing is not None and not force:
         # A baseline is a recording of a world that no longer exists once you
         # migrate — say what is being destroyed before destroying it.
@@ -337,23 +237,36 @@ def capture_cmd(
             project_dir, when_key, target=target, backend=backend,
             privacy=effective_privacy, sample_rate=sample_rate,
         )
+        collect_cmd = (
+            f"pymolt capture {when} --mode attach --collect --privacy {effective_privacy}"
+            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}"
+        )
+        if machine:
+            from pymolt.interfaces import views
+
+            view = views.capture_attach_view(instr, when=when, collect_command=collect_cmd)
+            typer.echo(views.dumps(view) if agent else json.dumps(view["data"], indent=2))
+            return
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
-            f"  [white]pymolt contract capture --when {when} --mode attach --collect "
-            f"--privacy {effective_privacy} --sample-rate {sample_rate}[/white]\n\n"
+            f"  [white]pymolt capture {when} --mode attach --collect "
+            f"--privacy {effective_privacy}"
+            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}[/white]\n\n"
             f"  [white]{instr.command_hint}[/white]",
             title="capture (attach)", expand=False, border_style="cyan",
         ))
         return
 
     if not command:
-        fail("provide a command after --, e.g. -- pytest tests/")
+        fail("provide a command after --, e.g. -- pytest tests/", json_output=machine)
     err.print(f"[dim]capturing[/dim] when=[cyan]{when}[/cyan] mode=[cyan]{mode}[/cyan] "
               f"cmd=[white]{' '.join(command)}[/white]")
     slot = service.capture_named_trace(
         project_dir, when_key, capture_mode, command=command, target=target, backend=backend,
         container=container, workdir=workdir, exclude=exclude, source=source,
         privacy=effective_privacy, sample_rate=sample_rate,
+        accept_failing=accept_failing,
+        stdlib=stdlib,
         impact_targets=(
             [item.strip() for item in impact_targets.split(",") if item.strip()]
             if impact_targets else None
@@ -362,11 +275,20 @@ def capture_cmd(
         request_id=request_id,
         correlation_id=correlation_id,
     )
+    if machine:
+        _emit_capture(slot, when, project_dir, agent=agent, invalid_code=(
+            EXIT_FINDING if slot.validity is CaptureValidity.COMMAND_FAILED
+            else EXIT_INCONCLUSIVE))
+        return
     if slot.validity is not CaptureValidity.VALID:
+        from pymolt.interfaces import views
+
         err.print(
             f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
             f"{slot.validity_reason or slot.validity.value}\n"
-            f"diagnostic artifact: {slot.trace_path}"
+            f"diagnostic artifact: {slot.trace_path}\n"
+            + escape(views.capture_refusal_hint(
+                slot, service.static_contact_count(project_dir) if slot.events == 0 else None))
         )
         code = (
             EXIT_FINDING
@@ -375,146 +297,231 @@ def capture_cmd(
         )
         raise typer.Exit(code=code)
     err.print(f"[green]captured[/green] {slot.events} events -> {slot.trace_path}")
+    if slot.red:
+        failed = slot.red.get("failed")
+        err.print(
+            f"[bold red]RED[/bold red] the command exited {slot.red.get('returncode')} "
+            f"({failed if failed is not None else 'some'} test(s) failed); kept because of "
+            "--accept-failing. The calls from failing tests are compared as usual."
+        )
     if slot.duration_seconds is not None:
         err.print(
             f"[dim]duration={slot.duration_seconds:.3f}s  "
             f"dropped={slot.dropped_events if slot.dropped_events is not None else 'unknown'}  "
             f"backend={slot.backend or backend}[/dim]"
         )
+    for failure in getattr(slot, "activation_failures", []) or []:
+        err.print(
+            "[yellow]warning[/yellow] the watcher failed to activate in pid "
+            f"{failure.get('pid')} (python {failure.get('python')}): "
+            f"{escape(str(failure.get('error')))} — that process ran UNTRACED, "
+            "so this capture cannot support a PASS"
+        )
     if slot.archived_previous:
         err.print(f"[dim]previous {when} recording kept at {slot.archived_previous}[/dim]")
+    if runs > 1:
+        _capture_replicate(project_dir, None, force=True, accept_failing=accept_failing,
+                           machine=False, agent=False)
+        return
     next_step(project_dir)
 
 
-@app.command("diff")
-def diff_cmd(
-    old: str = typer.Argument(..., help="OLD recording (JSON or JSONL)"),
-    new: str = typer.Argument(..., help="NEW recording (JSON or JSONL)"),
-    contract: bool = typer.Option(
-        False, "--contract", "-C",
-        help="Compare by interaction SHAPE (type/structure), ignoring concrete data values"),
-    profile: str = typer.Option(
-        "exact", "--profile", help="Comparator: exact | shape | custom"
-    ),
-    comparator: str | None = typer.Option(
-        None, "--comparator", help="Custom comparator as module:callable"
-    ),
-    as_json: bool = typer.Option(False, "--json", help="Emit the BoundaryDiff as JSON"),
-    full: bool = typer.Option(False, "--full", help="Show all entries, not just the first 15"),
-):
-    """Fold two boundary recordings into a BoundaryDiff and report it.
-
-    Default compares concrete values; ``--contract`` compares only the interaction shape
-    (returned-vs-raised, result type/structure) — robust to volatile data (paths, timestamps).
-    """
-    # A missing recording used to fold into an empty diff and report "no behavior
-    # change" — a false all-clear, the one answer this command must never invent.
-    require_file(old, what="OLD recording", json_output=as_json)
-    require_file(new, what="NEW recording", json_output=as_json)
-
-    if contract:
-        if profile != "exact":
-            fail("--contract cannot be combined with --profile", json_output=as_json)
-        profile = "shape"
+def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bool,
+                       accept_failing: bool, machine: bool, agent: bool) -> None:
+    """``pymolt capture baseline --replicate``: the baseline's command again, into its own
+    slot (see ``service.capture_baseline_replicate`` for what is refused)."""
+    existing = service.load_contract_state(project_dir).baseline_replicate
+    if existing is not None and not force:
+        if machine:
+            fail(f"the baseline already has a replicate from {existing.captured_at}",
+                 hint="Pass --force to replace it (the old one is archived, not deleted).",
+                 json_output=True)
+        if not typer.confirm(f"the baseline already has a replicate from "
+                             f"{existing.captured_at}. Replace it?"):
+            raise typer.Exit(code=EXIT_FINDING)
+    err.print("[dim]capturing[/dim] a replicate of the baseline (its own command, code and "
+              "environment)")
     try:
-        selected = ComparatorProfile(profile)
-        if selected is ComparatorProfile.CUSTOM:
-            if comparator is None:
-                raise ComparatorError("--profile custom requires --comparator module:callable")
-            load_custom_comparator(comparator)
-        diff = compare_traces(old, new, profile=selected, custom=comparator)
-    except ComparatorError as exc:
-        fail(str(exc), json_output=as_json)
-    if as_json:
-        console.print_json(diff.model_dump_json())
-    else:
-        render_boundary_diff(diff, full=full)
-    raise typer.Exit(code=_verification_exit(diff.verdict))
-
-
-# ── interactive orchestrator ──────────────────────────────────────────────────
-def _obtain_recording(side, target, work, backend, exclude, source):
-    """Interactively get one side's recording: an existing artifact, or a command to trace
-    (locally or inside an already-running container — old/new can even be different containers)."""
-    mode = typer.prompt(
-        f"[{side}] (p)ath to an existing recording or (c)ommand to run",
-        default="c",
-    ).strip().lower()
-    if mode.startswith("p"):
-        return Path(typer.prompt(f"[{side}] path to recording"))
-    cmd = shlex.split(typer.prompt(f"[{side}] command to run (e.g. /venv/bin/python app.py)"))
-    container = typer.prompt(f"[{side}] container id/name (blank = local)", default="").strip()
-    workdir = None
-    if container:
-        workdir = typer.prompt(f"[{side}] workdir in container (blank = image default)",
-                               default="").strip() or None
-    out = work / f"{side}.jsonl"
-    _trace_command(target, cmd, out, backend, container=container or None,
-                   workdir=workdir, exclude=exclude, source=source)
-    return out
-
-
-@app.command("boundary")
-def boundary_cmd(
-    backend: str = typer.Option("auto", "--backend", help="auto | setprofile | monitoring"),
-    full: bool = typer.Option(False, "--full", help="Show all diff entries"),
-):
-    """Interactive: capture (or load) both versions and show the boundary diff in one flow."""
-    console.print(Panel(
-        "Captures the dependency boundary under two versions and diffs them.\n"
-        "Each side is either an existing recording or a command this runs with the watcher "
-        "injected externally (zero edits to the target).",
-        title="verify boundary", expand=False,
-    ))
-    target = typer.prompt("Dependency side ('all'/'*' or 'flask')", default="all")
-    source = typer.prompt("Your code (caller) — blank = auto-detect", default="").strip()
-    exclude = typer.prompt("Top-levels to exclude (blank = none)", default="").strip()
-    work = Path(tempfile.mkdtemp(prefix="pymolt-boundary-"))
-    old = _obtain_recording("old", target, work, backend, exclude, source)
-    new = _obtain_recording("new", target, work, backend, exclude, source)
-    console.print()
-    diff = build_boundary_diff(str(old), str(new))
-    render_boundary_diff(diff, full=full)
-    raise typer.Exit(code=_verification_exit(diff.verdict))
-
-
-
-@app.command("map")
-def map_cmd(
-    project_dir: str = typer.Argument(".", help="The project directory to analyze"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the contact map as JSON"),
-):
-    """Static contact map: where our code calls into third-party dependencies (cheap, no runtime)."""
-    from pymolt.verify.contact_map import build_contact_map
-
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    cmap = build_contact_map(project_path)
-    if json_output:
-        typer.echo(json.dumps(cmap.model_dump(mode="json"), indent=2))
+        slot = service.capture_baseline_replicate(
+            project_dir, accept_failing=accept_failing, command=command or None)
+    except ValueError as exc:
+        fail(f"cannot replicate the baseline: {exc}", json_output=machine)
+    if machine:
+        _emit_capture(slot, "baseline-replicate", project_dir, agent=agent,
+                      invalid_code=EXIT_INCONCLUSIVE)
         return
-
-    total = len(cmap.contacts)
-    console.print(Panel(
-        f"Scanned [bold]{cmap.files_scanned}[/bold] file(s) — "
-        f"[bold]{total}[/bold] call site(s) reaching [bold]{sum(len(t) for t in cmap.by_dep.values())}[/bold] symbol(s) across [bold]{len(cmap.by_dep)}[/bold] dependencies",
-        title="Static Contact Map", expand=False,
-    ))
-    for dep, targets in cmap.by_dep.items():
-        console.print(f"\n[bold magenta]{dep}[/bold magenta] — {len(targets)} symbol(s)")
-        table = Table(show_header=True)
-        table.add_column("Dependency symbol", style="cyan")
-        table.add_column("Called from (your code)")
-        table.add_column("File", style="dim")
-        for c in cmap.contacts:
-            if c.dep == dep:
-                table.add_row(c.target, c.caller, c.file or "—")
-        console.print(table)
-    for note in cmap.notes:
-        console.print(f"[dim]Note: {note}[/dim]")
+    if slot.validity is not CaptureValidity.VALID:
+        err.print(f"[bold yellow]replicate not accepted[/bold yellow]: "
+                  f"{slot.validity_reason or slot.validity.value}\n"
+                  f"diagnostic artifact: {slot.trace_path}")
+        raise typer.Exit(code=EXIT_INCONCLUSIVE)
+    err.print(f"[green]captured[/green] baseline replicate: {slot.events} events -> "
+              f"{slot.trace_path}")
+    if slot.archived_previous:
+        err.print(f"[dim]previous replicate kept at {slot.archived_previous}[/dim]")
+    next_step(project_dir)
 
 
-def _render_contract_report(rep) -> None:
-    trust_pct = round(rep.trust * 100)
+_BLIND_WHY = {
+    "not-run": "not run",
+    "ran-not-recorded": "[bold]ran, not recorded[/bold]",
+    "unobservable": "[dim]unobservable[/dim]",
+}
+
+_IDENTITY_TIER_LABELS = {
+    "exact": "exact-join",
+    "canonical": "canonical",
+}
+
+
+_FACT_LABEL = {
+    "changed": "[bold red]CHANGED[/bold red]",
+    "disappeared": "[bold red]DISAPPEARED[/bold red]",
+    "appeared": "[bold red]APPEARED[/bold red]",
+    "rewritten": "[cyan]REWRITTEN[/cyan]",
+    "uncomparable": "[yellow]UNCOMPARABLE[/yellow]",
+    "drift": "[dim]DRIFT[/dim]",
+    "equal": "[green]equal[/green]",
+}
+
+
+def _fmt_outcomes(outcomes: list[dict] | None, limit: int = 70) -> str:
+    """``[{kind, value, count}]`` -> ``returns {...}`` / ``raises TypeError`` (compact)."""
+    if not outcomes:
+        return "—"
+    parts = []
+    for outcome in outcomes:
+        if outcome.get("kind") == "raise":
+            text = f"raises {outcome.get('value') or '?'}"
+        else:
+            value = json.dumps(outcome.get("value"), sort_keys=True, default=str)
+            text = "returns " + (value if len(value) <= limit else value[: limit - 1] + "…")
+        if outcome.get("count", 1) > 1 and len(outcomes) > 1:
+            text += f" ×{outcome['count']}"
+        parts.append(text)
+    return " | ".join(parts)
+
+
+def _fmt_site(site: dict | None) -> str:
+    if not site:
+        return "—"
+    where = f"{site.get('file', '?')}:{site.get('line', '?')}"
+    return f"{where} {site.get('func')}()" if site.get("func") else where
+
+
+_MAX_ENTRY_ROWS = 50  # raw entry lines a table prints at most (the JSON has them all)
+
+
+def _render_fact_summary(fact_diff: dict | None, *, verbose: bool = False) -> None:
+    """Findings, not entries: the verdict with its reasons, failing findings, review items by
+    reason with the action that settles each; ``verbose`` adds what was explained away. An
+    older report without a summary falls back to the entry table."""
+    if not fact_diff:
+        return
+    summary = fact_diff.get("summary")
+    if not summary:
+        _render_fact_changes(fact_diff)
+        return
+    from pymolt.verify.fact_report import render_text
+
+    for line in render_text(summary, explained=verbose, max_lines=_MAX_ENTRY_ROWS):
+        style = ("bold red" if line.lstrip().startswith("✗") else
+                 "yellow" if line.startswith("Review") else
+                 "dim" if line.startswith(("Quality", "      ")) else None)
+        console.print(f"[{style}]{escape(line)}[/{style}]" if style else escape(line))
+
+
+def _render_fact_changes(fact_diff: dict | None,
+                         title: str = "Behaviour diff — call facts that are not equal") -> None:
+    """Non-equal call facts (at most 50 rows): what was called, where, and old -> new."""
+    if not fact_diff:
+        return
+    entries = [e for e in fact_diff.get("entries", []) if e.get("category") != "equal"]
+    if not entries:
+        return
+    total = len(entries)
+    order = list(_FACT_LABEL)
+    entries.sort(key=lambda e: (not e.get("fails"), order.index(e.get("category", "equal"))
+                                if e.get("category") in order else len(order)))
+    entries = entries[:_MAX_ENTRY_ROWS]
+    shown = f"{len(entries)} of {total}" if total > len(entries) else str(total)
+    t = Table(title=f"{title} ({shown})", header_style="bold")
+    t.add_column("Change", no_wrap=True)
+    t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
+    t.add_column("Call site (your code)", overflow="fold", ratio=2)
+    t.add_column("Before → after", overflow="fold", ratio=3)
+    for e in entries:
+        symbol = e.get("symbol", "?")
+        if e.get("new_symbol"):
+            symbol = f"{symbol} → {e['new_symbol']}"
+        site = escape(_fmt_site(e.get("old_site") or e.get("new_site")))
+        old_text = (e.get("old_site") or {}).get("text")
+        new_text = (e.get("new_site") or {}).get("text")
+        if e.get("category") == "rewritten" and old_text and new_text and old_text != new_text:
+            site += f"\n[dim]{escape(old_text)}\n→ {escape(new_text)}[/dim]"
+        if e.get("category") == "drift":
+            change = escape(f"defaults {e.get('old_defaulted') or []} → "
+                            f"{e.get('new_defaulted') or []}")
+        else:
+            change = escape(f"{_fmt_outcomes(e.get('old'))}\n→ {_fmt_outcomes(e.get('new'))}")
+            if e.get("level") == "type":
+                change += "  [dim](compared by type)[/dim]"
+        t.add_row(_FACT_LABEL.get(e.get("category"), e.get("category", "?")),
+                  escape(symbol), site, change)
+    t.caption = ("REWRITTEN: the call site's code changed between captures; DRIFT: the "
+                 "library's defaults changed (reported, not failing)")
+    console.print(t)
+
+
+_CALIBRATION_LABEL = {
+    "hit": "[bold red]hit[/bold red]",
+    "prevented": "[green]prevented by the plan[/green]",
+    "miss": "[green]miss[/green]",
+    "not_exercised": "[dim]not exercised[/dim]",
+}
+
+
+def _render_calibration(cal) -> None:
+    """Predicted vs observed: each predicted risk against the fact diff, then the failing
+    changes no prediction covered."""
+    if cal is None:
+        return
+    source = ("the plan's predictions" if cal.source == "plan"
+              else "predictions from the baseline's runtime warnings")
+    if cal.risks:
+        prevented = f"{cal.prevented} prevented by the plan, " if cal.prevented else ""
+        t = Table(title=f"Calibration — {source}: {cal.hit} hit, {prevented}{cal.miss} miss, "
+                        f"{cal.not_exercised} not exercised", header_style="bold")
+        t.add_column("Prediction", no_wrap=True)
+        t.add_column("Result", no_wrap=True)
+        t.add_column("Dependency call", style="cyan", overflow="fold", ratio=2)
+        t.add_column("Call site (your code)", overflow="fold", ratio=2)
+        t.add_column("Observed", overflow="fold", ratio=2)
+        for risk in cal.risks:
+            observed = ", ".join(f"{o.category} {o.symbol.rsplit('.', 1)[-1]}"
+                                 for o in risk.observed) or (risk.note or "—")
+            if risk.fixed_by_plan:
+                observed += " [dim](fixed by the plan)[/dim]"
+            t.add_row(risk.tier.value, _CALIBRATION_LABEL.get(risk.result.value,
+                                                              risk.result.value),
+                      escape(risk.symbol), escape(risk.site.label()), observed)
+        console.print(t)
+    else:
+        console.print(f"[dim]Calibration: {source} named no risk.[/dim]")
+    if cal.unpredicted:
+        console.print(f"[bold yellow]{len(cal.unpredicted)} observed change(s) no prediction "
+                      "covered:[/bold yellow]")
+        for item in cal.unpredicted[:20]:
+            console.print(f"  {item.category} {escape(item.symbol)} at "
+                          f"{escape(item.site.label())}")
+    for note in cal.notes:
+        console.print(f"[dim]  note: {escape(note)}[/dim]")
+
+
+
+def _render_contract_report(rep, *, verbose: bool = False) -> None:
+    from pymolt.interfaces.views import coverage_lines, impact_focus
+
     border = {
         VerificationVerdict.PASS: "green",
         VerificationVerdict.FAIL: "red",
@@ -524,10 +531,12 @@ def _render_contract_report(rep) -> None:
         # Above the report, not inside it: every number below describes the old
         # world, and that has to be read first or not at all.
         console.print(Panel(
-            "[bold yellow]The evidence below predates the project's current state.[/bold yellow]\n"
-            "A capture was taken against a different manifest/environment, so this verdict "
-            "describes the world as it was then — not the code you have now.\n"
-            "[dim]Re-capture (pymolt contract capture) to judge the current code.[/dim]",
+            "[bold yellow]The evidence below does not describe the world it stands "
+            "for.[/bold yellow]\n"
+            "A capture was taken against a different manifest/environment than the one it "
+            "must describe — the project on disk now, or, for the baseline of a before/after "
+            "diff, the one the migration started from. The notes below say which.\n"
+            "[dim]Re-capture (pymolt capture) to judge the current code.[/dim]",
             title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
         ))
         border = "yellow"
@@ -536,12 +545,26 @@ def _render_contract_report(rep) -> None:
         f"[green]confirmed: {rep.confirmed}[/green]   "
         f"[yellow]BLIND: {rep.blind}[/yellow]   "
         f"[red]dynamic-only: {rep.dynamic_only}[/red]\n"
-        f"Contract trust (dynamic coverage of the static map): [bold]{trust_pct}%[/bold]"
+        + "\n".join(escape(line) for line in coverage_lines(rep))
     )
-    if rep.impact_filter_active:
+    if rep.identity_tiers:
+        # How the static symbols were joined to the runtime names, from the old exact-string
+        # rule to canonical identity: a jump in confirmed is auditable.
+        tiers = " → ".join(
+            f"{_IDENTITY_TIER_LABELS.get(t.name, t.name)} {round(t.share * 100)}% "
+            f"({t.confirmed}/{t.static})"
+            for t in rep.identity_tiers
+        )
+        head += f"\n[dim]Symbol matching: {tiers}[/dim]"
+
+    focus = impact_focus(rep)
+    if focus is not None:
         head += (
-            f"\nImpact focus: [bold]{len(rep.impact_paths)}[/bold] changed API path(s); "
-            f"full surface: {rep.all_static_targets} static / {rep.all_blind} blind"
+            f"\nImpact focus: [bold]{focus['paths']}[/bold] changed API path(s); on them "
+            f"{focus['static_targets']} static, {focus['confirmed']} confirmed, "
+            f"{focus['blind']} BLIND, {focus['dynamic_only']} dynamic-only"
+            + (f"; coverage {focus['coverage_pct']}%" if focus.get("coverage_pct") is not None
+               else "")
         )
     if rep.probed:
         head += (f"\nSandbox-probed: [bold]{rep.probed}[/bold] symbol(s) re-invoked under target — "
@@ -555,19 +578,40 @@ def _render_contract_report(rep) -> None:
             verdict = "[bold yellow]? inconclusive[/bold yellow]"
         # Spell the counts out: `{'disappeared': 235, 'result_changed': 0, …}` was a
         # raw dict repr leaking into an otherwise composed report.
+        fact_counts = (rep.fact_diff or {}).get("counts")
+        source = fact_counts if fact_counts else rep.diff
         parts = [f"{name.replace('_', ' ')} {count}"
-                 for name, count in rep.diff.items() if count]
+                 for name, count in source.items() if count]
         detail = ", ".join(parts) if parts else "nothing moved"
         head += f"\nVersion diff: {verdict}  [dim]({detail})[/dim]"
+        whole = rep.all_fact_diff or rep.fact_diff or {}
+        if (whole.get("edited_sites") or {}).get("sites") and whole.get("edited_summary"):
+            head += f"\n{escape(whole['edited_summary'])}"
     head = f"VERDICT: [bold {border}]{rep.verdict.value.upper()}[/bold {border}]\n" + head
     if rep.verdict_reasons:
         head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
+    _render_fact_summary(rep.all_fact_diff or rep.fact_diff, verbose=verbose)
+    if rep.unpredicted_changes:
+        _render_fact_changes(
+            {"entries": rep.unpredicted_changes},
+            title="Behaviour changes outside the plan's predicted impacts")
+    _render_calibration(getattr(rep, "calibration", None))
 
-    visible_symbols = rep.impacted_symbols if rep.impact_filter_active else rep.symbols
+    # Every symbol counts toward the verdict; after `apply` the plan's paths are listed first.
+    visible_symbols = (sorted(rep.symbols, key=lambda s: not s.impacted)
+                       if rep.impact_filter_active else rep.symbols)
+
+    def _count(rows) -> str:
+        if not rep.impact_filter_active:
+            return str(len(rows))
+        on_plan = sum(1 for s in rows if s.impacted)
+        first = ", listed first" if 0 < on_plan < len(rows) else ""
+        return f"{len(rows)}; {on_plan} on the plan's paths{first}"
+
     probed = [s for s in visible_symbols if s.probed]
     if probed:
-        t = Table(title=f"Sandbox probes (re-invoked under target version) ({len(probed)})")
+        t = Table(title=f"Sandbox probes (re-invoked under target version) ({_count(probed)})")
         t.add_column("Dependency symbol", style="cyan")
         t.add_column("Probe verdict")
         _pv = {"stable": "[green]stable[/green]", "changed": "[bold red]CHANGED[/bold red]",
@@ -582,19 +626,21 @@ def _render_contract_report(rep) -> None:
         # grep, or paste into --wrap. Truncating it to `apispec.ext.marshmallo…`
         # left a table that could only be looked at, never used. It folds now, and
         # the supporting columns give up their width first.
-        t = Table(title=f"BLIND — static contacts no trace exercised ({len(blind)})",
+        t = Table(title=f"BLIND — static contacts no trace exercised ({_count(blind)})",
                   header_style="yellow")
         t.add_column("Dependency symbol", style="cyan", overflow="fold", ratio=2)
+        t.add_column("Why", overflow="fold", ratio=1)
         t.add_column("Called from (your code)", overflow="fold", ratio=2)
         t.add_column("File", style="dim", overflow="fold", ratio=1)
         for s in blind:
-            t.add_row(s.target, ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
+            t.add_row(s.target, _BLIND_WHY.get(s.blind_reason or "", "—"),
+                      ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
         t.caption = "candidates for the sandbox (probe in isolation under old vs new)"
         console.print(t)
 
     dyn = [s for s in visible_symbols if s.status == "dynamic-only"]
     if dyn:
-        t = Table(title=f"DYNAMIC-ONLY — observed but the static map missed ({len(dyn)})",
+        t = Table(title=f"DYNAMIC-ONLY — observed but the static map missed ({_count(dyn)})",
                   header_style="red")
         t.add_column("Dependency symbol", style="cyan", overflow="fold", ratio=2)
         t.add_column("Observed at", style="dim", overflow="fold", ratio=1)
@@ -605,53 +651,3 @@ def _render_contract_report(rep) -> None:
 
     for note in rep.notes:
         console.print(f"[dim]Note: {note}[/dim]")
-
-
-@app.command("report")
-def report_cmd(
-    project_dir: str = typer.Argument(".", help="Project root to analyze"),
-    trace: str = typer.Option(None, "--trace", help="Observed trace JSONL (the dynamic numerator)"),
-    against: str = typer.Option(None, "--against", help="Older trace to diff the --trace against (version diff)"),
-    probe_python: str = typer.Option(None, "--probe-python", help="Target venv interpreter: sandbox-probe captured contacts under it"),
-    profile: str = typer.Option(
-        "exact", "--profile", help="Comparator: exact | shape | custom"
-    ),
-    comparator: str | None = typer.Option(
-        None, "--comparator", help="Custom comparator as module:callable"
-    ),
-    json_output: bool = typer.Option(False, "--json", help="Emit the report as JSON"),
-):
-    """Unified contract report: static map × dynamic trace → confirmed / BLIND / dynamic-only
-    (+ sandbox probe, version diff).
-
-    When --trace is omitted, auto-sources from .pymolt/contract_state.json (baseline/
-    post-migration captured via `capture`) — explicit --trace/--against always override.
-    """
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    if trace:
-        require_file(trace, what="--trace recording", json_output=json_output)
-    if against:
-        require_file(against, what="--against recording", json_output=json_output)
-
-    try:
-        selected = ComparatorProfile(profile)
-        if selected is ComparatorProfile.CUSTOM:
-            if comparator is None:
-                raise ComparatorError("--profile custom requires --comparator module:callable")
-            load_custom_comparator(comparator)
-        rep = service.build_contract_report_from_state(
-            project_path,
-            trace_override=trace,
-            against_override=against,
-            probe_python=probe_python,
-            comparator_profile=selected.value,
-            custom_comparator=comparator,
-        )
-    except (ComparatorError, ValueError) as exc:
-        fail(str(exc), json_output=json_output)
-    if json_output:
-        typer.echo(json.dumps(rep.model_dump(mode="json"), indent=2))
-        raise typer.Exit(code=_verification_exit(rep.verdict))
-    _render_contract_report(rep)
-    next_step(project_path)
-    raise typer.Exit(code=_verification_exit(rep.verdict))

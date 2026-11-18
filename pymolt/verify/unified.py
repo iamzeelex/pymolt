@@ -43,6 +43,10 @@ class UnifiedVerificationReport(BaseModel):
     shadow: ShadowReport | None = None
     rollback: AutoRollbackDecision | None = None
     rollback_executed: bool = False
+    # Each step's judgement (``workorder.judge``): step id -> {status, epoch, entries, failing,
+    # review, unexercised, risks}; ``steps_run``: the run they are for.
+    steps: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    steps_run: str | None = None
 
     def save(self, project_dir: str | Path) -> Path:
         path = Path(project_dir) / VERIFICATION_PATH
@@ -138,6 +142,9 @@ def build_unified_verification(
             "static_targets": contract.static_targets,
             "confirmed": contract.confirmed,
             "blind": contract.blind,
+            "coverage": contract.coverage,
+            "recall": contract.recall,
+            "coverage_granularity": contract.coverage_granularity,
             "diff": contract.diff,
             "impact_filter_active": contract.impact_filter_active,
         },
@@ -166,6 +173,7 @@ def build_unified_verification(
         if item.verdict is not VerificationVerdict.PASS
         for reason in (item.reasons or [item.verdict.value])
     ]
+    steps_run, steps = _judge_steps(contract)
     return UnifiedVerificationReport(
         run_id=run_id,
         comparator_profile=comparator_profile,
@@ -177,4 +185,20 @@ def build_unified_verification(
         canary=canary,
         shadow=shadow,
         rollback=rollback,
+        steps=steps,
+        steps_run=steps_run,
     )
+
+
+def _judge_steps(contract: ContractReport) -> tuple[str | None, dict]:
+    """Each plan step's judgement on this comparison (``workorder.judge``); none when the
+    report did not compare the two captures, or the judging failed (noted)."""
+    if getattr(contract, "_fact_diff", None) is None:
+        return None, {}
+    try:
+        from pymolt.workorder.judge import judge_steps
+
+        return judge_steps(contract.root, contract, contract.calibration)
+    except Exception as exc:  # noqa: BLE001 - the verdict stands without step judgements
+        contract.notes.append(f"steps not judged ({type(exc).__name__}: {exc})")
+        return None, {}

@@ -1,9 +1,13 @@
 """Local pymolt configuration and offline cache manager.
 
 Manages:
-1. API token (``PYMOLT_API_TOKEN`` / stored ``config.json`` with 0600 permissions).
-2. Axiom Cloud Hub / On-Prem endpoint (``PYMOLT_AXIOM_ENDPOINT`` / stored ``config.json`` / default ``https://hub.pymolt.dev``).
-3. Local offline delta cache (``$XDG_CACHE_HOME/pymolt/deltas/``) for instant zero-latency repeat runs.
+1. API token (``PYMOLT_API_TOKEN`` / stored ``config.json`` with 0600 permissions), sent
+   only to an explicitly configured Axiom endpoint.
+2. The remote Axiom endpoint: ``--endpoint`` / ``PYMOLT_AXIOM_ENDPOINT`` only. "No
+   endpoint" is the default state; API changes are then computed locally
+   (``pymolt.delta``). There is no hub default, and an endpoint stored in
+   ``config.json`` by older releases is reported but no longer used.
+3. Local cache of remote Axiom bundles (``$XDG_CACHE_HOME/pymolt/deltas/``).
 """
 
 from __future__ import annotations
@@ -19,7 +23,6 @@ log = logging.getLogger(__name__)
 
 ENV_TOKEN = "PYMOLT_API_TOKEN"
 ENV_ENDPOINT = "PYMOLT_AXIOM_ENDPOINT"
-DEFAULT_ENDPOINT = "https://hub.pymolt.dev"
 
 _TOKEN_KEY = "api_token"
 _ENDPOINT_KEY = "endpoint"
@@ -91,44 +94,28 @@ def load_token() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Endpoint management
+# Endpoint resolution
 # ---------------------------------------------------------------------------
 
-def save_endpoint(endpoint: str) -> Path:
-    """Persist custom Axiom Cloud Hub / On-Prem endpoint URL."""
-    clean_url = endpoint.strip().rstrip("/")
-    data = _read()
-    data[_ENDPOINT_KEY] = clean_url
-    return _write(data)
-
-
-def clear_endpoint() -> bool:
-    """Reset endpoint to default. Returns True if custom endpoint was present."""
-    data = _read()
-    if _ENDPOINT_KEY not in data:
-        return False
-    del data[_ENDPOINT_KEY]
-    _write(data)
-    return True
-
-
-def load_endpoint(override: str | None = None) -> str:
+def load_endpoint(override: str | None = None) -> str | None:
     """
-    Resolve Axiom Hub endpoint URL:
-    1. Explicit override argument (e.g. from CLI flag --endpoint)
-    2. ``PYMOLT_AXIOM_ENDPOINT`` environment variable
-    3. Stored ``endpoint`` in user config
-    4. Default ``DEFAULT_ENDPOINT`` (https://hub.pymolt.dev)
+    The explicitly configured remote Axiom endpoint, or ``None`` (the default):
+    1. explicit override argument (the ``--endpoint`` flag);
+    2. ``PYMOLT_AXIOM_ENDPOINT`` environment variable.
+    ``None`` means pymolt computes API changes locally and contacts no service.
     """
     if override and override.strip():
         return override.strip().rstrip("/")
     env_val = os.environ.get(ENV_ENDPOINT)
     if env_val and env_val.strip():
         return env_val.strip().rstrip("/")
-    stored_val = _read().get(_ENDPOINT_KEY)
-    if stored_val and str(stored_val).strip():
-        return str(stored_val).strip().rstrip("/")
-    return DEFAULT_ENDPOINT
+    return None
+
+
+def stored_endpoint() -> str | None:
+    """An endpoint an older release saved in config.json (ignored; reported only)."""
+    value = _read().get(_ENDPOINT_KEY)
+    return str(value).strip().rstrip("/") if value and str(value).strip() else None
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +198,11 @@ def config_show() -> dict[str, Any]:
     """Summary of current config and cache state."""
     tok = load_token()
     masked_tok = f"{tok[:6]}...{tok[-4:]}" if tok and len(tok) > 10 else ("Set" if tok else "None")
+    endpoint = load_endpoint()
     return {
-        "endpoint": load_endpoint(),
-        "is_default_endpoint": load_endpoint() == DEFAULT_ENDPOINT,
+        "endpoint": endpoint,
+        "remote": endpoint is not None,
+        "stored_endpoint_ignored": stored_endpoint(),
         "token_configured": bool(tok),
         "token_preview": masked_tok,
         "config_file": str(config_path()),

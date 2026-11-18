@@ -45,15 +45,15 @@ def test_static_only_report_is_all_blind():
     assert rep.static_targets >= 40
     assert rep.confirmed == 0                 # no trace given -> nothing confirmed
     assert rep.blind == rep.static_targets
-    assert rep.trust == 0.0
+    assert rep.coverage == 0.0 and rep.recall is None
 
 
 def test_fold_invariants_over_local_capture():
-    """When a named capture exists (pymolt contract capture), fold it and hold
+    """When a named capture exists (pymolt capture), fold it and hold
     the report's arithmetic to its own definitions."""
     trace = _FLASGGER / ".pymolt" / "contract_traces" / "baseline.jsonl"
     if not trace.is_file():
-        pytest.skip("no local capture present (pymolt contract capture --when baseline …)")
+        pytest.skip("no local capture present (pymolt capture baseline …)")
 
     from pymolt.verify.report import build_contract_report
 
@@ -62,6 +62,14 @@ def test_fold_invariants_over_local_capture():
     # confirmed / BLIND partition the static denominator; dynamic-only sits outside it.
     assert rep.confirmed + rep.blind == rep.static_targets
     assert rep.dynamic_only >= 0
-    assert 0.0 <= rep.trust <= 1.0
-    if rep.static_targets:
-        assert rep.trust == pytest.approx(rep.confirmed / rep.static_targets)
+    # coverage and recall are their own definitions over the contacts' statuses
+    reached = rep.contacts_recorded + rep.contacts_ran_not_recorded
+    observable = reached + rep.contacts_not_run
+    assert rep.contacts_total == observable + rep.contacts_unobservable
+    if observable:
+        assert rep.coverage == pytest.approx(reached / observable)
+    if reached:
+        assert rep.recall == pytest.approx(rep.contacts_recorded / reached)
+    for tier in rep.identity_tiers:
+        if tier.static:
+            assert tier.share == pytest.approx(tier.confirmed / tier.static)

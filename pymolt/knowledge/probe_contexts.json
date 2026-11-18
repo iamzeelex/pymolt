@@ -1,0 +1,17 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "kind": "probe_contexts",
+  "version": "2026-11-15",
+  "about": "Setup snippets the API probe runs (inside the probed interpreter, stdlib-era syntax) before resolving symbols, so context-bound proxies such as flask.request resolve to real objects. Each snippet must work across the versions it names.",
+  "entries": [
+    {
+      "id": "flask-request-context",
+      "package": "flask",
+      "roots": ["flask"],
+      "code": "from flask import Flask\napp = Flask('pymolt_probe')\napp.add_url_rule('/x', 'x_ep', lambda: 'ok', methods=['GET', 'POST'])\nctx = app.test_request_context('/x?a=1', method='POST', json={'message': 'hi'}, headers={'Authorization': 'Basic dTpw'})\nctx.push()\n",
+      "effect": "pushes an app + request context so flask.request, flask.current_app, flask.g and flask.session resolve",
+      "source": "bench/delta_parity probe --flask-context (flask 2.0 - 3.0)",
+      "date": "2026-11-15"
+    }
+  ]
+}

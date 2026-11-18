@@ -1,0 +1,16 @@
+[
+ "pandas.DataFrame",
+ "pandas.Series",
+ "pandas.concat",
+ "pandas.core.base.IndexOpsMixin.__iter__",
+ "pandas.core.frame.DataFrame.__init__",
+ "pandas.core.frame.DataFrame.groupby",
+ "pandas.core.frame.DataFrame.mean",
+ "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__",
+ "pandas.core.groupby.groupby.GroupBy.sum",
+ "pandas.core.reshape.concat.concat",
+ "pandas.core.series.Series.__init__",
+ "pandas.core.series.Series.__len__",
+ "pandas.core.series.Series.append",
+ "pandas.core.series.Series.to_dict"
+]
