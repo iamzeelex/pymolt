@@ -182,10 +182,10 @@ def record_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, *,
                 by: str | None = None, actor: str | None = None, claim: str | None = None,
                 expect: str | None = None, pairs: list[str] | tuple[str, ...] = (),
                 attestation: Any = None) -> ApplyResult:
-    """One phase of a record (module docstring). ``attestation``: a callable
-    ``(kind, step, details) -> attestation id or None`` that asks a person to attest (the
-    interface layer supplies it; None: nothing is attested). Raises ``StepRefusal`` (exit 2) or
-    ``MigrationPlanError`` / ``OSError`` (exit 3)."""
+    """One phase of a record (module docstring). ``attestation``: a ``pymolt.attest.Attester``
+    the interface layer supplies when a person may be on a terminal (None: nothing is
+    attested). Raises ``StepRefusal`` (exit 2) or ``MigrationPlanError`` / ``OSError`` (exit
+    3)."""
     if done and abort:
         raise StepRefusal("--done and --abort cannot be combined")
     if by not in (None, "agent", "person"):
@@ -666,6 +666,8 @@ def _done(ctx: _Context, *, by: str | None, actor: str | None, claim: str | None
     snapshot = latest_snapshot(root, ctx.run_id, step.id) if opened else None
     begun = snapshot[1] if snapshot is not None else {}
     by = "agent" if agent else (by or begun.get("by") or "person")
+    if agent:
+        attestation = None               # whatever terminal it runs on, an agent never attests
     actor = actor or (begun.get("actor") if begun.get("by") == by else None)
     changes, unrecorded, how, snap_path = _changes(ctx)
     completion = step.type == "review" or step.phase == "env"
@@ -688,16 +690,26 @@ def _done(ctx: _Context, *, by: str | None, actor: str | None, claim: str | None
                   "Start with `pymolt apply --step ID --record`, make the change, then "
                   "`--record --done`. A behaviour change with no code edit is accepted with "
                   "`pymolt verify . --accept FINDING_ID`."))
-    # Who attests, and what the record may claim.
+    # Who attests, and what the record may claim (design 5.6: --by person, --claim intended
+    # and a person-only --expect are attested commands).
     wants_attest = by == "person" or claim == "intended" or person_only_expect(expect)
-    att_id = None
-    if wants_attest and attestation is not None:
-        att_id = attestation("record", step, {"claim": claim, "expect": expect, "by": by})
-    chosen, chosen_expect, claim_notes = check_claim(step, claim=claim, expect=expect,
-                                                     attested=att_id is not None)
+    final_claim, final_expect, _n = check_claim(step, claim=claim, expect=expect, attested=True)
+    att_id, why_not = None, None
+    if wants_attest:
+        record, why_not = _attest(ctx, attestation, by=by, claim=final_claim,
+                                  expect=final_expect if final_claim == "intended" else None,
+                                  changes=changes)
+        att_id = record["id"] if record else None
+    try:
+        chosen, chosen_expect, claim_notes = check_claim(step, claim=claim, expect=expect,
+                                                         attested=att_id is not None)
+    except StepRefusal as exc:
+        if why_not:
+            raise StepRefusal(f"{exc} (not attested: {why_not})", hint=exc.hint) from None
+        raise
     attested_note = [] if att_id is not None or not wants_attest else [
         f"recorded as {'an unattested person' if by == 'person' else 'an agent'}: no person "
-        "attested it (an attestation needs a terminal, with no --agent or --json)"]
+        f"attested it ({why_not or 'an attestation needs a terminal, with no --agent or --json'})"]
     base, target = _pythons(root, ctx.plan)
     symbol_old = step.symbol.old
     symbol_new = step.symbol.new
@@ -770,6 +782,29 @@ def _done(ctx: _Context, *, by: str | None, actor: str | None, claim: str | None
                         attestation=att_id, check_failed=failed, self_check=check)
     _finish(result, root, ctx.plan, applicable_steps(ctx.plan), saved, ctx.run_id)
     return result
+
+
+def _attest(ctx: _Context, attestation, *, by: str, claim: str, expect: str | None,
+            changes: list[_Change]) -> tuple[dict | None, str | None]:
+    """Ask a person to attest the record (``pymolt.attest``): bound to the project, the run,
+    the step, the claim and expectation, and the recorded change (its files' hashes)."""
+    from pymolt.attest import files_digest, project_id
+
+    if attestation is None:
+        return None, "no person can attest here (--agent, --json or MCP)"
+    if by != "person":
+        return None, "an agent's record is never attested"
+    files = [{"file": c.file, "before": _sha256(c.before), "after": _sha256(c.after)}
+             for c in changes]
+    step = ctx.step
+    names = ", ".join(c.file for c in changes) or "no file"
+    text = (f"Record step {step.id} ({' '.join(step.title.split())[:80]}) of plan "
+            f"{ctx.plan.plan_id[:8]} as made by a {by}: claim {claim}"
+            + (f", expecting {expect}" if expect else "") + f". Files: {names}.")
+    return attestation.ask(text, {
+        "kind": "record", "project": project_id(ctx.root), "run_id": ctx.run_id,
+        "plan_id": ctx.plan.plan_id, "step": step.id, "by": by, "claim": claim,
+        "expect": expect, "files": files_digest(files)})
 
 
 def _same_as_epoch(ctx: _Context, changes: list[_Change]) -> bool:

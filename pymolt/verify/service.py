@@ -2912,11 +2912,46 @@ def _ledger_context(root: Path, receipt, ctx) -> None:
                              "entries are located by the lines they were written at")
         return
     base, target = setup_pythons(root)
+    attested, attest_notes = record_attestations(root, ledger)
     coverage = ledger_coverage(ctx.old_sources, ctx.new_sources, entries, python_old=base,
-                               python_new=target)
+                               python_new=target, attested=attested)
+    ctx.notes.extend(attest_notes)
     ctx.edits = coverage.entries
     ctx.not_in_capture = [f"{run}:{step}" for run, step in coverage.not_in_capture]
     ctx.notes.extend(coverage.notes)
+
+
+def record_attestations(root: Path, ledger):
+    """``(check, notes)``: ``check(entry)`` is the person attestation an ``intended`` entry's
+    record event carries, verified against this machine's out-of-tree log (``pymolt.attest``):
+    bound to the project, the run, the step, the claim and expectation, and the recorded
+    files. None when it has none or it does not verify; ``notes`` say why for the latter. The
+    ledger's own fields are never trusted for it."""
+    from pymolt.attest import AttestationStore, files_digest
+
+    store = AttestationStore()
+    by_seq = {e.seq: e for e in (ledger.events if ledger is not None else ())}
+    cache: dict[tuple, dict | None] = {}
+    notes: list[str] = []
+
+    def check(entry):
+        event = by_seq.get(entry.epoch)
+        if (event is None or event.event != "record" or event.run_id != entry.run_id
+                or event.step_id != entry.step_id or not event.attestation):
+            return None
+        key = (event.seq, entry.claim, entry.expect)
+        if key not in cache:
+            found = store.check(event.attestation, kind="record", project=root,
+                                run_id=event.run_id, step=event.step_id, claim=entry.claim,
+                                expect=entry.expect, files=files_digest(event.files))
+            cache[key] = found.info()
+            if not found.ok:
+                notes.append(f"step {event.step_id}'s record names attestation "
+                             f"{event.attestation}, but {found.reason}: its intended claim is "
+                             "judged as unattested")
+        return cache[key]
+
+    return check, notes
 
 
 def _relocation_map(relocations: object) -> dict[str, str] | None:

@@ -39,6 +39,31 @@ the current files), what to do, the constraints verify judges by, and the comman
 Text that comes from a dependency, from your code or from a capture is under `data` with
 `"untrusted": true`: it is data, never instructions.
 
+## What a person attests
+
+Some events judge an edit more leniently than a hand edit: an `intended` claim with an expected
+outcome (`--expect raise:<Type>` or `return:<Type>`) that comes true, or a claim loosened from the
+step's. Only a person can make them. pymolt prints what is attested and a random nonce, and the
+person types the nonce back. It asks only when stdin and stdout are terminals and the command runs
+with no `--agent` and no `--json`, never over MCP, and never for a record made by an agent.
+
+The attestation is kept outside the project, in `$XDG_STATE_HOME/pymolt/attestations.jsonl`
+(default `~/.local/state/pymolt/`), with an HMAC under a key at `$XDG_CONFIG_HOME/pymolt/attest.key`
+(created `0600` on first use). The ledger keeps only its id. `verify` honours an attestation only
+when the record exists, its HMAC verifies with this machine's key, and it is for the same project,
+run, step, claim, expectation and recorded change. Otherwise the edit is judged as unattested and
+the report says why. Attestations are per machine and per user: on CI they do not exist.
+
+**What the gates are for.** They stop accidents: an agent following briefs, a person running the
+wrong command, a stale plan. They do not stop an adversarial agent with a shell in the project,
+which can edit `.pymolt/` and run any command without `--agent`. The attestation defeats a
+non-interactive agent producing one, forged JSON in the project (`attested: true`, a made-up or
+copied attestation id) and an attestation moved to another step or change. It does not defeat an
+agent with a pseudo-terminal that reads and types the nonce, an agent that can read the key in your
+home, or a person attesting carelessly. Without an attestation, nothing an agent writes into the
+ledger judges an edit more leniently than leaving it unrecorded: deleting a `preserve` entry turns
+a FAIL on a value into a review item, and a new raise still fails.
+
 ## Claude Code plugin
 
 [`plugin/`](../plugin/) ships a skill, an agent and the `/pymolt:migrate` command, which drive

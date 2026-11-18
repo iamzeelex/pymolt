@@ -944,7 +944,7 @@ def apply_plan_cmd(
 
             result = record_step(project_path, migration_plan, step, done=done, abort=abort,
                                  agent=agent, by=by, actor=actor, claim=claim, expect=expect,
-                                 pairs=pair)
+                                 pairs=pair, attestation=_attester(agent, json_output))
         elif skip:
             result = skip_step(project_path, migration_plan, step, reason or "", agent=agent)
         else:
@@ -1005,6 +1005,15 @@ def apply_plan_cmd(
         _render_left_to_you(migration_plan)
     next_step(project_path)
     raise typer.Exit(code=code)
+
+
+def _attester(agent: bool, json_output: bool):
+    """The terminal a person attests on (design 5.6): never under --agent or --json, and only
+    when stdin and stdout are terminals (the adapter checks)."""
+    from pymolt.adapters.attest_tty import TtyPrompter
+    from pymolt.attest import Attester
+
+    return Attester(prompter=TtyPrompter(agent=agent, json_output=json_output))
 
 
 def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None:
