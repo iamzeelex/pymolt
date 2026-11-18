@@ -1194,7 +1194,11 @@ def _apply_records(root: Path, plan: MigrationPlan, run_id: str):
                     return attrs_for_recipe(_recipe_for(recipes, old_text, new_text), claims)
             else:
                 attrs = step_attrs(step)
-            kwargs = {"run_id": run_id, "step_id": step.id, "python_before": base,
+            # T0 is the base Python's code; every later text, a step's after-text included,
+            # is the target's (the builder anchors the plan's steps the same way).
+            t0 = changes[path].old_source if path in changes else None
+            kwargs = {"run_id": run_id, "step_id": step.id,
+                      "python_before": base if before == t0 else target,
                       "python_after": target}
             try:
                 entries += entries_for(path, before, after, attrs, **kwargs)
@@ -1242,7 +1246,11 @@ def _receipt_set_after_apply(receipt, prior, plan: MigrationPlan, appended, chec
             sites=_step_sites(plan, step, files),
             checks=step_checks(check, files, runs_on_base=step.runs_on_base))
     receipt.runs, receipt.steps = runs, steps
-    receipt.summarize([step.id for step, _event in appended])
+    # Progress counts every pymolt step of the plan (a manifest pin too, which this apply
+    # does not write); a plan whose steps the apply could not follow counts the one it wrote.
+    written = [step.id for step, _event in appended]
+    planned = [s.id for s in plan.steps if s.executor == "pymolt"]
+    receipt.summarize(planned if set(written) <= set(planned) else written)
 
 
 def _receipt_set_after_rollback(receipt, run_id: str, rolled_back_at: str,
