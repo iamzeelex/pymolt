@@ -20,6 +20,13 @@
   changed default, a different result) is found by `verify` and left to you. A rule that cannot be
   checked is listed for manual review instead of applied ([plan.md](plan.md#codemods)).
 
+- **A step rolled back alone keeps what came after it, within limits.** `rollback --step` undoes
+  only that step's change in a file that moved on, but refuses when a later edit touched the
+  step's lines or the statements right around them (a hand edit there could depend on it), and an
+  import the step wrote stays while anything uses it. Applying the step again re-bases it, and an
+  import its recipe inserts may then land in another place among the imports than in a straight
+  apply ([commands.md](commands.md#pymolt-rollback-dir)).
+
 ### Judging a difference
 
 Each of these is a review item, so the verdict is INCONCLUSIVE until a person decides

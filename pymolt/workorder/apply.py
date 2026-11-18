@@ -525,8 +525,9 @@ def _checks(check: SelfCheck, step: PlanStep, decisions: list[FileDecision]) -> 
 
 
 def _drift_notes(root: Path, ledger, receipt, noop: list[str], texts: _Texts) -> list[str]:
-    """A no-op step whose file moved on since the last epoch that wrote it: verify judges the
-    changed lines as hand edits (H1 said so by refusing; a step in effect is a no-op)."""
+    """A no-op step whose file moved on since the last epoch, or rollback, that wrote it: verify
+    judges the changed lines as hand edits (H1 said so by refusing; a step in effect is a
+    no-op)."""
     if not noop or ledger is None:
         return []
     from pymolt.apply_ledger import chain_runs
@@ -535,7 +536,8 @@ def _drift_notes(root: Path, ledger, receipt, noop: list[str], texts: _Texts) ->
     epochs = {seq for (run, _sid), seq in ledger.current_epochs().items() if run in chain}
     last: dict[str, str] = {}
     for event in sorted(ledger.events, key=lambda e: e.seq):
-        if event.seq in epochs:
+        if event.seq in epochs or (event.event == "rollback" and event.restored
+                                   and event.run_id in chain):
             last.update({f.file: f.after for f in event.files if f.after})
     notes = []
     for rel, digest in sorted(last.items()):

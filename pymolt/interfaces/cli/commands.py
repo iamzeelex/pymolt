@@ -1092,7 +1092,8 @@ def rollback(
         None, "--run-id", help="Apply run to undo (default: the open one)"
     ),
     step: str | None = typer.Option(
-        None, "--step", help="Roll back this step only (it must be the last change to its files)"),
+        None, "--step", help="Roll back this step only. A file later changes moved on gets "
+                             "only the step's own change undone, or the step is refused"),
     cascade: bool = typer.Option(
         False, "--cascade", help="With --step: roll back the steps that depend on it first"),
     force: bool = typer.Option(
@@ -1103,8 +1104,8 @@ def rollback(
 ):
     """Undo the open run's apply: restore the files its steps changed.
 
-    Refuses if a file was edited after apply, unless --force. --step rolls back one step,
-    when it is the last change to its files.
+    Refuses if a file was edited after apply, unless --force. --step rolls back one step: in a
+    file that later steps or edits moved on, only that step's own change is undone.
     """
     import json
 
@@ -1140,6 +1141,8 @@ def rollback(
         "files_restored": len(result.files_restored),
         "steps": result.steps,
         "kept": result.kept,
+        "inverse": result.inverse,
+        "notes": result.notes,
         "post_migration_capture": post,
         "post_migration_trace": post_trace,
     }
@@ -1152,6 +1155,10 @@ def rollback(
     }.get(post or "", "")
     kept = (f" (kept in effect: {', '.join(result.kept)}, it changed no file)"
             if result.kept else "")
+    if result.inverse:
+        kept += (f"\nUndone alone, later changes kept: "
+                 f"{', '.join(result.inverse)}")
+    kept += "".join(f"\n{note}" for note in result.notes)
     console.print(Panel(
         f"Rolled back run [bold cyan]{rolled_run[:8]}[/bold cyan]\n"
         f"Steps: {escape(', '.join(result.steps + result.kept) or 'none')}{escape(kept)}\n"
