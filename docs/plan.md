@@ -125,7 +125,17 @@ is read as one step, `v1`.
 
 ## When to bump the manifest
 
-`apply` writes source only. Moving the project's manifest to the target versions is yours to do:
+The plan's first steps, the `env` phase, name the bump:
+- a `manifest-pin` step for pymolt: each `name==version` line of a requirements file, with no
+  hash, for a package the target manifest pins at another version. The edit keeps the line's
+  extras, marker and comment;
+- a `manifest-pin` step for a person: every other line naming such a package (unpinned, another
+  specifier, hashed), or the moves themselves when the manifest is not a requirements file
+  (pyproject, poetry, conda);
+- a `target-env` step for a person, with the commands that build the target environment.
+
+`apply` writes source only: it does not write the pin step. Moving the project's manifest to the
+target versions is yours to do:
 - **After `plan`.** The plan compares the project's manifest with the target manifest. With the
   pins already bumped, a package the baseline did not record shows no move.
 - **Before the post-migration capture.** That capture must match the project as it is then; a bump

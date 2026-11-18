@@ -58,8 +58,8 @@ def _short(symbol: str | None) -> str:
     if not symbol:
         return "?"
     parts = symbol.split(".")
-    if len(parts) > 2 and parts[-1] in ("__init__", "__new__", "__call__"):
-        parts = parts[:-1]
+    if len(parts) > 1 and parts[-1] in ("__init__", "__new__", "__call__"):
+        return parts[-2]                  # a constructor: the class names it
     return ".".join(parts[-2:])
 
 
