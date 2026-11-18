@@ -93,7 +93,14 @@ Two cases go the other way. Both still fail, although they may be noise:
 
 ### PyMolt itself
 
-- It runs on 3.12. On 3.13, three tests currently fail.
+- It runs on 3.12. On 3.13, 14 of its tests fail, so CI tests on 3.12 only. Two groups of them
+  touch results:
+  - pymolt on 3.13 anchors 3.6-era code (such as `async` used as a name) by tokens instead of
+    its syntax tree, which survives less reformatting;
+  - on a 3.13 target under `sys.monitoring`, a raise from C code is recorded without its type,
+    and a call that fails to bind is not recorded.
+
+  Neither has been looked into yet.
 - The tracer is written to load on Python 3.4–3.5. That is not tested.
 
 ## Overhead
@@ -148,7 +155,7 @@ Details: [scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md),
   - a compiled gevent method whose raise only `sys.monitoring` sees.
 - The replicate explains the per-run msgpack differences (node ids) and 409 differences in
   all. The rare gevent outcome raised on both sides this time.
-- 121 of 175 static symbols are BLIND under this test subset (trust 65%).
+- 121 of 175 static symbols are BLIND under this test subset.
 
 Details: [scorecard](../bench/legacy_eval/results/pilot-locust-recapture/scorecard.md),
 [findings](../bench/legacy_eval/locust.md).

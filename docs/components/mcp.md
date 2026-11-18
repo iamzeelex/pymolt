@@ -47,6 +47,8 @@ The tools have the names of the CLI commands. Every tool takes
 | `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Runs a host process, so it is opt-in: set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment. |
 | `plan` | `pymolt plan` | Saves the API changes, codemods and predicted risks for the target manifest as the migration plan and returns the diffs. Writes no source. |
 | `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND, coverage and recall % with their granularity, and the calls that changed, plus how the plan's predicted risks fared. Saved like the CLI's. |
+| `apply` | `pymolt apply --agent` | On a plan a person approved for agents: applies its pymolt steps, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. Writing needs `PYMOLT_MCP_ALLOW_WRITE=1`. |
+| `rollback` | `pymolt rollback --step ID --agent` | Rolls back one step of an approved plan. Needs `PYMOLT_MCP_ALLOW_WRITE=1`. |
 
 ### Workflow
 
@@ -54,7 +56,9 @@ The tools have the names of the CLI commands. Every tool takes
 status (any time: which tool is next)
 scan  ->  setup  ->  assess
 ->  capture(when='baseline'  BEFORE editing)
-->  plan  ->  [a person runs `pymolt apply .`]   (or the agent edits the code)
+->  plan  ->  [a person approves the plan: `pymolt apply . --approve-agent`]
+->  apply()   (or the agent edits the code: apply(step=ID, record=true) first,
+              then apply(step=ID, record=true, done=true))
 ->  capture(when='post-migration'  AFTER editing)
 ->  verify
 ```
@@ -90,9 +94,11 @@ omitted per list. The full report is written to `.pymolt/agent/<command>.json`
 (the same file `--agent` writes) and its path returned in `full_report_path`.
 Output is plain text, with no rich/ANSI.
 
-## No source writes
+## Source writes
 
-`plan` saves the plan and returns the diffs; no tool writes a source file.
-Applying a plan always requires explicit human approval through the CLI
-(`pymolt apply .`), outside this server. Agents plan and recommend; humans
-apply. The applied plan retains rollback data (`pymolt rollback .`).
+Only `apply` and `rollback` write source files, and only when the server runs with
+`PYMOLT_MCP_ALLOW_WRITE=1`, on a plan a person approved for agents on a terminal
+(`pymolt apply . --approve-agent`). A re-plan or any change to the plan voids the
+approval. Without `PYMOLT_MCP_ALLOW_EXEC=1`, `apply` runs no smoke import and the
+receipt says so. Their dry runs and briefs need no opt-in. Details:
+[agents.md](../agents.md).

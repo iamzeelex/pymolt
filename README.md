@@ -108,7 +108,7 @@ The full list, the measured overhead and where pymolt was tried are in [docs/lim
 
 ## Agents and CI
 
-- `status`, `scan`, `setup`, `assess`, `capture`, `plan` and `verify` take `--agent` (a compact JSON view) and `--json` (the full report).
+- `status`, `scan`, `setup`, `assess`, `capture`, `plan`, `verify`, `apply` and `rollback` take `--agent` (a compact JSON view) and `--json` (the full report).
 - [`plugin/`](plugin/) is a Claude Code plugin that drives these commands.
 - An optional MCP server exposes the same views.
 

@@ -57,7 +57,7 @@ payload instead. Source changes need the user's go-ahead: `plan` writes no sourc
 ## Clients without a shell: attach the MCP server
 
 Agents that cannot run commands (chat clients, some IDE assistants) can use the same
-seven commands as MCP tools. Each tool returns exactly what `pymolt <command> --agent`
+commands as MCP tools (nine tools). Each tool returns exactly what `pymolt <command> --agent`
 prints. The server is an optional extra:
 
 ```bash
