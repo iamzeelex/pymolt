@@ -954,7 +954,8 @@ def build_contract_report(
                 report._fact_diff, report._accepts = fdiff, accepts
                 _attach_fact_diff(report, fdiff, impact_filter_active, impact_paths)
                 if predictions is not None:
-                    report.calibration = _calibration(predictions, old_facts, fdiff, root)
+                    report.calibration = _calibration(predictions, old_facts, fdiff, root,
+                                                      diff_context)
         except (OSError, ValueError) as e:
             report.notes.append(f"version diff failed: {e}")
 
@@ -1184,9 +1185,11 @@ def _order_causes(root: Path, old_facts: FactSet, new_facts: FactSet,
 
 
 def _calibration(predictions: Mapping[str, Any], old_facts: FactSet, fdiff: FactDiff,
-                 root: Path) -> Calibration:
+                 root: Path, diff_context=None) -> Calibration:
     """Score the predictions; ``risks: None`` means "predict from the baseline side now"
-    (its runtime warnings, no delta facts), with ``changes`` for fixed-by-plan."""
+    (its runtime warnings, no delta facts), with ``changes`` for fixed-by-plan. With the two
+    captures' sources (``diff_context``), a fix is credited by statement to the step a risk is
+    linked to (``workorder.credit``)."""
     risks = predictions.get("risks")
     notes = list(predictions.get("notes") or ())
     if risks is None:
@@ -1194,8 +1197,26 @@ def _calibration(predictions: Mapping[str, Any], old_facts: FactSet, fdiff: Fact
                              root=root)
         risks = made.risks
         notes.extend(made.notes)
+    links = None
+    if diff_context is not None and diff_context.old_sources is not None \
+            and diff_context.new_sources is not None:
+        try:
+            from pymolt.verify.predict import PredictedRisk
+            from pymolt.workorder.coverage import setup_pythons
+            from pymolt.workorder.credit import step_links
+
+            items = [r if isinstance(r, PredictedRisk) else PredictedRisk.model_validate(r)
+                     for r in risks or ()]
+            base, target = setup_pythons(root)
+            links = step_links(root, items, old_sources=diff_context.old_sources,
+                               new_sources=diff_context.new_sources, python_old=base,
+                               python_new=target)
+        except Exception as exc:  # noqa: BLE001 - calibration degrades to plan-time fixes
+            notes.append(f"fixes not credited by step ({type(exc).__name__}): the plan's "
+                         "fixed-by-plan decides")
+            links = None
     cal = calibrate(risks, fdiff, source=predictions.get("source") or "plan",
-                    plan_id=predictions.get("plan_id"))
+                    plan_id=predictions.get("plan_id"), links=links)
     cal.notes[:0] = notes
     return cal
 

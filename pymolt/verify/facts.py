@@ -472,8 +472,9 @@ class FactEntry(BaseModel):
     # Edit provenance (only with a ``DiffContext``): unedited / ledger (a ``preserve`` entry
     # covers the edited line) / intended (an ``intended`` entry does) / hand / downstream.
     provenance: str | None = None
-    # The ledger step whose entry decides the edited line (None: no entry does).
+    # The ledger step whose entry decides the edited line, and its run (None: no entry does).
     step_id: str | None = None
+    step_run: str | None = None
     # A change a person attested (an expectation recorded with a person's attestation, or a
     # ``verify --accept``): ``{"how", "by", "at", "attestation", "step"}``. Counted as compared
     # equal by the verdict, and always reported.
@@ -6708,6 +6709,7 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
         e.provenance = tier
         if entry is not None and entry.get("step_id"):
             e.step_id = str(entry["step_id"])
+            e.step_run = str(entry.get("run_id") or "") or None
         if e.category in (FactCategory.EQUAL, FactCategory.CHANGED, FactCategory.REWRITTEN) \
                 and e.comparison is Comparison.EQUAL:
             e.category = FactCategory.REWRITTEN
@@ -6924,6 +6926,7 @@ def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> 
         entry.provenance = _tier(covering) if covering is not None else "hand"
         if covering is not None and covering.get("step_id"):
             entry.step_id = str(covering["step_id"])
+            entry.step_run = str(covering.get("run_id") or "") or None
         entry.notes.append("unverified edited site")
     return entry
 
