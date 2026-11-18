@@ -15,6 +15,7 @@ import types
 
 import pytest
 
+from pymolt.verify import _backend
 from pymolt.verify._backend import (
     HAS_MONITORING,
     UNTYPED_RAISE,
@@ -90,7 +91,14 @@ def test_setprofile_types_a_c_raise_its_caller_handles():
     assert rec["raised"] == "ValueError"
 
 
-def test_setprofile_records_a_c_raise_handled_without_a_call_untyped():
+@pytest.mark.parametrize("armed, raised", [(True, "ValueError"), (False, UNTYPED_RAISE)])
+def test_setprofile_c_raise_handled_without_a_call(armed, raised, monkeypatch):
+    """Below 3.12 the calling frame's ``exception`` trace event types it (forced here); with
+    no such event (3.12+, sys.settrace taken) a handler that makes no call leaves it untyped."""
+    if armed and sys.gettrace() is not None:
+        pytest.skip("sys.settrace is taken (coverage or a debugger runs the suite)")
+    monkeypatch.setattr(_backend, "_ARM_EXCEPTION_EVENT", armed)
+
     def body():
         try:
             math.sqrt(-1)
@@ -99,7 +107,7 @@ def test_setprofile_records_a_c_raise_handled_without_a_call_untyped():
 
     sink = _run(SetProfileBackend, ["math"], body)
     (rec,) = _by_name(sink)["math.sqrt"]
-    assert rec["raised"] == UNTYPED_RAISE
+    assert rec["raised"] == raised
 
 
 @pytest.mark.parametrize("cls", BACKENDS)
