@@ -1,7 +1,7 @@
-"""The concurrency guard (design 8), with two real processes: an apply and a rollback, or two
-applies, never run at once (the second is refused by the lock, and writes nothing); an
-invocation killed between its write and its ledger is recovered by the next; ``status`` read
-during an apply sees a consistent state."""
+"""The concurrency guard (design 8), with two real processes: an apply and a rollback, an apply
+and a record, or two applies, never run at once (the second is refused by the lock, and writes
+nothing); an invocation killed between its write and its ledger is recovered by the next;
+``status`` read during an apply sees a consistent state."""
 from __future__ import annotations
 
 import json
@@ -18,6 +18,7 @@ from pymolt.migration_plan import MigrationConflictError, MigrationPlan
 from pymolt.migration_state import MigrationReceipt
 from pymolt.status import build_status
 from pymolt.workorder.apply import apply_steps
+from pymolt.workorder.record import record_step
 from pymolt.workorder.rollback import rollback_steps
 
 M = "app/m.py"
@@ -81,6 +82,11 @@ def test_a_second_operation_is_refused_by_the_lock_and_writes_nothing(tmp_path, 
             apply_steps(tmp_path, MigrationPlan.load(tmp_path), allow_no_baseline=True)
         with pytest.raises(MigrationConflictError, match="another migration operation"):
             rollback_steps(tmp_path)
+        # A record (stage 5) waits for the lock too: no snapshot, no receipt.
+        for done in (False, True):
+            with pytest.raises(MigrationConflictError, match="another migration operation"):
+                record_step(tmp_path, MigrationPlan.load(tmp_path), "mech-2", done=done)
+        assert not list((tmp_path / ".pymolt").glob("migrations/*/steps"))
         assert read(tmp_path, M) == written
         # Status reads while the transaction is open: the state from before it, consistent.
         status = build_status(tmp_path)
