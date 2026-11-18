@@ -467,7 +467,7 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
                           "already_applied" if noop or (not steps and not first_run) else
                           "nothing")
         result.receipt = _receipt_for_noop(root, plan, run_id, state, receipt)
-        _finish(result, plan, steps, ledger, run_id)
+        _finish(result, root, plan, steps, ledger, run_id)
         return result
 
     check, smoke_before = _check_before_write(
@@ -483,7 +483,7 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
         result.diff = [{"file": rel, "diff": "".join(difflib.unified_diff(
             old.splitlines(keepends=True), new.splitlines(keepends=True),
             fromfile=f"a/{rel}", tofile=f"b/{rel}"))} for rel, old, new in texts.changed()]
-        _finish(result, plan, steps, ledger, run_id, applied=set())
+        _finish(result, root, plan, steps, ledger, run_id)
         return result
     return _commit(root, plan, run_id, state, receipt, ledger, decided, texts, result,
                    start_fp=start_fp, start_setup=start_setup, baseline=baseline,
@@ -540,8 +540,9 @@ def _drift_notes(root: Path, ledger, receipt, noop: list[str], texts: _Texts) ->
     notes = []
     for rel, digest in sorted(last.items()):
         try:
-            now = _sha256(texts.get(rel))
-        except (MigrationPlanError, OSError):
+            texts.get(rel)
+            now = _sha256(texts.start[rel])          # the disk, not this invocation's text
+        except (MigrationPlanError, OSError, KeyError):
             continue
         if now != digest:
             notes.append(f"{rel} changed since its last step wrote it: verify judges the "
@@ -655,7 +656,7 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
     result.self_check = check
     if not decided:
         result.outcome = "applied"
-    _finish(result, plan, applicable_steps(plan), saved if decided else ledger, run_id)
+    _finish(result, root, plan, applicable_steps(plan), saved if decided else ledger, run_id)
     _collect_blobs(root)
     return result
 
@@ -803,13 +804,28 @@ def _receipt_for_noop(root: Path, plan: MigrationPlan, run_id: str, state, recei
     return out
 
 
-def _finish(result: ApplyResult, plan: MigrationPlan, steps: list[PlanStep], ledger,
-            run_id: str, applied: set[str] | None = None) -> None:
-    view = RunView.of(ledger, run_id)
-    extra = {sid: "present" for sid in result.present}
-    extra.update({sid: "blocked" for sid in result.blocked})
-    statuses = basic_statuses(plan.steps or steps, view, extra)
+def _finish(result: ApplyResult, root: Path, plan: MigrationPlan, steps: list[PlanStep],
+            ledger, run_id: str) -> None:
+    """``remaining``: the plan's steps not in effect, by projected status (``project_steps``);
+    the ledger alone if the projection fails."""
+    try:
+        from pymolt.workorder.state import project_steps
+
+        projection = project_steps(root, plan, ledger=ledger)
+    except Exception:  # noqa: BLE001 - the summary degrades to the ledger's statuses
+        logger.warning("could not project the plan's steps", exc_info=True)
+        projection = None
+    if projection is not None and projection.steps:
+        statuses = {s.id: s.status for s in projection.steps}
+        statuses.update({sid: "blocked" for sid in result.blocked
+                         if statuses.get(sid) == "planned"})
+    else:
+        view = RunView.of(ledger, run_id)
+        extra = {sid: "present" for sid in result.present}
+        extra.update({sid: "blocked" for sid in result.blocked})
+        statuses = basic_statuses(plan.steps or steps, view, extra)
     result.remaining = remaining(plan.steps or steps, statuses)
+
 
 
 def _undo_after_smoke(root: Path, plan: MigrationPlan, run_id: str, state, receipt, appended,
@@ -877,7 +893,7 @@ def _skip(root: Path, plan: MigrationPlan, step_id: str, reason: str) -> ApplyRe
     if view.status(step_id) == "skipped":
         result = ApplyResult(outcome="skipped", plan_id=plan.plan_id, run_id=run_id,
                              skipped=[step_id], notes=[f"step {step_id} was skipped already"])
-        _finish(result, plan, applicable_steps(plan), ledger, run_id)
+        _finish(result, root, plan, applicable_steps(plan), ledger, run_id)
         return result
     inspection = inspect_migration_plan(root, plan, check_files=False)
     if not inspection.valid:
@@ -911,7 +927,7 @@ def _skip(root: Path, plan: MigrationPlan, step_id: str, reason: str) -> ApplyRe
         raise
     result = ApplyResult(outcome="skipped", plan_id=plan.plan_id, run_id=run_id,
                          skipped=[step_id], receipt=receipt)
-    _finish(result, plan, applicable_steps(plan), saved, run_id)
+    _finish(result, root, plan, applicable_steps(plan), saved, run_id)
     return result
 
 

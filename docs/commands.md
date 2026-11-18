@@ -15,6 +15,16 @@ recognised by a post-migration capture taken since the baseline, or, unless a va
 `apply`, by files or pins changed since the baseline. Its verdict completes it; a FAIL then has no
 rollback to point at.
 
+With a saved plan, a `steps` line counts the plan's steps by status: `planned`, `blocked` (a
+dependency not in effect), `stale` (a statement it rewrites is gone, or the plan itself is stale),
+`present` (its change is already there, made by hand), `applied`, `rolled_back`, `skipped`, and
+`not_in_capture` (applied after the post-migration capture). `--json` and `--agent` list them
+under `steps`; `--agent` adds the brief of the step the next command is about. The next command
+follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply --step ID --dry-run`
+for a stale one, then the post-migration capture, with a note naming the first step left to a
+person or an agent. The post-migration capture is stale when a file it recorded no longer has the
+recorded text, whatever changed it.
+
 ### `pymolt scan [dir]`
 Lists the manifests, the Python-version divergence, the dependency edges, and every place your code
 touches a dependency: calls, attribute reads, decorators, base classes, context managers, constants

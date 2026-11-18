@@ -201,8 +201,25 @@ def status_view(report) -> dict:
         "next_reason": report.next_reason,
         "notes": list(report.notes),
     }
+    if report.steps:
+        data["steps"] = lists.cap("steps", list(report.steps))
+        data["steps_total"] = len(report.steps)
+        data["next_step"] = report.next_step
+        data["next_brief"] = _next_brief(report)
     return ok("\n".join(lines), lists.finish(data, warnings),
               hint=report.next_reason or None)
+
+
+def _next_brief(report) -> dict | None:
+    """The brief of the step the next command is about (untrusted text under ``data``)."""
+    if not report.next_step:
+        return None
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.workorder.render import brief_data
+
+    plan = MigrationPlan.load(report.project_dir)
+    step = plan.step(report.next_step) if plan is not None else None
+    return brief_data(plan, step, report.project_dir) if step is not None else None
 
 
 # ── scan ─────────────────────────────────────────────────────────────────────

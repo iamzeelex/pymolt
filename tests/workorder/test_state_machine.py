@@ -8,7 +8,8 @@ re-plan, over two runs. After every event:
 - the in-effect entries are exactly the entries of the current epochs of the runs on disk;
 - the disk agrees with the ledger: a file the last epoch in effect wrote, and nobody edited since,
   holds that epoch's after-text; a file-level rollback leaves the epoch's before-text;
-- every status change is a row of the state table (4.1).
+- every status change is a row of the state table (4.1);
+- ``project_steps`` is total and deterministic, and a step in effect is projected in effect.
 
 Every ordered pair of event kinds occurs (checked). ``--record`` and ``--abort`` come with
 stage 5.
@@ -29,7 +30,7 @@ from pymolt.migration_plan import MigrationConflictError, MigrationPlan, Migrati
 from pymolt.migration_state import MigrationReceipt
 from pymolt.workorder.apply import apply_steps, skip_step
 from pymolt.workorder.rollback import rollback_steps
-from pymolt.workorder.state import RunView
+from pymolt.workorder.state import RunView, project_steps
 
 SEQUENCES = 500
 LENGTH = 9
@@ -184,7 +185,27 @@ def _one(template_root: Path, plan1, plan2, work: Path, seed: int, pairs: Counte
             for f in rb.files:
                 assert _digest(root / f.file) == f.after         # the epoch's before-text
         _check(root, plans, edited_after)
+        _projected(root, plan)
     shutil.rmtree(root)
+
+
+STATUSES = {"planned", "blocked", "stale", "present", "in_progress", "applied", "recorded",
+            "skipped", "rolled_back", "not_in_capture", "verified", "failed", "needs_review",
+            "needs_evidence"}
+
+
+def _projected(root: Path, plan: MigrationPlan) -> None:
+    """``project_steps`` is total and deterministic, and agrees with the ledger."""
+    first = project_steps(root, plan)
+    again = project_steps(root, plan)
+    assert [(s.id, s.status, s.reasons) for s in first.steps] == [
+        (s.id, s.status, s.reasons) for s in again.steps]
+    assert [s.id for s in first.steps] == [s.id for s in plan.steps]
+    assert {s.status for s in first.steps} <= STATUSES
+    view = RunView.of(load_ledger(root), first.run_id)
+    for s in first.steps:
+        if view.in_effect(s.id):
+            assert s.status in ("applied", "recorded"), (s.id, s.status)
 
 
 def test_random_sequences_keep_the_invariants(template, tmp_path, monkeypatch):
