@@ -159,11 +159,24 @@ the evidence. Details are in [verify.md](verify.md).
 | `--cascade` | A cascade report to include |
 
 ### `pymolt rollback [dir]`
-Restores the files the last `apply` changed. It refuses to discard edits made after the apply unless
-given `--force`. `--run-id` picks an earlier apply. The plan stays valid: while its files are back at
-the planned originals, `apply` runs it again as a new run, with the same checks. When it restored files, the post-migration
-capture is set aside in the archive. When it restored none, the capture still describes the code
-and is kept.
+Restores the files the open run's steps changed, latest step first. It refuses to discard edits
+made after the apply unless given `--force`, which restores each file the run touched to its text
+before the run and never writes another file. `--run-id` picks an earlier run; it is refused
+while a later run's step in effect changed one of its files (roll that run back first). The plan
+stays valid: `apply` writes the rolled-back steps again in the same run, re-based when their
+lines moved. A step whose epoch changed no file stays in effect.
+
+The post-migration capture is set aside in the archive only when it recorded code the rollback
+took away: a rolled-back step's new statements are in its source snapshot, and it was taken
+after that step. Otherwise it still describes the code and is kept.
+
+| Option | Meaning |
+|---|---|
+| `--step` | That step only. Allowed when each of its files still holds the text the step wrote and no later step changed it since; refused otherwise, naming the later steps or edits. Refused while a step in effect depends on it |
+| `--cascade` | With `--step`: roll back the steps that depend on it first, latest first |
+| `--run-id` | The run to roll back (default: the open run) |
+| `--force` | Also discard edits made after apply (the whole run only) |
+| `--agent` | Refused, with `--force` and `--cascade` above all: a person rolls back |
 
 ## Tools
 

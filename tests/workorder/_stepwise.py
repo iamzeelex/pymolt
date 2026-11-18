@@ -68,6 +68,52 @@ def plan_for(root: Path, files: dict[str, tuple[str, list[CodemodPattern]]], *,
     return plan
 
 
+def plan_next(root: Path, files: dict[str, list[CodemodPattern]], *, save: bool = True):
+    """A new plan (a re-plan) over the files as they are now, with the same configuration and
+    baseline: ``{path: [patterns]}``."""
+    recorder = StepRecorder()
+    previews = []
+    for name, patterns in files.items():
+        path = root / name
+        source = path.read_text(encoding="utf-8")
+
+        def observe(recipe, before, after, path=path):
+            recorder.record(recipe, str(path), before, after)
+
+        new, hits = apply_patterns(source, patterns, on_step=observe)
+        previews.append(FilePreview(path=str(path), old_source=source, new_source=new,
+                                    sites=sum(n for _p, n in hits),
+                                    patterns=[p for p, _n in hits]))
+    plan = create_migration_plan(
+        root, previews, [DependencyMigration("a", "1.0", "2.0")], target_python="3.12",
+        source_manifest="requirements.txt", target_manifest_path=root / "requirements-target.txt",
+        files_scanned=len(files), predict=False, recorder=recorder)
+    if save:
+        plan.save(root)
+    return plan
+
+
+def post_capture(root: Path, *recorded: str):
+    """A post-migration capture whose source snapshot records ``recorded`` as they are now (a
+    real capture records the files whose calls it saw)."""
+    import gzip
+    import hashlib
+
+    script = root / "post_run.py"
+    script.write_text("import json\njson.loads('{}')\n", encoding="utf-8")
+    slot = service.capture_named_trace(root, "post_migration", CaptureMode.LIVE_COMMAND,
+                                       command=[sys.executable, str(script)], target="json")
+    with gzip.open(slot.sources_path, "rt", encoding="utf-8") as fh:
+        data = json.load(fh)
+    for name in recorded:
+        text = (root / name).read_text(encoding="utf-8")
+        data["files"][name] = {"sha256": hashlib.sha256(text.encode()).hexdigest(),
+                               "text": text}
+    with gzip.open(slot.sources_path, "wt", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    return slot
+
+
 def code_steps(plan) -> list:
     return [s for s in plan.steps if s.type in ("codemod", "python-fix")]
 

@@ -767,12 +767,13 @@ def apply_migration_plan(
 
 def needs_recovery(state: MigrationRunState | None) -> bool:
     """The run's last invocation was interrupted (or a run from before invocations were
-    recorded was left prepared or failed)."""
+    recorded was left prepared or failed: it has no step statuses, which a run gets once one
+    of its mutations committed, and no invocation)."""
     if state is None:
         return False
     if state.invocation is not None:
         return state.invocation.status in ("prepared", "failed")
-    return state.status in ("prepared", "failed")
+    return state.status in ("prepared", "failed") and not state.steps
 
 
 def recover_invocation(root: Path, state: MigrationRunState, plan: MigrationPlan, *,
