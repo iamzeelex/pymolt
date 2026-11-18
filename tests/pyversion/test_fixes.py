@@ -243,3 +243,133 @@ def test_the_gate_flags_a_rewrite_of_a_line_that_holds_no_live_site():
     assert minimal_diff_violations(old, new, pats, live={2}) == []
     assert minimal_diff_violations(old, new, pats, live={3}) == [
         "line 2: A = collections.Iterable (no live site)"]
+
+
+# ── several fixes in one file: each lands on its own site ─────────────────────────────────
+
+
+def _fix_file(tmp_path, source, sites, *symbols, prior_source=None):
+    (tmp_path / "app.py").write_text(source)
+    previews = [] if prior_source is None else [FilePreview(
+        path=str(tmp_path / "app.py"), old_source=source, new_source=prior_source, sites=1)]
+    pats = python_patterns(_report(*symbols), sites)
+    return apply_python_fixes(tmp_path, previews, pats, sites, target="3.12",
+                              target_executable=sys.executable)
+
+
+def test_a_second_fix_lands_after_the_first_inserted_an_import(tmp_path):
+    """The first fix adds ``import collections.abc`` (+1 line); the second fix's site line is
+    the input's, so applied unmapped it looked at ``A`` and left ``B`` unfixed."""
+    out = _fix_file(tmp_path, "import collections\nA = collections.Iterable\n"
+                              "B = collections.Mapping\n",
+                    [_site("collections.Iterable", 2), _site("collections.Mapping", 3)],
+                    ("collections.Iterable", "collections.abc.Iterable"),
+                    ("collections.Mapping", "collections.abc.Mapping"))
+    (fixed,) = out.previews
+    assert fixed.new_source == ("import collections\nimport collections.abc\n\n"
+                                "A = collections.abc.Iterable\nB = collections.abc.Mapping\n")
+    assert fixed.sites == 2 and out.dropped == {}
+
+
+def test_three_fixes_in_one_file_each_land_on_their_site(tmp_path):
+    """Three spellings, two of them in one statement: the imports the fixes add and drop move
+    every later site; each fix still finds its own."""
+    source = ("import collections\nimport imp\n"
+              "A = collections.Iterable\n"                                        # 3
+              "imp.reload(collections)\n"                                         # 4
+              "B = isinstance(A, (collections.Mapping, collections.Iterable))\n")  # 5
+    sites = [_site("collections.Iterable", 3), _site("imp.reload", 4),
+             _site("collections.Mapping", 5), _site("collections.Iterable", 5)]
+    report = DeltaReport(
+        package="python", from_version="3.6", to_version="3.12", quality="complete",
+        subject="python", facts=[
+            DeltaFact(symbol="collections.Iterable", kind="MOVED",
+                      successor="collections.abc.Iterable"),
+            DeltaFact(symbol="imp.reload", kind="REMOVED", successor=None),
+            DeltaFact(symbol="collections.Mapping", kind="MOVED",
+                      successor="collections.abc.Mapping")])
+    (tmp_path / "app.py").write_text(source)
+    out = apply_python_fixes(tmp_path, [], python_patterns(report, sites), sites,
+                             target="3.12", target_executable=sys.executable)
+    (fixed,) = out.previews
+    assert fixed.new_source == (
+        "import collections\nimport collections.abc\nimport importlib\n\n"
+        "A = collections.abc.Iterable\n"
+        "importlib.reload(collections)\n"
+        "B = isinstance(A, (collections.abc.Mapping, collections.abc.Iterable))\n")
+    assert fixed.sites == 4 and out.dropped == {}
+
+
+def test_fixes_after_a_dependency_rewrite_that_changed_the_line_count(tmp_path):
+    """Two shifts in a row: the dependency rewrite splits an import (+1), then the first fix
+    adds one. The second fix's site is carried through both."""
+    source = ("import collections\n"
+              "from pandas.util.testing import assert_frame_equal, makeDataFrame\n"
+              "A = collections.Iterable\n"                                        # 3
+              "B = collections.Mapping\n")                                        # 4
+    split = source.replace(
+        "from pandas.util.testing import assert_frame_equal, makeDataFrame\n",
+        "from pandas.util.testing import makeDataFrame\n"
+        "from pandas.testing import assert_frame_equal\n")
+    out = _fix_file(tmp_path, source,
+                    [_site("collections.Iterable", 3), _site("collections.Mapping", 4)],
+                    ("collections.Iterable", "collections.abc.Iterable"),
+                    ("collections.Mapping", "collections.abc.Mapping"), prior_source=split)
+    (merged,) = out.previews
+    lines = merged.new_source.splitlines()
+    assert merged.old_source == source
+    assert "from pandas.testing import assert_frame_equal" in lines       # the dependency rewrite
+    assert "A = collections.abc.Iterable" in lines
+    assert "B = collections.abc.Mapping" in lines
+    assert merged.sites == 1 + 2 and out.dropped == {}
+
+
+_FALLBACK = ("import collections\n"
+             "A = collections.Iterable\n"                                      # 2 live
+             "try:\n"
+             "    from collections.abc import Mapping\n"
+             "except ImportError:\n"
+             "    Mapping = collections.Mapping\n"                             # 6 guarded
+             "print(Mapping)\n"
+             "B = collections.Mapping\n")                                      # 8 live
+
+
+def _fallback_sites():
+    guard = {"kind": "guarded-fallback", "detail": "except ImportError"}
+    return [_site("collections.Iterable", 2), _site("collections.Mapping", 6, guard=guard),
+            _site("collections.Mapping", 8)]
+
+
+def test_a_guarded_fallback_stays_untouched_when_an_earlier_fix_moved_the_lines(tmp_path):
+    """The first fix adds two lines (``import collections.abc`` and a blank), so the live
+    ``B`` (line 8) is now where the fallback was carried to. Unmapped, the ``Mapping`` fix
+    rewrote the fallback; the gate then dropped the file and both fixes were lost."""
+    out = _fix_file(tmp_path, _FALLBACK, _fallback_sites(),
+                    ("collections.Iterable", "collections.abc.Iterable"),
+                    ("collections.Mapping", "collections.abc.Mapping"))
+    (fixed,) = out.previews
+    lines = fixed.new_source.splitlines()
+    assert "    Mapping = collections.Mapping" in lines                # the fallback is intact
+    assert "A = collections.abc.Iterable" in lines
+    assert "B = collections.abc.Mapping" in lines
+    assert out.dropped == {}
+
+
+def test_the_minimal_diff_gate_still_drops_a_stray_edit_among_several_fixes(tmp_path,
+                                                                           monkeypatch):
+    """The gate checks the whole input -> output change against the live sites on the input:
+    a fixer that also rewrote the guarded fallback is still caught."""
+    import pymolt.codemods.apply as applier
+
+    real = applier.apply_patterns
+
+    def stray(source, patterns, **kw):
+        new, hits = real(source, patterns, **kw)
+        return new.replace("    Mapping = collections.Mapping",
+                           "    Mapping = collections.abc.Mapping"), hits
+
+    monkeypatch.setattr(applier, "apply_patterns", stray)
+    out = _fix_file(tmp_path, _FALLBACK, _fallback_sites(),
+                    ("collections.Iterable", "collections.abc.Iterable"),
+                    ("collections.Mapping", "collections.abc.Mapping"))
+    assert out.previews == [] and "no live site" in out.dropped["app.py"]
