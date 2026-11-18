@@ -1,6 +1,6 @@
 # Legacy evaluation: hyper
 
-Project: `tests/artifacts/hyper` (HTTP/2 client, Python 2.7-3.5 era, archived). Branch `rework/cli-first-local-delta`. Logs: `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/hyper/`.
+Project: `tests/artifacts/hyper` (HTTP/2 client, Python 2.7-3.5 era, archived). Branch `rework/cli-first-local-delta`. Logs: `<local scratch>/eval/hyper/`.
 
 Test subset (same on both sides): `test_http20 test_http11 test_headers test_abstraction test_hyper test_import test_windowmanager test_cli`, with 3 baseline-failing tests deselected (see D3). Baseline uncaptured: 222 passed, 1 skipped in 2.4 s (3 failed, 222 passed without the deselect).
 

@@ -1,7 +1,7 @@
 # pymolt legacy evaluation: alphalens
 
 Project `tests/artifacts/alphalens` (Quantopian factor analysis, Python 2.7-3.5, pandas/scipy/matplotlib/empyrical).
-Branch `rework/cli-first-local-delta`. Logs: `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/alphalens/`.
+Branch `rework/cli-first-local-delta`. Logs: `<local scratch>/eval/alphalens/`.
 Test subset (both sides): `alphalens/tests/test_performance.py` + `test_utils.py`, with 6 tests deselected (they fail on the era baseline itself, see "Environments").
 
 Bottom line: the funnel reached **verify**, but only as INCONCLUSIVE, because the migration to pandas 3 / scipy 1.18 breaks the project and pymolt neither predicted nor rewrote anything. The reason is a pymolt gap (the delta engine cannot build the "old" environment from a container baseline), not a missing API fact.

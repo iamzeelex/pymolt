@@ -11,7 +11,7 @@ The goal is to measure how well pymolt handles real legacy projects, phase by ph
 - Artifacts are `tests/artifacts/<project>`: shallow git submodules, `ignore = dirty`. pymolt writes `.pymolt/` and target manifests there; that is expected.
   - A workaround file you add there must be named `*-pymolt-eval*`.
   - At the end, run `pymolt rollback <dir>` if you applied a plan. Restore any other source edits with `git -C tests/artifacts/<project> checkout -- <paths>`.
-- Logs and scratch go under `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/<project>/`. Keep every command's full output there; quote only excerpts in the report.
+- Logs and scratch go under `<local scratch>/eval/<project>/`. Keep every command's full output there; quote only excerpts in the report.
 - Time:
   - about 90 min wall time per project;
   - abort a single step after 20 min and record it as a timeout;

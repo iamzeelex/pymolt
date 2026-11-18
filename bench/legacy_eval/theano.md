@@ -1,7 +1,7 @@
 # pymolt legacy evaluation: theano
 
 Project: `tests/artifacts/theano` (Theano 1.0.5, discontinued 2017; successors Aesara, PyTensor). Branch `rework/cli-first-local-delta`.
-Logs: `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/theano/`.
+Logs: `<local scratch>/eval/theano/`.
 Test subset: `theano/scalar/tests` (31 tests, 4 modules). Base python:3.6 (linux/amd64), target host Python 3.12.
 
 ## 1. Scorecard

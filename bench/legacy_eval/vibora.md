@@ -1,6 +1,6 @@
 # Legacy evaluation: vibora
 
-Project: `tests/artifacts/vibora` (asyncio web framework, Python 3.6 only, 11 Cython `.pyx` + 14 extensions, archived). Branch `rework/cli-first-local-delta`. Logs: `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/vibora/`.
+Project: `tests/artifacts/vibora` (asyncio web framework, Python 3.6 only, 11 Cython `.pyx` + 14 extensions, archived). Branch `rework/cli-first-local-delta`. Logs: `<local scratch>/eval/vibora/`.
 
 Test subset: 17 files under `tests/` (`headers forms cache hooks limits responses blueprints components exceptions streaming subdomains timeouts router schemas templates client/interface client/streaming`). The test files are not named `test_*.py`, so they must be passed explicitly. Baseline uncaptured in the container: 74 passed in 28.6 s.
 

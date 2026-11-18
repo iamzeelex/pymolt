@@ -1,7 +1,7 @@
 # pymolt legacy evaluation: zipline
 
 Project `tests/artifacts/zipline` (Quantopian backtester, Python 2.7/3.5/3.6, 17 Cython `.pyx` files, bcolz, pandas 0.22 lock).
-Branch `rework/cli-first-local-delta`. Logs: `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/zipline/`.
+Branch `rework/cli-first-local-delta`. Logs: `<local scratch>/eval/zipline/`.
 Test subset (baseline only): `tests/test_memoize.py tests/test_execution_styles.py tests/test_restrictions.py tests/test_ordering.py` (732 passed, 21 s uncaptured in the container).
 
 Bottom line: zipline reached **capture baseline** (50 244 events), plan and apply (one rule-based rewrite), and an INCONCLUSIVE verify. It did not reach a working 3.12 target: the Cython extensions cannot be built against numpy 2, a project-level blocker that no pymolt phase could fix. The most useful findings are about assess (opaque "conflict" verdict, locks not selectable) and the plan summary.

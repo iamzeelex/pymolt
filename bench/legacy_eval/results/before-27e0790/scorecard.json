@@ -1,6 +1,6 @@
 {
  "meta": {
-  "pymolt": "/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/wave0-before/.venv/bin/pymolt",
+  "pymolt": "<local scratch>/wave0-before/.venv/bin/pymolt",
   "pymolt_version": "27e0790",
   "started": "2026-11-15T20:44:26+00:00",
   "parallel": 3,

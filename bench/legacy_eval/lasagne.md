@@ -1,7 +1,7 @@
 # pymolt legacy evaluation: lasagne
 
 Project: `tests/artifacts/lasagne` (library on top of Theano). Branch `rework/cli-first-local-delta`.
-Logs: `/private/tmp/claude-501/-Users-zeelex-Documents-projects-python-migrator/b5b734e8-1757-4fe9-b0ed-03fd9bc6c401/scratchpad/eval/lasagne/`.
+Logs: `<local scratch>/eval/lasagne/`.
 Test subset: `lasagne/tests/test_init.py test_utils.py test_nonlinearities.py layers/test_dense.py` (110 passed, 8 skipped). Base python:3.6 (linux/amd64), target host Python 3.12.
 
 ## 1. Scorecard
