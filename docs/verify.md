@@ -148,11 +148,29 @@ A line diff of the source each capture stored decides who edited a call's line:
   post-migration capture predates a step (its source still has the statements from before
   the step), the report says so: capture post-migration again;
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
-  symbol from the plan, or by a one-statement edit. An equal outcome is REWRITTEN equal. A
-  different value is a review item, which makes the verdict inconclusive. A new raise fails. A
-  call with no partner is counted as an unverified edited site; it does not block PASS.
+  symbol from the plan or the ledger, or by a one-statement edit. An equal outcome is REWRITTEN
+  equal. A different value is a review item, which makes the verdict inconclusive. A new raise
+  fails. A call with no partner is counted as an unverified edited site; it does not block PASS.
 
-The report prints the edited sites as equal, representation-only, need review and unverified.
+A ledger entry is judged by its claim, whoever made the edit: pymolt, or an agent or a person
+who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls.
+
+| Outcome on an edited line | hand edit | `preserve` | `intended` | `intended`, expectation attested by a person |
+|---|---|---|---|---|
+| equal | equal | equal | equal | equal |
+| representation only | DRIFT | FAIL | DRIFT | ACCEPTED if it expects `representation`; else FAIL |
+| different value | review | FAIL | review; FAIL if it expects `representation` | ACCEPTED if it expects `return:<Type>` and gets one; else FAIL |
+| new raise | FAIL | FAIL | FAIL | ACCEPTED if it expects `raise:<Type>` and gets one; else FAIL |
+| no partner | unverified | unverified | unverified | unverified |
+
+For every outcome, `preserve` is at least as strict as `intended`, and `intended` at least as
+strict as a hand edit, so recording an edit never judges it more leniently than leaving it
+unrecorded. Only a person's attestation does (an `intended` claim whose expectation a person
+attested), and a new raise fails unless one expects it. An ACCEPTED entry
+counts as compared equal, and the report prints each one with who accepted it and when.
+
+The report prints the edited sites as equal, representation-only, need review and unverified,
+then failed and accepted when there are any.
 
 ### Run noise
 
