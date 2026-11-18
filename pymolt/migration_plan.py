@@ -438,13 +438,17 @@ def create_migration_plan(
     if predict and python_move is not None:
         risks, python, compile_findings = _python_part(root, python_move, risks, stage)
 
-    from pymolt.workorder.manual import link_and_manual_steps
+    from pymolt.workorder.manual import T0, link_and_manual_steps
+    from pymolt.workorder.verify_effort import finish_steps
 
     # Every risk gets a step: the pymolt step that fixes it, or a manual one (``step_id``).
+    t0 = T0(root, changes, python_move[0] if python_move else None)
     steps = link_and_manual_steps(
         automated, root=root, changes=changes, risks=risks, manual_items=manual,
         advisories=advisories, compile_findings=compile_findings,
-        dependencies=list(migrations), python_move=python_move)
+        dependencies=list(migrations), python_move=python_move, t0=t0)
+    finish_steps(steps, risks, root=root, t0=t0, baseline_trace=baseline_path,
+                 baseline_command=list(baseline.command) if baseline is not None else None)
 
     return MigrationPlan(
         target_python=target_python,
