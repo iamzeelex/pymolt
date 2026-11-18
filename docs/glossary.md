@@ -26,6 +26,13 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **API change** | A symbol your code uses that is removed, moved, or changed in signature, default or deprecation status between base and target |
 | **codemod** | A rewrite for one API or Python-version change, applied with LibCST |
 | **plan** | The API changes, the codemods applied to your files as a diff, and the predicted risks, saved for `apply` |
+| **step** | One unit of the plan: a recipe pymolt applies across every file it changes, or work for an agent or a person. `apply --step ID` applies one |
+| **anchor** | A statement named by what it is (its code with the formatting stripped), its function or class and its neighbours, never by its line, so it is found again after lines move |
+| **run** | The application of one plan, opened by its first `apply`. Applying another plan closes it; its applied steps stay in effect |
+| **epoch** | One application of a step, numbered by its ledger event. A rollback ends it; applying the step again opens a new one |
+| **re-based** | A step applied to a file that moved on since the plan: its recipe ran again at its anchored statements and made the reviewed change there |
+| **present** | A step whose change is already in its place, made by hand: `apply` writes nothing for it and verify judges those lines as hand edits |
+| **stale step** | A step a statement of which is gone, or whose recipe now makes another change: `apply` refuses it and names why |
 | **predicted risk** | A call site the plan expects to break, rated certain / high / medium / low |
 | **verdict** | `PASS`, `FAIL` or `INCONCLUSIVE`, from `verify` |
 | **base tier** | How far the base dependencies can be trusted: gold (pinned, on the declared base Python), silver (pinned on an assumed base Python, or the tests pass), bronze (unvalidated), none (not resolved). JSON key: `baseline_tier` |
