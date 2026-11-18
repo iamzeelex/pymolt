@@ -523,7 +523,7 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     migration = _migration_phase(receipt, baseline, baseline_slot, project_path)
     # No apply run is in effect: plan and apply are optional, so the migration may be one made
     # by hand (or by an agent). It is judged by what is on disk, not by a receipt.
-    hand = receipt is None or (receipt.status == "rolled_back" and not receipt.in_effect)
+    hand = receipt is None or not receipt.in_effect
     if hand and baseline.state == DONE:
         migration = _hand_migration(
             project_path, baseline_slot, post_slot, plan, fingerprint, setup_fingerprint,
