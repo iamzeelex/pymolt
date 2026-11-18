@@ -9,8 +9,10 @@ re-plan, over two runs. After every event:
 - the disk agrees with the ledger: a file whose last event (an epoch in effect, or a rollback)
   nobody edited since holds that event's after-text; a file-level rollback leaves the epoch's
   before-text;
-- a rollback by the inverse effect (4.2 phase 2) undoes only the step's own change: applying the
-  step again at once gives back the files as they were before the rollback, byte for byte;
+- a rollback by the inverse effect (4.2 phase 2) undoes only the step's own change: doing the
+  step again at once gives back the files as they were before the rollback, byte for byte. An
+  epoch pymolt applied is done again by ``apply --step``; a recorded one by its recorder making
+  the same edit again (the epoch's change, made on the text the rollback left) and recording it;
 - every status change is a row of the state table (4.1);
 - ``project_steps`` is total and deterministic, and a step in effect is projected in effect.
 
@@ -135,20 +137,59 @@ def _statuses(root: Path, plans: dict[str, MigrationPlan]) -> dict[tuple[str, st
 
 
 def _round_trip(root: Path, result, work: Path, seed: int, ways: Counter) -> None:
-    """After a rollback by the inverse: the step applied again, on a copy, gives back the files
-    as they were before the rollback."""
+    """After a rollback by the inverse, on a copy: the step done again gives back the files as
+    they were before the rollback. ``apply --step`` does again what pymolt applied; a recorded
+    epoch is a person's edit, which pymolt's recipe does not reproduce, so the recorder makes it
+    again and records it."""
     ways["inverse"] += 1
+    sid = result.inverse[0]
+    epoch = _ended_epoch(root, result.run_id, sid)
     copy = work / f"rt{seed}"
     shutil.copytree(root, copy)
     try:
-        apply_steps(copy, result.plan, step=result.inverse[0], allow_no_baseline=True)
+        if epoch.event == "apply":
+            apply_steps(copy, result.plan, step=sid, allow_no_baseline=True)
+        else:
+            redo = _redo(copy, result.plan, epoch, seed)
+            record_step(copy, result.plan, sid)
+            for rel, text in redo.items():
+                (copy / rel).write_text(text)
+            record_step(copy, result.plan, sid, done=True)
     except (MigrationConflictError, MigrationPlanError):
-        ways["inverse, not re-applied"] += 1
+        ways[f"inverse of {epoch.event}, not done again"] += 1
     else:
-        ways["inverse, re-applied"] += 1
+        ways[f"inverse of {epoch.event}, done again"] += 1
         for rel in (M, N):
-            assert (copy / rel).read_text() == result.before[rel], (seed, rel)
+            assert (copy / rel).read_text() == result.before[rel], (seed, epoch.event, rel)
     shutil.rmtree(copy)
+
+
+def _ended_epoch(root: Path, run: str, sid: str):
+    """The event that opened the epoch the step's latest rollback ended."""
+    ledger = load_ledger(root)
+    rollback = max((e for e in ledger.events if e.event == "rollback" and e.run_id == run
+                    and e.step_id == sid), key=lambda e: e.seq)
+    return max((e for e in ledger.events if e.run_id == run and e.step_id == sid
+                and e.event in ("apply", "record") and e.seq < rollback.seq),
+               key=lambda e: e.seq)
+
+
+def _redo(root: Path, plan: MigrationPlan, epoch, seed: int) -> dict[str, str]:
+    """The recorded epoch's change made again on each of its files as the rollback left them:
+    the inverse of the inverse, with the same later steps in effect. It must be possible."""
+    from pymolt.apply_ledger import EventFile
+    from pymolt.workorder.rollback import _InverseContext, _later_events, _Texts
+
+    ledger, receipt = load_ledger(root), MigrationReceipt.load(root)
+    context = _InverseContext(root, plan, _Texts(root, plan))
+    out = {}
+    for f in epoch.files:
+        later = [e for _name, e in _later_events(ledger, receipt, f.file, epoch.seq, set())]
+        again = context.invert(epoch, EventFile(file=f.file, before=f.after, after=f.before),
+                               (root / f.file).read_text(), later)
+        assert again.ok, (seed, f.file, again.reasons)
+        out[f.file] = again.text
+    return out
 
 
 def _one(template_root: Path, plan1, plan2, work: Path, seed: int, pairs: Counter,
@@ -277,4 +318,5 @@ def test_random_sequences_keep_the_invariants(template, tmp_path, monkeypatch):
         _one(root, plan1, plan2, tmp_path, seed, pairs, ways)
     missing = [(a, b) for a in KINDS for b in KINDS if not pairs[(a, b)]]
     assert not missing, f"pairs never generated: {missing}"
-    assert all(ways[w] for w in ("file level", "inverse", "inverse, re-applied", "refused")), ways
+    assert all(ways[w] for w in ("file level", "inverse", "inverse of apply, done again",
+                                 "inverse of record, done again", "refused")), ways

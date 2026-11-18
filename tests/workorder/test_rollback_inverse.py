@@ -144,6 +144,34 @@ def test_a_statement_a_later_step_inserted_next_to_it_is_passed_over(tmp_path):
     assert read(tmp_path, M) == current.replace("X = a.g(1)", "X = a.f(1)")
 
 
+def test_a_recorded_step_whose_file_moved_on_is_undone_alone_and_recorded_again(tmp_path):
+    """Design 4.2, recorded steps: the same two phases, from the record's own texts. A person
+    recorded mech-2 with their own edit; mech-3 and a hand edit changed the file after it. Its
+    rollback undoes the person's edit only, and the person doing it again and recording it
+    gives the files back."""
+    from pymolt.workorder.record import record_step
+
+    plan = plan_for(tmp_path, FILES)
+    apply_steps(tmp_path, plan, step="mech-1")
+    record_step(tmp_path, plan, "mech-2")
+    _edit(tmp_path, M, "w = a.h(x)", "w = a.k(x) or a.h(x)")
+    record_step(tmp_path, plan, "mech-2", done=True)
+    apply_steps(tmp_path, plan, step="mech-3")
+    (tmp_path / M).write_text(HEAD + read(tmp_path, M) + TAIL, encoding="utf-8")
+    current = read(tmp_path, M)
+    epoch = next(e for e in ledger(tmp_path)["events"] if e["step_id"] == "mech-2")
+    assert (epoch["event"], [f["file"] for f in epoch["files"]]) == ("record", [M])
+
+    result = rollback_steps(tmp_path, step="mech-2")
+
+    assert (result.steps, result.inverse) == (["mech-2"], ["mech-2"])
+    assert read(tmp_path, M) == current.replace("w = a.k(x) or a.h(x)", "w = a.h(x)")
+    record_step(tmp_path, plan, "mech-2")
+    _edit(tmp_path, M, "w = a.h(x)", "w = a.k(x) or a.h(x)")
+    record_step(tmp_path, plan, "mech-2", done=True)
+    assert read(tmp_path, M) == current
+
+
 def test_rolling_back_the_last_change_is_still_file_level(tmp_path):
     plan = plan_for(tmp_path, FILES)
     apply_steps(tmp_path, plan)
