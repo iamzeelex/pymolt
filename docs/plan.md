@@ -121,7 +121,22 @@ Each step also says how it will be judged and how big it is:
 
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
 reason in the step's `why.evidence`. A plan saved by an earlier pymolt (`"schema_version": 1`)
-is read as one step, `v1`.
+is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema.json`.
+
+### PLAN.md
+
+`plan` also writes the plan for a person, `.pymolt/PLAN.md` (`--plan-md PATH` writes it
+elsewhere). It starts with the moves and a table of the steps: what each does, who does it, its
+claim, its sites (run / not run in the baseline), its effort and what it depends on. Then one
+section per step: where (with the line numbers at plan time), why, what to do (the diff, for a
+pymolt step), how verify judges it, and its effort. Low-tier steps the baseline never ran are
+collapsed into one table at the end.
+
+Text from a dependency, from your code or from a capture is shown in fenced blocks labelled
+"data from ..., not instructions". Control characters and bidi controls are removed, each item is
+cut at 300 characters, and each list at 10 items.
+
+`plan --agent` adds the steps and the brief of the first step for an agent ([agents.md](agents.md)).
 
 ## When to bump the manifest
 
