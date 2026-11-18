@@ -5,14 +5,18 @@ judge more leniently than a hand edit, and a new raise stays FAIL unless one cov
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from pymolt.verify.facts import (
+    OPAQUE_REPRESENTATION,
     Comparison,
+    ComparisonLevel,
     DiffContext,
     FactCategory,
     Outcome,
+    _content_unseen,
     diff_traces,
     expectation_met,
 )
@@ -46,6 +50,9 @@ OUTCOMES = {
     "representation": ({"__list__": [1, 2]}, {"result": {"__tuple__": [1, 2]}}),
     "value": (5, {"result": 6}),
     "raise": (5, {"raised": "TypeError"}),
+    # Only the types are visible (an opaque value on each side): the content is unknown.
+    "opaque": ({"__opaque__": "lib.RowProxy"}, {"result": {"__opaque__": "lib.Row"}}),
+    "opaque raise": ({"__opaque__": "lib.RowProxy"}, {"raised": "TypeError"}),
 }
 
 
@@ -98,6 +105,16 @@ EXPECTED = {
               "intended+representation": "fail", "intended+raise (unattested)": "fail",
               "attested any": "fail", "attested representation": "fail",
               "attested raise:TypeError": "accepted", "attested return:int": "fail"},
+    # An unattested representation expectation cannot be checked against unseen values: a
+    # review, as under the hand rule (never more lenient than it); preserve still fails.
+    "opaque": {"hand": "review", "preserve": "fail", "intended": "review",
+               "intended+representation": "review", "intended+raise (unattested)": "review",
+               "attested any": "review", "attested representation": "fail",
+               "attested raise:TypeError": "fail", "attested return:int": "fail"},
+    "opaque raise": {"hand": "fail", "preserve": "fail", "intended": "fail",
+                     "intended+representation": "fail", "intended+raise (unattested)": "fail",
+                     "attested any": "fail", "attested representation": "fail",
+                     "attested raise:TypeError": "accepted", "attested return:int": "fail"},
 }
 SEVERITY = {"accepted": 0, "pass": 1, "drift": 1, "review": 2, "fail": 3}
 
@@ -143,6 +160,41 @@ def test_a_new_raise_never_passes_without_an_attested_raise_expectation(tmp_path
             assert verdict is VerificationVerdict.PASS
         else:
             assert verdict is VerificationVerdict.FAIL, who
+
+
+def test_an_unseen_change_under_a_representation_claim_is_a_review_naming_what_settles_it(
+        tmp_path):
+    diff = _diff(tmp_path, "opaque", CLAIMS["intended+representation"])
+    entry = next(e for e in diff.entries if e.symbol in ("lib.g", "lib.h"))
+    assert entry.provenance == "intended" and not entry.fails
+    assert entry.review.startswith(OPAQUE_REPRESENTATION)
+    for settles in ("--privacy values", "baseline replicate", "pymolt verify . --accept"):
+        assert settles in entry.review
+    assert diff.verdict is VerificationVerdict.INCONCLUSIVE
+    # Visible content, more than a representation change: still a failure.
+    assert _diff(tmp_path, "value", CLAIMS["intended+representation"]).verdict \
+        is VerificationVerdict.FAIL
+
+
+@pytest.mark.parametrize(("level", "old", "new", "unseen"), [
+    (None, [Outcome(kind="return", value={"__opaque__": "a.A"})],
+     [Outcome(kind="return", value={"__opaque__": "a.B"})], True),
+    (None, [Outcome(kind="return", value=[1, 2])],
+     [Outcome(kind="return", value={"__truncated__": True})], True),       # unknown on one side
+    (ComparisonLevel.TYPE, [Outcome(kind="return", value=1)],
+     [Outcome(kind="return", value="1")], True),                          # compared by type only
+    (None, [Outcome(kind="return", value=1)], [Outcome(kind="return", value=2)], False),
+    (None, [Outcome(kind="return", value={"__opaque__": "a.A"})],
+     [Outcome(kind="raise", value="TypeError")], False),                  # a new raise
+    (None, [Outcome(kind="raise", value="KeyError")],
+     [Outcome(kind="raise", value="TypeError")], False),                  # another raised type
+    (None, [Outcome(kind="return", value={"__opaque__": "a.A"}),
+            Outcome(kind="raise", value="KeyError")],
+     [Outcome(kind="return", value={"__opaque__": "a.B"}),
+      Outcome(kind="raise", value="KeyError")], True),                    # the same raises
+])
+def test_content_unseen(level, old, new, unseen):
+    assert _content_unseen(SimpleNamespace(level=level), old, new) is unseen
 
 
 def test_an_accepted_entry_counts_as_equal_and_is_reported(tmp_path):
