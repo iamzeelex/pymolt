@@ -34,7 +34,7 @@ irrelevant changes.
   inconclusive.
 
 Measured on 22 known API changes in flask, werkzeug and pandas: recall 0.95, precision 1.00
-([bench/delta_parity](../bench/delta_parity/RESULTS.md)).
+([bench/delta_accuracy](../bench/delta_accuracy/RESULTS.md)).
 
 ## Python-version breakage
 
@@ -229,9 +229,3 @@ its rank among equal lines there (`site.nth`), not from the line number, so an e
 lines keeps it. The plan saves the ids it predicted, and `verify` scores those; a plan saved by an
 earlier pymolt (`"schema": "pymolt.risks/1"`) keeps its line-based ids.
 
-## A remote Axiom (optional)
-
-A remote Axiom service is used only when you configure one with `plan --endpoint URL` or
-`PYMOLT_AXIOM_ENDPOINT`, with the token in `PYMOLT_API_TOKEN`. Only package names and versions are
-sent, never code. On the same 22 changes, Axiom's cached data scored recall 0.55 and precision
-0.63.

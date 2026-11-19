@@ -178,7 +178,7 @@ A reviewed-change record, keyed by symbol, site and an outcome fingerprint, that
 ### Verdict scope (found in round 3, fixed)
 Once a plan was applied, the verdict read only the impact-filtered diff: the plan's predicted symbols. An unpredicted behaviour change therefore could not FAIL verify, so verify only confirmed the predictor. The django change scenario's `escape` (`&#39;` → `&#x27;`) and jinja2's `Template.render` were found in `all_fact_diff` and still came out PASS or INCONCLUSIVE.
 
-The filter dates from v0.1.0, where it was a *focus* on an Axiom impact set. It became the verdict when the applied plan became the default impact set.
+The filter dates from v0.1.0, where it was a *focus* on the plan's impact set. It became the verdict when the applied plan became the default impact set.
 
 Now:
 - **FAIL evidence** comes from the whole surface (`all_fact_diff`).

@@ -12,7 +12,7 @@ from pymolt.apply_ledger import (
     entries_for,
     in_effect_entries,
 )
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview
 from pymolt.migration_plan import apply_migration_plan, create_migration_plan
 from pymolt.migration_state import MigrationReceipt, ReceiptRun, StepReceipt

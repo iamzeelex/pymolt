@@ -15,8 +15,8 @@ The answer is deliberately weaker than a probe's, and says so:
   ``TYPE_CHECKING``, an attribute of a computed value. Such a step has ``exists: None``
   and ``unknown: <why>``; the diff never turns it into a fact. (griffe 2.0.2 loses inherited
   members when a base lives in an unloadable namespace subpackage: 56 of 111 flask 2.0.3 ->
-  3.0.0 "removals" measured in axiom_graph were false. The new side is probed live, so that
-  error class does not reach it.)
+  3.0.0 "removals" measured from griffe alone were false. The new side is probed live, so
+  that error class does not reach it.)
 - **aliases and re-exports are followed** whatever ``__all__`` says; an alias to a name
   outside the archive (``flask.Markup`` -> ``markupsafe.Markup``) exists, with the target as
   its canonical name and no kind;

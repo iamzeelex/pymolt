@@ -1,9 +1,9 @@
 """
 pymolt/codemods/models.py
 
-Local models for the codemod loop. CodemodPattern mirrors the Axiom Graph API's
-Tier-1 response unit (flat old → new); CodemodRule (pymolt.codemods.rules,
-imported here) is the Tier-2 declarative successor — a metavariable match/
+Local models for the codemod loop. DependencyMigration is one dependency to move
+(versions only); CodemodPattern is the Tier-1 unit (flat old → new); CodemodRule
+(pymolt.codemods.rules, imported here) is the Tier-2 declarative successor — a metavariable match/
 rewrite template with its own honest advisory channel. FileChange /
 CodemodRunResult describe what was rewritten on disk; FilePreview is the
 reviewable before/after unit the interface renders.
@@ -24,8 +24,17 @@ from pydantic import BaseModel, Field
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory
 
 
+class DependencyMigration:
+    """One dependency to move: its name and the from and to versions."""
+
+    def __init__(self, name: str, from_version: str, to_version: str) -> None:
+        self.name = name
+        self.from_version = from_version
+        self.to_version = to_version
+
+
 class CodemodPattern(BaseModel):
-    """A symbol replacement received from Axiom Graph: old → new."""
+    """A symbol replacement the delta engine derived: old → new."""
 
     old_qualname: str
     new_qualname: str
@@ -47,7 +56,7 @@ class CodemodPattern(BaseModel):
 
 
 class ApiImpact(BaseModel):
-    """A changed dependency API path returned by Axiom Graph.
+    """A changed dependency API path the delta engine found.
 
     The package name is supplied by the surrounding ``CodemodBundle`` map and
     is added only when impacts are frozen into a migration plan.
@@ -77,9 +86,9 @@ class CodemodBundle(BaseModel):
     impacts: list[ApiImpact] = Field(default_factory=list)
     """Changed public API paths used to scope local ContactMap verification."""
     downgraded: list[str] = Field(default_factory=list)
-    """Short summaries of rules the client downgraded: the server claimed
-    `verified` but local re-verification (the sole verification authority)
-    failed — see `client.AxiomGraphClient.fetch_bundle`."""
+    """Short summaries of rules the provider downgraded: their golden pair did not
+    verify, or the environment lacks what they need — see
+    `pymolt.delta.provider.LocalDeltaProvider.fetch_bundle`."""
 
 
 class FileChange(BaseModel):
@@ -107,7 +116,7 @@ class CodemodRunResult(BaseModel):
     (e.g. a file whose sole deprecated call is `return df.lookup(...)`: 0
     sites, 1 advisory) — an advisory-only file must surface here, not vanish."""
     downgraded: list[str] = Field(default_factory=list)
-    """Summaries of rules the client downgraded during fetch (threaded up from
+    """Summaries of rules the provider downgraded during fetch (threaded up from
     CodemodBundle.downgraded, merged across packages) so interfaces can show
     them."""
 

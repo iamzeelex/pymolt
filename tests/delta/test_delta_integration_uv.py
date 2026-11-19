@@ -250,6 +250,6 @@ def test_unbuildable_new_env_is_inconclusive(tmp_path, envs, monkeypatch):
 
 
 def _mig(name, old, new):
-    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import DependencyMigration
 
     return DependencyMigration(name, old, new)

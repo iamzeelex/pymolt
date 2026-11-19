@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from pymolt.codemods.apply import apply_patterns
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.migration_plan import create_migration_plan

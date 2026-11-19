@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from pymolt.apply_check import SmokeCheck, module_for, smoke_verdict
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import FilePreview
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app

@@ -254,7 +254,7 @@ def _fake_capture(monkeypatch):
 
 def _fake_codemods(monkeypatch, project):
     from pymolt.codemods import service as codemod_service
-    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import DependencyMigration
     from pymolt.codemods.models import CodemodPattern, FilePreview
 
     source = (project / "app.py").read_text(encoding="utf-8")

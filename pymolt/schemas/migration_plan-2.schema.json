@@ -169,7 +169,7 @@
       "type": "object"
     },
     "CodemodPattern": {
-      "description": "A symbol replacement received from Axiom Graph: old \u2192 new.",
+      "description": "A symbol replacement the delta engine derived: old \u2192 new.",
       "properties": {
         "confidence": {
           "default": "medium",

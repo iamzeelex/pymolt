@@ -10,7 +10,7 @@
       "roots": ["flask"],
       "code": "from flask import Flask\napp = Flask('pymolt_probe')\napp.add_url_rule('/x', 'x_ep', lambda: 'ok', methods=['GET', 'POST'])\nctx = app.test_request_context('/x?a=1', method='POST', json={'message': 'hi'}, headers={'Authorization': 'Basic dTpw'})\nctx.push()\n",
       "effect": "pushes an app + request context so flask.request, flask.current_app, flask.g and flask.session resolve",
-      "source": "bench/delta_parity probe --flask-context (flask 2.0 - 3.0)",
+      "source": "bench/delta_accuracy probe --flask-context (flask 2.0 - 3.0)",
       "date": "2026-11-15"
     }
   ]

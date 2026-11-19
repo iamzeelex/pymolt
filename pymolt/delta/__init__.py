@@ -1,4 +1,4 @@
-"""pymolt.delta — local, scoped API-change facts (replaces the Axiom Graph service).
+"""pymolt.delta — local, scoped API-change facts.
 
 ``compute_deltas(project_dir, migrations, *, symbols=None, online=False, use_cache=True)``
 returns one :class:`DeltaReport` (schema ``pymolt.delta/1``) per migration: what changed

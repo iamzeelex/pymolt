@@ -8,7 +8,7 @@ the shape and answers narrow questions:
   for a migration window, as :class:`~pymolt.codemods.rules.CodemodRule` objects the
   existing rules engine runs;
 - :func:`successor_hint` — the curated successor of a removed symbol;
-- :func:`succession_edges` — framework-succession edges (formerly served by Axiom);
+- :func:`succession_edges` — framework-succession edges;
 - :func:`warning_switches` — env switches that make an old version warn about the new one;
 - :func:`probe_contexts` — setup snippets the API probe runs so proxies resolve;
 - :func:`stdlib_changes` / :func:`stdlib_lifetimes` — curated stdlib successors and the
@@ -178,7 +178,7 @@ def succession_edges(frameworks: list[str]):
     """Curated framework-succession edges for the detected frameworks.
 
     Matching is case-insensitive on the base package name, so ``tensorflow==1.15``
-    still hits ``tensorflow``. De-duplicated, first-seen order (as Axiom served them).
+    still hits ``tensorflow``. De-duplicated, in first-seen order.
     """
     from pymolt.strategic.succession.models import SuccessionEdge
 

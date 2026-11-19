@@ -8,7 +8,7 @@ status → scan → setup → assess → capture baseline → plan → apply →
 | decision | evidence |
 |---|---|
 | Agents use the CLI (`--json`) plus one Agent Skill. MCP becomes an optional thin adapter. | The agent bench never had a CLI arm, and its wins came from capability plus compact answers. The attached server costs ~500–850 tokens per turn. Rounds 1–2 were not isolated (bench/RESULTS.md, round 3 notes). The MCP-only honesty bugs lived in duplicated logic. |
-| The Axiom Graph service is no longer a runtime dependency. API-change facts are computed locally, scoped to the symbols the project touches. | bench/delta_parity/RESULTS.md: over 22 changes, local reaches recall 0.95 and precision 1.00 against Axiom's 0.55 / 0.63. Successor hints: local 3/3, Axiom 0/3. Local takes < 2 s per library. The default hub URL does not resolve. |
+| API-change facts are computed locally, scoped to the symbols the project touches; no remote service is involved. | bench/delta_accuracy/RESULTS.md: over 22 changes, the local engine reaches recall 0.95 and precision 1.00, with successor hints for 3/3. It takes < 2 s per library. |
 | Predicted risks attach to `plan`. `verify` reports predicted vs observed. | `verify` stays the only verdict (cli-command-set decision). The pandas 1.5 FutureWarning about `numeric_only` predicted the break the fact diff later caught. |
 
 ## 1. Agent surface
@@ -45,11 +45,10 @@ Hints are cached under `.pymolt/cache/delta/`.
 
 **Knowledge** (`pymolt/knowledge/*.json`): versioned data shipped with pymolt. It holds curated codemod rules (e.g. pandas `Series.append`/`DataFrame.append` → `pd.concat`), framework-succession edges (moved from the succession client) and warning switches (e.g. `SQLALCHEMY_WARN_20`). Each entry has a source and a date.
 
-**Provider** (`provider.py`): `LocalDeltaProvider.fetch_bundle(migrations, progress=None, use_cache=None) -> dict[str, CodemodBundle]`, the same contract as `AxiomGraphClient`.
+**Provider** (`provider.py`): `LocalDeltaProvider.fetch_bundle(migrations, progress=None, use_cache=None) -> dict[str, CodemodBundle]`.
 - `patterns`/`rules` come from facts with a concrete successor: rename-call / rewrite-import when the successor is a same-signature move or rename, and knowledge rules for structural rewrites.
 - `impacts` hold every non-UNCHANGED fact, so plan shows them even when nothing is auto-fixable.
-- It is the default provider for `plan`. A remote Axiom endpoint stays usable only if explicitly configured (`--endpoint` / `PYMOLT_AXIOM_ENDPOINT`).
-- The hub default URL is removed. The `pymolt axiom …` group becomes a hidden stub (exit 2, naming the replacement) per the stub policy.
+- It is the only provider for `plan`.
 
 **Delta fact schema** (consumed by section 3):
 ```json
@@ -96,7 +95,7 @@ Each risk carries the site, the symbol, the fact, the evidence and whether a pla
    - it predicts `DataFrame.mean` at `core.py:24` as **high**, from the default change plus the warning;
    - after apply and the post-migration capture, `verify` reports that prediction as a **hit**;
    - the existing PASS/FAIL scenarios are unchanged.
-2. **Delta parity:** `bench/delta_parity` runs through `pymolt.delta` and keeps recall ≥ 0.95 and precision 1.00 on its 22 changes, < 2 s per library, excluding environment builds.
+2. **Delta accuracy:** `bench/delta_accuracy` runs through `pymolt.delta` and keeps recall ≥ 0.95 and precision 1.00 on its 22 changes, < 2 s per library, excluding environment builds.
 3. **MCP:**
    - 7 tools, the server under ~300 lines;
    - the parity test passes;

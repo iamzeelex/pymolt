@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from _stepwise import project, with_steps
 
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.migration_plan import create_migration_plan
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode

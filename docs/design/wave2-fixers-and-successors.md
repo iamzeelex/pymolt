@@ -6,7 +6,7 @@ Status: in progress, 2026-11-15. Base: `wave1/runner-and-stdlib` (9ef1336).
 |---|---|
 | 2a fixers | design P3 in `docs/design/python-version-breakage.md` |
 | 2b same-object successor search | found by the Wave 1 evaluation (alphalens `pandas.util.testing`) |
-| 2c static old side | axiom_graph's griffe idea, old side only (`bench/legacy_eval/KEY_ISSUES.md`, axiom section) |
+| 2c static old side | griffe over the old release's source, old side only (`bench/legacy_eval/KEY_ISSUES.md`) |
 | 2d cold scan | B6: theano's cold scan took 221 s |
 
 ## Acceptance
@@ -63,13 +63,13 @@ Rules:
 ### Static old side (2c owns `delta/static_side.py` (new), `delta/acquire.py` (new), and in `delta/envs.py` the final fallback of `resolve_old`; in `delta/engine.py` it edits only side selection, while 2b edits only diffing)
 - It returns **probe-shaped results** for the touched symbols, built from the old release's wheel or sdist with griffe (already a dependency). The sources are uv's cache, else a fetch (allowed only under `--online` or assess's network policy). The results hold: existence, kind, parameters (names, kinds, literal defaults only), owner, and `warnings.warn`/docstring deprecation prose.
 - Meta `{"basis": "static", "source": "<wheel|sdist> <file>"}`.
-- **Traps** (verified on axiom_graph):
+- **Traps** (verified on flask 2.0.3 → 3.0.0):
   - an unresolved base class or namespace subpackage means *unknown*, never absent;
   - follow aliases and re-exports regardless of `__all__`;
   - PEP 562 `__getattr__` names come from `delta/fetch.py`'s existing scope reader;
   - compare a default value only when both sides are literals.
 - The engine uses static results only when no old interpreter is reachable. Facts then carry `basis {"old": "static"}`, and the report quality is at most `partial`.
-- Port from axiom_graph `acquisition/sdist_cache.py:39-151`: `_read_capped`, `_safe_extract_zip` and the tar `..` filter.
+- Extraction caps every read, refuses `..` members and unpacks zips safely.
 
 ### Cold scan (2d owns `verify/contact_map.py`'s file walk and parse scheduling)
 - Parse cache misses in a process pool sized by CPU count, falling back to serial for small projects or when spawning fails.

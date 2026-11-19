@@ -16,10 +16,9 @@
 Nothing is executed, imported or built. A failure is an :class:`AcquireError` carrying the
 reason, which the engine turns into an INCONCLUSIVE note.
 
-The extractors and the capped read are adapted from axiom_graph's
-``acquisition/sdist_cache.py`` (``_read_capped``, ``_safe_extract_zip``, the tar ``..``
-filter), with two additions it lacks: a total-size cap against zip bombs, and links,
-devices and absolute members are refused instead of unpacked.
+The extractors cap every read, refuse a ``..`` member, cap the total unpacked size
+against zip bombs, and refuse links, devices and absolute members instead of unpacking
+them.
 """
 
 from __future__ import annotations

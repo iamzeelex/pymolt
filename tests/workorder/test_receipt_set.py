@@ -6,7 +6,7 @@ import json
 import pytest
 
 from pymolt.apply_ledger import build_entries, in_effect_entries, ledger_path, load_ledger
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import ApiImpact, CodemodPattern, FilePreview
 from pymolt.migration_plan import (
     MigrationPlan,

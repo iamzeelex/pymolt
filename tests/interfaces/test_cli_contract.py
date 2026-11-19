@@ -183,9 +183,9 @@ class TestExitCodes:
         assert "static contract surface is empty" in unchanged.stdout
         assert verify(changed).exit_code == EXIT_FINDING
 
-    def test_dead_service_is_environment_not_usage(self, project, monkeypatch):
+    def test_a_failing_delta_engine_is_environment_not_usage(self, project, monkeypatch):
         from pymolt.codemods import service as codemods_service
-        from pymolt.codemods.client import AxiomGraphError, DependencyMigration
+        from pymolt.codemods.models import DependencyMigration
         from pymolt.ingestion.config import EnvConfig, ToolChoice
 
         (project / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
@@ -195,7 +195,7 @@ class TestExitCodes:
         ).save(project / ".pymolt" / "env_config.json")
 
         def boom(*a, **k):
-            raise AxiomGraphError("connection refused")
+            raise RuntimeError("uv could not build the old environment")
 
         monkeypatch.setattr(
             codemods_service, "resolve_codemod_migrations",

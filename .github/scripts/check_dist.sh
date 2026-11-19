@@ -3,8 +3,8 @@
 # and both artifacts pass twine's metadata check. Used by CI and by the release.
 set -eu
 
-# Axiom Graph and the repo tooling are not part of the distribution.
-leaked=$(tar tzf dist/*.tar.gz | grep -E '/(services|bench|docs|integrations|plugin|tests)/' || true)
+# The repo tooling is not part of the distribution.
+leaked=$(tar tzf dist/*.tar.gz | grep -E '/(bench|docs|integrations|plugin|tests)/' || true)
 if [ -n "$leaked" ]; then
   echo "::error::sdist contains files outside the pymolt package:"
   echo "$leaked"

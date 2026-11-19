@@ -1,7 +1,7 @@
 """Durable, reviewable migration plans and reversible application.
 
 A plan freezes the exact before/after source that a dry-run produced. Applying
-it never asks Axiom Graph to recompute recipes: every source hash is checked and
+it never recomputes recipes: every source hash is checked and
 the reviewed batch is committed atomically. The same frozen source is retained
 under ``.pymolt/migrations/<run-id>/`` so rollback remains available after the
 temporary transaction files have been removed.

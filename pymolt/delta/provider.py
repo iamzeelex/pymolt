@@ -1,6 +1,6 @@
 """``LocalDeltaProvider``: codemods from local delta facts, the default for ``pymolt plan``.
 
-Same contract as ``AxiomGraphClient.fetch_bundle``: ``{package: CodemodBundle}``.
+``fetch_bundle`` returns ``{package: CodemodBundle}``.
 
 - **patterns** come from facts with a concrete, same-signature successor: a MOVED spelling
   (the same object is importable elsewhere) or a REMOVED one whose successor resolves in

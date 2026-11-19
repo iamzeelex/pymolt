@@ -18,7 +18,7 @@ from pymolt.apply_ledger import (
     ledger_path,
     load_ledger,
 )
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview
 from pymolt.migration_plan import (
     MigrationPlan,

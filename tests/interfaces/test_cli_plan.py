@@ -6,7 +6,7 @@ import sys
 from typer.testing import CliRunner
 
 from pymolt.codemods import service as codemod_service
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview, PreviewProgress
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app

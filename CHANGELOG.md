@@ -21,7 +21,6 @@ All notable changes to pymolt. The format follows
   - `migrate`, `codemods`: use `plan`, then `apply`.
   - `env hint`: use `assess`, which ends with the commands that build the target environment
     (`target_hint` in `--json`).
-  - `login`, `logout`, `auth`, `config`: see the Axiom entry below.
 - `capture` takes the side as an argument: `pymolt capture baseline -- CMD` replaces
   `pymolt contract capture --when baseline -- CMD`.
 - `capture` refuses to run before `setup`, because such a capture records no environment. Run
@@ -29,12 +28,12 @@ All notable changes to pymolt. The format follows
 - Renamed options. The old spellings still parse in 0.2 but are no longer listed:
   `assess --source-manifest` is `--manifest`, `assess --current-python` is `--base-python`,
   `assess -c` is `--upgrade-constraint`, and `plan --target-file` is `--target-manifest`.
-- `succession --axiom-url` is `succession --endpoint`. `succession --write` is removed: save the
-  in-place codemods with `succession --plan`, then run `pymolt apply`.
-- `plan` computes API changes locally and contacts no service by default. The hosted Axiom
-  default is gone, and an endpoint saved with `pymolt config set-endpoint` is no longer used.
-  For a remote Axiom, pass `plan --endpoint URL` or set `PYMOLT_AXIOM_ENDPOINT`, with the token
-  in `PYMOLT_API_TOKEN`.
+- `succession --write` is removed: save the in-place codemods with `succession --plan`, then
+  run `pymolt apply`.
+- `plan` and `succession` compute everything on this machine and contact no service. The
+  `login`, `logout`, `auth` and `config` commands are gone with no replacement, and so are the
+  options and settings that named a service: a service URL, a saved endpoint and a sign-in
+  token.
 - `apply` also writes the target's pins into a requirements manifest: each `name==version` line
   without `--hash` for a package the target pins at another version. See the change with
   `apply --dry-run`; leave it out with `apply --step ID --skip --reason TEXT`; `rollback`
