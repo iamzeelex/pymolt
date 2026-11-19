@@ -1,7 +1,7 @@
 {
   "meta": {
     "when": "2026-11-15 20:14:05",
-    "pymolt": "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+    "pymolt": ".venv/bin/pymolt",
     "wall_seconds": 63.7,
     "env_seconds": 1.3,
     "parallel": 3
@@ -184,9 +184,9 @@
       },
       "F": {
         "delta_sides": [
-          "click new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/click/change/.pymolt/cache/envs/cd7102e826d6591c)",
-          "click new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/click/equiv/.pymolt/cache/envs/cd7102e826d6591c)",
-          "click old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/click/old/bin/python)"
+          "click new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/click/change/.pymolt/cache/envs/cd7102e826d6591c)",
+          "click new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/click/equiv/.pymolt/cache/envs/cd7102e826d6591c)",
+          "click old: baseline capture interpreter (bench/generalization/.envs/click/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -445,26 +445,26 @@
       },
       "F": {
         "delta_sides": [
-          "asgiref new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
-          "asgiref new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
-          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
-          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
-          "django new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
-          "django new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
-          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
-          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
-          "sqlparse new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
-          "sqlparse new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
-          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
-          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)"
+          "asgiref new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
+          "asgiref new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
+          "asgiref old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "asgiref old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
+          "django new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
+          "django old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/653bda3768faee21)",
+          "sqlparse new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/653bda3768faee21)",
+          "sqlparse old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)"
         ],
         "delta_old_side_built": [
-          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
-          "asgiref old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
-          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
-          "django old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
-          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
-          "sqlparse old: throwaway environment pinned to the from-versions (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)"
+          "asgiref old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "asgiref old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "django old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/change/.pymolt/cache/envs/3b2df04512978d5d)",
+          "sqlparse old: throwaway environment pinned to the from-versions (bench/generalization/results/wave2/django/equiv/.pymolt/cache/envs/3b2df04512978d5d)"
         ],
         "inconclusive": [],
         "partial": [],
@@ -707,12 +707,12 @@
       },
       "F": {
         "delta_sides": [
-          "jinja2 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/change/.pymolt/cache/envs/695db8ae85b62cf6)",
-          "jinja2 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/equiv/.pymolt/cache/envs/695db8ae85b62cf6)",
-          "jinja2 old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/jinja2/old/bin/python)",
-          "markupsafe new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/change/.pymolt/cache/envs/695db8ae85b62cf6)",
-          "markupsafe new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/jinja2/equiv/.pymolt/cache/envs/695db8ae85b62cf6)",
-          "markupsafe old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/jinja2/old/bin/python)"
+          "jinja2 new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/jinja2/change/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "jinja2 new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/jinja2/equiv/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "jinja2 old: baseline capture interpreter (bench/generalization/.envs/jinja2/old/bin/python)",
+          "markupsafe new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/jinja2/change/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "markupsafe new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/jinja2/equiv/.pymolt/cache/envs/695db8ae85b62cf6)",
+          "markupsafe old: baseline capture interpreter (bench/generalization/.envs/jinja2/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -1042,9 +1042,9 @@
       },
       "F": {
         "delta_sides": [
-          "networkx new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/networkx/change/.pymolt/cache/envs/6e204b673b907f68)",
-          "networkx new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/networkx/equiv/.pymolt/cache/envs/6e204b673b907f68)",
-          "networkx old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/networkx/old/bin/python)"
+          "networkx new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/networkx/change/.pymolt/cache/envs/6e204b673b907f68)",
+          "networkx new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/networkx/equiv/.pymolt/cache/envs/6e204b673b907f68)",
+          "networkx old: baseline capture interpreter (bench/generalization/.envs/networkx/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -1252,12 +1252,12 @@
       },
       "F": {
         "delta_sides": [
-          "numpy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/change/.pymolt/cache/envs/7a4e5cb741884e8d)",
-          "numpy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/equiv/.pymolt/cache/envs/7a4e5cb741884e8d)",
-          "numpy old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/pandas/old/bin/python)",
-          "pandas new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/change/.pymolt/cache/envs/7a4e5cb741884e8d)",
-          "pandas new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pandas/equiv/.pymolt/cache/envs/7a4e5cb741884e8d)",
-          "pandas old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/pandas/old/bin/python)"
+          "numpy new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/pandas/change/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "numpy new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/pandas/equiv/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "numpy old: baseline capture interpreter (bench/generalization/.envs/pandas/old/bin/python)",
+          "pandas new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/pandas/change/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "pandas new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/pandas/equiv/.pymolt/cache/envs/7a4e5cb741884e8d)",
+          "pandas old: baseline capture interpreter (bench/generalization/.envs/pandas/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -1806,9 +1806,9 @@
       },
       "F": {
         "delta_sides": [
-          "pyyaml new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pyyaml/change/.pymolt/cache/envs/1edcb82c6d2656b1)",
-          "pyyaml new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/pyyaml/equiv/.pymolt/cache/envs/1edcb82c6d2656b1)",
-          "pyyaml old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/pyyaml/old/bin/python)"
+          "pyyaml new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/pyyaml/change/.pymolt/cache/envs/1edcb82c6d2656b1)",
+          "pyyaml new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/pyyaml/equiv/.pymolt/cache/envs/1edcb82c6d2656b1)",
+          "pyyaml old: baseline capture interpreter (bench/generalization/.envs/pyyaml/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -2130,9 +2130,9 @@
       },
       "F": {
         "delta_sides": [
-          "sqlalchemy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/sqlalchemy/change/.pymolt/cache/envs/8e304b5439d46c2d)",
-          "sqlalchemy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/sqlalchemy/equiv/.pymolt/cache/envs/8e304b5439d46c2d)",
-          "sqlalchemy old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/sqlalchemy/old/bin/python)"
+          "sqlalchemy new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/sqlalchemy/change/.pymolt/cache/envs/8e304b5439d46c2d)",
+          "sqlalchemy new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/sqlalchemy/equiv/.pymolt/cache/envs/8e304b5439d46c2d)",
+          "sqlalchemy old: baseline capture interpreter (bench/generalization/.envs/sqlalchemy/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -2537,18 +2537,18 @@
       },
       "F": {
         "delta_sides": [
-          "iniconfig new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "iniconfig new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "iniconfig old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)",
-          "packaging new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "packaging new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "packaging old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)",
-          "pluggy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "pluggy new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "pluggy old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)",
-          "pytest new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "pytest new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
-          "pytest old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/stdlib/old/bin/python)"
+          "iniconfig new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "iniconfig new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "iniconfig old: baseline capture interpreter (bench/generalization/.envs/stdlib/old/bin/python)",
+          "packaging new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "packaging new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "packaging old: baseline capture interpreter (bench/generalization/.envs/stdlib/old/bin/python)",
+          "pluggy new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pluggy new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pluggy old: baseline capture interpreter (bench/generalization/.envs/stdlib/old/bin/python)",
+          "pytest new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/change/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pytest new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/stdlib/equiv/.pymolt/cache/envs/67cd507464ddb3e4)",
+          "pytest old: baseline capture interpreter (bench/generalization/.envs/stdlib/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],
@@ -2807,9 +2807,9 @@
       },
       "F": {
         "delta_sides": [
-          "urllib3 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/urllib3/change/.pymolt/cache/envs/090e85a53af8b8c4)",
-          "urllib3 new: throwaway environment from requirements-target.txt (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/results/wave2/urllib3/equiv/.pymolt/cache/envs/090e85a53af8b8c4)",
-          "urllib3 old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/generalization/.envs/urllib3/old/bin/python)"
+          "urllib3 new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/urllib3/change/.pymolt/cache/envs/090e85a53af8b8c4)",
+          "urllib3 new: throwaway environment from requirements-target.txt (bench/generalization/results/wave2/urllib3/equiv/.pymolt/cache/envs/090e85a53af8b8c4)",
+          "urllib3 old: baseline capture interpreter (bench/generalization/.envs/urllib3/old/bin/python)"
         ],
         "delta_old_side_built": [],
         "inconclusive": [],

@@ -50,7 +50,7 @@ Group C breaks the product's core promise ("honesty markers"), so it ranks high 
 
 ## What axiom_graph already has
 
-Surveyed `/Users/zeelex/Documents/projects/axiom_graph/services/axiom_graph`: 143 tests, but codemods, succession, policy and the prose miners are untested.
+Surveyed `../axiom_graph/services/axiom_graph`: 143 tests, but codemods, succession, policy and the prose miners are untested.
 
 | Need | Verdict | Detail |
 |---|---|---|

@@ -1,6 +1,6 @@
 {
  "meta": {
-  "pymolt": "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+  "pymolt": ".venv/bin/pymolt",
   "pymolt_version": "3d7354f+dirty",
   "started": "2026-11-16T10:13:55+00:00",
   "parallel": 1,

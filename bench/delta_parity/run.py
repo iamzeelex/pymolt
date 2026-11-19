@@ -41,6 +41,9 @@ from packaging.version import Version
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO))
+sys.path.append(str(HERE.parent))  # bench/, for _paths
+
+from _paths import scrub  # noqa: E402
 
 from pymolt.delta import RecordedWarning, TouchedSymbol, compute_deltas, run_stats  # noqa: E402
 from pymolt.delta.fetch import successor_from  # noqa: E402
@@ -566,7 +569,7 @@ def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
     symbols, map_s = touched_symbols(name, pair)
     timing["contact_map_s"] = round(map_s, 2)
     sym_file = RESULTS / f"{name}_symbols.json"
-    sym_file.write_text(json.dumps(symbols, indent=1))
+    sym_file.write_text(json.dumps(scrub(symbols), indent=1))
 
     # ground truth: introspection + use, independent of pymolt.delta
     probes, calls = {}, {}
@@ -631,7 +634,9 @@ def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
             for u in sorted(units)
         },
     }
-    (RESULTS / f"{name}_parity.json").write_text(json.dumps(report, indent=1, default=str))
+    (RESULTS / f"{name}_parity.json").write_text(
+        json.dumps(scrub(report), indent=1, default=str)
+    )
     return report
 
 

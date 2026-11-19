@@ -707,8 +707,8 @@
     }
    ],
    "notes": [
-    "old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-old/bin/python)",
-    "new: configured target environment (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-new)"
+    "old: baseline capture interpreter (bench/delta_parity/.cache/envs/flask-old/bin/python)",
+    "new: configured target environment (bench/delta_parity/.cache/envs/flask-new)"
    ]
   },
   {
@@ -958,8 +958,8 @@
     }
    ],
    "notes": [
-    "old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-old/bin/python)",
-    "new: configured target environment (/Users/zeelex/Documents/projects/python_migrator/bench/delta_parity/.cache/envs/flask-new)"
+    "old: baseline capture interpreter (bench/delta_parity/.cache/envs/flask-old/bin/python)",
+    "new: configured target environment (bench/delta_parity/.cache/envs/flask-new)"
    ]
   }
  ],

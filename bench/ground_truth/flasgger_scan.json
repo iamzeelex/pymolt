@@ -1,7 +1,7 @@
 {
-  "root_dir": "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+  "root_dir": "tests/artifacts/flasgger",
   "surfaces": {
-    "root_dir": "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+    "root_dir": "tests/artifacts/flasgger",
     "project_roots": [
       {
         "path": ".",

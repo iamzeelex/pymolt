@@ -1,6 +1,6 @@
 {
  "meta": {
-  "pymolt": "/Users/zeelex/Documents/projects/python_migrator/.claude/worktrees/priceless-blackwell-7c09d5/.venv/bin/pymolt",
+  "pymolt": ".claude/worktrees/priceless-blackwell-7c09d5/.venv/bin/pymolt",
   "pymolt_version": "01e9233",
   "started": "2026-11-17T20:08:07+00:00",
   "parallel": 1,

@@ -3,7 +3,7 @@
 The goal is to measure how well pymolt handles real legacy projects, phase by phase. **Evaluate; do not fix pymolt.** Record what happened, whether pymolt's messages were honest and actionable, and every defect with evidence.
 
 ## Ground rules
-- Use pymolt from `/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt`, branch `rework/cli-first-local-delta`. Do not switch branches.
+- Use pymolt from `<repo>/.venv/bin/pymolt`, branch `rework/cli-first-local-delta`. Do not switch branches.
 - Do not edit `pymolt/`, `tests/` (outside your artifact), git config, or anything in the parent repo except:
   - your report `bench/legacy_eval/<project>.md`;
   - files pymolt itself writes into the artifact.
