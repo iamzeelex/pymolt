@@ -192,6 +192,8 @@ All notable changes to pymolt. The format follows
 - `apply --approve-agent`: a person on a terminal approves a plan for agents. `apply --agent`
   then writes its pymolt steps, and `rollback --step ID --agent` rolls one back. A re-plan or
   any change to the plan voids the approval.
+  `verify --auto-rollback`, which rolls back the whole run, is refused under `--agent`, like
+  `rollback --agent` without `--step`.
 - MCP `apply` and `rollback` tools, which write only on a plan a person approved for agents;
   `apply` runs its import check only under `--allow-run`. Every MCP tool refuses arguments it
   does not take, and `capture`, `apply` and `rollback` carry the `destructiveHint` annotation.
