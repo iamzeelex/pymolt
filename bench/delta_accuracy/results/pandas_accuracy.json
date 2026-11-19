@@ -33,14 +33,6 @@
   "engine_wall_s": 0.905,
   "local_total_excl_env_build_s": 0.91
  },
- "axiom_meta": {
-  "pandas": {
-   "file": "pandas__1.3.5__2.0.0.jsonl",
-   "steps": 1,
-   "empty_steps": 0,
-   "changes": 3617
-  }
- },
  "score": {
   "local": {
    "api": {
@@ -121,87 +113,6 @@
      }
     }
    }
-  },
-  "axiom": {
-   "api": {
-    "tp": 10,
-    "fp": 0,
-    "fn": 3,
-    "precision": 1.0,
-    "recall": 0.7692307692307693,
-    "per_category": {
-     "REMOVED": {
-      "tp": [
-       "pandas.core.series.Series.append"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "SIGNATURE": {
-      "tp": [
-       "pandas.Series",
-       "pandas.concat",
-       "pandas.core.frame.DataFrame.groupby",
-       "pandas.core.frame.DataFrame.mean",
-       "pandas.core.groupby.groupby.GroupBy",
-       "pandas.core.groupby.groupby.GroupBy.sum",
-       "pandas.core.reshape.concat.concat",
-       "pandas.core.series.Series",
-       "pandas.core.series.Series.__init__"
-      ],
-      "fp": [],
-      "fn": [
-       "pandas.core.groupby.generic.DataFrameGroupBy",
-       "pandas.core.series.Series.to_dict"
-      ]
-     },
-     "BASES": {
-      "tp": [],
-      "fp": [],
-      "fn": []
-     },
-     "DEPRECATED": {
-      "tp": [],
-      "fp": [],
-      "fn": []
-     },
-     "BEHAVIOR": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "pandas.core.frame.DataFrame.mean"
-      ]
-     }
-    }
-   },
-   "use": {
-    "tp": 1,
-    "fp": 0,
-    "fn": 1,
-    "precision": 1.0,
-    "recall": 0.5,
-    "per_category": {
-     "REMOVED": {
-      "tp": [
-       "pandas.core.series.Series.append"
-      ],
-      "fp": [],
-      "fn": []
-     },
-     "DEPRECATED": {
-      "tp": [],
-      "fp": [],
-      "fn": []
-     },
-     "BEHAVIOR": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "pandas.core.frame.DataFrame.mean"
-      ]
-     }
-    }
-   }
   }
  },
  "hints": {
@@ -214,13 +125,6 @@
     "pandas.concat",
     "warning",
     true
-   ],
-   "axiom": [
-    null,
-    [
-     "deprecated:: 1."
-    ],
-    false
    ]
   }
  },
@@ -625,12 +529,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "pandas.DataFrame"
    ]
@@ -701,18 +599,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.series.Series.__init__"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.series.Series.__init__"
-    ]
-   },
    "contacts": [
     "pandas.Series"
    ]
@@ -766,20 +652,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.reshape.concat.concat",
-      "1.5.3->2.0.0 Parameter kind was changed pandas.core.reshape.concat.concat"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.reshape.concat.concat",
-     "1.5.3->2.0.0 removed Parameter kind was changed pandas.core.reshape.concat.concat"
-    ]
-   },
    "contacts": [
     "pandas.concat"
    ]
@@ -795,12 +667,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "pandas.core.base.IndexOpsMixin.__iter__"
@@ -831,12 +697,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "pandas.core.base.IndexOpsMixin.__iter__"
    ]
@@ -852,12 +712,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "pandas.core.frame.DataFrame.__init__",
@@ -889,12 +743,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "pandas.core.frame.DataFrame.__init__"
@@ -992,22 +840,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.frame.DataFrame.groupby",
-      "1.5.3->2.0.0 Parameter was removed pandas.core.frame.DataFrame.groupby",
-      "1.5.3->2.0.0 Positional parameter was moved pandas.core.frame.DataFrame.groupby"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.frame.DataFrame.groupby",
-     "1.5.3->2.0.0 removed Parameter was removed pandas.core.frame.DataFrame.groupby",
-     "1.5.3->2.0.0 removed Positional parameter was moved pandas.core.frame.DataFrame.groupby"
-    ]
-   },
    "contacts": [
     "pandas.core.frame.DataFrame.groupby"
    ]
@@ -1081,22 +913,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.generic.NDFrame.mean",
-      "1.5.3->2.0.0 Parameter was removed pandas.core.generic.NDFrame.mean",
-      "1.5.3->2.0.0 Positional parameter was moved pandas.core.generic.NDFrame.mean"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.generic.NDFrame.mean",
-     "1.5.3->2.0.0 removed Parameter was removed pandas.core.generic.NDFrame.mean",
-     "1.5.3->2.0.0 removed Positional parameter was moved pandas.core.generic.NDFrame.mean"
-    ]
-   },
    "contacts": [
     "pandas.core.frame.DataFrame.mean"
    ]
@@ -1165,12 +981,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__"
    ]
@@ -1199,12 +1009,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__"
@@ -1274,20 +1078,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter was removed pandas.core.groupby.groupby.GroupBy.__init__",
-      "1.5.3->2.0.0 Positional parameter was moved pandas.core.groupby.groupby.GroupBy.__init__"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter was removed pandas.core.groupby.groupby.GroupBy.__init__",
-     "1.5.3->2.0.0 removed Positional parameter was moved pandas.core.groupby.groupby.GroupBy.__init__"
-    ]
-   },
    "contacts": [
     "pandas.core.groupby.groupby.GroupBy.sum"
    ]
@@ -1337,18 +1127,6 @@
        "signature"
       ]
      }
-    ]
-   },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.groupby.groupby.GroupBy.sum"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.groupby.groupby.GroupBy.sum"
     ]
    },
    "contacts": [
@@ -1402,20 +1180,6 @@
        "signature"
       ]
      }
-    ]
-   },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.reshape.concat.concat",
-      "1.5.3->2.0.0 Parameter kind was changed pandas.core.reshape.concat.concat"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.reshape.concat.concat",
-     "1.5.3->2.0.0 removed Parameter kind was changed pandas.core.reshape.concat.concat"
     ]
    },
    "contacts": [
@@ -1473,18 +1237,6 @@
        "signature"
       ]
      }
-    ]
-   },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.series.Series.__init__"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.series.Series.__init__"
     ]
    },
    "contacts": [
@@ -1556,18 +1308,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "1.5.3->2.0.0 Parameter default was changed pandas.core.series.Series.__init__"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "1.5.3->2.0.0 removed Parameter default was changed pandas.core.series.Series.__init__"
-    ]
-   },
    "contacts": [
     "pandas.core.series.Series.__init__"
    ]
@@ -1596,12 +1336,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "pandas.core.series.Series.__len__"
@@ -1657,20 +1391,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "1.5.3->2.0.0 Public object was removed pandas.core.series.Series.append"
-     ]
-    },
-    "hint": null,
-    "hint_text": [
-     "deprecated:: 1."
-    ],
-    "hits": [
-     "1.5.3->2.0.0 deprecated Public object was removed pandas.core.series.Series.append"
-    ]
-   },
    "contacts": [
     "pandas.core.series.Series.append"
    ]
@@ -1721,12 +1441,6 @@
       ]
      }
     ]
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "pandas.core.series.Series.to_dict"

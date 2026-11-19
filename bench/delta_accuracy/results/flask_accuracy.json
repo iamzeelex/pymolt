@@ -37,20 +37,6 @@
   "engine_wall_s": 0.351,
   "local_total_excl_env_build_s": 0.35
  },
- "axiom_meta": {
-  "flask": {
-   "file": "flask__2.0.3__3.0.0.jsonl",
-   "steps": 15,
-   "empty_steps": 0,
-   "changes": 280
-  },
-  "werkzeug": {
-   "file": "werkzeug__2.0.0__3.0.0.jsonl",
-   "steps": 20,
-   "empty_steps": 15,
-   "changes": 141
-  }
- },
  "score": {
   "local": {
    "api": {
@@ -132,106 +118,6 @@
      }
     }
    }
-  },
-  "axiom": {
-   "api": {
-    "tp": 2,
-    "fp": 7,
-    "fn": 7,
-    "precision": 0.2222222222222222,
-    "recall": 0.2222222222222222,
-    "per_category": {
-     "REMOVED": {
-      "tp": [
-       "flask.json.JSONEncoder"
-      ],
-      "fp": [
-       "flask.Blueprint.add_url_rule",
-       "flask.Flask.register_blueprint",
-       "flask.Flask.route",
-       "flask.__version__",
-       "flask.current_app.url_map",
-       "flask.current_app.view_functions"
-      ],
-      "fn": [
-       "flask.Markup"
-      ]
-     },
-     "SIGNATURE": {
-      "tp": [
-       "flask.views.MethodView.dispatch_request"
-      ],
-      "fp": [
-       "flask.Blueprint"
-      ],
-      "fn": [
-       "flask.abort",
-       "flask.request.headers.get"
-      ]
-     },
-     "BASES": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.Blueprint",
-       "flask.Flask"
-      ]
-     },
-     "DEPRECATED": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.__version__"
-      ]
-     },
-     "BEHAVIOR": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.request.json"
-      ]
-     }
-    }
-   },
-   "use": {
-    "tp": 1,
-    "fp": 6,
-    "fn": 3,
-    "precision": 0.14285714285714285,
-    "recall": 0.25,
-    "per_category": {
-     "REMOVED": {
-      "tp": [
-       "flask.json.JSONEncoder"
-      ],
-      "fp": [
-       "flask.Blueprint.add_url_rule",
-       "flask.Flask.register_blueprint",
-       "flask.Flask.route",
-       "flask.__version__",
-       "flask.current_app.url_map",
-       "flask.current_app.view_functions"
-      ],
-      "fn": [
-       "flask.Markup"
-      ]
-     },
-     "DEPRECATED": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.__version__"
-      ]
-     },
-     "BEHAVIOR": {
-      "tp": [],
-      "fp": [],
-      "fn": [
-       "flask.request.json"
-      ]
-     }
-    }
-   }
   }
  },
  "hints": {
@@ -243,11 +129,6 @@
     "markupsafe.Markup",
     "same object (MOVED)",
     true
-   ],
-   "axiom": [
-    null,
-    [],
-    false
    ]
   },
   "flask.json.JSONEncoder": {
@@ -259,13 +140,6 @@
    "local": [
     null,
     null,
-    false
-   ],
-   "axiom": [
-    null,
-    [
-     "deprecated:: 2."
-    ],
     false
    ]
   }
@@ -707,8 +581,8 @@
     }
    ],
    "notes": [
-    "old: baseline capture interpreter (bench/delta_parity/.cache/envs/flask-old/bin/python)",
-    "new: configured target environment (bench/delta_parity/.cache/envs/flask-new)"
+    "old: baseline capture interpreter (bench/delta_accuracy/.cache/envs/flask-old/bin/python)",
+    "new: configured target environment (bench/delta_accuracy/.cache/envs/flask-new)"
    ]
   },
   {
@@ -958,8 +832,8 @@
     }
    ],
    "notes": [
-    "old: baseline capture interpreter (bench/delta_parity/.cache/envs/flask-old/bin/python)",
-    "new: configured target environment (bench/delta_parity/.cache/envs/flask-new)"
+    "old: baseline capture interpreter (bench/delta_accuracy/.cache/envs/flask-old/bin/python)",
+    "new: configured target environment (bench/delta_accuracy/.cache/envs/flask-new)"
    ]
   }
  ],
@@ -1012,18 +886,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "2.3.3->3.0.0 Public object was removed flask.blueprints.Blueprint.__init__"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.3.3->3.0.0 removed Public object was removed flask.blueprints.Blueprint.__init__"
-    ]
-   },
    "contacts": [
     "flask.Blueprint",
     "flask.Blueprint.add_url_rule"
@@ -1051,18 +913,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.3.3->3.0.0 Public object was removed flask.blueprints.Blueprint.add_url_rule"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.3.3->3.0.0 removed Public object was removed flask.blueprints.Blueprint.add_url_rule"
-    ]
    },
    "contacts": [
     "flask.Blueprint.add_url_rule"
@@ -1116,12 +966,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.Flask",
     "flask.Flask.app_context",
@@ -1152,12 +996,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.Flask.app_context"
    ]
@@ -1185,18 +1023,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.3.3->3.0.0 Public object was removed flask.app.Flask.register_blueprint"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.3.3->3.0.0 removed Public object was removed flask.app.Flask.register_blueprint"
-    ]
-   },
    "contacts": [
     "flask.Flask.register_blueprint"
    ]
@@ -1223,18 +1049,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.3.3->3.0.0 Public object was removed flask.app.Flask.route"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.3.3->3.0.0 removed Public object was removed flask.app.Flask.route"
-    ]
    },
    "contacts": [
     "flask.Flask.route"
@@ -1286,12 +1100,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.Markup"
    ]
@@ -1318,12 +1126,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.Response"
@@ -1376,32 +1178,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.3.3->3.0.0 Public object was removed flask.__version__"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.0.3->2.1.0 removed Attribute value was changed flask.__version__",
-     "2.1.0->2.1.1 removed Attribute value was changed flask.__version__",
-     "2.1.1->2.1.2 removed Attribute value was changed flask.__version__",
-     "2.1.2->2.1.3 removed Attribute value was changed flask.__version__",
-     "2.1.3->2.2.0 removed Attribute value was changed flask.__version__",
-     "2.2.0->2.2.1 removed Attribute value was changed flask.__version__",
-     "2.2.1->2.2.2 removed Attribute value was changed flask.__version__",
-     "2.2.2->2.2.3 removed Attribute value was changed flask.__version__",
-     "2.2.3->2.2.4 removed Attribute value was changed flask.__version__",
-     "2.2.4->2.2.5 removed Attribute value was changed flask.__version__",
-     "2.2.5->2.3.0 removed Attribute value was changed flask.__version__",
-     "2.3.0->2.3.1 removed Attribute value was changed flask.__version__",
-     "2.3.1->2.3.2 removed Attribute value was changed flask.__version__",
-     "2.3.2->2.3.3 removed Attribute value was changed flask.__version__",
-     "2.3.3->3.0.0 removed Public object was removed flask.__version__"
-    ]
-   },
    "contacts": [
     "flask.__version__"
    ]
@@ -1452,12 +1228,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.abort"
    ]
@@ -1485,12 +1255,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.cli.with_appcontext"
    ]
@@ -1506,12 +1270,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.current_app.swag.config.__getitem__",
@@ -1533,18 +1291,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.3.3->3.0.0 Public object was removed flask.app.Flask.url_map"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.3.3->3.0.0 removed Public object was removed flask.app.Flask.url_map"
-    ]
    },
    "contacts": [
     "flask.current_app.url_map.iter_rules",
@@ -1574,12 +1320,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.current_app.url_map.iter_rules",
     "flask.current_app.url_map.iter_rules.__iter__"
@@ -1607,18 +1347,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.3.3->3.0.0 Public object was removed flask.app.Flask.view_functions"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.3.3->3.0.0 removed Public object was removed flask.app.Flask.view_functions"
-    ]
    },
    "contacts": [
     "flask.current_app.view_functions.__getitem__"
@@ -1670,20 +1398,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "REMOVED": [
-      "2.2.5->2.3.0 Public object was removed flask.json.JSONEncoder"
-     ]
-    },
-    "hint": null,
-    "hint_text": [
-     "deprecated:: 2."
-    ],
-    "hits": [
-     "2.2.5->2.3.0 deprecated Public object was removed flask.json.JSONEncoder"
-    ]
-   },
    "contacts": [
     "flask.json.JSONEncoder"
    ]
@@ -1713,12 +1427,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.json.provider.DefaultJSONProvider",
     "flask.json.provider.DefaultJSONProvider.default"
@@ -1737,12 +1445,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.json.provider.DefaultJSONProvider.default"
@@ -1771,12 +1473,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.jsonify"
    ]
@@ -1803,12 +1499,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.redirect"
@@ -1837,12 +1527,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.render_template"
    ]
@@ -1858,12 +1542,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request",
@@ -1913,12 +1591,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.args",
     "flask.request.args.get"
@@ -1947,12 +1619,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.args.get"
    ]
@@ -1979,12 +1645,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.authorization"
@@ -2013,12 +1673,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.endpoint.lower",
     "flask.request.endpoint.lower.replace"
@@ -2046,12 +1700,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.form.__getitem__",
@@ -2084,12 +1732,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.form.__getitem__"
    ]
@@ -2117,12 +1759,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.form.get"
    ]
@@ -2138,12 +1774,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.headers.get"
@@ -2196,12 +1826,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.headers.get"
    ]
@@ -2228,12 +1852,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.host"
@@ -2262,12 +1880,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.is_json"
    ]
@@ -2294,12 +1906,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.is_secure"
@@ -2342,12 +1948,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.json",
     "flask.request.json.get"
@@ -2376,12 +1976,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.method.lower",
     "flask.request.method.lower.__radd__"
@@ -2398,12 +1992,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.url_rule.__str__"
@@ -2432,12 +2020,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.request.url_rule.__str__"
    ]
@@ -2464,12 +2046,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.request.view_args"
@@ -2498,12 +2074,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.testing.FlaskClient"
    ]
@@ -2531,12 +2101,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "flask.url_for"
    ]
@@ -2563,12 +2127,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.views.MethodView",
@@ -2609,18 +2167,6 @@
      }
     ]
    },
-   "axiom": {
-    "categories": {
-     "SIGNATURE": [
-      "2.1.3->2.2.0 Parameter was removed flask.views.MethodView.dispatch_request"
-     ]
-    },
-    "hint": null,
-    "hint_text": [],
-    "hits": [
-     "2.1.3->2.2.0 removed Parameter was removed flask.views.MethodView.dispatch_request"
-    ]
-   },
    "contacts": [
     "flask.views.MethodView.dispatch_request"
    ]
@@ -2647,12 +2193,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "flask.views.View"
@@ -2681,12 +2221,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "werkzeug.exceptions.abort"
    ]
@@ -2714,12 +2248,6 @@
     "hint_source": null,
     "facts": []
    },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
-   },
    "contacts": [
     "werkzeug.middleware.dispatcher.DispatcherMiddleware"
    ]
@@ -2746,12 +2274,6 @@
     "hint": null,
     "hint_source": null,
     "facts": []
-   },
-   "axiom": {
-    "categories": {},
-    "hint": null,
-    "hint_text": [],
-    "hits": []
    },
    "contacts": [
     "werkzeug.serving.run_simple"
