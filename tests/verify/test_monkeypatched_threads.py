@@ -210,6 +210,8 @@ def test_compiled_calls_in_flight_in_different_greenlets_pair_correctly(cls):
         gb.switch()                      # B finishes its reduce
     finally:
         be.stop()
+    # the two reduce calls really interleaved: A's first callback, all of B's, then A's rest
+    assert order == ["a-cb", "b-cb", "a-resumed", "a-cb", "a-resumed"]
     recs = [r for r in sink.records.values() if r["qualname"].endswith("reduce")]
     assert sum(r["count"] for r in recs) == 2
     assert all(r["raised"] is None and r["result"] == {"__opaque__": "unobserved:c-return"}

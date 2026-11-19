@@ -4,6 +4,7 @@ Small real C extensions from the stdlib stand in for a compiled dependency: ``_j
 ``math`` / ``_datetime`` are made "the dependency" through a test matcher. Runtime-layer test:
 pure stdlib + pytest, 3.6-compatible syntax.
 """
+import collections
 import collections.abc
 import datetime
 import gc
@@ -190,14 +191,21 @@ def test_compiled_wrap_wraps_module_functions_and_class_methods():
     sink = MemorySink()
     mod = _fake_compiled_module()
     original = mod.helper
+    original_load = mod.Model.__dict__["load"]
     wrap = CompiledWrap(sink, PrefixMatcher(["vfakecw"]), source=__name__)
     wrap._suffixes = tuple(machinery.EXTENSION_SUFFIXES) + (".so",)
     wrap.scan(mod)
     assert mod.helper is not original and mod.helper.__wrapped__ is original
     assert mod.helper(7) == 7
-    assert "vfakecw.helper" in _by_name(sink)
+    assert mod.Model.__dict__["load"].__wrapped__ is original_load
+    model = mod.Model()
+    assert model.load(4) is model                    # a method once wrapped: binds the instance
+    by = _by_name(sink)
+    assert [r["count"] for r in by["vfakecw.helper"]] == [1]
+    assert [r["count"] for r in by["vfakecw.Model.load"]] == [1]
     wrap.stop()
     assert mod.helper is original
+    assert mod.Model.__dict__["load"] is original_load
 
 
 @needs_monitoring
@@ -348,9 +356,11 @@ def _registered_compiled_module(name):
     return mod
 
 
-def _monitored(mod, body, **kw):
+def _monitored(mod, body, prepare=None, **kw):
     sink = MemorySink()
     be = MonitoringBackend(PrefixMatcher([mod.__name__]), sink, source=__name__, **kw)
+    if prepare is not None:
+        prepare(be)
     be.start()
     try:
         body()
@@ -364,6 +374,19 @@ def _wrapper_code(code):
     from pymolt.verify._wrap import _WRAPPER_CODES
 
     return any(code is c for c in _WRAPPER_CODES)
+
+
+def _count_wrapper_starts(be, callback, hits):
+    """Count, per wrapper code object, how often ``callback`` (a PY_START callback) fires for
+    it. Installed before ``start``, which registers the callbacks."""
+    real = getattr(be, callback)
+
+    def counted(code, *rest):
+        if _wrapper_code(code):
+            hits[id(code)] += 1
+        return real(code, *rest)
+
+    setattr(be, callback, counted)
 
 
 @needs_monitoring
@@ -417,23 +440,33 @@ def test_the_wrapper_code_is_never_armed_by_either_incremental_tool():
             mod.helper(i)
             mod.Model().load(i)
 
-    be, sink = _monitored(mod, body, mode="incremental")
+    a_starts, b_starts = collections.Counter(), collections.Counter()
+
+    def prepare(be):
+        _count_wrapper_starts(be, "_on_start", a_starts)
+        _count_wrapper_starts(be, "_on_implicit", b_starts)
+
+    be, sink = _monitored(mod, body, prepare=prepare, mode="incremental")
     assert sum(r["count"] for r in _by_name(sink)["vfakecwi.helper"]) == 4
+    assert sum(r["count"] for r in _by_name(sink)["vfakecwi.Model.load"]) == 4
     assert not any(_wrapper_code(code) for code in be._watch_codes.values())
     assert be.armed == 0                             # tool A armed nothing for the wrapper
-    implicit = [ent for ent in be._implicit.values() if _wrapper_code(ent[0])]
-    assert implicit and not any(ent[1] for ent in implicit)    # tool B: DISABLEd, not owned
+    assert a_starts == {}                            # ... so it never sees the wrapper start
+    # tool B: each wrapper code's first start, then DISABLEd (8 calls, one event per code)
+    assert b_starts and set(b_starts.values()) == {1}
     assert be._local == {}                           # released by stop (nothing left armed)
 
 
 @needs_monitoring
 def test_discover_disables_the_wrapper_code():
     mod = _registered_compiled_module("vfakecwd")
-    be, sink = _monitored(mod, lambda: [mod.helper(i) for i in range(3)], mode="discover")
+    starts = collections.Counter()
+    be, sink = _monitored(mod, lambda: [mod.helper(i) for i in range(3)],
+                          prepare=lambda be: _count_wrapper_starts(be, "_on_start", starts),
+                          mode="discover")
+    assert set(_by_name(sink)) == {"vfakecwd.helper"}      # the wrapper itself is no contact
     assert sum(r["count"] for r in _by_name(sink)["vfakecwd.helper"]) == 3
-    ents = [ent for ent in be._callee.values() if _wrapper_code(ent[0])]
-    assert ents and not any(ent[1] for ent in ents)
-    assert all(ent[6] is be._mon.DISABLE for ent in ents)
+    assert starts and set(starts.values()) == {1}   # its first start, then DISABLEd
     assert not any(_wrapper_code(code) for code in be.observed.values())
 
 
@@ -1139,7 +1172,14 @@ def test_our_own_methods_settle_and_are_never_decided_again(mode):
         for _ in range(5):
             obj.ping()
 
-    _sink, be = _run_with(MonitoringBackend, {"mode": mode}, ["collections"], body)
-    code = _Ours.ping.__code__
-    assert be._rd[id(code)][1] is False             # no dependency class inherits our code
-    assert id(code) not in be._rd_closed            # so imports never re-decide it
+    hits = []
+
+    class Counting(MonitoringBackend):
+        def _on_call(self, code, offset, callable_, arg0):
+            if callable_ is _Ours.ping:
+                hits.append(1)
+            return MonitoringBackend._on_call(self, code, offset, callable_, arg0)
+
+    _sink, be = _run_with(Counting, {"mode": mode}, ["collections"], body)
+    assert len(hits) == 2                           # settled: no dependency class inherits it
+    assert id(_Ours.ping.__code__) not in be._rd_closed     # so imports never re-decide it

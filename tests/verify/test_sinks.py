@@ -1,5 +1,6 @@
 """Sinks: JsonlSink streaming, MemorySink aggregation + nondeterministic collapse."""
 import json
+import os
 
 from pymolt.verify._sinks import JsonlSink, MemorySink
 
@@ -54,8 +55,7 @@ def test_jsonl_sink_streams_one_event_per_line(tmp_path):
 def test_jsonl_sink_expands_pid_template(tmp_path):
     sink = JsonlSink(str(tmp_path / "trace-{pid}.jsonl"))
     sink.close()
-    assert "{pid}" not in sink.path
-    assert sink.path.endswith(".jsonl")
+    assert sink.path == str(tmp_path / "trace-{0}.jsonl".format(os.getpid()))
 
 
 def test_jsonl_sink_sampling_can_drop_events(tmp_path, monkeypatch):

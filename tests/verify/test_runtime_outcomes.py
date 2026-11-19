@@ -11,7 +11,6 @@ import types
 import pytest
 
 import pymolt.verify._normalize as normalize_mod
-from pymolt.verify import _backend
 from pymolt.verify._backend import (
     OUTCOME_AMBIGUOUS,
     OUTCOME_RAISE,
@@ -162,20 +161,6 @@ def test_jsonl_trace_carries_the_raise_event(target, tmp_path):
     assert sink.metrics["events_seen"] == 2 and sink.metrics["events_written"] == 2
 
 
-# ── per-code decision cache ──────────────────────────────────────────────────
-
-
-def test_decisions_are_cached_per_code_object(target):
-    _, be = _trace(target, lambda m: [m.ok(i) for i in range(5)])
-    entries = [e for e in be._callee.values() if e[0] is target.ok.__code__]
-    assert len(entries) == 1 and entries[0][1] is True
-
-
-def test_builtin_module_lookup_is_a_frozenset():
-    assert isinstance(_backend._BUILTIN_MODULES, frozenset)
-    assert set(sys.builtin_module_names) == _backend._BUILTIN_MODULES
-
-
 # ── sampling before normalization ────────────────────────────────────────────
 
 
@@ -262,10 +247,9 @@ def test_bytes_normalize_without_bytes_hex():
 def test_default_queue_is_deep_enough_for_cpu_bound_runs(tmp_path, monkeypatch):
     monkeypatch.delenv("PYMOLT_TRACE_QUEUE_SIZE", raising=False)
     sink = JsonlSink(str(tmp_path / "q.jsonl"))
-    try:
-        assert sink._queue.maxsize >= 65536
-    finally:
-        sink.close()
+    sink.close()
+    with open(sink.metadata_path) as fh:
+        assert json.load(fh)["backpressure"]["queue_size"] == 65536
 
 
 # ── runtime metadata ─────────────────────────────────────────────────────────

@@ -132,23 +132,23 @@ def _scenario(dep, action, calls=3):
     return shown, seen, reg
 
 
+# What each action shows untraced, out of 3 occurrences at one location: the actions really
+# differ, so comparing traced with untraced means something.
+SHOWN = {"always": 3, "default": 1, "once": 1, "module": 1, "ignore": 0, "error": 0}
+
+
 @pytest.mark.parametrize("backend", _backends())
 @pytest.mark.parametrize("action", ACTIONS)
 def test_every_filter_action_behaves_exactly_as_untraced(dep, backend, action):
     untraced = _scenario(dep, action)
+    shown, seen, _reg = untraced
+    assert len(shown) == SHOWN[action]
+    assert (len(seen) == 3) == (action == "error")
     sink = MemorySink()
     traced = _traced(backend, sink, lambda: _scenario(dep, action))
     assert traced == untraced
     # ... and the first one is recorded whatever the action did with it (error and ignore too).
     assert _warns(sink)[("c_level", "DeprecationWarning", "old thing")] >= 1
-
-
-@pytest.mark.parametrize("action,shown", [("always", 3), ("default", 1), ("once", 1),
-                                          ("module", 1), ("ignore", 0), ("error", 0)])
-def test_the_actions_really_differ_so_the_comparison_means_something(dep, action, shown):
-    shown_list, seen, _reg = _scenario(dep, action)
-    assert len(shown_list) == shown
-    assert (len(seen) == 3) == (action == "error")
 
 
 @pytest.mark.parametrize("backend", _backends())
@@ -298,7 +298,10 @@ def test_the_default_filters_still_decide_for_a_c_level_warning(dep):
             warnings.filters.append(f)
         _traced("setprofile", sink, dep.utcnow)
     assert caught == []
-    assert _warns(sink)       # but it was recorded
+    # ... but it was recorded, once, on the call in flight
+    (((sym, category, message), count),) = _warns(sink).items()
+    assert (sym, category, count) == ("utcnow", "DeprecationWarning", 1)
+    assert "utcnow" in message
 
 
 # ── what is recorded: the family rule ────────────────────────────────────────

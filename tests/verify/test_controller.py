@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pymolt.verify import _sinks, boundary_tracer
+from pymolt.verify import _sinks, boundary_tracer, export_watcher
 from pymolt.verify._backend import HAS_MONITORING
 from pymolt.verify._normalize import normalize
 from pymolt.verify.boundary_tracer import Controller
@@ -372,8 +372,10 @@ def test_activate_records_mode_switch_and_discovered_count(tmp_path):
 
 # ── the runtime stays 3.6-parseable and ships whole ──────────────────────────
 
-RUNTIME_FILES = ("_normalize.py", "_identity.py", "_backend.py", "_monitoring.py", "_sinks.py",
-                 "_wrap.py", "boundary_tracer.py", "sitecustomize.py", "_install_hook.py")
+# Every file the capture ships into the target interpreter: the bundled modules, plus the
+# startup hooks that load them.
+RUNTIME_FILES = tuple(Path(m.__file__).name for m in export_watcher._RUNTIME_MODULES) + (
+    "sitecustomize.py", "_install_hook.py")
 
 
 @pytest.mark.skipif(sys.version_info < (3, 8), reason="ast feature_version is 3.8+")
@@ -544,7 +546,6 @@ def test_incremental_below_312_is_discover_then_watch_with_a_note(dep, monkeypat
     assert ctl.mode == "auto" and ctl.discover.name == "setprofile"
     assert "incremental-unavailable: discover -> watch" in sink.metadata["backend_notes"]
     assert (ctl.quiet, ctl.max_seconds) == (1000.0, boundary_tracer.DEFAULT_MAX)
-    assert (boundary_tracer.DEFAULT_QUIET, boundary_tracer.DEFAULT_MAX) == (5.0, 60.0)
 
 
 @pytest.mark.skipif(not HAS_MONITORING, reason="the CALL event is 3.12+")

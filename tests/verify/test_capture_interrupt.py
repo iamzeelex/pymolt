@@ -177,6 +177,7 @@ def test_capture_trace_timeout_keeps_uncopied_raw_traces(tmp_path, monkeypatch):
 
     kept = list(tmpdir.glob("pymolt-trace-*"))
     # never delete traces that were not copied anywhere
+    assert len(kept) == 1, kept
     assert all(
         any(f.stat().st_size for f in d.rglob("trace-*.jsonl")) for d in kept
     )
