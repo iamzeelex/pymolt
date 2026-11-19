@@ -24,7 +24,7 @@ Re-run `bench/legacy_eval/run.py`:
 - **Re-compile:** every rewritten file compiles on the target, and on the base runner when the successor existed there.
 - **Static old side:** with no container running, dependency deltas come back `partial` (basis static) instead of INCONCLUSIVE. On alphalens and zipline, a static fact never contradicts a container-probed fact. In particular there are no false REMOVED from unresolved bases.
 - **Theano's cold scan** is at most the old 80 s on an idle machine, and the warm scan is unchanged.
-- The pandas e2e (4/4), delta parity (P 1.00, R 0.95), the full suite and the 3.6 parse checks are unchanged.
+- The pandas e2e (4/4), delta accuracy (P 1.00, R 0.95), the full suite and the 3.6 parse checks are unchanged.
 
 ## Contracts
 

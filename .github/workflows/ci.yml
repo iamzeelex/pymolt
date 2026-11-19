@@ -20,14 +20,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the commit e-mail check reads the pull request's commits
+      - name: Commit e-mail addresses are public
+        if: github.event_name == 'pull_request'
+        run: >-
+          .github/scripts/check_commit_emails.sh
+          "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
       - uses: astral-sh/setup-uv@v6
         with:
-          # The suite assumes the interpreter it runs on is the lowest Python a
-          # project may declare (3.12); under 3.13 two assess tests fail.
+          # The suite assumes the interpreter it runs on is the lowest Python a project may
+          # declare (3.12); on 3.13, 14 tests fail for known reasons (docs/limits.md).
           python-version: "3.12"
           enable-cache: true
+      - name: Old interpreters for the 3.8 and 3.11 runtime tests
+        run: uv python install 3.8 3.11
+      # Every test runs here: the MCP extra, and the optional packages some tests need
+      # (they are skipped where missing, which would hide them in CI). -rs lists any skip.
       - name: pytest
-        run: uv run --extra dev pytest -q
+        run: >-
+          uv run --extra dev --extra mcp
+          --with gevent --with greenlet --with coverage --with flask --with numpy --with pandas
+          pytest -q -rs
 
   package:
     name: package
@@ -41,3 +55,7 @@ jobs:
         run: uv build
       - name: Check the distributions
         run: .github/scripts/check_dist.sh
+      - name: The installed wheel serves MCP
+        env:
+          PYMOLT_SMOKE_INSTALL: "1"
+        run: uv run --extra dev pytest -q -rs tests/interfaces/test_fresh_install_smoke.py

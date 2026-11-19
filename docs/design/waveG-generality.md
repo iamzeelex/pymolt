@@ -11,7 +11,7 @@ The API-change detection generalizes across ecosystems. The **runtime evidence l
   - A recall (BEHAVIOR entries excluded) is at least 0.8 per toy;
   - pydantic gets a baseline (G1);
   - expected warnings are found, C-level ones included where the capture can observe them (G7).
-- **No regression:** `bench/legacy_eval` scorecard vs `results/after-wave2`, `bench/e2e_pandas` 4/4, delta parity (P 1.00, R 0.95), the full suite, and the 3.6 parse of every injected-runtime file.
+- **No regression:** `bench/legacy_eval` scorecard vs `results/after-wave2`, `bench/e2e_pandas` 4/4, delta accuracy (P 1.00, R 0.95), the full suite, and the 3.6 parse of every injected-runtime file.
 - **Overhead:** `bench/load` steady-state loss stays within 20% (the phase-2 gate).
 
 ## Contracts
@@ -234,7 +234,7 @@ Time-dependent outcomes, for example `gzip.compress`, which embeds mtime, compar
 **Gates:**
 - the full suite (1863 passed);
 - `bench/e2e_pandas` 4/4;
-- delta parity unchanged (local API P 1.00 / R 0.95);
+- delta accuracy unchanged (local API P 1.00 / R 0.95);
 - `bench/load` PASS (18.9% saturated loss, median of 3, about 1 point of margin; dropped 0; recall 100%; tail ×1.06; startup at least 72%);
 - every injected-runtime file parses at 3.6;
 - no changed file has more ruff findings than at HEAD.
