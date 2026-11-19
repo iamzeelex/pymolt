@@ -179,7 +179,8 @@ class TestAdvisorySurfacing:
         assert result.changes == []
         assert len(result.advisories_by_file) == 1
         advisories = next(iter(result.advisories_by_file.values()))
-        assert advisories[0].severity in ("not-applied", "precondition")
+        # not rewritten, so advised: never the caveat of a site that was applied
+        assert [(a.severity, a.site_kind) for a in advisories] == [("not-applied", "return")]
 
     def test_runtime_precondition_applies_with_caveat_advisory(self, tmp_path):
         (tmp_path / "app.py").write_text("vals = df.lookup(rows, cols)\n")

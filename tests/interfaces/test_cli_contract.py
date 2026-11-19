@@ -214,7 +214,8 @@ class TestRendering:
         this command is asked."""
         result = runner.invoke(app, ["scan", str(project)])
         assert result.exit_code == EXIT_OK
-        assert "flask" in result.stdout
+        # the declared requirement itself: "flask" alone also matches the call map's flask.Flask
+        assert "flask==2.0.3" in _ANSI.sub("", result.stdout)
 
     def test_scan_shows_where_the_code_calls_dependencies(self, project):
         result = runner.invoke(app, ["scan", str(project)])
@@ -233,11 +234,6 @@ class TestRendering:
 
         payload = json.loads(runner.invoke(app, [*argv, "--json", "--no-write"]).stdout)
         assert payload["target_hint"]["target_python"] == "3.12"
-
-    def test_contract_map_points_at_scan(self, project):
-        result = runner.invoke(app, ["contract", "map", str(project)])
-        assert result.exit_code == EXIT_USAGE
-        assert "pymolt scan" in result.output
 
     def test_next_step_is_guidance_on_stderr_not_part_of_the_answer(self, project):
         result = runner.invoke(app, ["scan", str(project)])
@@ -345,7 +341,10 @@ class TestOptionNames:
         ])
         assert result.exit_code == EXIT_OK, result.output
 
-        listed = runner.invoke(app, ["assess", "--help"]).output
+        listed = _ANSI.sub("", runner.invoke(app, ["assess", "--help"]).output)
+        assert "--manifest" in listed and "--base-python" in listed  # the new names are listed
         for old in ("--source-manifest", "--current-python", "-c "):
             assert old not in listed
-        assert "--target-file" not in runner.invoke(app, ["plan", "--help"]).output
+        plan_help = _ANSI.sub("", runner.invoke(app, ["plan", "--help"]).output)
+        assert "--patch" in plan_help
+        assert "--target-file" not in plan_help

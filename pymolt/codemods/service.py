@@ -2,7 +2,8 @@
 pymolt/codemods/service.py
 
 UI-agnostic codemod orchestration: turn an upgrade set into codemod
-patterns/rules and apply them locally.
+patterns/rules, preview them locally, and build the migration plan from the
+previews (``pymolt apply`` writes the plan; nothing here writes source).
 
 The provider is ``pymolt.delta.provider.LocalDeltaProvider``: it computes the API
 changes from the old and new environments on this machine.
@@ -29,9 +30,6 @@ from pymolt.assess.service import (
     resolve_chosen_source,
 )
 from pymolt.codemods.apply import (
-    apply_mixed_to_repo,
-    apply_rules_to_repo,
-    apply_to_repo,
     preview_mixed_repo,
     preview_repo,
     preview_rules_repo,
@@ -445,50 +443,6 @@ def _merge_run_results(a: CodemodRunResult, b: CodemodRunResult) -> CodemodRunRe
     )
 
 
-def run_codemods(
-    root: str | Path,
-    migrations: list[DependencyMigration],
-    *,
-    write: bool = False,
-    client=None,
-    progress: Callable[[str], None] | None = None,
-    online: bool = False,
-) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], CodemodRunResult]:
-    """
-    Compute patterns/rules for `migrations` locally and apply them under `root` (per
-    package: rules if the provider returned any, else patterns).
-
-    Returns (by_package, run_result). Dry-run unless write=True. Auto-apply
-    only writes confidence=="verified" rules (see `apply.apply_rules_to_repo`);
-    `run_result.downgraded` carries the rules the provider downgraded.
-
-    `progress`, if given, is called with human-readable status lines as each
-    phase (fetch → local verify → apply) starts, so an interface can show that work
-    is happening instead of appearing to hang.
-    """
-    client = client or codemod_provider(root, online=online)
-    bundles = client.fetch_bundle(migrations, progress=progress)
-    by_pkg, rules_flat, patterns_flat, downgraded = _split_bundles(bundles)
-
-    if progress:
-        n = len(rules_flat) + len(patterns_flat)
-        progress(f"Applying {n} codemod(s) under {root} via LibCST…")
-
-    if not rules_flat:
-        # No package returned rules (nothing curated applies) — the
-        # Tier-1 path runs byte-identical to today.
-        result = apply_to_repo(root, patterns_flat, write=write)
-    elif patterns_flat:
-        result = apply_mixed_to_repo(
-            root, rules_flat, patterns_flat, write=write
-        )
-    else:
-        rules_result = apply_rules_to_repo(root, rules_flat, write=write)
-        result = rules_result
-    result.downgraded = downgraded
-    return by_pkg, result
-
-
 def preview_codemods(
     root: str | Path,
     migrations: list[DependencyMigration],
@@ -512,10 +466,8 @@ def preview_codemods(
     "downgraded" list. A rule the provider downgraded already carries
     confidence=="heuristic" on the returned `FilePreview.rules`, which is what
     the review card renders — so the downgrade is
-    visible without widening this return type. `run_codemods` has room to
-    carry the fuller `CodemodRunResult.downgraded` list because it returns a
-    model, not a bare tuple; `preview_codemods` does not, and callers (interfaces,
-    tests) already destructure exactly two values.
+    visible without widening this return type (``on_downgraded`` hands over the
+    fuller list); callers (interfaces, tests) destructure exactly two values.
 
     `progress` reports phase transitions (fetch → preview), `on_recipes` hands
     over the fetched recipe set the moment it is known (before the walk starts,

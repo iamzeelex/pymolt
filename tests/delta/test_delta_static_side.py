@@ -268,7 +268,7 @@ def test_acquire_online_downloads_checks_the_digest_and_caches(tmp_path, monkeyp
     assert _last(results["pkg.f"])["shape"] == [["a", POK, "1"]]
 
 
-def test_acquire_online_refuses_a_digest_mismatch_and_a_zip_slip(tmp_path, monkeypatch):
+def test_acquire_online_refuses_a_digest_mismatch(tmp_path, monkeypatch):
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "empty"))
     whl = _wheel(tmp_path / "pkg-1.0-py3-none-any.whl", {"pkg/__init__.py": "x = 1\n"})
 
@@ -282,6 +282,9 @@ def test_acquire_online_refuses_a_digest_mismatch_and_a_zip_slip(tmp_path, monke
         acquire(tmp_path / "p1", "pkg", "1.0", online=True, fetcher=_Fetcher([bad]),
                 download=download)
 
+
+def test_acquire_online_refuses_a_zip_slip_archive(tmp_path, monkeypatch):
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "empty"))
     (tmp_path / "evil").mkdir()
     evil = _wheel(tmp_path / "evil" / "pkg-1.0-py3-none-any.whl",
                   {"pkg/__init__.py": "x = 1\n", "../../escaped.py": "boom\n"})

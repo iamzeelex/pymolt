@@ -1,16 +1,15 @@
-"""Tests for pymolt.codemods.service — rows→migrations + run_codemods."""
+"""Tests for pymolt.codemods.service — rows→migrations, the provider and the preview."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
 from pymolt.assess.service import AssessResult
-from pymolt.codemods.models import CodemodBundle, CodemodPattern, DependencyMigration
+from pymolt.codemods.models import CodemodBundle, DependencyMigration
 from pymolt.codemods.service import (
     migrations_from_dependency_file,
     migrations_from_rows,
     resolve_codemod_migrations,
-    run_codemods,
 )
 from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixation
 from pymolt.core.graph import DependencyGraph, Node
@@ -191,83 +190,6 @@ class TestContainerDegrade:
         assert len(migrations) == 1
         assert "requirements-target.txt" in source_desc
         assert any("not running" in w for w in warnings)
-
-
-class _FakeClient:
-    def __init__(self, patterns):
-        self._patterns = patterns
-        self.calls = []
-
-    def fetch_bundle(self, migrations, *, progress=None):
-        self.calls.append(migrations)
-        if progress:
-            progress("analyzing")
-        return {"flask": CodemodBundle(patterns=self._patterns)}
-
-    def fetch_codemods(self, migrations):
-        return {name: bundle.patterns for name, bundle in self.fetch_bundle(migrations).items()}
-
-
-def test_run_codemods_fetches_and_applies(tmp_path):
-    (tmp_path / "app.py").write_text(
-        "from flask.helpers import safe_join\nx = safe_join(a, b)\n"
-    )
-    pattern = CodemodPattern(
-        old_qualname="flask.helpers.safe_join",
-        new_qualname="werkzeug.utils.safe_join",
-        kind="rewrite-import",
-        confidence="high",
-    )
-    fake = _FakeClient([pattern])
-
-    by_pkg, result = run_codemods(
-        tmp_path,
-        [DependencyMigration("flask", "2.0.3", "3.0.0")],
-        write=True,
-        client=fake,
-    )
-
-    assert "flask" in by_pkg
-    assert result.files_changed == 1
-    assert "werkzeug.utils" in (tmp_path / "app.py").read_text()
-    assert len(fake.calls) == 1  # client was used, no real network
-
-
-def test_run_codemods_reports_progress(tmp_path):
-    (tmp_path / "app.py").write_text("x = 1\n")
-    pattern = CodemodPattern(
-        old_qualname="flask.helpers.safe_join",
-        new_qualname="werkzeug.utils.safe_join",
-        kind="rewrite-import",
-    )
-    msgs: list[str] = []
-    run_codemods(
-        tmp_path,
-        [DependencyMigration("flask", "2.0.3", "3.0.0")],
-        client=_FakeClient([pattern]),
-        progress=msgs.append,
-    )
-    # fetch phase + apply phase both surfaced a status line
-    assert any("analyzing" in m for m in msgs)
-    assert any("Applying" in m and "LibCST" in m for m in msgs)
-
-
-def test_run_codemods_dry_run_default(tmp_path):
-    (tmp_path / "app.py").write_text(
-        "from flask.helpers import safe_join\nx = safe_join(a, b)\n"
-    )
-    pattern = CodemodPattern(
-        old_qualname="flask.helpers.safe_join",
-        new_qualname="werkzeug.utils.safe_join",
-        kind="rewrite-import",
-    )
-    _, result = run_codemods(
-        tmp_path,
-        [DependencyMigration("flask", "2.0.3", "3.0.0")],
-        client=_FakeClient([pattern]),
-    )
-    assert result.dry_run is True
-    assert "flask.helpers" in (tmp_path / "app.py").read_text()  # untouched
 
 
 # ── provider: the local delta engine ──────────────────────────────────────────

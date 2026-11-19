@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app as cli
-from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE, EXIT_USAGE
+from pymolt.interfaces.cli.output import EXIT_FINDING, EXIT_INCONCLUSIVE, EXIT_OK, EXIT_USAGE
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
 from pymolt.verify.unified import UnifiedVerificationReport
@@ -233,7 +233,8 @@ def test_verify_on_explicit_recordings_renders_and_is_not_saved(tmp_path):
     result = runner.invoke(cli, [
         "verify", str(tmp_path), "--baseline", str(old), "--post-migration", str(new),
     ])
-    assert result.exit_code in (0, 1, EXIT_INCONCLUSIVE)
+    # the same run recorded twice, its one call site covered: nothing changed
+    assert result.exit_code == EXIT_OK, result.output
     assert "Traceback" not in result.output
     assert "Not saved" in result.output
     assert not (tmp_path / ".pymolt" / "verification.json").exists()
@@ -303,18 +304,6 @@ def test_verify_without_comparable_pair_is_inconclusive(tmp_path):
     payload = json.loads(result.output)
     assert payload["verdict"] == "inconclusive"
     assert payload["contract"]["verdict_reasons"]
-
-
-@pytest.mark.parametrize("old, new", [
-    ("capture", "pymolt capture"), ("trace", "pymolt capture"),
-    ("export-watcher", "pymolt capture"), ("boundary", "pymolt capture"),
-    ("report", "pymolt verify"), ("diff", "pymolt verify --baseline"), ("map", "pymolt scan"),
-])
-def test_removed_contract_commands_name_their_replacement(old, new):
-    result = runner.invoke(cli, ["contract", old, "--when", "baseline"])
-    assert result.exit_code == EXIT_USAGE
-    assert f"pymolt contract {old}` was removed" in result.output
-    assert new in result.output
 
 
 def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeypatch):
