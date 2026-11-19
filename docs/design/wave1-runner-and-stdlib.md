@@ -11,7 +11,7 @@ Fixers (P3) are Wave 2. Here python risks are rated, never fixed (`fixed_by_plan
 - verify trust on container captures rises above the 0–7% caused by `/work` paths;
 - hyper, vibora and theano get certain/high python risks at the sites listed in the design's Acceptance section (hyper's 7 unguarded removed sites; vibora `vibora/templates/ast.py:1`; theano `imp`/`distutils`);
 - lasagne's 2 guarded fallbacks are listed and not rated;
-- the pandas e2e bench and delta parity are unchanged;
+- the pandas e2e bench and delta accuracy are unchanged;
 - the injected runtime and the probes still parse as Python 3.6.
 
 ## Contracts

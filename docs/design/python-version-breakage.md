@@ -192,7 +192,7 @@ There are no new commands; all output goes through `views.py`, and MCP returns t
    - `pandas.util.testing` is REMOVED at the test sites, with its successor.
 6. **pandas toy:**
    - the python delta is complete with 0 risks and 0 rewrites;
-   - the verdicts (PASS / FAIL / PASS / FAIL), the calibration and delta parity (P 1.00, R 0.95) are unchanged;
+   - the verdicts (PASS / FAIL / PASS / FAIL), the calibration and delta accuracy (P 1.00, R 0.95) are unchanged;
    - a warm plan takes at most +2 s.
 7. **New `bench/e2e_stdlib`** (3.8 → 3.12, host):
    - at least 25 labelled sites: attr, from and import forms; fallbacks in both orders; version guards; broad except; the shim on and off; a removed keyword; unittest aliases; escapes.

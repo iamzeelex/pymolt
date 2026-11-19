@@ -113,7 +113,7 @@ All five criteria pass:
   - proposes the one `toyapp/core.py` rewrite;
   - rates `Series.append` certain and fixed by the plan, and `DataFrame.mean`@24 high.
 - The verdicts are PASS, FAIL, PASS, FAIL as before. Calibration has `mean` as a hit, `append` as prevented, and the four call-time-default risks as misses.
-- Delta parity: P 1.00, R 0.95, the same as before.
+- Delta accuracy: P 1.00, R 0.95, the same as before.
 - Full suite: 1149 passed.
 
 The first run through plan → apply surfaced four defects. The previous bench edited the code by hand, so it never ran this path. All four are fixed:
