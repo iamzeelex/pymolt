@@ -309,11 +309,29 @@ def test_a_review_step_records_a_completion_with_no_entries(tmp_path):
     ev = ledger(tmp_path)["events"][-1]
     assert (ev["event"], ev["files"]) == ("record", [])
     assert not [e for e in ledger(tmp_path)["entries"] if e["step_id"] == "beh-1"]
-    # A rollback of an epoch that changed no file keeps it (row 6).
-    assert rollback_steps(tmp_path, step="beh-1").kept == ["beh-1"]
 
 
-def test_refusals_target_env_applied_skipped_and_dependencies(tmp_path):
+def test_row_6_a_completion_with_no_file_keeps_its_epoch(tmp_path):
+    """A recorded completion with no entries: its rollback rewrites nothing, says
+    ``restored: false``, and the step stays in effect with its epoch."""
+    plan = _plan(tmp_path, step_type="review", executor="person")
+    apply_steps(tmp_path, plan, step="mech-1", allow_no_baseline=True)
+    record_step(tmp_path, plan, "beh-1")
+    record_step(tmp_path, plan, "beh-1", done=True)
+    epoch = _step(tmp_path, plan.plan_id, "beh-1").epoch
+    before = read(tmp_path, M)
+
+    result = rollback_steps(tmp_path, step="beh-1")
+
+    assert (result.steps, result.kept, result.files_restored) == ([], ["beh-1"], [])
+    last = ledger(tmp_path)["events"][-1]
+    assert (last["event"], last["step_id"], last["restored"]) == ("rollback", "beh-1", False)
+    step = _step(tmp_path, plan.plan_id, "beh-1")
+    assert (step.status, step.epoch, step.in_effect) == ("rolled_back", epoch, True)
+    assert read(tmp_path, M) == before
+
+
+def test_refusals_target_env_applied_skipped_and_unknown(tmp_path):
     plan = _plan(tmp_path)
     with pytest.raises(StepRefusal, match="nothing to record"):
         record_step(tmp_path, plan, "env-2")
@@ -437,7 +455,7 @@ def test_a_person_without_an_attestation_is_recorded_unattested(tmp_path):
 
 
 def test_cli_record_done_and_exit_codes(tmp_path):
-    plan = _plan(tmp_path)
+    _plan(tmp_path)
     runner = CliRunner()
     opened = runner.invoke(app, ["apply", str(tmp_path), "--step", "sig-1", "--record",
                                  "--agent"])
@@ -453,7 +471,7 @@ def test_cli_record_done_and_exit_codes(tmp_path):
     assert done.exit_code == 0, done.stdout
     assert json.loads(done.stdout)["data"]["recorded"] == ["sig-1"]
     bad = runner.invoke(app, ["apply", str(tmp_path), "--step", "sig-1", "--done"])
-    assert bad.exit_code == 2
+    assert bad.exit_code == 2 and "--done goes with --record" in bad.output
     bad = runner.invoke(app, ["apply", str(tmp_path), "--claim", "preserve"])
     assert bad.exit_code == 2
-    assert plan.plan_id
+    assert "--claim, --expect and --pair go with --record" in bad.output

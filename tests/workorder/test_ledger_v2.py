@@ -18,8 +18,7 @@ from pymolt.apply_ledger import (
     ledger_path,
     load_ledger,
 )
-from pymolt.codemods.models import DependencyMigration
-from pymolt.codemods.models import CodemodPattern, FilePreview
+from pymolt.codemods.models import CodemodPattern, DependencyMigration, FilePreview
 from pymolt.migration_plan import (
     MigrationPlan,
     _ledger_steps,
@@ -28,8 +27,6 @@ from pymolt.migration_plan import (
     rollback_migration,
 )
 from pymolt.migration_state import MigrationReceipt
-from pymolt.workorder.edits import make_edit
-from pymolt.workorder.models import PlanStep, StepDo, StepRecipe, StepSymbol
 
 PRESERVE = EntryAttrs(kind="rename-call", rule="rename-call:a.f→b.g", claim="preserve",
                       basis="same-signature", old_symbol="a.f", new_symbol="b.g")
@@ -220,34 +217,9 @@ def test_the_builders_steps_are_recorded_each_with_its_own_claim_and_anchors(tmp
     assert {k.split(":", 1)[1]: (r.epoch, r.claim) for k, r in saved.steps.items()} == {
         first.id: (1, "preserve"), second.id: (2, None)}
     assert saved.progress == "complete" and saved.run_id == receipt.run_id
-
-
-def test_steps_that_chain_are_recorded_one_event_each_and_attributed_by_step(tmp_path):
-    t0 = "import a\nx = a.f()\ny = a.h()\n"
-    t1 = "import a\nx = a.g()\ny = a.h()\n"
-    t2 = "import a\nx = a.g()\ny = a.k()\n"
-    plan = _plan(tmp_path, {"m.py": (t0, t2, [_pattern("a.f", "a.g"), _pattern("a.h", "a.k")])})
-
-    def step(n, before, after, old, new, claim):
-        return PlanStep(
-            id=f"mech-{n}", key=f"{n:010x}", phase="mechanical", type="codemod",
-            title=f"{old} → {new}", executor="pymolt", claim=claim,
-            basis="same-signature" if claim else None, symbol=StepSymbol(old=old, new=new),
-            do=StepDo(recipe=StepRecipe(kind="pattern", keys=[f"rename-call:{old}→{new}"])),
-            edits=[make_edit("m.py", before, after)])
-
-    plan.steps = [step(1, t0, t1, "a.f", "a.g", "preserve"), step(2, t1, t2, "a.h", "a.k", None)]
-    assert [s.id for s, _files in _ledger_steps(plan)] == ["mech-1", "mech-2"]
-    apply_migration_plan(tmp_path, plan, allow_no_baseline=True)
-
-    ledger = load_ledger(tmp_path)
-    assert [(e.seq, e.step_id) for e in ledger.events] == [(1, "mech-1"), (2, "mech-2")]
-    assert ledger.events[1].files[0].before == ledger.events[0].files[0].after
-    assert [(e.epoch, e.step_id, e.claim, e.anchor_new.stmt) for e in ledger.entries] == [
-        (1, "mech-1", "preserve", "x = a.g()"), (2, "mech-2", None, "y = a.k()")]
     # Steps whose hunks do not chain to the plan's text fall back to the whole-file step.
-    plan.steps = plan.steps[:1]
-    assert [s.id for s, _files in _ledger_steps(plan)] == ["v1"]
+    partial = plan.model_copy(update={"steps": [s for s in plan.steps if s.id != second.id]})
+    assert [s.id for s, _files in _ledger_steps(partial)] == ["v1"]
 
 
 def test_a_plan_whose_whole_file_step_cannot_be_built_still_applies(tmp_path, monkeypatch):

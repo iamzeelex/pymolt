@@ -140,8 +140,9 @@ def test_the_builder_fixture_has_no_dependency_and_the_oracle_agrees(tmp_path):
     root = _project(tmp_path)
     recorder = StepRecorder()
     plan = builder_plan(root, recorder, _walk(root, recorder))
-    assert [s.depends_on for s in plan.steps] == [[]] * len(plan.steps)
-    assert _oracle(plan) >= 3
+    assert [s.id for s in plan.steps] == ["env-1", "mech-1", "mech-2", "mech-3", "mech-4"]
+    assert [s.depends_on for s in plan.steps] == [[]] * 5
+    assert _oracle(plan) == 3            # mech-1/2, mech-1/3 and mech-2/3 meet in app.py
 
 
 # ── hand-made edits: the inserted-import key and the fallback ────────────────────────────────

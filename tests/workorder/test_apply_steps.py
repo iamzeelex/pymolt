@@ -225,8 +225,7 @@ def test_a_moved_text_without_re_basing_is_stale_for_a_whole_file_step(tmp_path)
     texts."""
     from _stepwise import project
 
-    from pymolt.codemods.models import DependencyMigration
-    from pymolt.codemods.models import FilePreview
+    from pymolt.codemods.models import DependencyMigration, FilePreview
     from pymolt.migration_plan import create_migration_plan
 
     target = project(tmp_path)
@@ -423,7 +422,7 @@ def test_skip_needs_a_reason_and_refuses_a_step_in_effect(tmp_path):
 
 
 def test_the_cli_exit_codes(tmp_path):
-    plan = plan_for(tmp_path, {M: (APP, RECIPES)})
+    plan_for(tmp_path, {M: (APP, RECIPES)})
     d = str(tmp_path)
 
     assert runner.invoke(app, ["apply", d, "--step", "mech-9"]).exit_code == 2
@@ -442,15 +441,12 @@ def test_the_cli_exit_codes(tmp_path):
     assert text.exit_code == 0, text.output
     assert "mech-2, mech-3" in text.output and "Steps remaining" in text.output
     skip = runner.invoke(app, ["apply", d, "--step", "env-2", "--skip", "--reason", "CI"])
-    assert skip.exit_code == 0, skip.output and "Step skipped" in skip.output
-    state = service.load_contract_state(tmp_path)
-    state.baseline = None
-    state.save(tmp_path / ".pymolt" / "contract_state.json")
+    assert skip.exit_code == 0, skip.output
+    assert "Step skipped" in skip.output
     other = tmp_path / "other"
     other.mkdir()
     plan_for(other, {M: (APP, RECIPES)}, baseline=False)
     assert runner.invoke(app, ["apply", str(other)]).exit_code == 4
-    assert plan is not None
 
 
 def test_agent_refusals_and_what_it_may_do(tmp_path):

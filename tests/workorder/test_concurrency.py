@@ -74,6 +74,7 @@ def no_compile(monkeypatch):
 
 def test_a_second_operation_is_refused_by_the_lock_and_writes_nothing(tmp_path, no_compile):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)}, baseline=False)
+    idle = build_status(tmp_path).phase("migration")
     proc = _child(tmp_path, "HOLD")
     try:
         _wait_inside(tmp_path, proc)
@@ -89,8 +90,8 @@ def test_a_second_operation_is_refused_by_the_lock_and_writes_nothing(tmp_path, 
         assert not list((tmp_path / ".pymolt").glob("migrations/*/steps"))
         assert read(tmp_path, M) == written
         # Status reads while the transaction is open: the state from before it, consistent.
-        status = build_status(tmp_path)
-        assert status.phase("migration") is not None
+        during = build_status(tmp_path).phase("migration")
+        assert (during.state, during.detail) == (idle.state, idle.detail)
         assert not (tmp_path / ".pymolt" / "migration_state.json").exists()
     finally:
         (tmp_path / "go").write_text("1")
