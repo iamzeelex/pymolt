@@ -1,6 +1,7 @@
 """The state table, rows 5 to 16 (design 4.1), rollback phase 1 (4.2), ``--force`` across runs,
 the cross-run refusals, the capture rule and the refusals under ``--agent``. Rows 1 to 4 are in
-``test_apply_steps``; row 7's re-base in ``test_apply_rebase``."""
+``test_apply_steps``; row 6 and a recorded step's rollback in ``test_record_step``; row 7's
+re-base in ``test_apply_rebase``."""
 from __future__ import annotations
 
 import pytest
@@ -16,13 +17,11 @@ from _stepwise import (
     rename,
 )
 
-from pymolt.apply_ledger import EventFile, LedgerEvent, append_ledger, in_effect_entries
+from pymolt.apply_ledger import in_effect_entries
 from pymolt.migration_plan import MigrationConflictError
-from pymolt.migration_state import MigrationReceipt, StepReceipt
+from pymolt.migration_state import MigrationReceipt
 from pymolt.verify import service
 from pymolt.workorder.apply import StepRefusal, apply_steps, skip_step
-from pymolt.workorder.blobs import put_texts
-from pymolt.workorder.edits import sha256
 from pymolt.workorder.rollback import rollback_steps
 
 M = "app/m.py"
@@ -137,58 +136,6 @@ def test_row_5_a_capture_whose_snapshot_lacks_the_file_is_kept(tmp_path):
     post_capture(tmp_path)                               # it saw no call in app/m.py
 
     assert rollback_steps(tmp_path, step="mech-1").post == "kept"
-
-
-# ── row 6: an epoch that changed no file ──────────────────────────────────────────────────
-
-
-def test_row_6_an_epoch_with_no_file_keeps_its_epoch(tmp_path):
-    """A completion with no entries (a person's env or review step, recorded): its rollback
-    rewrites nothing, says ``restored: false``, and the step stays in effect."""
-    plan = plan_for(tmp_path, {M: (APP, RECIPES)})
-    apply_steps(tmp_path, plan, step="mech-1")
-    saved = append_ledger(tmp_path, [(LedgerEvent(
-        event="record", run_id=plan.plan_id, step_id="env-2", at="2026-11-17T00:00:00+00:00",
-        executor="person", actor="person"), [])])
-    receipt = MigrationReceipt.load(tmp_path)
-    receipt.steps[f"{plan.plan_id}:env-2"] = StepReceipt(
-        status="recorded", epoch=saved.events[-1].seq, executor="person", actor="person")
-    receipt.save(tmp_path)
-
-    result = rollback_steps(tmp_path, step="env-2")
-
-    assert (result.steps, result.kept, result.files_restored) == ([], ["env-2"], [])
-    last = ledger(tmp_path)["events"][-1]
-    assert (last["event"], last["step_id"], last["restored"]) == ("rollback", "env-2", False)
-    assert _status(tmp_path, plan.plan_id, "env-2") == ("rolled_back", 2, True)
-
-
-def test_a_recorded_step_rolls_back_from_its_record_blobs(tmp_path):
-    """4.2, recorded steps: the same phase 1, from the record's before- and after-text."""
-    plan = plan_for(tmp_path, {M: (APP, RECIPES)})
-    edited = APP.replace("z = 1", "z = 2")
-    put_texts(tmp_path, [APP, edited])
-    (tmp_path / M).write_text(edited, encoding="utf-8")
-    saved = append_ledger(tmp_path, [(LedgerEvent(
-        event="record", run_id=plan.plan_id, step_id="env-2", at="2026-11-17T00:00:00+00:00",
-        executor="agent", actor="agent",
-        files=[EventFile(file=M, before=sha256(APP), after=sha256(edited))]), [])])
-    MigrationReceipt(run_id=plan.plan_id, plan_id=plan.plan_id, target_python="3.12",
-                     source_manifest="requirements.txt", steps={
-                         f"{plan.plan_id}:env-2": StepReceipt(
-                             status="recorded", epoch=saved.events[-1].seq, files=[M])},
-                     ).save(tmp_path)
-    run_dir = tmp_path / ".pymolt" / "migrations" / plan.plan_id
-    run_dir.mkdir(parents=True)
-    plan.save(tmp_path, run_dir / "plan.json")
-    from pymolt.migration_plan import MigrationRunState, _save_run_state
-
-    _save_run_state(run_dir, MigrationRunState(run_id=plan.plan_id, status="applied",
-                                               prepared_at="2026-11-17T00:00:00+00:00"))
-
-    rollback_steps(tmp_path, step="env-2")
-
-    assert read(tmp_path, M) == APP
 
 
 # ── rows 9 to 14: two runs ────────────────────────────────────────────────────────────────
@@ -348,8 +295,8 @@ def test_the_cli_rollback_step_options(tmp_path):
     # undone alone (--cascade has no dependent to roll back first).
     alone = runner.invoke(app, ["rollback", d, "--step", "mech-1", "--cascade", "--json"])
     assert alone.exit_code == 0, alone.output
-    assert (json.loads(alone.stdout)["steps"], json.loads(alone.stdout)["inverse"]) == (
-        ["mech-1"], ["mech-1"])
+    undone = json.loads(alone.stdout)
+    assert (undone["steps"], undone["inverse"], undone["notes"]) == (["mech-1"], ["mech-1"], [])
     text = runner.invoke(app, ["rollback", d, "--step", "mech-2"])
     assert text.exit_code == 0, text.output
     assert "Migration rolled back" in text.output and "mech-2" in text.output

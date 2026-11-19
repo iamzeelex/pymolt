@@ -6,12 +6,10 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from _verifying import LINE, M, capture, edit, json_project, verify
 from typer.testing import CliRunner
 
 from pymolt.interfaces.cli.commands import app
-from pymolt.migration_plan import MigrationPlan
 from pymolt.status import build_status
 from pymolt.verify.predict import PredictedRisk, PredictionReport, RiskSite, RiskTier
 from pymolt.verify.unified import build_unified_verification
@@ -185,18 +183,20 @@ def test_a_risk_at_an_accepted_change_scores_accepted(tmp_path):
     assert risk.result.value == "accepted" and cal.accepted == 1
 
 
-@pytest.mark.parametrize("compared_other", [True])
-def test_a_verdict_on_another_recording_judges_no_step(tmp_path, compared_other):
+def test_a_verdict_on_another_recording_judges_no_step(tmp_path):
+    from pymolt.verify import service
+
     plan = _plan(tmp_path)
     _record(tmp_path, plan, SAME)
     post = capture(tmp_path, "post_migration")
-    from pymolt.verify import service
-
+    # The control: on the post-migration capture itself, the step is judged.
+    control = build_unified_verification(service.build_contract_report_from_state(tmp_path))
+    assert list(control.steps) == ["beh-1"]
     other = tmp_path / "other.jsonl"
-    other.write_bytes((tmp_path / post.trace_path).read_bytes()
-                      if not str(post.trace_path).startswith("/") else
-                      open(post.trace_path, "rb").read())
+    other.write_bytes((tmp_path / post.trace_path).read_bytes())
+
     report = service.build_contract_report_from_state(tmp_path, trace_override=str(other))
     unified = build_unified_verification(report)
+
     assert unified.steps == {}
-    assert MigrationPlan.load(tmp_path) is not None
+    assert not any("steps not judged" in n for n in report.notes)    # not judged, not failed

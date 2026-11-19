@@ -42,12 +42,30 @@ def _hand_edit(root):
 
 
 def test_failing_and_review_findings_carry_a_stable_id(tmp_path):
-    report = _hand_edit(tmp_path)
+    (tmp_path / "review").mkdir()
+    report = _hand_edit(tmp_path / "review")
     finding = _finding(report)
     summary = report.all_fact_diff["summary"]
     assert any(f["id"] == finding for r in summary["review"] for f in r["findings"])
-    assert _finding(verify(tmp_path)) == finding                  # the same on every verify
+    assert _finding(verify(tmp_path / "review")) == finding        # the same on every verify
     entry = site_entries(report)[0]
+    assert entry["fingerprint"] and len(entry["fingerprint"]) == 64
+    # A failing finding: a preserve step's recorded edit changed the value.
+    failing = tmp_path / "failing"
+    failing.mkdir()
+    plan = json_project(failing, dict(sid="sig-1", step_type="api-change", executor="agent",
+                                      claim="preserve"))
+    record_step(failing, plan, "sig-1", agent=True)
+    edit(failing, *VALUE)
+    record_step(failing, plan, "sig-1", done=True, agent=True)
+    capture(failing, "post_migration")
+    report = verify(failing)
+    assert report.all_fact_diff["verdict"] == "fail"
+    [entry] = [e for e in site_entries(report) if e["fails"]]
+    finding = entry["finding"]
+    assert finding and any(f["id"] == finding
+                           for f in report.all_fact_diff["summary"]["failing"])
+    assert _finding(verify(failing)) == finding                   # the same on every verify
     assert entry["fingerprint"] and len(entry["fingerprint"]) == 64
 
 
@@ -116,7 +134,7 @@ def test_an_accept_on_an_intended_step_s_line_is_that_step_s(tmp_path):
     assert verify(tmp_path).all_fact_diff["verdict"] == "pass"
 
 
-def test_a_preserve_line_cannot_be_accepted_and_nobody_but_a_person_accepts(tmp_path):
+def test_a_preserve_line_cannot_be_accepted(tmp_path):
     plan = json_project(tmp_path, dict(sid="sig-1", step_type="api-change", executor="agent",
                                        claim="preserve"))
     record_step(tmp_path, plan, "sig-1", agent=True)
@@ -126,14 +144,19 @@ def test_a_preserve_line_cannot_be_accepted_and_nobody_but_a_person_accepts(tmp_
     report = verify(tmp_path)
     with pytest.raises(AcceptRefusal, match="claims to preserve"):
         _accept(tmp_path, report, _finding(report))
-    hand = tmp_path / "hand"
-    hand.mkdir()
-    report = _hand_edit(hand)
+
+
+def test_nobody_but_a_person_accepts(tmp_path):
+    report = _hand_edit(tmp_path)
     with pytest.raises(AcceptRefusal, match="person's attested act"):
-        accept_finding(hand, report._fact_diff, _finding(report),
+        accept_finding(tmp_path, report._fact_diff, _finding(report),
                        attester=Attester(prompter=None), ctx=report._accepts)
+
+
+def test_an_unknown_finding_is_refused(tmp_path):
+    report = _hand_edit(tmp_path)
     with pytest.raises(AcceptRefusal, match="no finding nope"):
-        _accept(hand, report, "nope")
+        _accept(tmp_path, report, "nope")
 
 
 # ── expiry ────────────────────────────────────────────────────────────────────────────────
@@ -205,7 +228,7 @@ def test_a_fingerprint_written_into_the_ledger_is_not_an_accept(tmp_path):
         fingerprint=entry["fingerprint"], captures=report._accepts.captures,
         symbol=entry["symbol"]), [])])
     again = verify(tmp_path)
-    assert again.all_fact_diff["verdict"] != "pass"
+    assert again.all_fact_diff["verdict"] == "inconclusive"         # still the review
     assert any("not in this machine's attestation log" in n for n in again.notes)
 
 
@@ -226,7 +249,7 @@ def test_a_fingerprint_copied_onto_another_finding_is_not_an_accept(tmp_path):
     again = verify(tmp_path)
 
     assert not any(e.get("accepted") for e in site_entries(again, 13))
-    assert again.all_fact_diff["verdict"] != "pass"
+    assert again.all_fact_diff["verdict"] == "inconclusive"         # line 13 is still a review
 
 
 def test_an_accept_copied_to_a_later_capture_is_expired(tmp_path):

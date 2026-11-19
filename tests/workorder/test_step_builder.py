@@ -8,8 +8,12 @@ from types import SimpleNamespace
 
 from pymolt.anchors import StatementIndex
 from pymolt.codemods.apply import apply_patterns, preview_mixed_repo, preview_repo
-from pymolt.codemods.models import DependencyMigration
-from pymolt.codemods.models import CodemodPattern, FilePreview, MoveGroup
+from pymolt.codemods.models import (
+    CodemodPattern,
+    DependencyMigration,
+    FilePreview,
+    MoveGroup,
+)
 from pymolt.codemods.rules import CodemodRule
 from pymolt.delta.models import DeltaFact, DeltaReport
 from pymolt.migration_plan import create_migration_plan
@@ -101,22 +105,31 @@ def _plan(root, recorder, outcome):
         predict=False, recorder=recorder, python_stage=stage, python_move=("3.11", "3.12"))
 
 
-def test_the_steps_rebuild_every_planned_file_exactly(tmp_path):
+def _built(tmp_path):
     root = _project(tmp_path)
     recorder = StepRecorder()
-    plan = _plan(root, recorder, _walk(root, recorder))
+    return _plan(root, recorder, _walk(root, recorder))
+
+
+def test_the_steps_rebuild_every_planned_file_exactly(tmp_path):
+    plan = _built(tmp_path)
     assert sorted(c.path for c in plan.changes) == ["app.py", "b_other.py", "c_only.py"]
     rebuilt = replay_changes(plan.changes, plan.steps)
     assert rebuilt == {c.path: c.new_source for c in plan.changes}
+    rule, move, _fix = _pymolt(plan)
+    # One step per recipe across every file it changes; the blocked rule is in none.
+    assert [e.file for e in rule.edits] == ["app.py", "c_only.py"]
+    assert [e.file for e in move.edits] == ["app.py", "b_other.py"]
+    assert not any("ix" in k for s in _pymolt(plan) for k in s.do.recipe.keys)
+
+
+def test_the_steps_follow_the_walk_with_each_recipes_claim(tmp_path):
+    plan = _built(tmp_path)
     # The order is the walk's: the rule, the move group, then the python fix.
     assert [(s.id, s.type, s.do.recipe.kind) for s in _pymolt(plan)] == [
         ("mech-1", "codemod", "rule"), ("mech-2", "codemod", "move-group"),
         ("mech-3", "python-fix", "pattern")]
     rule, move, fix = _pymolt(plan)
-    # One step per recipe across every file it changes; the blocked rule is in none.
-    assert [e.file for e in rule.edits] == ["app.py", "c_only.py"]
-    assert [e.file for e in move.edits] == ["app.py", "b_other.py"]
-    assert not any("ix" in k for s in _pymolt(plan) for k in s.do.recipe.keys)
     # Claims per recipe: a verified rule, a same-object move, a python fixer.
     assert [(s.claim, s.basis) for s in _pymolt(plan)] == [
         ("preserve", "verified-rule"), ("preserve", "same-object"),
@@ -130,15 +143,18 @@ def test_the_steps_rebuild_every_planned_file_exactly(tmp_path):
     assert fix.checks_at_plan == {"compile_target": "ok",
                                   "compile_base": "not checked: no base interpreter or runner"}
     assert all(s.effort.size == "none" for s in _pymolt(plan))
-    # The blocked rule is left to an agent, after the pymolt steps of its phase.
+
+
+def test_the_blocked_rule_is_left_to_an_agent_after_the_pymolt_steps(tmp_path):
+    plan = _built(tmp_path)
     assert [(s.id, s.type, s.executor) for s in plan.steps if s.executor != "pymolt"] == [
         ("env-1", "target-env", "person"), ("mech-4", "manual-rewrite", "agent")]
+    # After the pymolt steps of its phase.
+    assert [s.id for s in plan.steps] == ["env-1", "mech-1", "mech-2", "mech-3", "mech-4"]
 
 
 def test_each_steps_anchors_are_made_on_its_own_before_text(tmp_path):
-    root = _project(tmp_path)
-    recorder = StepRecorder()
-    plan = _plan(root, recorder, _walk(root, recorder))
+    plan = _built(tmp_path)
     rule, move, fix = _pymolt(plan)
     t0 = APP
     t1 = apply_hunks(t0, rule.edit_for("app.py").hunks)

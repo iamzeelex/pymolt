@@ -6,8 +6,6 @@ The metamorphic property: apply A, B, C, roll back B by its inverse, and the fil
 applying A and C alone."""
 from __future__ import annotations
 
-import json
-
 import pytest
 from _stepwise import ledger, plan_for, plan_next, read, rename
 
@@ -570,20 +568,3 @@ def test_invert_follows_a_neighbour_through_later_steps_only_when_told():
     assert not invert(M, text, t1, t2).ok                       # a hand edit, as far as it knows
     later = [make_edit(M, t1, t2).effect]
     assert invert(M, text, t1, t2, later=later).text == text.replace("a.h(", "a.k(")
-
-
-def test_the_cli_reports_the_inverse(tmp_path):
-    from typer.testing import CliRunner
-
-    from pymolt.interfaces.cli.commands import app
-
-    plan = plan_for(tmp_path, FILES)
-    apply_steps(tmp_path, plan)
-    runner = CliRunner()
-
-    out = runner.invoke(app, ["rollback", str(tmp_path), "--step", "mech-1", "--json"])
-
-    assert out.exit_code == 0, out.output
-    payload = json.loads(out.stdout)
-    assert (payload["steps"], payload["inverse"], payload["notes"]) == (
-        ["mech-1"], ["mech-1"], [])

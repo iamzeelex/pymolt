@@ -105,7 +105,7 @@ def test_a_rebinding_since_the_plan_makes_the_recipe_change_nothing(tmp_path):
     decision = decide(step, step.edit_for(M), shadowed, rerun=rerun)
 
     assert decision.rule == STALE
-    assert any("changes nothing" in r or "another change" in r for r in decision.reasons)
+    assert decision.reasons == [f"{M}: its recipe changes nothing in the current text"]
 
 
 def test_a_dependency_rename_is_restricted_to_the_steps_statements(tmp_path):

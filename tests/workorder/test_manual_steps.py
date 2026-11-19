@@ -7,8 +7,7 @@ from __future__ import annotations
 import pytest
 
 from pymolt.codemods.apply import preview_rules_repo
-from pymolt.codemods.models import DependencyMigration
-from pymolt.codemods.models import recipe_key
+from pymolt.codemods.models import DependencyMigration, recipe_key
 from pymolt.codemods.rules import CodemodRule
 from pymolt.migration_plan import PlannedAdvisory, PlannedManualItem, create_migration_plan
 from pymolt.verify.facts import CallWarning
@@ -43,13 +42,13 @@ def _automated(tmp_path):
     return root, plan
 
 
-def test_every_risk_gets_a_step(tmp_path):
-    root, plan = _automated(tmp_path)
-    automated = _pymolt(plan)
+def _every_kind_of_risk() -> PredictionReport:
+    """Two risks the pymolt steps fix, the ix sites (one with no line), a DEFAULT, a warning
+    with no fact, and a Python removal."""
     removed = {"kind": "REMOVED", "symbol": "pandas.DataFrame.ix", "successor": None}
     default = {"kind": "DEFAULT", "symbol": "pandas.DataFrame.mean", "param": "numeric_only",
                "old": "None", "new": "False"}
-    risks = PredictionReport(risks=[
+    return PredictionReport(risks=[
         _risk("pandas.core.series.Series.append", "app.py", 7, "combine", fixed=True,
               fact={"kind": "REMOVED", "symbol": "pandas.Series.append"}),
         _risk("pandas._testing.assert_frame_equal", "b_other.py", 5, "check", fixed=True,
@@ -65,6 +64,12 @@ def test_every_risk_gets_a_step(tmp_path):
               fact={"kind": "REMOVED", "symbol": "imp.find_module",
                     "evidence": ["hint: use importlib.util.find_spec"]}),
     ])
+
+
+def test_every_risk_gets_a_step(tmp_path):
+    root, plan = _automated(tmp_path)
+    automated = _pymolt(plan)
+    risks = _every_kind_of_risk()
     steps = link_and_manual_steps(automated, root=root, changes=plan.changes, risks=risks,
                                   manual_items=[], advisories=[], compile_findings=[],
                                   dependencies=PANDAS, python_move=("3.11", "3.12"))
@@ -98,12 +103,24 @@ def test_every_risk_gets_a_step(tmp_path):
     assert by_id["beh-1"].why.baseline.warnings == ["FutureWarning: numeric_only"]
     assert warned.step_id == "beh-2" and by_id["beh-2"].title.endswith("warned in the baseline")
     assert all(r.step_id for r in risks.risks)
-    # Keys name the kind of change: the same group in a re-plan keeps its key.
-    again = link_and_manual_steps(automated, root=root, changes=plan.changes,
-                                  risks=risks.model_copy(deep=True), manual_items=[],
-                                  advisories=[], compile_findings=[], dependencies=PANDAS,
-                                  python_move=("3.11", "3.12"))
+
+
+def test_a_re_plan_keeps_each_groups_key(tmp_path):
+    """Keys name the kind of change: the same group in a re-plan keeps its key."""
+    root, plan = _automated(tmp_path)
+    risks = _every_kind_of_risk()
+
+    def link(report):
+        return link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes,
+                                     risks=report, manual_items=[], advisories=[],
+                                     compile_findings=[], dependencies=PANDAS,
+                                     python_move=("3.11", "3.12"))
+
+    steps = link(risks)
+    again = link(risks.model_copy(deep=True))
+
     assert [s.key for s in again] == [s.key for s in steps]
+    assert len({s.key for s in steps}) == len(steps)             # one key per group
 
 
 def test_h5_items_advisories_and_compile_findings_become_steps(tmp_path):
