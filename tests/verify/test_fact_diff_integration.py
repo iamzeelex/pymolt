@@ -151,7 +151,7 @@ def test_dynamic_only_symbol_with_unsettled_fact_still_blocks_pass(tmp_path):
            _view_event("dep.Result.size", {"__nondeterministic__": True}, root, line=6)]
     rep = _verdict_for(root, old, new)
     assert "dep.Result.size" not in rep.fact_equal_symbols
-    assert rep.verdict is not VerificationVerdict.PASS
+    assert rep.verdict is VerificationVerdict.INCONCLUSIVE
     assert any("not compared equal on both sides" in r for r in rep.verdict_reasons)
 
 
@@ -223,13 +223,8 @@ def test_widened_snapshot_is_a_note_not_a_blocker(tmp_path):
 
 
 def test_command_capture_uses_the_facts_sink_end_to_end(tmp_path):
-    from pymolt.verify import boundary_tracer
     from pymolt.verify.facts import load_facts, snapshot_path
 
-    if not hasattr(boundary_tracer, "ENV_SINK"):
-        import pytest
-
-        pytest.skip("this watcher has no PYMOLT_TRACE_SINK")
     app = tmp_path / "app.py"
     app.write_text(
         "import json, threading\n"

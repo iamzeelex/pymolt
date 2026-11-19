@@ -147,6 +147,7 @@ def test_fresh_inputs_at_one_site_compare_as_one_group():
     assert (e.old_count, e.new_count) == (3, 2)
     assert e.explained.startswith("volatile-site") and "volatile-site:3/2" in e.notes
     assert any(w.startswith("volatile-sites: 1 fully") for w in d.warnings)
+    assert "⟨src:hex:" in str(e.old)  # the bytes carry the uuid hex-encoded: masked there too
 
 
 def test_a_new_raise_type_in_a_volatile_group_fails():
@@ -524,18 +525,6 @@ def test_same_complete_input_value_change_fails():
     assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.CHANGED]
 
 
-def test_opaque_receiver_value_change_fails_in_a_quiet_workload():
-    # jinja2: the same template and context now render https instead of http.
-    inp = {"self": {"__opaque__": "jinja2.environment.Template"}, "t": "www.example.org"}
-    old = fs(fact("jinja2.environment.Template.render", inp,
-                  (("return", '<a href="http://www.example.org">'),)))
-    new = fs(fact("jinja2.environment.Template.render", inp,
-                  (("return", '<a href="https://www.example.org">'),)))
-    d = diff_facts(old, new)
-    assert [e.category for e in failing(d)] == [FactCategory.CHANGED]
-    assert d.verdict is VerificationVerdict.FAIL
-
-
 # ── step 4: attribution and evidence asymmetries ──────────────────────────────────────────
 
 DECORATED = ('import flask\napp = flask.Flask("x")\n\n\n@app.route("/fast")\n'
@@ -628,7 +617,8 @@ def test_stacked_pairing_needs_as_many_calls_on_each_side():
     new = fs(applied(NEW_DECO, 5, POST), applied(NEW_DECO, 6, PUT))
     d = diff_facts(old, new, context=ctx_for(STACKED))
     assert not any("stacked-decorators" in e.notes for e in d.entries)
-    assert d.verdict is not VerificationVerdict.PASS
+    assert [(e.category, e.symbol) for e in failing(d)] == [(FactCategory.DISAPPEARED, OLD_DECO)]
+    assert d.verdict is VerificationVerdict.FAIL
 
 
 def test_stacked_pairing_needs_one_decorated_statement():
@@ -664,6 +654,8 @@ def test_a_call_moved_by_an_edit_is_still_a_rewrite():
                   text="with s.get('/', timeout=1) as r:"))
     d = diff_facts(old, new, context=ctx)
     assert not any("attribution-moved" in e.notes for e in d.entries)
+    (e,) = d.entries
+    assert e.category is FactCategory.REWRITTEN and not e.fails
 
 
 def c_call(symbol, line=10, outcomes=(("return", {"__opaque__": "unobserved:c-return"}),)):
@@ -963,10 +955,13 @@ def test_a_hidden_input_value_change_in_a_noisy_workload_is_a_review_item():
 
 
 def test_the_same_hidden_input_change_fails_when_the_workload_is_quiet():
+    # An opaque receiver (the template) and the same context, another rendering.
     old = fs(fact(RENDER, TEMPLATE, (("return", "<td>23.2</td>"),)))
     new = fs(fact(RENDER, TEMPLATE, (("return", "<td>41.9</td>"),)))
     d = diff_facts(old, new)
     assert [e.symbol for e in failing(d)] == [RENDER] and not d.entries[0].review
+    assert d.entries[0].category is FactCategory.CHANGED
+    assert d.verdict is VerificationVerdict.FAIL
     assert not any(w.startswith("run-variation") for w in d.warnings)
 
 
@@ -1165,7 +1160,7 @@ def test_qualname_pairing_needs_definition_lines_of_one_statement():
     # Without source snapshots: forty lines apart is not one decorated statement either.
     d = diff_facts(old, new)
     assert not any("attribution-moved" in e.notes for e in d.entries)
-    assert d.verdict is not VerificationVerdict.PASS
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE  # edited or not: unknown
     # Not a definition line at all: no pairing either.
     new = fs(fact("lib.A.m.<locals>.decorator", {"f": {"__callable__": "app.h"}},
                   (("return", {"__callable__": "app.h"}),), line=9, text="x = lib.A.m(h)"))
@@ -1193,17 +1188,25 @@ def test_a_fact_complete_tallies_prove_gone_is_never_softened_by_drops():
     assert e.category is FactCategory.DISAPPEARED
 
 
-def test_pair_entry_outside_a_diff_leaves_no_shared_noise_state():
-    from pymolt.verify import facts as F
+def test_a_diff_leaves_no_noise_state_behind_for_the_next_one():
+    # The first diff masks UUID_A / UUID_B as entropy-source values on its sides. The second
+    # has no entropy source: the same ids in its outputs are plain values and must still fail,
+    # exactly as when it runs alone.
+    def quiet():
+        def side(u):
+            return fs(fact("lib.register", {"name": "w"},
+                           (("return", "node_" + u.replace("-", "")),), line=6, first=1))
+        return diff_facts(side(UUID_A), side(UUID_B))
 
-    assert F._NOISE.get() is None
-    url_old, url_new = url_pair(1111, 2222)
-    diff_facts(url_old, url_new)
-    assert F._NOISE.get() is None
-    o = F._V(fact=url_old.facts[0], site_value="x", input_key="a")
-    n = F._V(fact=url_new.facts[0], site_value="x", input_key="b")
-    F._pair_entry(o, n, F.DiffProfile.EXACT, {}, rewritten=None, input_changed=True)
-    assert F._NOISE.get() is None
+    def dump(d):
+        return json.dumps(d.to_json_dict(include_equal=True), sort_keys=True, default=str)
+
+    alone = quiet()
+    assert [e.symbol for e in failing(alone)] == ["lib.register"]
+    masked = diff_facts(fs(*uuid_side(UUID_A, UUID_A.replace("-", ""))),
+                        fs(*uuid_side(UUID_B, UUID_B.replace("-", ""))))
+    assert not failing(masked)
+    assert dump(quiet()) == dump(alone)
 
 
 def test_substitution_on_long_leaves_stays_fast():
@@ -1285,9 +1288,12 @@ def test_a_total_regression_behind_a_derived_session_is_not_a_pass():
     old = fs(*billing("a", [(1, 100, "120"), (2, 100, "120"), (3, 100, "120")]))
     new = fs(*billing("b", [(1, 100, "120"), (2, 100, "150")]))
     d = diff_facts(old, new)
-    assert d.verdict is not VerificationVerdict.PASS
+    # the session input differs on every call and no mask reaches it (a digest of the id):
+    # an unpaired site, a review item (docs/verify.md, "Input changes"), never a pass
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
     (e,) = [e for e in d.entries if e.symbol == "billing.charge"]
-    assert e.fails or e.review
+    assert not e.fails and e.explained.startswith("unpaired-site")
+    assert e.review.startswith("unpaired site")
 
 
 def test_a_new_amount_behind_a_derived_session_is_not_explained():
@@ -1326,7 +1332,9 @@ def test_a_static_value_on_the_lossy_side_is_no_lost_producer():
                   (("return", "1198"),), line=3, text="billing.charge(h, a)", first=90),
              dropped_events=7)
     d = diff_facts(old, new)
-    assert d.verdict is not VerificationVerdict.PASS
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    (e,) = [e for e in d.entries if e.symbol == "billing.charge"]
+    assert not e.fails and e.review.startswith("unpaired site")
     assert not any("possibly-dropped-producer" in " ".join(e.notes) for e in d.entries)
 
 
@@ -1374,14 +1382,6 @@ def test_an_input_clock_value_of_a_fact_spanning_the_suite_is_not_masked():
     (e,) = d.entries
     assert "matched-modulo-masked-input" not in e.notes
     assert "clock" not in (e.explained or "")
-
-
-def test_masked_bytes_compare_after_masking():
-    # msgpack bytes that carry the uuid (hex-encoded) compare equal once masked.
-    d = diff_facts(fs(*packs(["a1", "a2", "a3"])), fs(*packs(["b1", "b2"])))
-    e = group_of(d)
-    assert e.category is FactCategory.EQUAL and e.level is ComparisonLevel.MASKED
-    assert "⟨src:hex:" in str(e.old)
 
 
 def json_change(total):

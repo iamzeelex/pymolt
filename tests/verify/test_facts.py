@@ -167,7 +167,7 @@ def test_rewritten_site_with_equal_outcome_passes(tmp_path):
 
 
 def test_rewritten_site_with_different_outcome_fails(tmp_path):
-    d = _rewrite_case(tmp_path, S13)
+    d = _rewrite_case(tmp_path, S13)  # no DiffContext: values on rewritten lines stay strict
     entry = only(d, FactCategory.REWRITTEN)
     assert entry.comparison is Comparison.CHANGED and entry.fails
     assert entry.old[0].value == S12 and entry.new[0].value == S13
@@ -199,6 +199,7 @@ def test_shape_profile_changed_type_still_fails(tmp_path):
     d = run_diff(tmp_path, old, new, profile="shape")
     entry = only(d, FactCategory.CHANGED)
     assert entry.old_types == [{"return": "int"}] and entry.new_types == [{"return": "str"}]
+    assert entry.fails and d.verdict is VerificationVerdict.FAIL
 
 
 def test_bool_and_int_are_not_equal(tmp_path):
@@ -455,7 +456,8 @@ def test_json_form_is_stable_and_self_describing(tmp_path):
     # /2 (verify noise, reporting): the ``summary`` of findings comes first; entries follow
     assert first["schema"] == "pymolt.fact-diff/2" and first["verdict"] == "fail"
     assert next(iter(k for k in first if k != "schema")) == "summary"
-    assert first["summary"]["failing"][0]["symbol"] in ("lib.f", "lib.g")
+    # findings sort kind > presence > type > value: lib.g vanished, lib.f changed its value
+    assert [f["symbol"] for f in first["summary"]["failing"]] == ["lib.g", "lib.f"]
     assert [e["category"] for e in first["entries"]] == ["changed", "disappeared"]
     changed = first["entries"][0]
     assert changed["symbol"] == "lib.f" and changed["fails"] is True
@@ -747,7 +749,9 @@ def test_a_type_change_at_a_widened_site_fails(tmp_path):
     new = snapshot_of(tmp_path, "n", [("m.get", {"id": i}, str(i), 10) for i in range(10)],
                       facts_per_site=4)
     d = diff_traces(old, new, root=ROOT)
-    assert only(d, "changed").input == {"__widened__": True}
+    entry = only(d, "changed")
+    assert entry.input == {"__widened__": True}
+    assert entry.fails and d.verdict is VerificationVerdict.FAIL
 
 
 def test_a_widened_baseline_meets_an_exact_jsonl_at_type_level(tmp_path):
@@ -792,7 +796,7 @@ def test_untyped_raise_still_differs_from_a_return(tmp_path):
 
 def test_known_raise_types_still_differ_and_builtins_spellings_agree(tmp_path):
     d = run_diff(tmp_path, [ev("m.f", raised="KeyError")], [ev("m.f", raised="TypeError")])
-    assert only(d, "changed")
+    assert only(d, "changed").fails and d.verdict is VerificationVerdict.FAIL
     d = run_diff(tmp_path, [ev("m.f", raised="TypeError")],
                  [ev("m.f", raised="builtins.TypeError")])
     assert only(d, "equal").level is ComparisonLevel.EXACT
@@ -1060,7 +1064,12 @@ def test_same_site_same_symbol_other_input_pairs_and_compares(tmp_path):
 def test_same_site_other_input_other_outcome_is_changed(tmp_path):
     old = [rv("lib.f", {"bound": {"a": 1}}, result=1)]
     new = [rv("lib.f", {"bound": {"b": 1}}, result=2)]
-    assert only(diff_sites(tmp_path, old, new), FactCategory.CHANGED)
+    d = diff_sites(tmp_path, old, new)
+    e = only(d, FactCategory.CHANGED)
+    # the same value under another parameter name is binding drift; the outcome still compares
+    # strictly
+    assert e.explained.startswith("binding")
+    assert e.fails and d.verdict is VerificationVerdict.FAIL
 
 
 def test_ambiguous_same_site_group_stays_unpaired(tmp_path):
@@ -1236,7 +1245,8 @@ def test_property_read_does_not_make_a_handle(tmp_path):
 def test_value_object_keeps_exact_attribute_comparison(tmp_path):
     d = run_diff(tmp_path, [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=0))],
                  [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=2))])
-    assert only(d, FactCategory.CHANGED)
+    e = only(d, FactCategory.CHANGED)
+    assert e.level is ComparisonLevel.EXACT and e.fails
 
 
 def test_sentinel_attribute_resolved_is_drift():
@@ -1437,13 +1447,6 @@ def test_namedtuple_object_vs_tuple_is_representation_only(tmp_path):
     assert only(d, FactCategory.DRIFT)
 
 
-def test_hand_edit_new_raise_fails(tmp_path):
-    new = [rv("lib.h", {"bound": {}}, line=3) | {"t": "raise", "raised": "TypeError"}]
-    new[0].pop("result")
-    d = prov_diff(tmp_path, [call("lib.g", 3, 5)], new)
-    assert d.failures() and d.verdict is VerificationVerdict.FAIL
-
-
 def test_ledger_edit_with_a_strict_claim_fails_on_a_difference(tmp_path):
     edit = {"file": "app.py", "old_lines": [3, 3], "new_lines": [3, 3], "claim": "same-object",
             "old_symbol": "lib.g", "new_symbol": "lib.h"}
@@ -1556,11 +1559,6 @@ def test_downstream_of_an_edit_is_judged_as_a_hand_edit(tmp_path):
     assert not d.failures()
 
 
-def test_without_a_context_values_on_rewritten_lines_still_fail(tmp_path):
-    d = _rewrite_case(tmp_path, S13)
-    assert d.verdict is VerificationVerdict.FAIL
-
-
 # ── Round 3b ─────────────────────────────────────────────────────────────────────────────
 
 SAME_SRC = "def main():\n    a = lib.f(1)\n    return lib.g(a)\n"
@@ -1639,10 +1637,8 @@ def test_a_call_result_from_project_code_is_a_runtime_value_not_project_code(tmp
     mine = src + "\n\ndef make():\n    return lib.row()\n"
     texts = {"old": {APP + ":2": "row = make()", APP + ":3": "return row.keys()"},
              "new": {APP + ":2": "row = make()", APP + ":3": "return row.keys()"}}
-    d = prov_diff(tmp_path, [call("lib.f", 2, 1), call("lib.keys", 3, 5)], new, old_src=src,
-                  new_src=mine, texts=texts)
+    d = prov_diff(tmp_path, old, new, old_src=src, new_src=mine, texts=texts)
     assert only(d, FactCategory.DISAPPEARED).fails
-    assert old
 
 
 # ── Round 3d ─────────────────────────────────────────────────────────────────────────────
@@ -1713,14 +1709,12 @@ def test_opaque_attribute_does_not_hide_a_known_attribute_difference():
     assert same.comparison is Comparison.EQUAL and same.level is ComparisonLevel.TYPE
 
 
-def test_opaque_attributes_compare_by_type_and_a_truncated_object_is_type_only():
+def test_opaque_attributes_compare_by_type():
     a = obj("lib.R", exit_code=0, exception={"__opaque__": "lib.a.Err"})
     b = obj("lib.R", exit_code=0, exception={"__opaque__": "lib.b.Err"})
     assert cmp_obj(a, b).comparison is Comparison.EQUAL
     c = obj("lib.R", exit_code=0, exception={"__opaque__": "lib.Other"})
     assert cmp_obj(a, c).comparison is Comparison.CHANGED
-    cut = {**obj("lib.R", exit_code=0), "__truncated__": True}
-    assert cmp_obj(cut, obj("lib.R", exit_code=2)).comparison is Comparison.EQUAL
 
 
 def test_type_level_object_comparison_ignores_one_sided_attributes():

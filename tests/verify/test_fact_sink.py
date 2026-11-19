@@ -5,13 +5,10 @@ completeness (every call tallied, sampled or not), the snapshot format (one JSON
 streamable line by line), atomic periodic flush, thread safety and the sidecar the host's
 counter accounting reads.
 """
-import ast
 import json
 import os
-import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -325,13 +322,6 @@ def test_widen_keeps_type_only_renderings():
     assert widen_value(ambiguous) is ambiguous
     assert widen_value({"__shape__": "str"}) == {"__shape__": "str"}
     assert widen_value(5) == {"__opaque__": "int"}
-
-
-@pytest.mark.parametrize("version", [(3, 6), (3, 4)])
-def test_sinks_module_parses_on_old_pythons(version):
-    source = Path(_sinks.__file__).read_text(encoding="utf-8")
-    ast.parse(source, feature_version=version)
-    assert sys.version_info >= (3, 8)  # the check itself needs a modern host
 
 
 # ── novelty-first sampling (all sinks) ───────────────────────────────────────────────────

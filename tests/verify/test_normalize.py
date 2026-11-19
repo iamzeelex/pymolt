@@ -594,6 +594,19 @@ def test_object_budget_bounds_wide_graph():
 
     out = nz.normalize(build(3))
     assert out["__object__"].endswith("N")
+    rendered, cut = [], []
+
+    def walk(v):
+        if isinstance(v, dict):
+            if "__object__" in v:
+                (rendered if v.get("attrs") else cut).append(v)
+            for x in v.values():
+                walk(x)
+
+    walk(out)
+    # 27,931 objects in the graph: exactly the budget is rendered, the rest are type-level
+    assert len(rendered) == nz.MAX_OBJECTS
+    assert cut and all(c["__truncated__"] is True and c["attrs"] == {} for c in cut)
 
 
 def test_status_code_attr_still_renders_structure():

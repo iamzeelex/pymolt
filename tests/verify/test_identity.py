@@ -352,11 +352,15 @@ def _our_function(x, y=1):
     return x
 
 
-def test_dependency_decorator_around_our_function_keeps_the_wrapper_name(dep):
+def test_dependency_decorator_around_our_function_keeps_the_wrapper_name(dep, identity_path):
     ours = dep.deco(_our_function)          # our function: not a dependency contact
     ev = _trace(lambda: ours(4))[0].events[0]
     assert ev["symq"] != "unwrapped"
     assert ev["sym"] != __name__ + "._our_function"
+    if identity_path == "co_qualname":
+        assert (ev["sym"], ev["symq"]) == (MOD + ".deco.<locals>.wrapper", None)
+    else:
+        assert (ev["sym"], ev["symq"]) == (MOD + ".wrapper", "fallback")
 
 
 def test_identity_is_computed_once_per_code_object(dep, monkeypatch):
@@ -368,16 +372,10 @@ def test_identity_is_computed_once_per_code_object(dep, monkeypatch):
         return real(self, code, module, g)
 
     monkeypatch.setattr(IdentityResolver, "code_identity", counting)
-    _, be = _trace(lambda: [dep.plain(i) for i in range(5)])
+    sink, _ = _trace(lambda: [dep.plain(i) for i in range(5)])
     assert calls == [dep.plain.__code__]
-    (ent,) = [e for e in be._callee.values() if e[0] is dep.plain.__code__]
-    assert ent[4] is not None and ent[4].sym == MOD + ".plain"
-
-
-def test_wrapped_inner_is_cached_per_inner_function(dep):
-    _, be = _trace(lambda: [dep.decorated(i) for i in range(5)])
-    inners = [v for v in be._identity._inner.values() if v[1] is not None]
-    assert len(inners) == 1 and inners[0][1].sym == MOD + ".decorated"
+    # every call carries the identity computed that once
+    assert [e["sym"] for e in sink.events] == [MOD + ".plain"] * 5
 
 
 # ── the pre-3.11 index ───────────────────────────────────────────────────────
@@ -423,13 +421,22 @@ def test_index_rebuilds_when_the_module_grows(dep, monkeypatch):
 
 def test_index_rebuilds_are_bounded(dep, monkeypatch):
     monkeypatch.setattr(_identity, "HAS_CO_QUALNAME", False)
+    builds = []
+    real = _identity.build_index
+
+    def counting(module, g):
+        builds.append(module)
+        return real(module, g)
+
+    monkeypatch.setattr(_identity, "build_index", counting)
     resolver = IdentityResolver()
     nested = dep.make_closure()
     for i in range(_identity._INDEX_MAX_REBUILDS + 3):
         dep.__dict__["filler" + str(i)] = i           # namespace keeps growing
         ci, _ = resolver.code_identity(nested.__code__, MOD, dep.__dict__)
         assert ci.symq == "fallback"
-    assert resolver._index[MOD][2] == _identity._INDEX_MAX_REBUILDS
+    # the first build, then one rebuild per growth up to the bound, then none
+    assert builds == [MOD] * (_identity._INDEX_MAX_REBUILDS + 1)
 
 
 def test_one_code_under_two_names_is_ambiguous(dep, monkeypatch):

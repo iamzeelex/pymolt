@@ -63,13 +63,26 @@ def test_the_explained_table_names_mechanism_count_example_and_rule():
 
 
 def test_masked_samples_show_the_recorded_values_too():
-    s = summarize(mixed_diff())
+    # A TTL that shrank from 120 s to 30 s: the values compare masked as offsets from the
+    # call's own time; the finding's sample carries the recorded epochs beside them.
+    old = env_fs(fact("auth.expiry", {"u": 1}, (("return", int(T_OLD) + 120),)), ts=T_OLD)
+    new = env_fs(fact("auth.expiry", {"u": 1}, (("return", int(T_NEW) + 30),)), ts=T_NEW)
+    (f,) = summarize(diff_facts(old, new))["failing"]
+    sample = f["sample"]
+    assert sample["old"][0]["value"].startswith("⟨clock:")
+    assert sample["new"][0]["value"].startswith("⟨clock:")
+    assert sample["raw"]["old"][0]["value"] == int(T_OLD) + 120
+    assert sample["raw"]["new"][0]["value"] == int(T_NEW) + 30
+    # the entries keep the recorded values off their JSON form: masked only
     d = mixed_diff()
     (e,) = [x for x in d.entries if x.symbol == "lib.stamp"]
     assert e.old_raw is not None and e.old_raw[0].value == "at 2026-11-16 10:26:05"
     assert "raw" not in json.dumps([x for x in d.to_json_dict()["entries"]
-                                    if x["symbol"] == "lib.stamp"])  # entries: masked only
-    assert s["quality"]["noise"].startswith("not measured")
+                                    if x["symbol"] == "lib.stamp"])
+
+
+def test_the_quality_stamp_says_noise_was_not_measured_without_a_replicate():
+    assert summarize(mixed_diff())["quality"]["noise"].startswith("not measured")
 
 
 def test_values_are_capped_with_head_tail_length_and_digest():
@@ -110,7 +123,7 @@ def test_text_lists_at_most_the_budgeted_findings():
     new = fs(*[fact(f"lib.f{i}", {"x": i}, (("return", 2),), line=i + 1) for i in range(80)])
     lines = render_text(summarize(diff_facts(old, new)), max_lines=50)
     assert sum(1 for x in lines if x.lstrip().startswith("✗")) == 50
-    assert any("80 in all" in x or "in all" in x for x in lines)
+    assert "… 30 more, 80 in all (see --json)" in [x.strip() for x in lines]
 
 
 def test_the_agent_view_carries_findings_with_actions():

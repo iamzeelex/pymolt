@@ -141,10 +141,12 @@ def test_the_ladder(tmp_path, outcome, who):
 
 
 @pytest.mark.parametrize("outcome", list(OUTCOMES))
-def test_the_ladder_is_monotone(outcome):
+def test_the_ladder_is_monotone(tmp_path, outcome):
     """preserve >= intended unattested >= hand, for every outcome and every unattested
-    expectation; only an attested expectation ranks below the hand judgement."""
-    row = {who: SEVERITY[j] for who, j in EXPECTED[outcome].items()}
+    expectation; only an attested expectation ranks below the hand judgement. Judged by the
+    code, not read from ``EXPECTED``."""
+    row = {who: SEVERITY[_judgement(_diff(tmp_path, outcome, edit))]
+           for who, edit in CLAIMS.items()}
     unattested = [w for w in CLAIMS if w.startswith("intended")]
     for who in unattested:
         assert row["preserve"] >= row[who] >= row["hand"], (outcome, who)
