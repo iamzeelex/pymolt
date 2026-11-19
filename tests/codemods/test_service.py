@@ -5,8 +5,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from pymolt.assess.service import AssessResult
-from pymolt.codemods.client import DependencyMigration
-from pymolt.codemods.models import CodemodBundle, CodemodPattern
+from pymolt.codemods.models import CodemodBundle, CodemodPattern, DependencyMigration
 from pymolt.codemods.service import (
     migrations_from_dependency_file,
     migrations_from_rows,
@@ -224,7 +223,6 @@ def test_run_codemods_fetches_and_applies(tmp_path):
     by_pkg, result = run_codemods(
         tmp_path,
         [DependencyMigration("flask", "2.0.3", "3.0.0")],
-        base_url="http://unused",
         write=True,
         client=fake,
     )
@@ -246,7 +244,6 @@ def test_run_codemods_reports_progress(tmp_path):
     run_codemods(
         tmp_path,
         [DependencyMigration("flask", "2.0.3", "3.0.0")],
-        base_url="http://unused",
         client=_FakeClient([pattern]),
         progress=msgs.append,
     )
@@ -267,23 +264,20 @@ def test_run_codemods_dry_run_default(tmp_path):
     _, result = run_codemods(
         tmp_path,
         [DependencyMigration("flask", "2.0.3", "3.0.0")],
-        base_url="http://unused",
         client=_FakeClient([pattern]),
     )
     assert result.dry_run is True
     assert "flask.helpers" in (tmp_path / "app.py").read_text()  # untouched
 
 
-# ── provider choice: local by default, Axiom only when configured ────────────
+# ── provider: the local delta engine ──────────────────────────────────────────
 
-def test_codemod_provider_is_local_without_an_endpoint(tmp_path):
-    from pymolt.codemods.client import AxiomGraphClient
+def test_codemod_provider_is_the_local_engine_and_passes_online(tmp_path):
     from pymolt.codemods.service import codemod_provider
     from pymolt.delta.provider import LocalDeltaProvider
 
-    local = codemod_provider(tmp_path, None, online=True)
+    local = codemod_provider(tmp_path, online=True)
     assert isinstance(local, LocalDeltaProvider) and local.online is True
-    assert isinstance(codemod_provider(tmp_path, "http://axiom.test"), AxiomGraphClient)
 
 
 def test_preview_codemods_defaults_to_the_local_provider(tmp_path, monkeypatch):

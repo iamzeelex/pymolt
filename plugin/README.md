@@ -74,14 +74,15 @@ claude mcp add pymolt -- pymolt mcp          # Claude Code, if you want tools in
 # ~/.codex/config.toml
 [mcp_servers.pymolt]
 command = "pymolt"
-args = ["mcp"]
+args = ["mcp", "--allow-run"]
 ```
 
-Every tool's project directory must lie inside the server's working directory (set
-`PYMOLT_MCP_ROOT` to change that root). That bounds the project, not everything a tool
-touches: `setup`'s target environment may be elsewhere, and the `capture` tool runs a command
-on your machine, so it is off until you set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's
-environment. No tool writes source.
+Every tool's project directory must lie inside the server's working directory (pass
+`--root DIR` to change that root). That bounds the project, not everything a tool touches:
+`setup`'s target environment may be elsewhere. The `capture` tool runs a command on your
+machine, so it exists only when you start the server with `--allow-run`. `apply` and
+`rollback` change source only on a plan you approved for agents
+(`pymolt apply . --approve-agent`).
 
 Sanity check:
 

@@ -1,12 +1,12 @@
 """
 pymolt.codemods — the LOCAL side of the codemod loop.
 
-Axiom Graph (the service) produces codemod *patterns* from public package
-sources; pymolt fetches them and applies them to the user's repository here.
-User code never leaves the machine — only dependency names/versions are sent.
+The local delta engine (``pymolt.delta``) derives codemod *patterns* and picks curated
+*rules*; this package applies them to the user's repository. Everything runs on this
+machine.
 
-  - models.CodemodPattern  : the pattern as received from the Axiom Graph API
-  - client.AxiomGraphClient : fetch patterns (versions in, patterns out)
+  - models.CodemodPattern  : one old → new symbol replacement
+  - service.build_migration_plan : the plan's previews (nothing is written)
   - apply.apply_to_repo     : rewrite local source via LibCST (format-preserving)
 """
 

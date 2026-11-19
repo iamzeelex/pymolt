@@ -2,9 +2,8 @@
 pymolt/codemods/rules.py
 
 Structured codemod RULES — the declarative, data-only successor to the flat
-`old → new` CodemodPattern. A rule is pure JSON (it crosses the Axiom Graph
-boundary as data); the *executor* lives here in pymolt and is trusted/versioned
-with the client. No code is ever shipped from the server.
+`old → new` CodemodPattern. A rule is pure JSON (curated in ``pymolt/knowledge``);
+the *executor* lives here, so a rule carries no code.
 
 A rule carries a metavariable `match` pattern and a `rewrite` template (a list of
 statements). The engine binds `$METAVARS` from the match and substitutes them

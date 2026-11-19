@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from pymolt.anchors import StatementIndex
 from pymolt.codemods.apply import apply_patterns, preview_mixed_repo, preview_repo
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview, MoveGroup
 from pymolt.codemods.rules import CodemodRule
 from pymolt.delta.models import DeltaFact, DeltaReport

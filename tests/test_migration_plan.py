@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import ApiImpact, CodemodPattern, FilePreview
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.migration_plan import (
@@ -95,7 +95,7 @@ def test_plan_round_trip_is_relative_and_inspectable(tmp_path):
     assert inspect_migration_plan(tmp_path, plan).valid is True
 
 
-def test_plan_freezes_axiom_api_impacts(tmp_path):
+def test_plan_freezes_api_impacts(tmp_path):
     target = _project(tmp_path)
     plan = create_migration_plan(
         tmp_path,

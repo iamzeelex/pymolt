@@ -3,7 +3,7 @@ to a person, and the target environment a person builds."""
 
 from __future__ import annotations
 
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.migration_plan import create_migration_plan
 from pymolt.workorder.edits import apply_hunks, sha256
 from pymolt.workorder.env import env_steps, manifest_pins, target_pins

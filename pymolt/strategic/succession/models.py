@@ -1,6 +1,6 @@
 """pymolt-side framework-succession models.
 
-Mirror of Axiom Graph's ``SuccessionEdge`` (pymolt never imports the server). The
+A ``SuccessionEdge`` is one curated edge from ``pymolt/knowledge/succession.json``. The
 IN_PLACE bundle reuses pymolt's own ``CodemodPattern`` / ``CodemodRule`` — the exact
 types the LibCST apply pipeline already consumes — so an in-place shim edge flows
 straight into ``apply_to_repo`` / ``apply_rules_to_repo`` with no translation. The

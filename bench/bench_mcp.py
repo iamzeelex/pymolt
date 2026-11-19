@@ -299,12 +299,8 @@ def mcp_config(ws: Path) -> str:
         "mcpServers": {
             "pymolt": {
                 "command": PYMOLT_BIN,
-                "args": ["mcp"],
-                "env": {
-                    "PYMOLT_MCP_ROOT": str(ws),
-                    "PYMOLT_MCP_ALLOW_EXEC": "1",
-                    "PATH": os.environ.get("PATH", ""),
-                },
+                "args": ["mcp", "--root", str(ws), "--allow-run"],
+                "env": {"PATH": os.environ.get("PATH", "")},
             }
         }
     })

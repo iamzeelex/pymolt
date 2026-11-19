@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 from pymolt.codemods.apply import preview_rules_repo
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import recipe_key
 from pymolt.codemods.rules import CodemodRule
 from pymolt.migration_plan import PlannedAdvisory, PlannedManualItem, create_migration_plan

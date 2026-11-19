@@ -145,8 +145,8 @@ def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | Non
                 agent: bool = False, smoke_reason: str | None = None) -> ApplyResult:
     """Apply the selected pymolt steps of ``plan`` (module docstring). Under ``agent`` the
     plan must be approved for agents (``workorder.approval``), except for a dry run.
-    ``smoke_reason``: why the smoke import is not run, for the receipts (MCP without
-    ``PYMOLT_MCP_ALLOW_EXEC``). Raises ``StepRefusal`` / ``MigrationConflictError`` (exit 2),
+    ``smoke_reason``: why the smoke import is not run, for the receipts (an MCP server started
+    without ``--allow-run``). Raises ``StepRefusal`` / ``MigrationConflictError`` (exit 2),
     ``MigrationEvidenceError`` (exit 4), ``MigrationCheckError`` (exit 1) or
     ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if step and through:

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from pymolt.codemods import service as codemod_service
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.rules import verify_rule
 from pymolt.delta import provider as provider_mod
 from pymolt.delta.models import DeltaFact, DeltaReport
@@ -155,7 +155,6 @@ def test_plan_then_apply_writes_the_expected_rewrite(tmp_path, fake_deltas, monk
     from pymolt.migration_plan import MigrationPlan, apply_migration_plan
 
     _project(tmp_path)
-    monkeypatch.delenv("PYMOLT_AXIOM_ENDPOINT", raising=False)
     monkeypatch.setattr(codemod_service, "resolve_codemod_migrations",
                         lambda *a, **k: ([PANDAS], "test migrations"))
 

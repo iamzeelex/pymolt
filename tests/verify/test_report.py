@@ -304,7 +304,7 @@ def test_empty_impact_set_is_active_and_reports_unmatched_paths(tmp_path):
     assert not any("narrowed" in note for note in rep.notes)
 
 
-def test_single_serialized_axiom_impact_mapping_is_accepted(tmp_path):
+def test_single_serialized_api_impact_mapping_is_accepted(tmp_path):
     rep = build_contract_report(
         _project(tmp_path),
         impact_set={
@@ -586,11 +586,11 @@ def test_unobservable_static_paths_are_classified_not_blind():
         "AttributeError: 'function' object has no attribute 'strip'", "typer"
     ) == "returned-value"
     assert _unresolvable_class(
-        "ModuleNotFoundError: No module named 'axiom_graph'", "axiom_graph"
+        "ModuleNotFoundError: No module named 'legacylib'", "legacylib"
     ) == "absent-dependency"
     # A missing submodule of an installed package is a real resolution failure.
     assert _unresolvable_class(
-        "ModuleNotFoundError: No module named 'axiom_graph.core'", "axiom_graph"
+        "ModuleNotFoundError: No module named 'legacylib.core'", "legacylib"
     ) is None
     assert _unresolvable_class(
         "AttributeError: type object 'Requirement' has no attribute 'name'", "packaging"

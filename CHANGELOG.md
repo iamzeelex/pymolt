@@ -21,7 +21,6 @@ All notable changes to pymolt. The format follows
   - `migrate`, `codemods`: use `plan`, then `apply`.
   - `env hint`: use `assess`, which ends with the commands that build the target environment
     (`target_hint` in `--json`).
-  - `login`, `logout`, `auth`, `config`: see the Axiom entry below.
 - `capture` takes the side as an argument: `pymolt capture baseline -- CMD` replaces
   `pymolt contract capture --when baseline -- CMD`.
 - `capture` refuses to run before `setup`, because such a capture records no environment. Run
@@ -29,12 +28,12 @@ All notable changes to pymolt. The format follows
 - Renamed options. The old spellings still parse in 0.2 but are no longer listed:
   `assess --source-manifest` is `--manifest`, `assess --current-python` is `--base-python`,
   `assess -c` is `--upgrade-constraint`, and `plan --target-file` is `--target-manifest`.
-- `succession --axiom-url` is `succession --endpoint`. `succession --write` is removed: save the
-  in-place codemods with `succession --plan`, then run `pymolt apply`.
-- `plan` computes API changes locally and contacts no service by default. The hosted Axiom
-  default is gone, and an endpoint saved with `pymolt config set-endpoint` is no longer used.
-  For a remote Axiom, pass `plan --endpoint URL` or set `PYMOLT_AXIOM_ENDPOINT`, with the token
-  in `PYMOLT_API_TOKEN`.
+- `succession --write` is removed: save the in-place codemods with `succession --plan`, then
+  run `pymolt apply`.
+- `plan` and `succession` compute everything on this machine and contact no service. The
+  `login`, `logout`, `auth` and `config` commands are gone with no replacement, and so are the
+  options and settings that named a service: a service URL, a saved endpoint and a sign-in
+  token.
 - `apply` also writes the target's pins into a requirements manifest: each `name==version` line
   without `--hash` for a package the target pins at another version. See the change with
   `apply --dry-run`; leave it out with `apply --step ID --skip --reason TEXT`; `rollback`
@@ -61,8 +60,10 @@ All notable changes to pymolt. The format follows
   `setup_apply` are `setup`, `contract_map` is `scan`, `contract_capture` is `capture`,
   `contract_report` is `verify`, `codemods_preview`, `codemods` and `migrate` are `plan`, and
   `env_hint` is `assess`. Each tool returns what `pymolt <command> --agent` prints, so every
-  tool's `data` differs from 0.1.0. The new `apply` and `rollback` tools write nothing unless
-  the server runs with `PYMOLT_MCP_ALLOW_WRITE=1`.
+  tool's `data` differs from 0.1.0. What the agent may do is set in the server command:
+  `pymolt mcp --root DIR` bounds the project directories (it replaces `PYMOLT_MCP_ROOT`), and
+  `--allow-run` adds the `capture` tool (it replaces `PYMOLT_MCP_ALLOW_EXEC`). Without it the
+  agent runs no program. `capture` lost `deployment_id`, `request_id` and `correlation_id`.
 - The migration plan is schema 2 (`"schema_version": 2`), a list of ordered steps. pymolt reads
   a 0.1.0 plan as one step, `v1`; pymolt 0.1.0 cannot read a schema-2 plan. Run `pymolt plan`
   again to get steps.
@@ -191,8 +192,9 @@ All notable changes to pymolt. The format follows
 - `apply --approve-agent`: a person on a terminal approves a plan for agents. `apply --agent`
   then writes its pymolt steps, and `rollback --step ID --agent` rolls one back. A re-plan or
   any change to the plan voids the approval.
-- MCP `apply` and `rollback` tools, which need `PYMOLT_MCP_ALLOW_WRITE=1` and an approved plan;
-  their smoke import needs `PYMOLT_MCP_ALLOW_EXEC=1`. They refuse arguments they do not take.
+- MCP `apply` and `rollback` tools, which write only on a plan a person approved for agents;
+  `apply` runs its import check only under `--allow-run`. Every MCP tool refuses arguments it
+  does not take, and `capture`, `apply` and `rollback` carry the `destructiveHint` annotation.
 - Text that comes from a dependency, the code or a capture is fenced and marked untrusted in
   step briefs, `PLAN.md` and the agent views.
 

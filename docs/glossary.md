@@ -41,4 +41,3 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **predicted risk** | A call site the plan expects to break, rated certain / high / medium / low |
 | **verdict** | `PASS`, `FAIL` or `INCONCLUSIVE`, from `verify` |
 | **base tier** | How far the base dependencies can be trusted: gold (pinned, on the declared base Python), silver (pinned on an assumed base Python, or the tests pass), bronze (unvalidated), none (not resolved). JSON key: `baseline_tier` |
-| **Axiom** | An optional remote provider of API changes, used only if configured with `plan --endpoint` or `PYMOLT_AXIOM_ENDPOINT` |

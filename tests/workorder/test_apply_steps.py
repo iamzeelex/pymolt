@@ -225,7 +225,7 @@ def test_a_moved_text_without_re_basing_is_stale_for_a_whole_file_step(tmp_path)
     texts."""
     from _stepwise import project
 
-    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import DependencyMigration
     from pymolt.codemods.models import FilePreview
     from pymolt.migration_plan import create_migration_plan
 

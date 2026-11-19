@@ -5,7 +5,7 @@ import gzip
 import json
 
 from pymolt.apply_ledger import EventFile, LedgerEvent, append_ledger, load_ledger
-from pymolt.codemods.client import DependencyMigration
+from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview
 from pymolt.migration_plan import (
     _migration_lock,

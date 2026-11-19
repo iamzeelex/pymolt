@@ -37,7 +37,7 @@ def _applied_impact_plan(tmp_path):
     return plan
 
 
-def test_post_capture_automatically_targets_applied_axiom_impacts(tmp_path, monkeypatch):
+def test_post_capture_automatically_targets_applied_api_impacts(tmp_path, monkeypatch):
     _applied_impact_plan(tmp_path)
     captured = {}
 

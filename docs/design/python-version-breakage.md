@@ -208,7 +208,7 @@ There are no new commands; all output goes through `views.py`, and MCP returns t
 **Agreed order (owner, 2026-11-15):** the waves in `bench/legacy_eval/KEY_ISSUES.md`.
 1. Wave 0 makes the instrument honest (P0) and scripts the evaluation.
 2. Wave 1 runs two parallel tracks: 1a is the container runner (P4), 1b is stdlib detection (P1–P2).
-3. Wave 2 adds the fixers (P3), plus a static old side taken from axiom_graph's griffe idea.
+3. Wave 2 adds the fixers (P3), plus a static old side read from the old release's source with griffe.
 4. Wave 3 covers imports and installs (P5, P6).
 5. Wave 4 covers knowledge and search (P7, plus the Theano and nose succession).
 

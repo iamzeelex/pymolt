@@ -2,8 +2,9 @@
 
 Builds the wheel, installs it into a throwaway venv with uv (which fetches the
 dependencies, ``mcp<2`` among them), starts ``pymolt mcp`` on pipes and speaks
-JSON-RPC to it: ``initialize`` must return a valid result and ``tools/list`` the
-seven tools. Slow and network-bound, so it runs only with PYMOLT_SMOKE_INSTALL=1.
+JSON-RPC to it: ``initialize`` must return a valid result, and ``tools/list`` the
+tools the person granted (``--allow-run`` adds ``capture``). Slow and network-bound, so it
+runs only with PYMOLT_SMOKE_INSTALL=1 (CI's package job sets it).
 """
 from __future__ import annotations
 
@@ -44,7 +45,8 @@ def _receive(proc: subprocess.Popen) -> dict:
     return json.loads(line)
 
 
-def test_installed_wheel_answers_mcp_initialize(tmp_path):
+@pytest.mark.parametrize("allow_run", [False, True], ids=["default", "allow-run"])
+def test_installed_wheel_answers_mcp_initialize(tmp_path, allow_run):
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv is not on PATH")
@@ -57,8 +59,8 @@ def test_installed_wheel_answers_mcp_initialize(tmp_path):
 
     exe = python.parent / "pymolt"
     proc = subprocess.Popen(
-        [str(exe), "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, cwd=tmp_path, env={**os.environ, "PYMOLT_MCP_ROOT": str(tmp_path)},
+        [str(exe), "mcp", "--root", str(tmp_path), *(["--allow-run"] if allow_run else [])],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_path,
     )
     try:
         _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -75,7 +77,8 @@ def test_installed_wheel_answers_mcp_initialize(tmp_path):
         _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
         _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = {tool["name"] for tool in _receive(proc)["result"]["tools"]}
-        assert tools == {"status", "scan", "setup", "assess", "capture", "plan", "verify"}
+        granted = {"status", "scan", "setup", "assess", "plan", "verify", "apply", "rollback"}
+        assert tools == (granted | {"capture"} if allow_run else granted)
     finally:
         proc.kill()
         proc.wait(timeout=10)

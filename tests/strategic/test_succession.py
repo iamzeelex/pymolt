@@ -1,4 +1,4 @@
-"""Framework-succession client + detection + in-place apply (S2). No network."""
+"""Framework succession: detection, curated edges, in-place apply (S2). No network."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import json
 
 from typer.testing import CliRunner
 
-import pymolt.strategic.succession.client as client_mod
 from pymolt.codemods.models import CodemodPattern
 from pymolt.interfaces.cli import commands
 from pymolt.strategic.succession.detect import detect_frameworks
@@ -16,15 +15,15 @@ from pymolt.strategic.succession.service import run_succession
 runner = CliRunner()
 
 
-class _FakeClient:
+class _FakeEdges:
+    """Stands in for the curated knowledge: returns fixed edges, records the lookups."""
+
     def __init__(self, edges):
         self._edges = edges
         self.calls = []
 
-    def fetch(self, frameworks, *, progress=None):
+    def __call__(self, frameworks):
         self.calls.append(list(frameworks))
-        if progress:
-            progress("fetching")
         return self._edges
 
 
@@ -66,46 +65,6 @@ def test_detect_frameworks_empty_when_no_manifest(tmp_path):
     assert detect_frameworks(tmp_path) == []
 
 
-# ── client ────────────────────────────────────────────────────────────────────
-
-class _FakeResp:
-    def __init__(self, payload):
-        self._payload = payload
-        self.status_code = 200
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._payload
-
-
-def test_client_fetch_parses_edges_and_sends_token(monkeypatch):
-    captured = {}
-
-    def fake_post(url, json, headers, timeout):
-        captured["url"] = url
-        captured["frameworks"] = json["frameworks"]
-        captured["auth"] = headers.get("Authorization")
-        return _FakeResp({"edges": [_keras_shim().model_dump(mode="json")]})
-
-    monkeypatch.setattr(client_mod.httpx, "post", fake_post)
-    edges = client_mod.SuccessionClient("http://svc:8000", token="tok").fetch(["keras"])
-
-    assert captured["url"] == "http://svc:8000/succession"
-    assert captured["frameworks"] == ["keras"]
-    assert captured["auth"] == "Bearer tok"
-    assert len(edges) == 1 and edges[0].is_in_place
-
-
-def test_client_empty_frameworks_no_request(monkeypatch):
-    monkeypatch.setattr(
-        client_mod.httpx, "post",
-        lambda **k: (_ for _ in ()).throw(AssertionError("should not call network")),
-    )
-    assert client_mod.SuccessionClient("http://x").fetch([]) == []
-
-
 # ── service: in-place applies, transplant does not ───────────────────────────
 
 def test_run_succession_applies_in_place_shim(tmp_path):
@@ -113,11 +72,11 @@ def test_run_succession_applies_in_place_shim(tmp_path):
     (tmp_path / "app.py").write_text(
         "from keras.layers import Conv2D\nx = Conv2D(3)\n", encoding="utf-8"
     )
-    fake = _FakeClient([_keras_shim()])
+    fake = _FakeEdges([_keras_shim()])
 
-    edges, result = run_succession(tmp_path, base_url="http://x", client=fake)
+    edges, result = run_succession(tmp_path, edges_for=fake)
 
-    assert fake.calls == [["keras"]]  # detected + sent
+    assert fake.calls == [["keras"]]  # detected + looked up
     assert result is not None and result.files_changed == 1
     # dry-run: disk is untouched
     assert "from keras.layers import Conv2D" in (tmp_path / "app.py").read_text()
@@ -170,18 +129,14 @@ def test_run_succession_never_applies_transplant(tmp_path):
     src = "from keras.layers import Conv2D\n"
     (tmp_path / "app.py").write_text(src, encoding="utf-8")
 
-    edges, result = run_succession(
-        tmp_path, base_url="http://x", client=_FakeClient([_transplant()])
-    )
+    edges, result = run_succession(tmp_path, edges_for=_FakeEdges([_transplant()]))
     assert edges[0].is_transplant
     assert result is None  # nothing in-place to apply
     assert (tmp_path / "app.py").read_text() == src  # untouched
 
 
 def test_run_succession_no_frameworks_returns_empty(tmp_path):
-    edges, result = run_succession(
-        tmp_path, base_url="http://x", client=_FakeClient([_keras_shim()])
-    )
+    edges, result = run_succession(tmp_path, edges_for=_FakeEdges([_keras_shim()]))
     assert edges == [] and result is None
 
 
@@ -231,18 +186,12 @@ def test_cli_succession_renders_transplant_plan(tmp_path, monkeypatch):
     assert "Scaffold" in result.output and "pymolt capture" in result.output
 
 
-# ── local knowledge (the default: no endpoint configured) ─────────────────────
+# ── curated knowledge ─────────────────────────────────────────────────────────
 
-def test_client_without_endpoint_reads_curated_knowledge(monkeypatch):
-    monkeypatch.delenv("PYMOLT_AXIOM_ENDPOINT", raising=False)
-    monkeypatch.setattr(
-        client_mod.httpx, "post",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network without an endpoint")),
-    )
-    client = client_mod.SuccessionClient()
-    assert client.remote is False
+def test_curated_knowledge_holds_the_framework_edges():
+    from pymolt.knowledge import succession_edges
 
-    edges = client.fetch(["tensorflow==1.15", "keras>=2.0.8", "numpy"])
+    edges = succession_edges(["tensorflow==1.15", "keras>=2.0.8", "numpy"])
 
     by_target = {e.to_framework: e for e in edges}
     assert set(by_target) == {"tensorflow.keras", "torch+torchvision", "tensorflow>=2"}
@@ -260,29 +209,15 @@ def test_knowledge_edges_dedupe_across_aliases():
     assert [e.to_framework for e in edges] == ["tensorflow>=2"]
 
 
-def test_run_succession_local_applies_the_curated_shim(tmp_path, monkeypatch):
-    monkeypatch.delenv("PYMOLT_AXIOM_ENDPOINT", raising=False)
+def test_run_succession_applies_the_curated_shim(tmp_path):
     (tmp_path / "requirements.txt").write_text("keras>=2.0.8\n", encoding="utf-8")
     (tmp_path / "app.py").write_text("from keras.layers import Conv2D\n", encoding="utf-8")
 
-    edges, result = run_succession(tmp_path, base_url=None)
+    edges, result = run_succession(tmp_path)
 
     assert {e.to_framework for e in edges} == {"tensorflow.keras", "torch+torchvision"}
     assert result is not None and result.files_changed == 1
     assert (tmp_path / "app.py").read_text() == "from keras.layers import Conv2D\n"
-
-
-def test_endpoint_in_environment_switches_to_remote(monkeypatch):
-    monkeypatch.setenv("PYMOLT_AXIOM_ENDPOINT", "http://svc:8000")
-    captured = {}
-
-    def fake_post(url, json, headers, timeout):
-        captured["url"] = url
-        return _FakeResp({"edges": []})
-
-    monkeypatch.setattr(client_mod.httpx, "post", fake_post)
-    assert client_mod.SuccessionClient().fetch(["keras"]) == []
-    assert captured["url"] == "http://svc:8000/succession"
 
 
 # ── C8: an honest "not in pymolt's knowledge" ─────────────────────────────────

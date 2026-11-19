@@ -1,4 +1,4 @@
-"""Framework-succession orchestration: detect → fetch → preview IN_PLACE shims.
+"""Framework-succession orchestration: detect → look up → preview IN_PLACE shims.
 
 The IN_PLACE strategy reuses the codemod pipeline (patterns via ``apply_to_repo``,
 rules via ``apply_rules_to_repo``), always as a dry run. Writing the shims goes
@@ -15,7 +15,6 @@ from pathlib import Path
 from pymolt.codemods.apply import apply_rules_to_repo, apply_to_repo, preview_mixed_repo
 from pymolt.codemods.models import CodemodRunResult, FilePreview
 from pymolt.codemods.service import _merge_run_results
-from pymolt.strategic.succession.client import SuccessionClient
 from pymolt.strategic.succession.detect import detect_frameworks
 from pymolt.strategic.succession.models import SuccessionEdge
 
@@ -23,22 +22,27 @@ from pymolt.strategic.succession.models import SuccessionEdge
 def run_succession(
     project_dir: str | Path,
     *,
-    base_url: str,
-    client: SuccessionClient | None = None,
+    edges_for: Callable[[list[str]], list[SuccessionEdge]] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[list[SuccessionEdge], CodemodRunResult | None]:
-    """Detect the project's frameworks, fetch succession edges, preview IN_PLACE shims.
+    """Detect the project's frameworks, look up their succession edges, preview IN_PLACE
+    shims.
 
     Returns ``(edges, preview_result)``. Nothing is written. ``preview_result`` is
     ``None`` when nothing was detected or no in-place shim applies. Transplant edges
     ride along in ``edges`` for the caller to render but are never applied here.
-    Raises ``SuccessionError`` if the service is unreachable (caller owns the UX).
+    ``edges_for`` maps framework requirements to edges; it defaults to pymolt's curated
+    knowledge (``pymolt.knowledge.succession_edges``).
     """
     frameworks = detect_frameworks(project_dir)
     if not frameworks:
         return [], None
-    client = client or SuccessionClient(base_url)
-    edges = client.fetch(frameworks, progress=progress)
+    if edges_for is None:
+        from pymolt.knowledge import succession_edges as edges_for
+    if progress:
+        progress(f"Looking up succession paths for {len(frameworks)} framework(s) in "
+                 "pymolt's curated knowledge…")
+    edges = edges_for(frameworks)
 
     patterns = [p for e in edges if e.is_in_place for p in e.patterns]
     rules = [r for e in edges if e.is_in_place for r in e.rules]

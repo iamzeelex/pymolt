@@ -93,17 +93,28 @@ uv tool install "./pymolt[mcp]"
 ```json
 {
   "mcpServers": {
-    "pymolt": { "command": "pymolt", "args": ["mcp"] }
+    "pymolt": { "command": "pymolt", "args": ["mcp", "--allow-run"] }
   }
 }
 ```
 
-The nine tools are named after the CLI commands. Only `apply` and `rollback` write: they need
-`PYMOLT_MCP_ALLOW_WRITE=1` in the server's environment, and they write a pymolt step only on a plan
-a person approved for agents. They take none of `force`, `cascade`, `approve_agent`, `claim`,
-`expect`, `pair` or `allow_no_baseline`, and refuse a call that passes one. Their dry runs and
-briefs need no opt-in. Without `PYMOLT_MCP_ALLOW_EXEC=1`, `apply` runs no smoke import, and each
-step's receipt says `smoke_import: not checked: MCP without PYMOLT_MCP_ALLOW_EXEC`.
+The tools are named after the CLI commands. What the agent may do is yours to grant, in the
+server command:
+
+- **where**: every `project_dir` must lie under `--root DIR` (default: the directory the server
+  starts in);
+- **running programs**: with `--allow-run` the server has a `capture` tool, which runs the
+  agent's command on your machine, and `apply` runs its import check. Without it there is no
+  `capture` tool, and each applied step's receipt says
+  `smoke_import: not checked: MCP server started without --allow-run`;
+- **changing source**: `apply` and `rollback` write a step only on a plan you approved for agents
+  on a terminal (`pymolt apply . --approve-agent`). They take none of `force`, `cascade`,
+  `approve_agent`, `claim`, `expect`, `pair` or `allow_no_baseline`. Dry runs and briefs need no
+  approval.
+
+Every tool refuses an argument it does not take, and the tools that run programs or change
+source (`capture`, `apply`, `rollback`) say so in their MCP annotations, so a client can ask you
+before each call.
 
 | Tool | Returns |
 |---|---|
@@ -111,8 +122,8 @@ step's receipt says `smoke_import: not checked: MCP without PYMOLT_MCP_ALLOW_EXE
 | `scan` | project roots, dependency edges, Python-version divergence, every call site into a dependency |
 | `setup` | with no choices, the valid manifests, tools and Python versions; with them, the saved configuration |
 | `assess` | which versions move or conflict, what needs manual work, how to build the target environment, optional risk scores |
-| `capture` | runs your test or app command with the tracer and keeps the capture. It runs a process on your machine, so it needs `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment |
+| `capture` | runs your test or app command with the tracer and keeps the capture. It runs a process on your machine, so it exists only with `--allow-run` |
 | `plan` | the API changes, Python breakage, codemods and predicted risks, as a saved plan, its steps, unified diffs and the first agent step's brief. It also writes `.pymolt/PLAN.md` |
 | `verify` | the verdict, coverage and recall with their granularity, which predicted risks came true, and which dependency calls changed |
-| `apply` | applies the plan's pymolt steps on an approved plan, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. Writing needs `PYMOLT_MCP_ALLOW_WRITE=1` |
-| `rollback` | rolls back one step of an approved plan. It needs `PYMOLT_MCP_ALLOW_WRITE=1` |
+| `apply` | applies the plan's pymolt steps on an approved plan, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. It writes only on an approved plan |
+| `rollback` | rolls back one step of an approved plan |

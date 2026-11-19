@@ -54,10 +54,6 @@ dev = [
     # Test fixture only: a representative third-party "user app dependency" that the
     # contract tests trace at the code→dependency boundary (not a pymolt runtime dep).
     "requests>=2.0",
-    # Not a pymolt dependency: the Axiom Graph service (.research/axiom_graph) is a
-    # FastAPI app, and the cross-service contract test routes the real client through
-    # it in-process. Without this the test silently skips — which is how it rotted.
-    "fastapi>=0.110",
 ]
 mcp = [
     # Pinned below 2: the server is built on FastMCP's 1.x API (mcp.server.fastmcp).
@@ -84,8 +80,7 @@ packages = ["pymolt"]
 
 [tool.hatch.build.targets.sdist]
 # Keep the sdist to the installable package only. Everything else here (bench/,
-# docs/, integrations/, plugin/, services/axiom_graph — repo-internal services and tooling per
-# EDITIONS.md — tests/, install.sh, tox.ini, uv.lock) is
+# docs/, integrations/, plugin/, tests/, install.sh, tox.ini, uv.lock) is
 # repo-only tooling/content, not part of the `pymolt` distribution.
 include = [
     "/pymolt",

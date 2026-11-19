@@ -2,7 +2,7 @@
   "schema": "pymolt.knowledge/1",
   "kind": "succession",
   "version": "2026-11-15",
-  "about": "Curated framework-succession edges: where code written for a dead framework era should go. Moved here from the Axiom Graph succession catalog so the lookup needs no service.",
+  "about": "Curated framework-succession edges: where code written for a dead framework era should go.",
   "index": {
     "keras": ["keras-to-tf-keras", "keras-to-torch"],
     "tensorflow": ["tf1-to-tf2"],
@@ -11,7 +11,7 @@
   "entries": [
     {
       "id": "keras-to-tf-keras",
-      "source": "Axiom Graph succession_catalog (keras -> tensorflow.keras); Keras 2.3 was the last multi-backend release",
+      "source": "keras -> tensorflow.keras: Keras 2.3 was the last multi-backend release",
       "date": "2026-11-15",
       "edge": {
         "from_framework": "keras",
@@ -37,7 +37,7 @@
     },
     {
       "id": "tf1-to-tf2",
-      "source": "Axiom Graph succession_catalog (tensorflow<2 -> tensorflow>=2); the symbols Google's tf_upgrade_v2 routes through tf.compat.v1",
+      "source": "tensorflow<2 -> tensorflow>=2: the symbols Google's tf_upgrade_v2 routes through tf.compat.v1",
       "date": "2026-11-15",
       "edge": {
         "from_framework": "tensorflow<2",
@@ -71,7 +71,7 @@
     },
     {
       "id": "keras-to-torch",
-      "source": "Axiom Graph succession_catalog (keras -> torch+torchvision); torchvision ships maskrcnn_resnet50_fpn",
+      "source": "keras -> torch+torchvision: torchvision ships maskrcnn_resnet50_fpn",
       "date": "2026-11-15",
       "edge": {
         "from_framework": "keras",

@@ -427,7 +427,7 @@ def test_the_runtime_warning_reaches_the_baseline_facts(captured):
 
 
 def test_plan_stores_risks_and_verify_calibrates_them(captured):
-    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import DependencyMigration
     from pymolt.migration_plan import MigrationPlan, create_migration_plan
     from pymolt.verify import service
 
@@ -498,7 +498,7 @@ def test_no_baseline_means_no_risks(tmp_path):
 def test_predict_plan_risks_degrades_when_the_delta_engine_is_missing(captured, monkeypatch):
     import builtins
 
-    from pymolt.codemods.client import DependencyMigration
+    from pymolt.codemods.models import DependencyMigration
 
     real_import = builtins.__import__
 

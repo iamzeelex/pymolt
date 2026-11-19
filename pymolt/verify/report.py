@@ -285,7 +285,7 @@ _IMPACT_PATH_FIELDS = (
 
 
 def _impact_paths(*collections: Collection[object] | None) -> tuple[bool, list[str]]:
-    """Normalize strings, Axiom change models, and their serialized dictionaries."""
+    """Normalize strings, API-change models, and their serialized dictionaries."""
     active = any(items is not None for items in collections)
     paths: set[str] = set()
 

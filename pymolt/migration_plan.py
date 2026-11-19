@@ -1,7 +1,7 @@
 """Durable, reviewable migration plans and reversible application.
 
 A plan freezes the exact before/after source that a dry-run produced. Applying
-it never asks Axiom Graph to recompute recipes: every source hash is checked and
+it never recomputes recipes: every source hash is checked and
 the reviewed batch is committed atomically. The same frozen source is retained
 under ``.pymolt/migrations/<run-id>/`` so rollback remains available after the
 temporary transaction files have been removed.
@@ -1055,10 +1055,12 @@ def rollback_migration(
     *,
     run_id: str | None = None,
     force: bool = False,
+    agent: bool = False,
 ):
     """Roll back every step in effect of the run (default: the latest), restoring each file it
-    touched (``workorder.rollback``). Returns ``(plan, rolled_back_at, run_id)``."""
+    touched (``workorder.rollback``). Returns ``(plan, rolled_back_at, run_id)``. Under ``agent``
+    it is refused: a whole run is a person's to roll back (``workorder.rollback``)."""
     from pymolt.workorder.rollback import rollback_steps
 
-    result = rollback_steps(project_dir, run_id=run_id, force=force)
+    result = rollback_steps(project_dir, run_id=run_id, force=force, agent=agent)
     return result.plan, result.rolled_back_at, result.run_id

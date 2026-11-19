@@ -382,6 +382,13 @@ def verify_migration(
         fail("--accept is a person's attested act: it is refused under --agent and --json",
              hint="A person runs `pymolt verify . --accept ID` on a terminal.",
              json_output=json_output)
+    if auto_rollback and agent:
+        # The same rule as `rollback --agent`: an agent rolls back one step, a person a run.
+        fail("--auto-rollback is refused under --agent: it rolls back the whole run, which is "
+             "a person's decision",
+             hint="Roll back one step with `pymolt rollback . --step ID --agent`, or ask a "
+                  "person to run `pymolt verify . --auto-rollback ...`.",
+             json_output=json_output)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
         if path_value:
@@ -486,7 +493,7 @@ def verify_migration(
             rollback=rollback_decision,
         )
         if rollback_decision is not None and rollback_decision.should_rollback:
-            rollback_migration(project_path, run_id=rollback_decision.run_id)
+            rollback_migration(project_path, run_id=rollback_decision.run_id, agent=agent)
             unified.rollback_executed = True
         # Saved with what it compared (``contract.compared``), unless the baseline side is
         # another recording: a verdict against another baseline is not this project's.
@@ -618,10 +625,6 @@ def plan(
         help="Target manifest to plan for (default: the one assess wrote)",
     ),
     target_file_old: str | None = typer.Option(None, "--target-file", hidden=True),
-    endpoint: str | None = typer.Option(
-        None, "--endpoint",
-        help="Use a remote Axiom at this URL (default: none, API changes are computed locally)",
-    ),
     online: bool = typer.Option(
         False, "--online",
         help="Let the local engine read intermediate releases from PyPI for successor hints "
@@ -647,9 +650,7 @@ def plan(
     """
     import json
 
-    from pymolt.codemods.client import AxiomGraphError
     from pymolt.codemods.service import PlanInputError, build_migration_plan
-    from pymolt.config import load_endpoint
 
     json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
@@ -661,7 +662,6 @@ def plan(
             migration_plan, previews, source_desc, by_pkg = build_migration_plan(
                 project_path,
                 target_file=target_file,
-                base_url=load_endpoint(endpoint),
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
                 online=online,
             )
@@ -671,7 +671,7 @@ def plan(
         plan_md_path = write_plan_md(migration_plan, project_path, plan_md)
     except PlanInputError as exc:
         fail(str(exc), hint=exc.hint or None, json_output=json_output)
-    except (AxiomGraphError, OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         fail(
             f"could not create migration plan: {exc}",
             hint="No source files were changed.",
@@ -2719,16 +2719,27 @@ def _render_or_write_patches(
 
 @app.command(rich_help_panel="Tools")
 def mcp(
+    root: str | None = typer.Option(
+        None, "--root",
+        help="The directory the agent may work in (default: where the server starts)",
+    ),
+    allow_run: bool = typer.Option(
+        False, "--allow-run",
+        help="Let the agent run programs: the capture tool and apply's import check",
+    ),
     serve: bool = typer.Option(
         False, "--serve", help="Run even in a terminal (for testing)"
     ),
 ):
     """Run the MCP server on stdio, for AI agents.
 
-    An agent client starts it; you register it once:
+    An agent client starts it; you register it once, with what you allow:
 
-      Claude Code:  claude mcp add pymolt -- pymolt mcp
+      Claude Code:  claude mcp add pymolt -- pymolt mcp --allow-run
       Codex:        add an [mcp_servers.pymolt] entry to ~/.codex/config.toml
+
+    Without --allow-run the agent runs no program. apply and rollback change source only
+    on a plan you approved for agents (`pymolt apply . --approve-agent`).
     """
     # All human-facing output goes to STDERR: stdout is the JSON-RPC channel and a
     # single stray byte there corrupts the protocol.
@@ -2757,23 +2768,25 @@ def mcp(
         )
         err.print('  Other         command [cyan]pymolt[/cyan], args [cyan]["mcp"][/cyan]')
         err.print(
+            "\nAdd [cyan]--allow-run[/cyan] to let the agent run its capture command, and "
+            "[cyan]--root DIR[/cyan] to change the directory it may work in."
+        )
+        err.print(
             "\nTo run it here anyway (e.g. to test), use [bold]pymolt mcp --serve[/bold]."
         )
         raise typer.Exit(code=0)
 
     # Spawned by a client (stdin piped) or --serve: run. A one-line lifecycle note to
     # STDERR so it never looks dead; stdout stays clean for the protocol.
-    err.print("[dim]pymolt mcp: stdio server ready (JSON-RPC on stdin/stdout; Ctrl-C).[/dim]")
-    run_mcp()
+    granted = "runs programs" if allow_run else "runs no program (no --allow-run)"
+    err.print(f"[dim]pymolt mcp: stdio server ready; it {granted} (JSON-RPC on "
+              "stdin/stdout; Ctrl-C).[/dim]")
+    run_mcp(root=root, allow_run=allow_run)
 
 
 @app.command(rich_help_panel="Experimental")
 def succession(
     project_dir: str = typer.Argument(".", help="Project directory"),
-    endpoint: str | None = typer.Option(
-        None, "--endpoint",
-        help="Ask a remote Axiom at this URL (default: none, pymolt's curated knowledge)",
-    ),
     save_plan: bool = typer.Option(
         False, "--plan", help="Save the in-place codemods as the plan for `pymolt apply`"
     ),
@@ -2783,13 +2796,11 @@ def succession(
     """Find where a deprecated framework's code should go (e.g. TF1/Keras).
 
     Detects the frameworks and looks up where they went in pymolt's curated
-    knowledge (or a remote Axiom given with --endpoint). In-place paths (e.g.
+    knowledge. In-place paths (e.g.
     keras → tensorflow.keras) are shown as file changes; --plan saves them as the
     plan for `pymolt apply`. Transplant paths (e.g. keras → torch) are shown as
     steps to follow, never applied. Writes no source file.
     """
-    from pymolt.config import load_endpoint
-    from pymolt.strategic.succession.client import SuccessionError
     from pymolt.strategic.succession.detect import (
         detect_frameworks,
         knowledge_coverage,
@@ -2825,19 +2836,9 @@ def succession(
             console.print(f"[bold]No framework among the {len(declared)} declared "
                           "dependencies[/bold] (all were checked).")
 
-    try:
-        with err.status("Looking up framework succession…", spinner="dots") as status:
-            edges, result = run_succession(
-                project_dir, base_url=load_endpoint(endpoint),
-                progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
-            )
-    except SuccessionError as exc:
-        fail(
-            f"Axiom Graph unavailable: {exc}",
-            hint="Check the --endpoint URL (or PYMOLT_AXIOM_ENDPOINT); without one, pymolt "
-                 "uses its curated knowledge.",
-            code=EXIT_ENVIRONMENT,
-            json_output=json_output,
+    with err.status("Looking up framework succession…", spinner="dots") as status:
+        edges, result = run_succession(
+            project_dir, progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
         )
 
     from pymolt.strategic.succession.transplant import build_transplant_plan
@@ -2869,7 +2870,7 @@ def succession(
 
     if not edges:
         named = ", ".join(frameworks) if frameworks else None
-        source = ("Axiom Graph" if load_endpoint(endpoint) else "pymolt's succession knowledge")
+        source = "pymolt's succession knowledge"
         if named:
             console.print(
                 f"[yellow]{named}: not in {source}, which covers {', '.join(covered)}.[/yellow]\n"
@@ -3093,30 +3094,5 @@ _removed("contract", {
     "diff": "`pymolt verify --baseline OLD --post-migration NEW`",
 })
 _removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})
-# Axiom is no longer a service pymolt needs: `pymolt plan` computes API changes locally, and a
-# remote endpoint is used only when given explicitly (--endpoint / PYMOLT_AXIOM_ENDPOINT).
-_AXIOM_STATUS = ("`pymolt plan` (it computes API changes locally; a remote Axiom is used only "
-                 "with `--endpoint URL` or `PYMOLT_AXIOM_ENDPOINT`)")
-_AXIOM_ENDPOINT = "`pymolt plan --endpoint URL` or `PYMOLT_AXIOM_ENDPOINT` (none is the default)"
-_AXIOM_LOGIN = ("`PYMOLT_API_TOKEN` (sent only to an endpoint given with `--endpoint` or "
-                "`PYMOLT_AXIOM_ENDPOINT`)")
-_AXIOM_LOGOUT = "`unset PYMOLT_API_TOKEN`"
-_AXIOM_CACHE = "`rm -r .pymolt/cache/delta` in the project (the local API-change cache)"
-_removed("axiom", {
-    "status": _AXIOM_STATUS,
-    "endpoint": _AXIOM_ENDPOINT,
-    "login": _AXIOM_LOGIN,
-    "logout": _AXIOM_LOGOUT,
-    "clear-cache": _AXIOM_CACHE,
-})
-_removed("auth", {"login": _AXIOM_LOGIN, "status": _AXIOM_STATUS, "logout": _AXIOM_LOGOUT})
-_removed("config", {
-    "show": _AXIOM_STATUS,
-    "set-endpoint": _AXIOM_ENDPOINT,
-    "reset-endpoint": "`unset PYMOLT_AXIOM_ENDPOINT` (no endpoint is the default)",
-    "clear-cache": _AXIOM_CACHE,
-})
-_removed("login", _AXIOM_LOGIN)
-_removed("logout", _AXIOM_LOGOUT)
 _removed("migrate", "`pymolt plan`, then `pymolt apply` (status shows the steps before them)")
 _removed("codemods", "`pymolt plan` to see the changes, then `pymolt apply`")

@@ -94,7 +94,6 @@ steps. It writes no source file. Its `--json` adds `steps` and `plan_md`. Detail
 |---|---|
 | `--target-manifest` | The target manifest to plan for (default: the one assess wrote) |
 | `--online` | Read intermediate releases from PyPI for successor hints (package names and versions only) |
-| `--endpoint` | Use a remote Axiom at this URL instead of the local engine (or set `PYMOLT_AXIOM_ENDPOINT`) |
 | `--output`, `--patch` | Where to save the plan; also write the diff to a file |
 | `--plan-md` | Where to write the plan for a person (default: `.pymolt/PLAN.md`) |
 
@@ -249,5 +248,7 @@ These commands were removed in this version. Each still prints its replacement a
 | `contract map` | `scan` |
 | `migrate`, `codemods` | `plan` + `apply` |
 | `env hint` | `assess` |
-| `axiom`, `auth`, `config`, `login`, `logout` | API changes are computed locally by `plan`. For a remote provider use `plan --endpoint URL` or `PYMOLT_AXIOM_ENDPOINT`, with the token in `PYMOLT_API_TOKEN` |
+
+`auth`, `config`, `login` and `logout` are gone with no replacement: pymolt needs no sign-in or
+user settings, and `plan` computes API changes on this machine.
 <!-- docs-check:on -->
