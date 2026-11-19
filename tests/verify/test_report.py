@@ -196,56 +196,24 @@ def test_impact_set_focuses_metrics_and_preserves_full_surface(tmp_path):
     assert rep.impact_by_kind == {"call": 1}
 
 
-def test_impact_set_filters_diff_and_existing_verdict_fold(tmp_path):
+def _flask_result_change(tmp_path):
+    """Two recordings of the project: flask.Flask's result changed, with_appcontext's did not."""
     root = _project(tmp_path)
     old = tmp_path / "old.jsonl"
     new = tmp_path / "new.jsonl"
-    old.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "q": "flask.Flask",
-                        "in": {"bound": {}},
-                        "result": "old",
-                        "t": "return",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "q": "flask.cli.with_appcontext",
-                        "in": {"bound": {}},
-                        "result": "stable",
-                        "t": "return",
-                    }
-                ),
-            ]
-        ),
-        encoding="utf-8",
-    )
-    new.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "q": "flask.Flask",
-                        "in": {"bound": {}},
-                        "result": "new",
-                        "t": "return",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "q": "flask.cli.with_appcontext",
-                        "in": {"bound": {}},
-                        "result": "stable",
-                        "t": "return",
-                    }
-                ),
-            ]
-        ),
-        encoding="utf-8",
-    )
+    for path, result in ((old, "old"), (new, "new")):
+        path.write_text(
+            "\n".join(
+                json.dumps({"q": q, "in": {"bound": {}}, "result": r, "t": "return"})
+                for q, r in (("flask.Flask", result), ("flask.cli.with_appcontext", "stable"))
+            ),
+            encoding="utf-8",
+        )
+    return root, old, new
+
+
+def test_a_change_outside_the_impact_set_is_left_out_of_the_focus_but_fails(tmp_path):
+    root, old, new = _flask_result_change(tmp_path)
 
     focused = build_contract_report(
         root,
@@ -272,20 +240,30 @@ def test_impact_set_filters_diff_and_existing_verdict_fold(tmp_path):
     # the impact set, and that still fails the verdict (an unpredicted change).
     assert focused.verdict is VerificationVerdict.FAIL
 
+    full = build_contract_report(root, trace=new, against=old)
+    _stamp_verdict(full, str(new), str(old), [])
+    assert full.verdict is VerificationVerdict.FAIL
+
+
+def test_a_change_inside_the_impact_set_fails(tmp_path):
+    root, old, new = _flask_result_change(tmp_path)
+
     impacted = build_contract_report(root, trace=new, against=old, impact_set={"flask.Flask"})
     _stamp_verdict(impacted, str(new), str(old), [])
+
     assert impacted.diff_clean is False and impacted.verdict is VerificationVerdict.FAIL
+
+
+def test_unchanged_recordings_with_an_impact_set_pass(tmp_path):
+    root, old, _new = _flask_result_change(tmp_path)
 
     same = build_contract_report(root, trace=old, against=old,
                                  impact_set={"flask.cli.with_appcontext"})
     _stamp_verdict(same, str(old), str(old), [])
-    assert same.all_diff_clean is True and same.verdict is not VerificationVerdict.FAIL
-    # coverage stays scoped to the impacted surface, not the whole one
-    assert same.blind == same.impacted_blind
 
-    full = build_contract_report(root, trace=new, against=old)
-    _stamp_verdict(full, str(new), str(old), [])
-    assert full.verdict is VerificationVerdict.FAIL
+    # both static symbols ran and nothing changed: PASS (docs/verify.md, "The verdict")
+    assert same.blind == 0
+    assert same.all_diff_clean is True and same.verdict is VerificationVerdict.PASS
 
 
 def test_empty_impact_set_is_active_and_reports_unmatched_paths(tmp_path):

@@ -269,7 +269,7 @@ class TestCaptureNamedTrace:
         assert state.diagnostic_captures[-1] == diagnostic
         assert Path(active.trace_path).is_file()
 
-    def test_recapture_overwrites_in_place_no_history(self, tmp_path):
+    def test_recapture_replaces_the_active_slot(self, tmp_path):
         script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
         first = service.capture_named_trace(
             tmp_path, "baseline", CaptureMode.TEST_SUITE,
@@ -465,13 +465,14 @@ class TestBuildContractReportFromState:
         p = tmp_path / name
         with p.open("w") as f:
             for q in qualnames:
-                f.write(json.dumps({"q": q}) + "\n")
+                f.write(json.dumps({"q": q, "t": "return", "in": {"bound": {}},
+                                    "result": None}) + "\n")
         return str(p)
 
     def test_no_captures_falls_back_to_static_only(self, tmp_path):
         self._app_with_dependency(tmp_path)
         rep = service.build_contract_report_from_state(tmp_path)
-        assert rep.static_targets >= 1
+        assert rep.static_targets == 1  # requests.get
         assert rep.confirmed == 0
         assert any("no trace given" in n for n in rep.notes)
 
@@ -482,6 +483,7 @@ class TestBuildContractReportFromState:
             command=[sys.executable, str(tmp_path / "app.py")], target="requests",
         )
         rep = service.build_contract_report_from_state(tmp_path)
+        assert rep.confirmed == 1  # the baseline's requests.get call is the trace
         assert rep.diff is None  # only one side captured -> no version diff
 
     def test_both_captures_diff_post_migration_against_baseline(self, tmp_path):
@@ -496,6 +498,8 @@ class TestBuildContractReportFromState:
 
         rep = service.build_contract_report_from_state(tmp_path)
         assert rep.diff is not None  # both slots present -> version diff attached
+        # post-migration against the baseline: the extra post call appeared (not disappeared)
+        assert (rep.diff["appeared"], rep.diff["disappeared"]) == (1, 0)
         assert rep.observed_targets >= 2
 
     def test_explicit_override_wins_over_state(self, tmp_path):

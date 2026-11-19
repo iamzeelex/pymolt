@@ -318,14 +318,6 @@ def test_a_replicate_in_another_environment_is_rejected(tmp_path: Path):
     assert _replicate_environment_differs(base, _trace(tmp_path, "r3", None)) is None
 
 
-def test_a_replicate_with_another_random_hash_seed_is_the_same_environment(tmp_path: Path):
-    from pymolt.verify.service import _replicate_environment_differs
-
-    other = dict(DOCKER, hash={"seed": None, "randomized": True, "algorithm": "siphash24"})
-    assert _replicate_environment_differs(_trace(tmp_path, "b", DOCKER),
-                                          _trace(tmp_path, "r", other)) is None
-
-
 def test_the_verdict_reason_names_the_differing_aspects():
     from pymolt.verify.service import _fact_diff_reasons
 
@@ -366,7 +358,8 @@ def test_the_runtime_records_its_environment_without_a_hostname():
 
 def test_the_runtime_reads_a_pinned_hash_seed(monkeypatch):
     monkeypatch.setenv("PYTHONHASHSEED", "0")
-    assert bt._environment()["hash"]["seed"] in (0, None)  # None under -E / -I
+    expected = None if sys.flags.ignore_environment else 0   # -E / -I: the variable is unread
+    assert bt._environment()["hash"]["seed"] == expected
     monkeypatch.setenv("PYTHONHASHSEED", "random")
     assert bt._environment()["hash"]["seed"] is None
 

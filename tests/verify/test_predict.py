@@ -237,7 +237,6 @@ def test_planned_rewrites_map_changed_old_lines():
 
 
 def test_delta_report_models_are_accepted():
-    pytest.importorskip("pymolt.delta.models")
     from pymolt.delta.models import DeltaReport
 
     rep = DeltaReport.model_validate(_delta(DEFAULT_MEAN))
@@ -670,6 +669,13 @@ def test_merging_keeps_dependency_risks_and_adds_python_ones_even_with_no_baseli
 
 
 def test_dependency_risks_default_to_the_dependency_scope():
+    report = predict_risks(_one_site(), [_delta({"symbol": "lib.mod.f", "kind": "REMOVED"},
+                                                package="lib")])
+    (risk,) = report.risks
+    assert risk.scope == "dependency"
+
+
+def test_an_empty_report_lists_no_guarded_or_pre_existing_sites():
     assert PredictionReport().guarded == [] and PredictionReport().pre_existing == []
 
 

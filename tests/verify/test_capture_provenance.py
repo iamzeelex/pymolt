@@ -240,6 +240,8 @@ class TestBaselineIsJudgedAgainstTheMigrationStart:
         assert not any("STALE" in n or "staleness unknown" in n for n in report.notes)
         assert STALE not in report.verdict_reasons
         assert UNKNOWN not in report.verdict_reasons
+        # apply's receipt pinned the start, not the rule for a hand-made migration
+        assert not any("taken as the migration's starting point" in n for n in report.notes)
 
     def test_post_migration_older_than_the_current_manifest_is_stale(self, tmp_path):
         self._project(tmp_path)
@@ -383,12 +385,15 @@ class TestBaselineIsJudgedAgainstTheMigrationStart:
             tmp_path, baseline, run_id=plan.plan_id, plan_path=str(frozen),
             environment_fingerprint=None,
         )
-        self._upgrade(tmp_path)
+        # A moved setup, not only bumped pins: the rule for a hand-made migration cannot
+        # make the baseline fresh, so only the frozen plan can.
+        _configure(tmp_path, base="3.12", contents="flask==3.0.0\n")
         self._capture(tmp_path, "post_migration")
 
         report = service.build_contract_report_from_state(tmp_path)
 
         assert report.baseline_stale is False
+        assert UNKNOWN not in report.verdict_reasons
 
     def test_unchanged_manifest_needs_no_receipt(self, tmp_path):
         """Nothing moved since the baseline, so it describes the start whenever that was:
