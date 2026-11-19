@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from _stepwise import APP, RECIPES, manual_step, plan_for, plan_next, rename, with_steps
+from _stepwise import APP, RECIPES, manual_step, plan_for, plan_next, read, rename, with_steps
 from _verifying import person
 from typer.testing import CliRunner
 
@@ -131,6 +131,37 @@ def test_an_agent_cannot_roll_back_on_an_unapproved_plan(tmp_path):
     with pytest.raises(StepRefusal, match="no person approved"):
         rollback_steps(tmp_path, agent=True, step="mech-3")
     assert MigrationReceipt.load(tmp_path).steps[f"{plan.plan_id}:mech-3"].in_effect
+
+
+def test_a_whole_run_rollback_through_verify_is_refused_to_an_agent(tmp_path):
+    """`verify --auto-rollback` rolls back the whole run, so under --agent it is refused
+    as `rollback --agent` without --step is, before anything is compared or written."""
+    plan = _approved(tmp_path)
+    apply_steps(tmp_path, plan, agent=True)
+    applied = read(tmp_path, M)
+    (tmp_path / "policy.json").write_text("{}")
+    (tmp_path / "metrics.json").write_text("{}")
+
+    out = runner.invoke(app, ["verify", str(tmp_path), "--policy", str(tmp_path / "policy.json"),
+                              "--metrics", str(tmp_path / "metrics.json"), "--auto-rollback",
+                              "--agent"])
+
+    payload = json.loads(out.stdout)
+    assert out.exit_code == 2 and payload["ok"] is False
+    assert "--auto-rollback is refused under --agent" in payload["error"]
+    assert "--step ID --agent" in payload["hint"]
+    assert read(tmp_path, M) == applied
+    assert MigrationReceipt.load(tmp_path).steps[f"{plan.plan_id}:mech-1"].in_effect
+
+
+def test_rollback_migration_refuses_an_agent_a_whole_run(tmp_path):
+    from pymolt.migration_plan import rollback_migration
+
+    plan = _approved(tmp_path)
+    apply_steps(tmp_path, plan, agent=True)
+    with pytest.raises(MigrationConflictError, match="a person rolls back a whole run"):
+        rollback_migration(tmp_path, agent=True)
+    assert MigrationReceipt.load(tmp_path).steps[f"{plan.plan_id}:mech-1"].in_effect
 
 
 # ── the view ──────────────────────────────────────────────────────────────────────────────

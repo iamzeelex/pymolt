@@ -108,7 +108,7 @@ def test_failed_canary_can_execute_explicit_auto_rollback(tmp_path, monkeypatch)
     rolled_back = []
     monkeypatch.setattr(
         "pymolt.migration_plan.rollback_migration",
-        lambda project_dir, run_id=None: rolled_back.append(run_id),
+        lambda project_dir, run_id=None, agent=False: rolled_back.append((run_id, agent)),
     )
     policy = tmp_path / "policy.json"
     metrics = tmp_path / "metrics.json"
@@ -135,5 +135,5 @@ def test_failed_canary_can_execute_explicit_auto_rollback(tmp_path, monkeypatch)
     ])
 
     assert result.exit_code == EXIT_FINDING, result.output
-    assert rolled_back == ["a" * 32]
+    assert rolled_back == [("a" * 32, False)]  # a person's verify, not an agent's
     assert json.loads(result.stdout)["rollback_executed"] is True

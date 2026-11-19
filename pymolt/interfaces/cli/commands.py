@@ -382,6 +382,13 @@ def verify_migration(
         fail("--accept is a person's attested act: it is refused under --agent and --json",
              hint="A person runs `pymolt verify . --accept ID` on a terminal.",
              json_output=json_output)
+    if auto_rollback and agent:
+        # The same rule as `rollback --agent`: an agent rolls back one step, a person a run.
+        fail("--auto-rollback is refused under --agent: it rolls back the whole run, which is "
+             "a person's decision",
+             hint="Roll back one step with `pymolt rollback . --step ID --agent`, or ask a "
+                  "person to run `pymolt verify . --auto-rollback ...`.",
+             json_output=json_output)
     for path_value, what in ((baseline_file, "--baseline recording"),
                              (post_file, "--post-migration recording")):
         if path_value:
@@ -486,7 +493,7 @@ def verify_migration(
             rollback=rollback_decision,
         )
         if rollback_decision is not None and rollback_decision.should_rollback:
-            rollback_migration(project_path, run_id=rollback_decision.run_id)
+            rollback_migration(project_path, run_id=rollback_decision.run_id, agent=agent)
             unified.rollback_executed = True
         # Saved with what it compared (``contract.compared``), unless the baseline side is
         # another recording: a verdict against another baseline is not this project's.
