@@ -36,7 +36,7 @@ PLACEHOLDER_DOMAINS = re.compile(
 
 HOME = re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\\\?Users\\\\?)([A-Za-z0-9._$<>-]+)")
 TEMP = re.compile(r"/var/folders/[A-Za-z0-9_+-]{2}/[A-Za-z0-9_+-]{12,}"
-                  r"|/private/tmp/claude-\d+|\.claude/projects/-")
+                  r"|/private/tmp/claude-\d+|\.claude/project[s]/-")  # [s]: not a match itself
 EMAIL = re.compile(r"(?<![\w.%+\\-])([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
                    r"\.[A-Za-z]{2,})\b")
 SECRET = re.compile(
@@ -88,6 +88,7 @@ def test_no_tracked_file_carries_private_data():
     "C:\\Users\\" + "jdoe\\AppData",
     "tmp at /var/folders/ab/" + "c" * 28 + "/T/x",
     "scratch /private/tmp/claude-" + "123/abc",
+    "memory in ~/.claude/" + "projects/-home-x/memory",
     "mail jane.doe" + "@gmail.com about it",
     "token ghp_" + "a" * 36,
     "-----BEGIN OPENSSH " + "PRIVATE KEY-----",
