@@ -40,6 +40,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+sys.path.append(str(HERE.parent))  # bench/, for _paths
+
+from _paths import scrub  # noqa: E402
+
 TOYS = HERE / "toys"
 ENVS = HERE / ".envs"
 DEFAULT_PYMOLT = REPO / ".venv" / "bin" / "pymolt"
@@ -1085,6 +1089,7 @@ def skew_signals(rows: list[dict]) -> list[str]:
 
 
 def write_scorecard(out: Path, rows: list[dict], meta: dict) -> None:
+    rows, meta = scrub(rows), scrub(meta)
     (out / "scorecard.json").write_text(json.dumps({"meta": meta, "rows": rows}, indent=2))
     lines = ["# Generalization scorecard", "",
              f"run: {meta.get('when')}  |  pymolt: `{meta.get('pymolt')}`", "",
@@ -1249,7 +1254,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     print((out / "scorecard.md").read_text())
     if args.record:
         summary = record_summary(toys, rows, out)
-        (out / "record_summary.json").write_text(json.dumps(summary, indent=2))
+        (out / "record_summary.json").write_text(json.dumps(scrub(summary), indent=2))
         print(json.dumps(summary["totals"], indent=2))
     print(f"wall time {meta['wall_seconds']}s; scorecard: {out / 'scorecard.md'}")
     return 0

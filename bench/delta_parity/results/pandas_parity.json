@@ -594,8 +594,8 @@
     }
    ],
    "notes": [
-    "old: baseline capture interpreter (/Users/zeelex/Documents/projects/python_migrator/bench/e2e_pandas/.envs/3.11/bin/python)",
-    "new: configured target environment (/Users/zeelex/Documents/projects/python_migrator/bench/e2e_pandas/.envs/3.12)"
+    "old: baseline capture interpreter (bench/e2e_pandas/.envs/3.11/bin/python)",
+    "new: configured target environment (bench/e2e_pandas/.envs/3.12)"
    ]
   }
  ],

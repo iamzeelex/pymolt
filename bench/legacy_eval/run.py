@@ -43,6 +43,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
+sys.path.append(str(HERE.parent))  # bench/, for _paths
+
+from _paths import scrub  # noqa: E402
+
 PHASES = [
     "scan",
     "setup",
@@ -950,7 +954,7 @@ def write_scorecard(out: Path, meta: dict, results: dict) -> dict:
     order = [p for p in HEAVY_FIRST[::-1] if p in results] + [
         p for p in results if p not in HEAVY_FIRST
     ]
-    sc = {"meta": meta, "projects": {p: results[p] for p in order}}
+    sc = scrub({"meta": meta, "projects": {p: results[p] for p in order}})
     (out / "scorecard.json").write_text(json.dumps(sc, indent=1))
     (out / "scorecard.md").write_text(render_md(sc))
     return sc

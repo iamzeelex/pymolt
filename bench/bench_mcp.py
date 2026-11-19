@@ -40,6 +40,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from _paths import scrub
+
 REPO = Path(__file__).resolve().parent.parent
 PYMOLT_BIN = str(REPO / ".venv" / "bin" / "pymolt")
 RESULTS = REPO / "bench" / "results"
@@ -582,7 +584,7 @@ def _dump(runs: list[dict], args, final: bool = False) -> None:
     }
     RESULTS.mkdir(parents=True, exist_ok=True)
     tag = f"_{args.tag}" if args.tag else ""
-    (RESULTS / f"mcp_{args.model}{tag}.json").write_text(json.dumps(payload, indent=2))
+    (RESULTS / f"mcp_{args.model}{tag}.json").write_text(json.dumps(scrub(payload), indent=2))
 
 
 if __name__ == "__main__":

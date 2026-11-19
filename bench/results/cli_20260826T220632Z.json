@@ -12,9 +12,9 @@
     {
       "command": "status",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "status",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json"
       ],
       "repeats": 5,
@@ -34,9 +34,9 @@
     {
       "command": "scan",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "scan",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json"
       ],
       "repeats": 5,
@@ -56,10 +56,10 @@
     {
       "command": "contract map",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "contract",
         "map",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json"
       ],
       "repeats": 5,
@@ -84,9 +84,9 @@
       "stderr_head": "",
       "command": "assess",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "assess",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json",
         "--no-write",
         "--target-python",
@@ -107,9 +107,9 @@
     {
       "command": "assess",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "assess",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json",
         "--no-write",
         "--target-python",
@@ -134,9 +134,9 @@
     {
       "command": "status",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "status",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json"
       ],
       "repeats": 5,
@@ -156,9 +156,9 @@
     {
       "command": "scan",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "scan",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json"
       ],
       "repeats": 5,
@@ -178,10 +178,10 @@
     {
       "command": "contract map",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "contract",
         "map",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json"
       ],
       "repeats": 5,
@@ -206,9 +206,9 @@
       "stderr_head": "",
       "command": "assess",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "assess",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json",
         "--no-write",
         "--target-python",
@@ -229,9 +229,9 @@
     {
       "command": "assess",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "assess",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json",
         "--no-write",
         "--target-python",
@@ -256,9 +256,9 @@
     {
       "command": "status",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "status",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json"
       ],
       "repeats": 5,
@@ -278,9 +278,9 @@
     {
       "command": "scan",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "scan",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json"
       ],
       "repeats": 5,
@@ -300,10 +300,10 @@
     {
       "command": "contract map",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "contract",
         "map",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json"
       ],
       "repeats": 5,
@@ -325,12 +325,12 @@
       "exit_code": 3,
       "stdout_bytes": 169,
       "stdout_tokens": 51,
-      "stderr_head": "env config /Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze/.pymolt/env_config.json failed validation, ignoring: 2 validation errors for EnvConfig\nbase_python\n  Value error, 'q' is not a Python version (expected e.g. 3.11 or 3.6.1) [type=value_error, input_value='q', input_type",
+      "stderr_head": "env config tests/artifacts/blaze/.pymolt/env_config.json failed validation, ignoring: 2 validation errors for EnvConfig\nbase_python\n  Value error, 'q' is not a Python version (expected e.g. 3.11 or 3.6.1) [type=value_error, input_value='q', input_type",
       "command": "assess",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "assess",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json",
         "--no-write",
         "--target-python",
@@ -351,9 +351,9 @@
     {
       "command": "assess",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "assess",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json",
         "--no-write",
         "--target-python",
@@ -369,7 +369,7 @@
       "wall_ms_stdev": 83.7,
       "stdout_bytes": 169,
       "stdout_tokens": 51,
-      "stderr_head": "env config /Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze/.pymolt/env_config.json failed validation, ignoring: 2 validation errors for EnvConfig\nbase_python\n  Value error, 'q' is not a Python version (expected e.g. 3.11 or 3.6.1) [type=value_error, input_value='q', input_type",
+      "stderr_head": "env config tests/artifacts/blaze/.pymolt/env_config.json failed validation, ignoring: 2 validation errors for EnvConfig\nbase_python\n  Value error, 'q' is not a Python version (expected e.g. 3.11 or 3.6.1) [type=value_error, input_value='q', input_type",
       "fixture": "blaze",
       "cache": "warm",
       "py_files": 133,

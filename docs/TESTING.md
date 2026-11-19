@@ -29,8 +29,9 @@ artifact, and that never shows up as a change in this repo.
 
 ## Setup (once)
 
+Run every command from the root of your clone of this repo.
+
 ```bash
-cd /Users/zeelex/Documents/projects/python_migrator
 source .venv/bin/activate        # `pymolt` lives in this venv
 ```
 
