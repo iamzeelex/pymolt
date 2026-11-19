@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Delta parity: pymolt's local delta engine versus Axiom Graph's cached checkpoints.
+"""Delta accuracy: the local API-change engine against ground truth.
 
-Question: can PyMolt generate the API-change facts a migration needs on the spot, from
-the two environments it already builds and scoped to the symbols the project touches,
-at least as well as the Axiom Graph service? See README.md for the decision rule.
+Question: how well does PyMolt generate the API-change facts a migration needs on the
+spot, from the two environments it already builds and scoped to the symbols the project
+touches? See README.md for the method.
 
 Per pair:
   1. build (or reuse) the old and new environments with uv;
@@ -18,25 +18,20 @@ Per pair:
      warnings the baseline run emits (calls_<pair>.py in the OLD env only: what the
      baseline capture records). Without --offline it may fetch intermediate releases
      (versions only). The engine's facts are mapped back onto the units;
-  5. AXIOM: match the cached checkpoint changes (~/Library/Caches/axiom_graph/checkpoints)
-     to the same symbols through every path spelling (public, defining, receiver);
-  6. score precision and recall per category and write results/<pair>_parity.json.
+  5. score precision and recall per category and write results/<pair>_accuracy.json.
 
-Run:  .venv/bin/python bench/delta_parity/run.py [--pair flask|pandas|all] [--offline] [--warm]
+Run:  .venv/bin/python bench/delta_accuracy/run.py [--pair flask|pandas|all] [--offline] [--warm]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
-
-from packaging.version import Version
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -46,16 +41,10 @@ sys.path.append(str(HERE.parent))  # bench/, for _paths
 from _paths import scrub  # noqa: E402
 
 from pymolt.delta import RecordedWarning, TouchedSymbol, compute_deltas, run_stats  # noqa: E402
-from pymolt.delta.fetch import successor_from  # noqa: E402
 
 CACHE = HERE / ".cache"
 RESULTS = HERE / "results"
 PYMOLT = REPO / ".venv" / "bin" / "pymolt"
-AXIOM = Path(
-    os.environ.get(
-        "AXIOM_CHECKPOINTS", Path.home() / "Library" / "Caches" / "axiom_graph" / "checkpoints"
-    )
-)
 E2E_ENVS = REPO / "bench" / "e2e_pandas" / ".envs"
 
 PAIRS = {
@@ -73,9 +62,6 @@ PAIRS = {
             "python": "3.12",
             "packages": ["flask==3.0.0", "werkzeug==3.0.0"],
         },
-        # Exactly the version pairs Axiom's checkpoints cover.
-        "axiom": {"flask": ("2.0.3", "3.0.0"), "werkzeug": ("2.0.0", "3.0.0")},
-        "axiom_from": None,
         "calls": "calls_flask.py",
         "probe_args": ["--flask-context"],
         # Instance methods / overrides flasgger uses that a static map cannot type
@@ -104,9 +90,6 @@ PAIRS = {
             "packages": ["pandas==1.5.3", "numpy<2"],
         },
         "new": {"env": E2E_ENVS / "3.12", "python": "3.12", "packages": ["pandas==2.2.3"]},
-        # The only cached pandas checkpoint is 1.3.5 -> 2.0.0; keep the steps from 1.5.3 on.
-        "axiom": {"pandas": ("1.3.5", "2.0.0")},
-        "axiom_from": "1.5.3",
         "calls": "calls_pandas.py",
         "probe_args": [],
         # Baseline fact symbols of the toy app (bench/e2e_pandas, scenario "change").
@@ -424,111 +407,6 @@ def engine_predict(units: dict, reports: list) -> dict[str, dict]:
     return out
 
 
-# ── Axiom checkpoints ─────────────────────────────────────────────────────────────────
-
-_AXIOM_KIND = {
-    "Public object was removed": "REMOVED",
-    "object-removed": "REMOVED",
-    "Parameter was removed": "SIGNATURE",
-    "Parameter was added as required": "SIGNATURE",
-    "Positional parameter was moved": "SIGNATURE",
-    "Parameter kind was changed": "SIGNATURE",
-    "Parameter default was changed": "SIGNATURE",
-    "Public object points to a different kind of object": "SIGNATURE",
-    "Base class was removed": "BASES",
-}
-
-
-def load_axiom(pair: dict) -> tuple[list[dict], dict]:
-    rows, meta = [], {}
-    for pkg, (fv, tv) in pair["axiom"].items():
-        f = AXIOM / f"{pkg}__{fv}__{tv}.jsonl"
-        if not f.exists():
-            raise SystemExit(f"Axiom checkpoint missing: {f} (set AXIOM_CHECKPOINTS)")
-        steps = [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
-        seen, empty, kept = set(), 0, 0
-        for st in steps:
-            if pair["axiom_from"] and Version(st["from_version"]) < Version(pair["axiom_from"]):
-                continue
-            key = (st["from_version"], st["to_version"])
-            if key in seen:
-                continue  # resumed runs append duplicate steps
-            seen.add(key)
-            kept += 1
-            if not st.get("changes"):
-                empty += 1
-            for c in st.get("changes") or []:
-                rows.append(
-                    {**c, "step": f"{st['from_version']}->{st['to_version']}", "package": pkg}
-                )
-            for t in st.get("transitions") or []:
-                rows.append(
-                    {
-                        "kind": "transition",
-                        "path": t.get("from_path"),
-                        "to_path": t.get("to_path"),
-                        "step": f"{st['from_version']}->{st['to_version']}",
-                        "package": pkg,
-                    }
-                )
-        meta[pkg] = {
-            "file": f.name,
-            "steps": kept,
-            "empty_steps": empty,
-            "changes": sum(1 for r in rows if r["package"] == pkg and r["kind"] != "transition"),
-        }
-    return rows, meta
-
-
-def axiom_predict(units: dict, rows: list[dict]) -> dict[str, dict]:
-    by_path: dict[str, list[dict]] = {}
-    for r in rows:
-        by_path.setdefault(r["path"], []).append(r)
-    out = {}
-    for unit, u in units.items():
-        keys, init_keys = {unit}, set()
-        for side in (u["old"], u["new"]):
-            for k in ("owner", "receiver_path", "defined_as"):
-                if side.get(k):
-                    keys.add(side[k])
-            # Generous to Axiom: also accept changes recorded under the callee a public
-            # method forwards to (pandas 1.5 DataFrame.mean -> NDFrame.mean). The join
-            # itself needs the local probe's forwarding fact.
-            fwd = side.get("forwards_to") or ""
-            if fwd.startswith("self.") and side.get("owner"):
-                keys.add(side["owner"].rsplit(".", 1)[0] + "." + fwd[5:])
-            elif fwd.count(".") == 1 and side.get("defined_as"):
-                keys.add(side["defined_as"].split(".<locals>")[0].rsplit(".", 2)[0] + "." + fwd)
-            if side.get("kind") == "class" and side.get("defined_as"):
-                init_keys.add(side["defined_as"] + ".__init__")
-        if unit.count(".") >= 1:
-            init_keys.add(unit + ".__init__")
-        cats, hits, hint_msgs, transitions = {}, [], [], []
-        for key in keys | init_keys:
-            for r in by_path.get(key, []):
-                if r["kind"] == "transition":
-                    transitions.append(r["to_path"])
-                    continue
-                cat = _AXIOM_KIND.get(r["kind"])
-                if cat == "REMOVED" and key in init_keys:
-                    cat = "SIGNATURE"  # "X.__init__ removed" is a constructor claim
-                if r.get("deprecation_hint") or r.get("state") == "deprecated":
-                    hint_msgs.append(r.get("deprecation_hint") or "")
-                    if u["exists_n"]:
-                        cats.setdefault("DEPRECATED", []).append(f"{r['step']} {r['kind']} {key}")
-                if cat:
-                    cats.setdefault(cat, []).append(f"{r['step']} {r['kind']} {key}")
-                hits.append(f"{r['step']} {r['state']} {r['kind']} {key}")
-        hint = successor_from(hint_msgs) or (transitions[0] if transitions else None)
-        out[unit] = {
-            "categories": {k: sorted(set(v)) for k, v in cats.items()},
-            "hint": hint,
-            "hint_text": [h[:160] for h in hint_msgs if h],
-            "hits": sorted(set(hits)),
-        }
-    return out
-
-
 # ── scoring ───────────────────────────────────────────────────────────────────────────
 
 
@@ -600,12 +478,7 @@ def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
     timing["local_total_excl_env_build_s"] = round(wall - stats.get("env_build_s", 0), 2)
     local = engine_predict(units, reports)
 
-    rows, axiom_meta = load_axiom(pair)
-    axiom = axiom_predict(units, rows)
-    scored = {
-        "local": {"api": score(gt, local), "use": score(gt, local, USE_IMPACT)},
-        "axiom": {"api": score(gt, axiom), "use": score(gt, axiom, USE_IMPACT)},
-    }
+    scored = {"local": {"api": score(gt, local), "use": score(gt, local, USE_IMPACT)}}
     hints = {}
     for unit, g in gt.items():
         if "REMOVED" in g["categories"]:
@@ -614,8 +487,6 @@ def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
                 "expected": exp,
                 "local": [local[unit]["hint"], local[unit]["hint_source"],
                           hint_ok(local[unit]["hint"], exp)],
-                "axiom": [axiom[unit]["hint"], axiom[unit]["hint_text"][:1],
-                          hint_ok(axiom[unit]["hint"], exp)],
             }
     report = {
         "pair": name,
@@ -624,17 +495,15 @@ def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
         "symbols": len(symbols),
         "units": len(units),
         "timing": timing,
-        "axiom_meta": axiom_meta,
         "score": scored,
         "hints": hints,
         "delta_reports": [r.model_dump() for r in reports],
         "per_unit": {
-            u: {"ground_truth": gt[u], "local": local[u], "axiom": axiom[u],
-                "contacts": units[u]["contacts"]}
+            u: {"ground_truth": gt[u], "local": local[u], "contacts": units[u]["contacts"]}
             for u in sorted(units)
         },
     }
-    (RESULTS / f"{name}_parity.json").write_text(
+    (RESULTS / f"{name}_accuracy.json").write_text(
         json.dumps(scrub(report), indent=1, default=str)
     )
     return report
@@ -642,40 +511,36 @@ def run_pair(name: str, offline: bool, warm: bool = False) -> dict:
 
 def print_report(rep: dict) -> None:
     print(f"\n=== {rep['pair']}  {rep['versions']}  symbols={rep['symbols']} units={rep['units']}")
-    print("axiom checkpoints:", rep["axiom_meta"])
     for r in rep["delta_reports"]:
         print(f"  pymolt.delta {r['package']} {r['from']} -> {r['to']}: {r['quality']}, "
               f"{sum(1 for f in r['facts'] if f['kind'] != 'UNCHANGED')} change fact(s)")
-    for who in ("local", "axiom"):
-        for view in ("api", "use"):
-            s = rep["score"][who][view]
-            p = "n/a" if s["precision"] is None else f"{s['precision']:.2f}"
-            r = "n/a" if s["recall"] is None else f"{s['recall']:.2f}"
-            counts = f"TP={s['tp']:>2} FP={s['fp']:>2} FN={s['fn']:>2}"
-            print(f"  {who:<22} {view:<4} {counts}  P={p} R={r}")
+    for view in ("api", "use"):
+        s = rep["score"]["local"][view]
+        p = "n/a" if s["precision"] is None else f"{s['precision']:.2f}"
+        r = "n/a" if s["recall"] is None else f"{s['recall']:.2f}"
+        counts = f"TP={s['tp']:>2} FP={s['fp']:>2} FN={s['fn']:>2}"
+        print(f"  {'local':<22} {view:<4} {counts}  P={p} R={r}")
     print("  hints:", json.dumps(rep["hints"]))
     t = rep["timing"]
     print(f"  engine: {t['local_total_excl_env_build_s']} s excl. env builds "
           f"(wall {t['engine_wall_s']} s)  {t['engine']}")
-    print(f"  {'unit':<52}{'ground truth':<34}{'local':<34}axiom")
+    print(f"  {'unit':<52}{'ground truth':<34}local")
     for u, d in rep["per_unit"].items():
         g = ",".join(sorted(d["ground_truth"]["categories"])) or "-"
         lo = ",".join(sorted(d["local"]["categories"])) or "-"
-        ax = ",".join(sorted(d["axiom"]["categories"])) or "-"
-        if g != "-" or lo != "-" or ax != "-":
-            print(f"  {u:<52}{g:<34}{lo:<34}{ax}")
+        if g != "-" or lo != "-":
+            print(f"  {u:<52}{g:<34}{lo}")
 
 
 def print_pooled(reps: list[dict]) -> None:
     print("\n=== pooled")
-    for who in ("local", "axiom"):
-        for view in ("api", "use"):
-            tp = sum(r["score"][who][view]["tp"] for r in reps)
-            fp = sum(r["score"][who][view]["fp"] for r in reps)
-            fn = sum(r["score"][who][view]["fn"] for r in reps)
-            p = f"{tp / (tp + fp):.2f}" if tp + fp else "n/a"
-            rc = f"{tp / (tp + fn):.2f}" if tp + fn else "n/a"
-            print(f"  {who:<6} {view:<4} TP={tp:>2} FP={fp:>2} FN={fn:>2}  P={p} R={rc}")
+    for view in ("api", "use"):
+        tp = sum(r["score"]["local"][view]["tp"] for r in reps)
+        fp = sum(r["score"]["local"][view]["fp"] for r in reps)
+        fn = sum(r["score"]["local"][view]["fn"] for r in reps)
+        p = f"{tp / (tp + fp):.2f}" if tp + fp else "n/a"
+        rc = f"{tp / (tp + fn):.2f}" if tp + fn else "n/a"
+        print(f"  {'local':<6} {view:<4} TP={tp:>2} FP={fp:>2} FN={fn:>2}  P={p} R={rc}")
     for r in reps:
         print(f"  {r['pair']}: engine {r['timing']['local_total_excl_env_build_s']} s "
               "excl. env builds")

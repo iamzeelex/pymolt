@@ -48,9 +48,7 @@ Group C breaks the product's core promise ("honesty markers"), so it ranks high 
 | C10 | setup: lists every running container as "bind-mounting project"; edits the project's `.gitignore` without saying so | only one container mounts it | reported |
 | C11 | assess: `source_fixation: "pinned"` alongside "not fully pinned … a reconstruction" | the manifest holds ranges only | reported (hyper D4) |
 
-## What axiom_graph already has
-
-Surveyed `../axiom_graph/services/axiom_graph`: 143 tests, but codemods, succession, policy and the prose miners are untested.
+## Reusable prior work
 
 | Need | Verdict | Detail |
 |---|---|---|
@@ -64,7 +62,6 @@ Surveyed `../axiom_graph/services/axiom_graph`: 143 tests, but codemods, success
 | successor mining | idea only | add to `delta/fetch.py::successor_from`: the "replaced by / moved to / superseded by" regexes, stopwords, the dispatcher denylist and no-op gate, recurrence demotion, and `@deprecated("…")` messages. Skip CFG/SSA (about 1,200 lines for forwarding the probe already sees) |
 | first release that works on 3.12 (hyperframe) | idea, plus a small port | nothing checks Python compatibility. Build it in pymolt's `Fetcher`: `requires_python`, wheel tags, range-read modules checked against the stdlib lifetimes. Port the sdist fallback and safe extraction (`acquisition/sdist_cache.py:39-151`) for sdist-only releases (Theano) |
 | cheap ports | port | `acquisition/import_roots.py` (pure, 8 tests); the curated `DataFrame.lookup` rule (`core/rule_catalog.py:31`) as JSON |
-| traps | — | `accumulate_chain` records `removed_in` wrongly for non-monotonic histories (`flask.Markup`); `call_graph.py` is dead (it imports a removed vendored pycg); griffe's zip extraction lacks a zip-slip guard |
 
 ## Proposed order
 
@@ -75,7 +72,7 @@ Principle: first make the instrument honest and the evaluation repeatable, so ev
 | **0. Honest instrument** | Anchor every stored path to the project (trace path, target env). `plan --agent` never tracebacks. assess keeps the resolver's stderr and marks only the culprit, not every row "conflict". Correct wording: verify says which side is missing; "0 need attention" never shows over unrated deltas; capture's hint follows the real cause and `ok` means accepted; apply says "no change" for no-ops; succession says "not in the knowledge". setup accepts sub-root manifests that scan found; one setup.py parser. **Script the evaluation** (`bench/legacy_eval/run.py`: containers, era deps, workaround manifests, fixed test subsets) | B1, B3, B4, B5, B7, C1, C3, C4, C5, C6, C7, C8 (wording), C10, C11 | 3–4 d |
 | **1a. Container runner** (track A) | `RunnerSpec`; delta old side, identity resolution and path mapping through `docker exec`; `/work` → project paths | A1, B2, B7 | 4–5 d |
 | **1b. Stdlib detection** (track B, parallel to 1a) | design P1–P2: lifetimes data, stdlib sites with guards, per-file scan cache, python pseudo-migration (target probe plus data), evidence-capped tiers, plan without a baseline | A2, B6, C9 | 6–7 d |
-| **2. Fixes and fallback** | design P3 (LibCST: attr rewrite plus import, `replace-attr-path`, curated stdlib rules, minimal-diff gate). Static old side from axiom's griffe idea, for when no runner is reachable | A2 fixes, A1 fallback | 5 d |
+| **2. Fixes and fallback** | design P3 (LibCST: attr rewrite plus import, `replace-attr-path`, curated stdlib rules, minimal-diff gate). Static old side from the griffe idea above, for when no runner is reachable | A2 fixes, A1 fallback | 5 d |
 | **3. Imports and installs** | design P5 (`capture --mode imports`, verify import layer, calibration, `rejection`) and P6 (assess install/import ladder, culprit pin) | A3, A4 (partly) | 7 d |
 | **4. Knowledge and search** | Theano→PyTensor and nose→pytest succession; the prose-miner ideas; the `DataFrame.lookup` rule; first release importable on the target; A4's `-t no-module` | A4, C8, hyperframe | 4–5 d |
 

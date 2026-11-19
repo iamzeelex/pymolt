@@ -1,6 +1,6 @@
 # Generalization matrix: is pymolt skewed toward pandas and numpy?
 
-Every acceptance gate so far was pandas-centred: the e2e toy, delta parity (pandas + flask), and four of the six legacy projects in the numpy/pandas world. This bench measures the same funnel on migrations from **other ecosystems**, each with a **verified ground truth**, so a skew shows up as numbers rather than impressions.
+Every acceptance gate so far was pandas-centred: the e2e toy, delta accuracy (pandas + flask), and four of the six legacy projects in the numpy/pandas world. This bench measures the same funnel on migrations from **other ecosystems**, each with a **verified ground truth**, so a skew shows up as numbers rather than impressions.
 
 ## Hypotheses from the code audit (2026-11-15)
 
