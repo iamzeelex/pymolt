@@ -144,7 +144,9 @@ def test_a_move_group_finds_its_statement_after_an_earlier_fix_moved_it():
     assert sum(n for _, n in hits) == 2
 
 
-def test_a_site_on_a_line_an_earlier_change_deleted_is_not_rewritten_elsewhere():
+def test_carry_lines_drops_a_deleted_line_and_shifts_the_lines_after_it():
+    """How a later fix's ``lines_for`` follows an earlier change: a site on a line that change
+    deleted is dropped, never moved onto another line."""
     from pymolt.codemods.apply import carry_lines, line_map
 
     moved = line_map("a\nb\nc\n", "a\nc\n")

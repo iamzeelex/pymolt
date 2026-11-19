@@ -113,8 +113,11 @@ def test_apply_setup_persists_system_interpreter(tmp_path):
     assert saved["system_python"] == "/usr/bin/python3"
 
 
-def test_gather_exposes_interpreters(tmp_path):
+def test_gather_lists_the_project_venv_interpreter_first(tmp_path):
     (tmp_path / "requirements.txt").write_text("flask\n")
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("")
     options = gather_setup_options(tmp_path)
-    # At least the system python3/python should be discoverable in CI.
-    assert isinstance(options.interpreters, list)
+    # the project's own environment is the likeliest target, ahead of python3 on PATH
+    assert options.interpreters[0] == str(venv_python)

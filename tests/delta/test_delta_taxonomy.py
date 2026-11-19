@@ -164,14 +164,20 @@ def test_kwargs_that_only_refuse_make_every_removed_parameter_a_signature_change
     assert all(c.kind == "SIGNATURE" for c in changed)
 
 
-def test_probe_flags_a_kwargs_parameter_that_raises_when_filled_and_names_module_siblings(
-        tmp_path):
+def test_probe_flags_a_kwargs_parameter_that_raises_when_filled(tmp_path):
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "__init__.py").write_text(
         "def select(*entities, **kw):\n    if kw:\n        raise TypeError()\n"
-        "    return entities\n\n"
-        "def force_text(s):\n    return s\n\nforce_str = force_text\n")
-    out = _probe(tmp_path, ["pkg.select", "pkg.force_text"])
+        "    return entities\n")
+    out = _probe(tmp_path, ["pkg.select"])
     assert out["pkg.select"]["steps"][0]["rejects_kwargs"] is True
+
+
+def test_probe_names_a_module_level_alias_as_the_same_object(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        "def force_text(s):\n    return s\n\nforce_str = force_text\n")
+    out = _probe(tmp_path, ["pkg.force_text"])
     assert out["pkg.force_text"]["steps"][0]["same_object_as"] == ["pkg.force_str"]

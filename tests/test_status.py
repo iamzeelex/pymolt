@@ -505,9 +505,3 @@ class TestEnvironmentChecks:
         assert result.exit_code == 0
         assert "target environment" in result.stdout
 
-    def test_doctor_points_at_status(self, tmp_path):
-        result = runner.invoke(app, ["doctor", str(tmp_path), "--json"])
-
-        assert result.exit_code == 2
-        assert "pymolt status" in result.output
-

@@ -80,6 +80,10 @@ def test_the_plan_json_carries_the_field_additively():
 
     plan = MigrationPlan(target_python="3.12", source_manifest="requirements.txt")
     assert plan.model_dump()["type_relocations"] == []
+    # a plan written before the field existed still loads, with no relocations
+    older = plan.model_dump(mode="json")
+    del older["type_relocations"]
+    assert MigrationPlan.model_validate(older).type_relocations == []
     item = {"old": "a.B", "new": "c.B", "via": "a.B"}
     again = MigrationPlan.model_validate(
         MigrationPlan(target_python="3.12", source_manifest="r.txt",

@@ -22,15 +22,6 @@ def _rewrite_import():
     )
 
 
-def _rename_call():
-    return CodemodPattern(
-        old_qualname="mypkg.old_api",
-        new_qualname="mypkg.new_api",
-        kind="rename-call",
-        confidence="high",
-    )
-
-
 def _rewrite_module():
     # A whole-namespace move — one pattern for all of keras.* (framework succession).
     return CodemodPattern(
@@ -104,14 +95,6 @@ class TestApplyPattern:
         out, _ = apply_pattern(src, _rewrite_import())
         assert "# keep" in out
 
-    def test_rename_call_and_import(self):
-        src = "from mypkg import old_api\nr = old_api(1)\n"
-        out, sites = apply_pattern(src, _rename_call())
-        assert "import new_api" in out
-        assert "new_api(1)" in out
-        assert "old_api" not in out
-        assert sites >= 1
-
     def test_noop_when_absent(self):
         src = "y = 1 + 2\n"
         out, sites = apply_pattern(src, _rewrite_import())
@@ -142,9 +125,9 @@ class TestRenameIsBindingAware:
 
     def test_real_import_is_renamed(self):
         src = "from mypkg import old_api\nz = old_api(2)\n"
-        out, _ = apply_pattern(src, self.P)
-        assert "from mypkg import new_api" in out
-        assert "new_api(2)" in out
+        out, sites = apply_pattern(src, self.P)
+        assert out == "from mypkg import new_api\nz = new_api(2)\n"
+        assert sites == 2  # the import and the call
 
     def test_aliased_import_keeps_alias_call(self):
         src = "from mypkg import old_api as foo\nw = foo(3)\n"
@@ -182,14 +165,6 @@ class TestApplyToRepo:
         (venv / "lib.py").write_text("from flask.helpers import safe_join\n")
         return tmp_path
 
-    def test_dry_run_does_not_write(self, tmp_path):
-        repo = self._make_repo(tmp_path)
-        result = apply_to_repo(repo, [_rewrite_import()])
-        assert result.dry_run is True
-        assert result.files_changed == 1
-        # disk unchanged
-        assert "flask.helpers" in (repo / "app.py").read_text()
-
     def test_write_applies(self, tmp_path):
         repo = self._make_repo(tmp_path)
         os.chmod(repo / "app.py", 0o744)
@@ -212,17 +187,20 @@ class TestApplyToRepo:
         # good file still processed despite the broken one
         assert result.files_changed == 1
 
-    def test_dry_run_never_prepares_transaction_files(self, tmp_path, monkeypatch):
+    def test_dry_run_is_the_default_and_never_prepares_transaction_files(
+            self, tmp_path, monkeypatch):
         repo = self._make_repo(tmp_path)
 
         def unexpected_commit(_rewrites):
             raise AssertionError("dry-run must not prepare or commit files")
 
         monkeypatch.setattr(apply_module, "_commit_rewrites", unexpected_commit)
-        result = apply_to_repo(repo, [_rewrite_import()], write=False)
+        result = apply_to_repo(repo, [_rewrite_import()])  # no `write`: a dry run
 
+        assert result.dry_run is True
         assert result.files_changed == 1
         assert "flask.helpers" in (repo / "app.py").read_text()
+        assert not list(repo.glob(".*.pymolt-*.tmp"))
 
     def test_prepare_failure_leaves_every_source_untouched(self, tmp_path, monkeypatch):
         first = tmp_path / "a.py"

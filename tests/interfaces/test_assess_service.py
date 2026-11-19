@@ -59,18 +59,28 @@ def test_build_comparison_rows_no_culprits_means_all_unresolved():
     assert all(r["status"] == "unresolved" for r in rows)
 
 
-def test_resolve_chosen_source_missing_raises(tmp_path):
+def _manifest_and_lock(tmp_path):
     from pymolt.ingestion.detect import detect_sources
 
     (tmp_path / "requirements.txt").write_text("flask\n")
     (tmp_path / "uv.lock").write_text('version = 1\n[[package]]\nname = "flask"\nversion = "1.0"\n')
-    sources = detect_sources(tmp_path)
-    # Named -> exact match.
+    return detect_sources(tmp_path)
+
+
+def test_resolve_chosen_source_takes_the_named_manifest(tmp_path):
+    sources = _manifest_and_lock(tmp_path)
     chosen = resolve_chosen_source(sources, "requirements.txt", tmp_path)
     assert chosen.path.name == "requirements.txt"
-    # Default -> first lock.
+
+
+def test_resolve_chosen_source_defaults_to_the_lock(tmp_path):
+    sources = _manifest_and_lock(tmp_path)
     assert resolve_chosen_source(sources, None).path.name == "uv.lock"
-    with pytest.raises(ValueError):
+
+
+def test_resolve_chosen_source_missing_raises(tmp_path):
+    sources = _manifest_and_lock(tmp_path)
+    with pytest.raises(ValueError, match="Manifest 'nope.txt' not found"):
         resolve_chosen_source(sources, "nope.txt", tmp_path)
 
 

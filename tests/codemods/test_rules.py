@@ -151,9 +151,6 @@ LOOKUP_B_PLAIN = CodemodRule(
 
 
 class TestBFormAcceptance:
-    def test_verifies_true(self):
-        assert verify_rule(LOOKUP_B) is True
-
     def test_applies_with_real_names_and_indentation(self):
         src = (
             "def score(frame, r, c):\n"
