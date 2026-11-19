@@ -16,7 +16,6 @@ from pymolt.verify import _normalize as nz
 from pymolt.verify import _sinks
 from pymolt.verify.fact_report import summarize
 from pymolt.verify.facts import (
-    Comparison,
     ComparisonLevel,
     FactCategory,
     OrderCause,
@@ -362,7 +361,6 @@ def test_the_line_fast_path_skips_lines_without_order(tmp_path: Path):
     trace.write_text(json.dumps(call("lib.f", {"a": 1, "b": 2}, 1)) + "\n")
     fs = load_facts(trace, root=ROOT, runner=None)
     assert fs.facts[0].input_order is None
-    assert Comparison  # imported for readers of these tests
 
 
 # ── the baseline replicate ────────────────────────────────────────────────────────────────

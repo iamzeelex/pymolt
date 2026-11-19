@@ -31,10 +31,8 @@ def _write(path, text):
     path.write_text(textwrap.dedent(text), encoding="utf-8")
 
 
-@pytest.fixture
-def project(tmp_path):
+def _make_project(root):
     """A project whose root holds ``fakepkg`` (importable because the root is on sys.path)."""
-    root = tmp_path / "proj"
     _write(
         root / "fakepkg" / "__init__.py",
         """
@@ -95,57 +93,80 @@ def project(tmp_path):
     return root
 
 
+@pytest.fixture
+def project(tmp_path):
+    return _make_project(tmp_path / "proj")
+
+
+_PATHS = [
+    "fakepkg.Thing",
+    "fakepkg.thing_alias",
+    "fakepkg.Pub",
+    "fakepkg.decorated",
+    "fakepkg.parse",
+    "fakepkg._impl",
+    "fakepkg.Thing.run",
+    "fakepkg.Missing",
+    "fakepkg.broken.anything",
+    "nosuchdist.thing",
+]
+
+
+@pytest.fixture(scope="module")
+def resolved(tmp_path_factory):
+    """One probe run over every path above (the subprocess is the slow part)."""
+    root = _make_project(tmp_path_factory.mktemp("resolved") / "proj")
+    return resolve_identities(_PATHS, root, _HOST, use_cache=False)
+
+
 def test_probe_parses_as_python36():
     ast.parse(_PROBE_SOURCE, feature_version=(3, 6))
 
 
-def test_resolves_reexports_classes_wrappers_and_failures(project):
-    res = resolve_identities(
-        [
-            "fakepkg.Thing",
-            "fakepkg.thing_alias",
-            "fakepkg.Pub",
-            "fakepkg.decorated",
-            "fakepkg.parse",
-            "fakepkg._impl",
-            "fakepkg.Thing.run",
-            "fakepkg.Missing",
-            "fakepkg.broken.anything",
-            "nosuchdist.thing",
-        ],
-        project,
-        _HOST,
-        use_cache=False,
-    )
-    r = res.results
+@pytest.mark.parametrize(("path", "sym", "kind"), [
+    ("fakepkg.Thing", "fakepkg._impl.Thing", "class"),                # a re-export
+    ("fakepkg.thing_alias", "fakepkg._impl.Thing", "class"),          # an alias of it
+    ("fakepkg.Pub", "fakepkg._impl.Pub", "class"),    # where its code runs, not its __module__
+    ("fakepkg.decorated", "fakepkg._impl.decorated", "function"),     # through the wrapper
+    ("fakepkg._impl", "fakepkg._impl", "module"),
+    ("fakepkg.Thing.run", "fakepkg._impl.Thing.run", "function"),
+])
+def test_a_public_path_resolves_to_where_its_code_lives(resolved, path, sym, kind):
+    r = resolved.results[path]
+    assert (r.sym, r.kind) == (sym, kind) and r.error is None
 
-    thing = r["fakepkg.Thing"]
-    assert (thing.sym, thing.kind) == ("fakepkg._impl.Thing", "class")
-    assert "fakepkg._impl.run" in thing.legacy  # unique code name -> unambiguous v1 name
-    assert "fakepkg._impl.__init__" not in thing.legacy  # Other.__init__ makes it ambiguous
-    assert r["fakepkg.thing_alias"].sym == "fakepkg._impl.Thing"
 
-    pub = r["fakepkg.Pub"]
-    assert pub.sym == "fakepkg._impl.Pub"  # where its code runs, not the rewritten __module__
-    assert "fakepkg.Pub" in pub.aliases
-
-    decorated = r["fakepkg.decorated"]
-    assert (decorated.sym, decorated.kind) == ("fakepkg._impl.decorated", "function")
-    assert decorated.unwrapped is True
-
+def test_v1_names_are_kept_only_where_they_are_unambiguous(resolved):
+    r = resolved.results
+    assert "fakepkg._impl.run" in r["fakepkg.Thing"].legacy  # unique code name
+    assert "fakepkg._impl.__init__" not in r["fakepkg.Thing"].legacy  # Other.__init__ too
+    assert r["fakepkg.Thing.run"].legacy == ["fakepkg._impl.run"]
     # typing.overload stubs are compiled but never run: the implementation stays unique.
     assert r["fakepkg.parse"].legacy == ["fakepkg._impl.parse"]
 
-    assert (r["fakepkg._impl"].sym, r["fakepkg._impl"].kind) == ("fakepkg._impl", "module")
-    assert r["fakepkg.Thing.run"].sym == "fakepkg._impl.Thing.run"
-    assert r["fakepkg.Thing.run"].legacy == ["fakepkg._impl.run"]
 
-    assert "AttributeError" in r["fakepkg.Missing"].error
-    assert "boom at import" in r["fakepkg.broken.anything"].error
-    assert "nosuchdist" in r["nosuchdist.thing"].error
-    assert not any(identity.transient for identity in r.values())
-    assert res.resolved == 7
-    assert res.python == ".".join(str(part) for part in sys.version_info[:3])
+def test_a_rewritten_module_keeps_the_public_path_as_an_alias(resolved):
+    assert "fakepkg.Pub" in resolved.results["fakepkg.Pub"].aliases
+
+
+def test_a_decorated_function_is_marked_unwrapped(resolved):
+    assert resolved.results["fakepkg.decorated"].unwrapped is True
+
+
+@pytest.mark.parametrize(("path", "fragment"), [
+    ("fakepkg.Missing", "AttributeError"),
+    ("fakepkg.broken.anything", "boom at import"),
+    ("nosuchdist.thing", "nosuchdist"),
+])
+def test_a_path_that_cannot_resolve_is_a_lasting_error(resolved, path, fragment):
+    r = resolved.results[path]
+    assert fragment in r.error and not r.transient and r.sym is None
+
+
+def test_the_batch_counts_what_resolved_and_names_its_python(resolved):
+    assert not any(identity.transient for identity in resolved.results.values())
+    assert resolved.resolved == 7
+    assert resolved.python == ".".join(str(part) for part in sys.version_info[:3])
 
 
 def test_per_path_timeout_keeps_resolving_the_rest(project):
