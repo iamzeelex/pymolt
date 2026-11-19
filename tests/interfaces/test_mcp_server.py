@@ -1,9 +1,10 @@
 """Tests for the optional stdio MCP adapter (pymolt/interfaces/mcp_server.py).
 
-The whole module is skipped when the `mcp` extra isn't installed. Tools are
-registered on FastMCP but stay plain importable functions, so we call them
-directly. The parity tests at the bottom are the adapter's contract: every tool
-returns exactly what `pymolt <command> --agent` prints for the same project.
+The whole module is skipped when the `mcp` extra isn't installed (CI installs it). The tools
+are methods of ``Tools``, bound to the person's grants, so we call them directly. The parity
+tests at the bottom are the adapter's contract: every tool returns exactly what
+`pymolt <command> --agent` prints for the same project. The write tools (apply, rollback) are
+tested in tests/workorder/test_mcp_write_tools.py.
 """
 from __future__ import annotations
 
@@ -19,9 +20,10 @@ pytest.importorskip("mcp")
 
 from pymolt.interfaces import mcp_server  # noqa: E402
 from pymolt.interfaces.cli.commands import app  # noqa: E402
+from pymolt.interfaces.mcp_server import Grants, Tools, build_server  # noqa: E402
 
-_EXPECTED_TOOLS = {"status", "scan", "setup", "assess", "capture", "verify", "plan", "apply",
-                   "rollback"}
+_DEFAULT_TOOLS = {"status", "scan", "setup", "assess", "plan", "verify", "apply", "rollback"}
+_ALL_TOOLS = _DEFAULT_TOOLS | {"capture"}
 runner = CliRunner()
 
 
@@ -47,48 +49,70 @@ def _configured_project(tmp_path):
     return project
 
 
-@pytest.fixture(autouse=True)
-def _workspace_root(tmp_path, monkeypatch):
-    """Confine every test's workspace root to its own tmp_path."""
-    monkeypatch.setattr(mcp_server, "_WORKSPACE_ROOT", tmp_path.resolve())
+@pytest.fixture
+def tools(tmp_path):
+    """The tools of a server rooted at this test's tmp_path, started with --allow-run."""
+    return Tools(Grants(root=tmp_path.resolve(), allow_run=True))
 
 
-@pytest.fixture(autouse=True)
-def _no_exec_env(monkeypatch):
-    """Exec is disabled unless a test opts in with PYMOLT_MCP_ALLOW_EXEC=1."""
-    monkeypatch.delenv("PYMOLT_MCP_ALLOW_EXEC", raising=False)
+def _names(server) -> set[str]:
+    return {t.name for t in asyncio.run(server.list_tools())}
 
 
-# ── registration ─────────────────────────────────────────────────────────────
+# ── what the person grants ────────────────────────────────────────────────────
 
 
-def test_the_tools_are_the_cli_commands():
-    """One name per action, the same in the CLI and here."""
-    names = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert names == _EXPECTED_TOOLS
+def test_without_allow_run_the_agent_has_no_capture_tool(tmp_path):
+    server = build_server(Grants(root=tmp_path))
+    assert _names(server) == _DEFAULT_TOOLS
+    assert "--allow-run" in server.instructions
+
+
+def test_allow_run_adds_capture(tmp_path):
+    server = build_server(Grants(root=tmp_path, allow_run=True))
+    assert _names(server) == _ALL_TOOLS
+    assert "--allow-run" not in server.instructions
+
+
+def test_the_tools_that_change_things_say_so(tmp_path):
+    """Annotations let a client ask the person before a call that runs programs or
+    changes source."""
+    listed = asyncio.run(build_server(Grants(root=tmp_path, allow_run=True)).list_tools())
+    destructive = {t.name for t in listed if t.annotations.destructiveHint}
+    assert destructive == {"capture", "apply", "rollback"}
+
+
+def test_every_tool_refuses_an_argument_it_does_not_take(tmp_path):
+    server = build_server(Grants(root=tmp_path, allow_run=True))
+    for name in _ALL_TOOLS:
+        with pytest.raises(Exception, match="Extra inputs are not permitted"):
+            asyncio.run(server.call_tool(name, {"project_dir": str(tmp_path), "force_it": 1}))
+
+
+def test_the_cli_passes_the_grants_to_the_server(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(mcp_server, "run", lambda **kw: seen.update(kw))
+    result = runner.invoke(app, ["mcp", "--serve", "--root", str(tmp_path), "--allow-run"])
+    assert result.exit_code == 0, result.output
+    assert seen == {"root": str(tmp_path), "allow_run": True}
+    seen.clear()
+    runner.invoke(app, ["mcp", "--serve"])
+    assert seen == {"root": None, "allow_run": False}
 
 
 def test_dir_taking_tools_use_project_dir_param():
     """The directory arg is named `project_dir`, as in the CLI (regression guard for `dir`)."""
-    for name in _EXPECTED_TOOLS:
-        params = inspect.signature(getattr(mcp_server, name)).parameters
+    for name in _ALL_TOOLS:
+        params = inspect.signature(getattr(Tools, name)).parameters
         assert "project_dir" in params, f"{name} lost its project_dir param"
         assert "dir" not in params
-
-
-def test_the_adapter_stays_thin():
-    """The acceptance bar: nine tools over the view layer, about 400 lines (the two write
-    tools, apply and rollback, are parity-tested in tests/workorder/test_agent_view.py)."""
-    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
-    assert len(source.splitlines()) <= 420
-    assert "_fit_answer" not in source and "truncation_note" not in source
 
 
 def test_scan_description_tells_the_agent_to_expect_a_monorepo():
     """A tool description is the only text that reaches the model (measured: the
     server `instructions` moved no request tokens). When it stopped naming the
     monorepo case, agents dropped nested requirements-only roots."""
-    doc = mcp_server.scan.__doc__ or ""
+    doc = Tools.scan.__doc__ or ""
     assert "monorepo" in doc.lower()
     assert "requirements.txt" in doc
     assert "EVERY project root" in doc
@@ -97,8 +121,8 @@ def test_scan_description_tells_the_agent_to_expect_a_monorepo():
 # ── shapes and failures ──────────────────────────────────────────────────────
 
 
-def test_scan_returns_contract_shape_and_writes_report(tmp_path):
-    result = mcp_server.scan(project_dir=str(_make_project(tmp_path)))
+def test_scan_returns_contract_shape_and_writes_report(tmp_path, tools):
+    result = tools.scan(project_dir=str(_make_project(tmp_path)))
     assert set(result) == {"ok", "summary", "data", "full_report_path", "hint"}
     assert result["ok"] is True and result["data"]["root_count"] >= 1
     written = Path(result["full_report_path"])
@@ -107,76 +131,69 @@ def test_scan_returns_contract_shape_and_writes_report(tmp_path):
     json.dumps(result)
 
 
-def test_scan_reports_the_call_sites_into_dependencies(tmp_path):
-    result = mcp_server.scan(project_dir=str(_make_project(tmp_path)))
+def test_scan_reports_the_call_sites_into_dependencies(tmp_path, tools):
+    result = tools.scan(project_dir=str(_make_project(tmp_path)))
     assert result["data"]["contacts"]["total"] >= 1
     assert any(row.startswith("requests ") for row in result["data"]["contacts"]["per_dependency"])
     assert "call site" in result["summary"]
 
 
-def test_scan_finds_a_nested_requirements_only_root(tmp_path):
+def test_scan_finds_a_nested_requirements_only_root(tmp_path, tools):
     (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup(name='top')\n")
     (tmp_path / "requirements.txt").write_text("flask>=1.0\n")
     demo = tmp_path / "demo_app"
     demo.mkdir()
     (demo / "requirements.txt").write_text("flask>=2.0\n")
     (demo / "app.py").write_text("import flask\n")
-    res = mcp_server.scan(project_dir=str(tmp_path))
+    res = tools.scan(project_dir=str(tmp_path))
     assert "demo_app" in {r["path"] for r in res["data"]["roots"]}
 
 
-def test_scan_nonexistent_dir_returns_error(tmp_path):
-    result = mcp_server.scan(project_dir=str(tmp_path / "does-not-exist"))
+def test_scan_nonexistent_dir_returns_error(tmp_path, tools):
+    result = tools.scan(project_dir=str(tmp_path / "does-not-exist"))
     assert result["ok"] is False
     assert "does not exist" in result["error"].lower()
     assert "hint" in result and "summary" not in result
 
 
-def test_every_tool_handles_nonexistent_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
+def test_every_tool_handles_nonexistent_dir(tmp_path, tools):
     missing = str(tmp_path / "nope")
-    for name in _EXPECTED_TOOLS:
+    for name in _ALL_TOOLS:
         kwargs = {"command": ["pytest"]} if name == "capture" else {}
-        result = getattr(mcp_server, name)(project_dir=missing, **kwargs)
+        result = getattr(tools, name)(project_dir=missing, **kwargs)
         assert result["ok"] is False and result["error"], name
 
 
-def test_resolve_dir_confines_to_the_workspace_root(tmp_path, monkeypatch):
+def test_every_tool_stays_inside_the_root_the_person_gave(tmp_path):
     root, outside = tmp_path / "root", tmp_path / "outside"
     (root / "sub").mkdir(parents=True)
     outside.mkdir()
-    monkeypatch.setattr(mcp_server, "_WORKSPACE_ROOT", root.resolve())
-    assert mcp_server._resolve_dir(str(root / "sub")) == (root / "sub").resolve()
-    with pytest.raises(ValueError, match="outside the workspace root"):
-        mcp_server._resolve_dir(str(outside))
-    assert "outside the workspace root" in mcp_server.scan(project_dir=str(outside))["error"]
+    _make_project(outside)
+    confined = Tools(Grants(root=root.resolve(), allow_run=True))
+    assert confined.scan(project_dir=str(root / "sub"))["ok"] is True
+    for name in _ALL_TOOLS:
+        kwargs = {"command": ["pytest"]} if name == "capture" else {}
+        result = getattr(confined, name)(project_dir=str(outside), **kwargs)
+        assert result["ok"] is False and "outside the workspace root" in result["error"], name
+        assert "--root" in result["hint"], name
+    assert not (outside / ".pymolt").exists()
 
 
-def test_capture_is_gated_by_the_exec_opt_in(tmp_path, monkeypatch):
-    project = _configured_project(tmp_path)
-    blocked = mcp_server.capture(project_dir=str(project), command=["pytest"])
-    assert blocked["ok"] is False and "PYMOLT_MCP_ALLOW_EXEC" in blocked["hint"]
-    assert mcp_server.scan(project_dir=str(project))["ok"] is True, "read-only tools ungated"
-    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
-    assert mcp_server._require_exec_allowed() is None
-
-
-def test_capture_before_setup_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
+def test_capture_before_setup_is_refused(tmp_path, tools):
     project = _make_project(tmp_path)
-    result = mcp_server.capture(project_dir=str(project), command=["pytest"])
+    result = tools.capture(project_dir=str(project), command=["pytest"])
     assert result["ok"] is False and "not configured" in result["error"]
     assert not (project / ".pymolt" / "contract_state.json").exists()
 
 
-def test_setup_lists_then_saves(tmp_path):
+def test_setup_lists_then_saves(tmp_path, tools):
     project = _make_project(tmp_path)
-    listing = mcp_server.setup(project_dir=str(project))
+    listing = tools.setup(project_dir=str(project))
     options = listing["data"]["options"]
     assert listing["ok"] is True and "requirements.txt" in options["manifests"]
     assert not (project / ".pymolt" / "env_config.json").exists()
 
-    saved = mcp_server.setup(
+    saved = tools.setup(
         project_dir=str(project), manifest="requirements.txt", tool=options["tools"][0],
         base_python="3.8", target_python=options["target_python_options"][0],
         target_env=".venv-target",
@@ -186,17 +203,17 @@ def test_setup_lists_then_saves(tmp_path):
     assert config["target_env_path"] == ".venv-target"
 
 
-def test_setup_rejects_invalid_or_partial_choices(tmp_path):
+def test_setup_rejects_invalid_or_partial_choices(tmp_path, tools):
     project = str(_make_project(tmp_path))
-    bad = mcp_server.setup(project_dir=project, manifest="bogus.txt", tool="uv",
+    bad = tools.setup(project_dir=project, manifest="bogus.txt", tool="uv",
                            base_python="3.8", target_python="3.12")
     assert bad["ok"] is False and "requirements.txt" in bad["hint"]
-    partial = mcp_server.setup(project_dir=project, manifest="requirements.txt")
+    partial = tools.setup(project_dir=project, manifest="requirements.txt")
     assert "tool" in partial["error"] and "target_python" in partial["error"]
 
 
-def test_plan_before_setup_says_what_to_run(tmp_path):
-    result = mcp_server.plan(project_dir=str(_make_project(tmp_path)))
+def test_plan_before_setup_says_what_to_run(tmp_path, tools):
+    result = tools.plan(project_dir=str(_make_project(tmp_path)))
     assert result["ok"] is False and "not configured" in result["error"]
     assert "setup" in result["hint"]
 
@@ -254,8 +271,7 @@ def _fake_capture(monkeypatch):
 
 def _fake_codemods(monkeypatch, project):
     from pymolt.codemods import service as codemod_service
-    from pymolt.codemods.models import DependencyMigration
-    from pymolt.codemods.models import CodemodPattern, FilePreview
+    from pymolt.codemods.models import CodemodPattern, DependencyMigration, FilePreview
 
     source = (project / "app.py").read_text(encoding="utf-8")
     pattern = CodemodPattern(old_qualname="requests.get", new_qualname="requests.api.get",
@@ -271,11 +287,11 @@ def _fake_codemods(monkeypatch, project):
     return source
 
 
-def test_assess_never_says_feasible_and_keeps_warnings(tmp_path, monkeypatch):
+def test_assess_never_says_feasible_and_keeps_warnings(tmp_path, monkeypatch, tools):
     _fake_resolution(monkeypatch)
     project = _configured_project(tmp_path)
     (project / "Dockerfile").write_text("FROM python:3.11\n", encoding="utf-8")
-    result = mcp_server.assess(project_dir=str(project))
+    result = tools.assess(project_dir=str(project))
     assert result["ok"] is True, result
     data = result["data"]
     assert data["changes"] == ["requests 2.31.0>2.32.0 upgrade"]
@@ -285,10 +301,10 @@ def test_assess_never_says_feasible_and_keeps_warnings(tmp_path, monkeypatch):
     assert "python:3.12" in data["target_env"]["suggested_dockerfile"]
 
 
-def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch):
+def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch, tools):
     project = _configured_project(tmp_path)
     source = _fake_codemods(monkeypatch, project)
-    result = mcp_server.plan(project_dir=str(project))
+    result = tools.plan(project_dir=str(project))
     assert result["ok"] is True, result
     assert (project / ".pymolt" / "migration_plan.json").is_file()
     assert result["data"]["files_to_change"] == ["app.py"]
@@ -309,32 +325,31 @@ def _normalize(view: dict) -> dict:
     return json.loads(text)
 
 
-def _parity_cases(p: str):
+def _parity_cases(tools, p: str):
     """(CLI argv, MCP call) per tool; the CLI side gets --agent."""
     return {
-        "status": (["status", p], lambda: mcp_server.status(project_dir=p)),
-        "scan": (["scan", p], lambda: mcp_server.scan(project_dir=p)),
-        "setup": (["setup", p], lambda: mcp_server.setup(project_dir=p)),
+        "status": (["status", p], lambda: tools.status(project_dir=p)),
+        "scan": (["scan", p], lambda: tools.scan(project_dir=p)),
+        "setup": (["setup", p], lambda: tools.setup(project_dir=p)),
         "setup-save": (
             ["setup", p, "--manifest", "requirements.txt", "--tool", "system",
              "--base-python", "3.11", "--target-python", "3.12"],
-            lambda: mcp_server.setup(project_dir=p, manifest="requirements.txt", tool="system",
+            lambda: tools.setup(project_dir=p, manifest="requirements.txt", tool="system",
                                      base_python="3.11", target_python="3.12")),
-        "assess": (["assess", p], lambda: mcp_server.assess(project_dir=p)),
+        "assess": (["assess", p], lambda: tools.assess(project_dir=p)),
         "capture": (
             ["capture", "baseline", "--mode", "tests", "--project-dir", p, "--force",
              "--agent", "--", "pytest"],
-            lambda: mcp_server.capture(project_dir=p, when="baseline", mode="tests",
+            lambda: tools.capture(project_dir=p, when="baseline", mode="tests",
                                        command=["pytest"], force=True)),
-        "plan": (["plan", p], lambda: mcp_server.plan(project_dir=p)),
-        "verify": (["verify", p], lambda: mcp_server.verify(project_dir=p)),
+        "plan": (["plan", p], lambda: tools.plan(project_dir=p)),
+        "verify": (["verify", p], lambda: tools.verify(project_dir=p)),
     }
 
 
-@pytest.mark.parametrize("case", list(_parity_cases(".")))
-def test_mcp_tool_returns_the_cli_agent_view(case, tmp_path, monkeypatch):
+@pytest.mark.parametrize("case", list(_parity_cases(None, ".")))
+def test_mcp_tool_returns_the_cli_agent_view(case, tmp_path, monkeypatch, tools):
     project = _configured_project(tmp_path)
-    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
     monkeypatch.setattr("sys.stdout.isatty", lambda: False)
     _fake_resolution(monkeypatch)
     capture = _fake_capture(monkeypatch)
@@ -345,7 +360,7 @@ def test_mcp_tool_returns_the_cli_agent_view(case, tmp_path, monkeypatch):
         for when in ("baseline", "post_migration"):
             capture(project, when, CaptureMode.TEST_SUITE, command=["pytest"])
 
-    argv, call = _parity_cases(str(project))[case]
+    argv, call = _parity_cases(tools, str(project))[case]
     if "--agent" not in argv:
         argv = [*argv, "--agent"]
     result = runner.invoke(app, argv)
@@ -380,9 +395,8 @@ def test_cli_setup_json_is_the_full_payload(tmp_path):
     assert not (project / ".pymolt" / "env_config.json").exists()
 
 
-def test_capture_passes_accept_failing_through(tmp_path, monkeypatch):
+def test_capture_passes_accept_failing_through(tmp_path, monkeypatch, tools):
     project = _configured_project(tmp_path)
-    monkeypatch.setenv("PYMOLT_MCP_ALLOW_EXEC", "1")
     seen = {}
     fake = _fake_capture(monkeypatch)
 
@@ -391,5 +405,5 @@ def test_capture_passes_accept_failing_through(tmp_path, monkeypatch):
         return fake(project_dir, when, mode, **kwargs)
 
     monkeypatch.setattr("pymolt.verify.service.capture_named_trace", spy)
-    view = mcp_server.capture(project_dir=str(project), command=["pytest"], accept_failing=True)
+    view = tools.capture(project_dir=str(project), command=["pytest"], accept_failing=True)
     assert view["ok"] is True and seen["accept_failing"] is True

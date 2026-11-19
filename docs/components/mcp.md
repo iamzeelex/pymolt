@@ -27,11 +27,24 @@ you to reinstall with `pymolt[mcp]` — no traceback.
 ## Client wiring
 
 ```bash
-claude mcp add pymolt -- pymolt mcp    # Claude Code
+claude mcp add pymolt -- pymolt mcp --allow-run    # Claude Code
 ```
 
 For any other MCP client (ChatGPT, Cursor, a local model), configure a **stdio**
 server whose command is `pymolt mcp`. The server name is `pymolt`.
+
+## What the agent may do
+
+You decide in the server command, where the agent cannot change it:
+
+| Grant | Effect |
+|---|---|
+| `--root DIR` | Every tool's `project_dir` must lie under `DIR` (default: where the server starts). |
+| `--allow-run` | Adds the `capture` tool, which runs the agent's command on this machine, and lets `apply` run its import check. Without it the agent runs no program. |
+| your approval of a plan | `apply` and `rollback` write a step only on a plan you approved for agents on a terminal (`pymolt apply . --approve-agent`). A re-plan or any change to the plan voids it. |
+
+Every tool refuses an argument it does not take. `capture`, `apply` and `rollback` carry the
+MCP `destructiveHint` annotation, so a client can ask you before each call.
 
 ## Tools
 
@@ -44,11 +57,11 @@ The tools have the names of the CLI commands. Every tool takes
 | `scan` | `pymolt scan` | Project roots, Python-version evidence + divergence, dependency edges, and every call site into a dependency (offline, no resolution). Use instead of reading Dockerfiles/lockfiles or grepping imports. |
 | `setup` | `pymolt setup` | With no choices: the exact manifest / tool / interpreter / target-Python strings it accepts. With them: writes `.pymolt/env_config.json`; an invalid choice returns `ok:false` with the valid values. |
 | `assess` | `pymolt assess` | Resolves base vs target graphs, compares per package (blockers/upgrades first), writes the pinned target manifest, and returns how to build the target environment. `risk=true` does cached network calls. |
-| `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Runs a host process, so it is opt-in: set `PYMOLT_MCP_ALLOW_EXEC=1` in the server's environment. |
+| `capture` | `pymolt capture` | Runs YOUR command with the boundary tracer injected and keeps it as the baseline or post-migration capture. Needs setup. Runs a host process, so it exists only with `--allow-run`. |
 | `plan` | `pymolt plan` | Saves the API changes, codemods and predicted risks for the target manifest as the migration plan and returns the diffs. Writes no source. |
 | `verify` | `pymolt verify` | The verdict: PASS / FAIL / INCONCLUSIVE with reasons, confirmed / BLIND, coverage and recall % with their granularity, and the calls that changed, plus how the plan's predicted risks fared. Saved like the CLI's. |
-| `apply` | `pymolt apply --agent` | On a plan a person approved for agents: applies its pymolt steps, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. Writing needs `PYMOLT_MCP_ALLOW_WRITE=1`. |
-| `rollback` | `pymolt rollback --step ID --agent` | Rolls back one step of an approved plan. Needs `PYMOLT_MCP_ALLOW_WRITE=1`. |
+| `apply` | `pymolt apply --agent` | On a plan a person approved for agents: applies its pymolt steps, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. It writes only on an approved plan. |
+| `rollback` | `pymolt rollback --step ID --agent` | Rolls back one step of an approved plan. |
 
 ### Workflow
 
@@ -96,9 +109,8 @@ Output is plain text, with no rich/ANSI.
 
 ## Source writes
 
-Only `apply` and `rollback` write source files, and only when the server runs with
-`PYMOLT_MCP_ALLOW_WRITE=1`, on a plan a person approved for agents on a terminal
-(`pymolt apply . --approve-agent`). A re-plan or any change to the plan voids the
-approval. Without `PYMOLT_MCP_ALLOW_EXEC=1`, `apply` runs no smoke import and the
-receipt says so. Their dry runs and briefs need no opt-in. Details:
+Only `apply` and `rollback` write source files, and only on a plan a person approved
+for agents on a terminal (`pymolt apply . --approve-agent`). A re-plan or any change to
+the plan voids the approval. Without `--allow-run`, `apply` runs no import check and the
+receipt says so. Their dry runs and briefs need no approval. Details:
 [agents.md](../agents.md).

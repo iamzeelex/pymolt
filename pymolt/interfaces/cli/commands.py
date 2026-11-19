@@ -2712,16 +2712,27 @@ def _render_or_write_patches(
 
 @app.command(rich_help_panel="Tools")
 def mcp(
+    root: str | None = typer.Option(
+        None, "--root",
+        help="The directory the agent may work in (default: where the server starts)",
+    ),
+    allow_run: bool = typer.Option(
+        False, "--allow-run",
+        help="Let the agent run programs: the capture tool and apply's import check",
+    ),
     serve: bool = typer.Option(
         False, "--serve", help="Run even in a terminal (for testing)"
     ),
 ):
     """Run the MCP server on stdio, for AI agents.
 
-    An agent client starts it; you register it once:
+    An agent client starts it; you register it once, with what you allow:
 
-      Claude Code:  claude mcp add pymolt -- pymolt mcp
+      Claude Code:  claude mcp add pymolt -- pymolt mcp --allow-run
       Codex:        add an [mcp_servers.pymolt] entry to ~/.codex/config.toml
+
+    Without --allow-run the agent runs no program. apply and rollback change source only
+    on a plan you approved for agents (`pymolt apply . --approve-agent`).
     """
     # All human-facing output goes to STDERR: stdout is the JSON-RPC channel and a
     # single stray byte there corrupts the protocol.
@@ -2750,14 +2761,20 @@ def mcp(
         )
         err.print('  Other         command [cyan]pymolt[/cyan], args [cyan]["mcp"][/cyan]')
         err.print(
+            "\nAdd [cyan]--allow-run[/cyan] to let the agent run its capture command, and "
+            "[cyan]--root DIR[/cyan] to change the directory it may work in."
+        )
+        err.print(
             "\nTo run it here anyway (e.g. to test), use [bold]pymolt mcp --serve[/bold]."
         )
         raise typer.Exit(code=0)
 
     # Spawned by a client (stdin piped) or --serve: run. A one-line lifecycle note to
     # STDERR so it never looks dead; stdout stays clean for the protocol.
-    err.print("[dim]pymolt mcp: stdio server ready (JSON-RPC on stdin/stdout; Ctrl-C).[/dim]")
-    run_mcp()
+    granted = "runs programs" if allow_run else "runs no program (no --allow-run)"
+    err.print(f"[dim]pymolt mcp: stdio server ready; it {granted} (JSON-RPC on "
+              "stdin/stdout; Ctrl-C).[/dim]")
+    run_mcp(root=root, allow_run=allow_run)
 
 
 @app.command(rich_help_panel="Experimental")

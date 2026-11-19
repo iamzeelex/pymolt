@@ -1,15 +1,13 @@
 """Agents running the plan (design 3.6, variant A): a person's approval per plan, voided by a
 re-plan or any change to the plan; ``apply --agent`` and ``rollback --agent --step`` on an
-approved plan; the full apply view with the next brief; and the MCP ``apply`` and
-``rollback`` tools, opt-in, without the parameters an agent never sets, with the smoke-import
-note on their receipts."""
+approved plan; the full apply view with the next brief. The MCP ``apply`` and ``rollback``
+tools are in test_mcp_write_tools.py."""
 from __future__ import annotations
 
-import inspect
 import json
 
 import pytest
-from _stepwise import APP, RECIPES, manual_step, plan_for, plan_next, read, rename, with_steps
+from _stepwise import APP, RECIPES, manual_step, plan_for, plan_next, rename, with_steps
 from _verifying import person
 from typer.testing import CliRunner
 
@@ -149,113 +147,3 @@ def test_the_apply_view_names_the_next_command_and_brief(tmp_path):
     assert nxt["command"] == "pymolt apply --step env-1 --record" and nxt["step"] == "env-1"
     assert nxt["brief"]["step"] == "env-1"
     assert data["checks"]["mech-1"]["smoke_import"] == "not checked: not requested"
-
-
-# ── MCP ───────────────────────────────────────────────────────────────────────────────────
-
-
-mcp_server = pytest.importorskip("pymolt.interfaces.mcp_server")
-FORBIDDEN = ("force", "cascade", "approve_agent", "claim", "expect", "pair",
-             "allow_no_baseline")
-
-
-@pytest.fixture
-def mcp(tmp_path, monkeypatch):
-    monkeypatch.setattr(mcp_server, "_WORKSPACE_ROOT", tmp_path.resolve())
-    monkeypatch.delenv("PYMOLT_MCP_ALLOW_EXEC", raising=False)
-    monkeypatch.setenv("PYMOLT_MCP_ALLOW_WRITE", "1")
-    return mcp_server
-
-
-def test_the_write_tools_never_take_the_forbidden_parameters(mcp, tmp_path):
-    import asyncio
-
-    for name in ("apply", "rollback"):
-        params = set(inspect.signature(getattr(mcp, name)).parameters)
-        assert not params & set(FORBIDDEN), name
-    for name, bad in (("apply", {"claim": "intended"}), ("apply", {"expect": "raise:X"}),
-                      ("apply", {"force": True}), ("rollback", {"force": True}),
-                      ("rollback", {"cascade": True}), ("apply", {"approve_agent": True})):
-        with pytest.raises(Exception, match="Extra inputs are not permitted"):
-            asyncio.run(mcp.mcp.call_tool(name, {"project_dir": str(tmp_path), **bad}))
-
-
-def test_the_write_tools_are_opt_in(mcp, tmp_path, monkeypatch):
-    _approved(tmp_path)
-    monkeypatch.delenv("PYMOLT_MCP_ALLOW_WRITE")
-    refused = mcp.apply(project_dir=str(tmp_path))
-    assert refused["ok"] is False and "PYMOLT_MCP_ALLOW_WRITE" in refused["hint"]
-    assert mcp.rollback(project_dir=str(tmp_path), step="mech-1")["ok"] is False
-    # Reading is not writing: a dry run and a brief need no opt-in.
-    assert mcp.apply(project_dir=str(tmp_path), dry_run=True)["ok"] is True
-    assert mcp.apply(project_dir=str(tmp_path), step="sig-1", brief=True)["step"] == "sig-1"
-    assert read(tmp_path, M) == APP
-
-
-def test_mcp_apply_records_the_smoke_import_note(mcp, tmp_path):
-    plan = _approved(tmp_path)
-    view = mcp.apply(project_dir=str(tmp_path))
-    assert view["ok"] is True, view
-    note = "not checked: MCP without PYMOLT_MCP_ALLOW_EXEC"
-    assert view["data"]["checks"]["mech-1"]["smoke_import"] == note
-    receipt = MigrationReceipt.load(tmp_path)
-    assert receipt.steps[f"{plan.plan_id}:mech-1"].checks["smoke_import"] == note
-
-
-def test_mcp_apply_on_an_unapproved_plan_is_refused(mcp, tmp_path):
-    _plan(tmp_path)
-    view = mcp.apply(project_dir=str(tmp_path))
-    assert view["ok"] is False and "approved for agents" in view["error"]
-
-
-def _normalize(view, root, plan_id):
-    import re
-
-    text = json.dumps(view, sort_keys=True).replace(
-        "not checked: MCP without PYMOLT_MCP_ALLOW_EXEC", "not checked: not requested")
-    text = text.replace(str(root.resolve()), "<root>").replace(str(root), "<root>")
-    text = text.replace(plan_id, "<plan>").replace(plan_id[:8], "<plan8>")
-    text = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+\-:\d]*", "<at>", text)
-    return json.loads(text)
-
-
-@pytest.mark.parametrize("case", ["dry_run", "record", "done", "brief", "apply", "rollback"])
-def test_mcp_tool_returns_the_cli_agent_view(mcp, tmp_path, case):
-    """CLI <-> MCP parity for the write tools (the smoke-import note aside, which says why
-    the MCP side did not run it)."""
-    plans = {}
-    for side in ("a", "b"):
-        (tmp_path / side).mkdir()
-        plans[side] = _approved(tmp_path / side)
-    calls = {
-        "dry_run": (["apply", "{p}", "--dry-run"], dict(dry_run=True)),
-        "record": (["apply", "{p}", "--step", "sig-1", "--record"],
-                   dict(step="sig-1", record=True)),
-        "done": (["apply", "{p}", "--step", "sig-1", "--record", "--done"],
-                 dict(step="sig-1", record=True, done=True)),
-        "brief": (["apply", "{p}", "--step", "sig-1", "--brief"],
-                  dict(step="sig-1", brief=True)),
-        "apply": (["apply", "{p}", "--step", "mech-1"], dict(step="mech-1")),
-        "rollback": (["rollback", "{p}", "--step", "mech-1"], dict(step="mech-1")),
-    }
-    argv, kwargs = calls[case]
-    views = []
-    for side in ("a", "b"):
-        root, plan = tmp_path / side, plans[side]
-        if case == "done":
-            from pymolt.workorder.record import record_step
-
-            record_step(root, plan, "sig-1", agent=True)
-            (root / M).write_text(APP.replace("return a.h(x)", "return a.h(x) or 0"))
-        if case == "rollback":
-            apply_steps(root, plan, agent=True, step="mech-1")
-        if side == "a":
-            out = runner.invoke(app, [x.format(p=str(root)) for x in argv] + ["--agent"])
-            views.append(json.loads(out.stdout))
-        else:
-            tool = mcp.rollback if case == "rollback" else mcp.apply
-            views.append(tool(project_dir=str(root), **kwargs))
-    cli, via_mcp = (_normalize(v, tmp_path / s, plans[s].plan_id)
-                    for v, s in zip(views, "ab", strict=True))
-    assert cli.get("ok", True) is not False, cli
-    assert via_mcp == cli
