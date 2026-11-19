@@ -61,6 +61,8 @@ def test_import_gets_replaced_and_the_gate_accepts_it():
     pats = [CodemodPattern(old_qualname="imp.reload", new_qualname="importlib.reload",
                            kind="replace-attr-path", scope="python")]
     new, hits = apply_patterns(old, pats)
+    # `import imp` fails on 3.12, so it goes with its last use
+    assert new == "import importlib\n\nimportlib.reload(m)\n" and len(hits) == 1
     assert minimal_diff_violations(old, new, [p for p, _ in hits]) == []
 
 
@@ -68,7 +70,7 @@ def test_the_gate_flags_a_line_with_no_flagged_spelling():
     pats = [CodemodPattern(old_qualname="imp.reload", new_qualname="importlib.reload",
                            kind="replace-attr-path", scope="python")]
     assert minimal_diff_violations("x = 1\nimp.reload(m)\n", "x = 2\nimportlib.reload(m)\n",
-                                   pats)
+                                   pats) == ["line 1: x = 1"]
 
 
 def test_recompile_reports_a_file_that_does_not_compile():

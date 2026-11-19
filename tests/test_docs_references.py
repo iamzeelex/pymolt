@@ -167,4 +167,8 @@ def test_the_check_sees_references():
 
 
 def test_hidden_options_count_as_missing():
+    # `assess --current-python` is a hidden alias: it exists on the command, docs may not name it
+    assess = typer.main.get_command(app).commands["assess"]
+    hidden = {o for param in assess.params if getattr(param, "hidden", False) for o in param.opts}
+    assert "--current-python" in hidden
     assert "--current-python" not in _cli()["assess"]

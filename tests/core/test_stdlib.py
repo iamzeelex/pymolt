@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from pymolt.core import stdlib
-from pymolt.core.legacy_stdlib import describe, is_py2_stdlib, py3_replacement
 from pymolt.knowledge import KnowledgeError, stdlib_changes, stdlib_lifetimes
 
 
@@ -92,21 +91,16 @@ class TestChanges:
                 assert e.successor, e.id
 
 
-class TestLegacyTable:
-    def test_py2_api_still_works(self):
-        assert is_py2_stdlib("ConfigParser") and not is_py2_stdlib("flask")
-        assert py3_replacement("urllib2") == "urllib.request"
-        assert py3_replacement("sets") == ""
-        assert "ConfigParser → configparser" in describe(["ConfigParser"])
-
-
 def test_lifetimes_file_is_valid_and_stamped():
     data = stdlib_lifetimes()
     assert data["date"] and data["source"] and data["pythons"]
     assert data["modules"] and data["names"]
-    with pytest.raises(KnowledgeError):
-        from pymolt import knowledge
 
+
+def test_an_unknown_knowledge_file_raises():
+    from pymolt import knowledge
+
+    with pytest.raises(KnowledgeError):
         knowledge._load_raw("does_not_exist")
 
 

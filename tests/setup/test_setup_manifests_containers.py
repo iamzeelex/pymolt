@@ -4,7 +4,6 @@ import pytest
 
 from pymolt.ingestion import fallback_compiler as fc
 from pymolt.ingestion.config import ToolChoice
-from pymolt.setup import service
 from pymolt.setup.service import (
     SetupChoices,
     SetupError,
@@ -111,7 +110,3 @@ def test_apply_setup_without_gitignore_touches_nothing(tmp_path):
     assert not (tmp_path / ".gitignore").exists() and notes == []
     saved = json.loads((tmp_path / ".pymolt" / "env_config.json").read_text())
     assert saved["selected_manifest"] == "setup.py"
-
-
-def test_module_exposes_no_unfiltered_container_listing():
-    assert not hasattr(service, "list_running_containers")

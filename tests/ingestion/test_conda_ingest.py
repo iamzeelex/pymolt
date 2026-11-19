@@ -1,10 +1,13 @@
-from unittest.mock import patch, MagicMock
+import subprocess
+from unittest.mock import MagicMock, patch
+
+import pymolt.ingestion.conda_ingest as conda_ingest
 from pymolt.core.enums import Provenance, ResolutionQuality, SourceFixation
 from pymolt.ingestion.conda_ingest import (
-    parse_conda_solve_json,
-    find_conda_executable_on_host,
     find_conda_executable_in_container,
-    ingest
+    find_conda_executable_on_host,
+    ingest,
+    parse_conda_solve_json,
 )
 
 
@@ -55,32 +58,54 @@ def test_parse_conda_solve_json_with_logs():
     assert solved[0] == {"name": "numpy", "version": "1.24.3", "channel": "conda-forge"}
 
 
-@patch("pymolt.ingestion.conda_ingest.shutil.which")
-@patch("pymolt.ingestion.conda_ingest.Path.is_file")
-def test_find_conda_executable_on_host(mock_is_file, mock_which):
-    # Case 1: shutil.which finds mamba
-    mock_which.side_effect = lambda x: "/usr/bin/mamba" if x == "mamba" else None
-    path = find_conda_executable_on_host()
-    assert path == "/usr/bin/mamba"
-
-    # Case 2: shutil.which finds nothing, but candidate miniconda file exists
-    mock_which.side_effect = lambda x: None
-    mock_is_file.side_effect = lambda: True
-    path = find_conda_executable_on_host()
-    assert path is not None
-    assert "miniconda3" in path or "anaconda3" in path
+def test_find_conda_executable_on_host_prefers_the_path(monkeypatch):
+    monkeypatch.setattr(conda_ingest.shutil, "which",
+                        lambda x: "/usr/bin/mamba" if x == "mamba" else None)
+    assert find_conda_executable_on_host() == "/usr/bin/mamba"
 
 
-@patch("pymolt.ingestion.conda_ingest.subprocess.run")
-def test_find_conda_executable_in_container(mock_run):
-    mock_res = MagicMock()
-    mock_res.returncode = 0
-    mock_res.stdout = "/opt/conda/bin/conda\n"
-    mock_run.return_value = mock_res
+def test_find_conda_executable_on_host_falls_back_to_a_home_install(monkeypatch, tmp_path):
+    conda = tmp_path / "miniconda3" / "condabin" / "conda"
+    conda.parent.mkdir(parents=True)
+    conda.touch()
+    monkeypatch.setattr(conda_ingest.shutil, "which", lambda x: None)
+    monkeypatch.setattr(conda_ingest.Path, "home", classmethod(lambda cls: tmp_path))
+    assert find_conda_executable_on_host() == str(conda)
 
-    exe = find_conda_executable_in_container("dummy_container")
-    assert exe == "mamba"  # since "mamba" is checked first and mock_run returned success
-    mock_run.assert_called_once()
+
+def _which_in_container(available):
+    """A `docker exec <id> which <exe>` boundary where only ``available`` exist."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(list(cmd))
+        exe = cmd[-1]
+        if exe in available:
+            return subprocess.CompletedProcess(cmd, 0, f"/opt/conda/bin/{exe}\n", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+    return run, calls
+
+
+def test_find_conda_executable_in_container_takes_the_first_present(monkeypatch):
+    run, calls = _which_in_container({"mamba", "conda"})
+    monkeypatch.setattr(conda_ingest.subprocess, "run", run)
+    assert find_conda_executable_in_container("dummy_container") == "mamba"
+    assert calls == [["docker", "exec", "dummy_container", "which", "mamba"]]
+
+
+def test_find_conda_executable_in_container_falls_back_to_conda(monkeypatch):
+    run, calls = _which_in_container({"conda"})
+    monkeypatch.setattr(conda_ingest.subprocess, "run", run)
+    assert find_conda_executable_in_container("dummy_container") == "conda"
+    assert calls == [["docker", "exec", "dummy_container", "which", "mamba"],
+                     ["docker", "exec", "dummy_container", "which", "conda"]]
+
+
+def test_find_conda_executable_in_container_none_when_absent(monkeypatch):
+    run, calls = _which_in_container(set())
+    monkeypatch.setattr(conda_ingest.subprocess, "run", run)
+    assert find_conda_executable_in_container("dummy_container") is None
+    assert [c[-1] for c in calls] == ["mamba", "conda", "micromamba"]
 
 
 @patch("pymolt.ingestion.conda_ingest.find_conda_executable_on_host")

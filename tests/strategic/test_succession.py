@@ -150,12 +150,15 @@ def test_cli_succession_json_smoke(tmp_path, monkeypatch):
     )
     result = runner.invoke(commands.app, ["succession", str(tmp_path), "--json"])
     assert result.exit_code == 0
-    assert "tensorflow.keras" in result.output and "keras" in result.output
+    data = json.loads(result.stdout)
+    assert data["frameworks"] == ["keras"]
+    assert data["edges"] == [_keras_shim().model_dump(mode="json")]
+    assert data["transplant_plans"] == [] and data["dry_run"] is True
 
 
 # ── transplant plan (S3) ──────────────────────────────────────────────────────
 
-def test_build_transplant_plan_orders_steps_and_ends_in_contract():
+def test_build_transplant_plan_orders_steps_and_ends_in_verify():
     from pymolt.strategic.succession.transplant import build_transplant_plan
     plan = build_transplant_plan(_transplant())
     assert [s.n for s in plan.steps] == list(range(1, len(plan.steps) + 1))  # 1..N

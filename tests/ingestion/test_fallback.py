@@ -90,11 +90,14 @@ def test_find_interpreter_on_path(monkeypatch, tmp_path):
 
 def test_find_interpreter_version_mismatch_returns_none(monkeypatch, tmp_path):
     # Every candidate resolves, but each probe answers 3.12 — never a false match.
-    _Boundary({}).install(monkeypatch)  # unknown paths probe as failures
+    b = _Boundary({"/usr/bin/python3": "3.12"}).install(monkeypatch)
     monkeypatch.setattr(fc.shutil, "which", lambda c: "/usr/bin/python3")
     monkeypatch.setattr(fc.Path, "home", classmethod(lambda cls: tmp_path))
 
     assert find_python_interpreter("3.6.1") is None
+    # the candidates were probed and answered with a version (not a failed probe)
+    probed = [c[0] for c in b.subprocess_calls if _is_version_probe(c)]
+    assert probed and set(probed) == {"/usr/bin/python3"}
 
 
 def test_find_interpreter_prefers_project_local_venv(monkeypatch, tmp_path):

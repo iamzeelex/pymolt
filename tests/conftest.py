@@ -1,7 +1,7 @@
 import pytest
 
 from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixation
-from pymolt.core.graph import DependencyGraph, Node
+from pymolt.core.graph import DependencyGraph, Edge, NameMapping, Node
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +21,7 @@ def _isolate_test_cache_and_config(monkeypatch: pytest.MonkeyPatch, tmp_path_fac
 
 @pytest.fixture
 def sample_graph() -> DependencyGraph:
-    """Provide a standard minimal DependencyGraph for testing."""
+    """A small DependencyGraph: one direct node, one transitive node and the edge between them."""
     nodes = {
         "requests": Node(
             name="requests",
@@ -29,11 +29,20 @@ def sample_graph() -> DependencyGraph:
             mode=Mode.PYPI,
             provenance=Provenance.PYPI,
             direct=True,
-        )
+            declared_requirement="requests>=2.0",
+            mapping=NameMapping(pypi_name="requests", import_name="requests",
+                                confidence="authoritative"),
+        ),
+        "idna": Node(
+            name="idna",
+            version="3.6",
+            mode=Mode.PYPI,
+            provenance=Provenance.PYPI,
+        ),
     }
     return DependencyGraph(
         nodes=nodes,
-        edges=[],
+        edges=[Edge(source="requests", target="idna", via="requests")],
         roots=["requests"],
         resolution_quality=ResolutionQuality.RESOLVED,
         source_fixation=SourceFixation.PINNED,
