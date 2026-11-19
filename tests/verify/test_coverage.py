@@ -22,9 +22,11 @@ def test_parse_counts_only_files_with_executed_lines():
 
 
 def test_coverage_map_is_exercised_matches_prefix_and_submodules():
-    cov = CoverageMap(exercised_prefixes={"flask.views", "flask"})
-    assert cov.is_exercised("flask") is True
-    assert cov.is_exercised("flask.views") is True
+    cov = CoverageMap(exercised_prefixes={"flask.views"})
+    assert cov.is_exercised("flask.views") is True    # the prefix itself
+    assert cov.is_exercised("flask") is True          # a submodule of it ran
+    assert cov.is_exercised("fla") is False           # a name prefix is not a module prefix
+    assert cov.is_exercised("flask.app") is False
     assert cov.is_exercised("marshmallow") is False
 
 

@@ -63,7 +63,8 @@ pymolt scan tests/artifacts/flasgger      # the "Calls into dependencies" sectio
 ```
 Expect: **≈60 files**, **≈230 contacts** across ≈19 deps (flask, click, werkzeug, …).
 Counts drift with the submodule state — an order-of-magnitude check, not a pin
-(`tests/verify/test_flasgger_artifact.py` holds the floors automatically).
+(`tests/verify/test_flasgger_artifact.py`, marked `integration`, holds the floors whenever the
+submodule is initialised).
 pymolt's own injected watcher bundle (`pymolt_trace`) is filtered out.
 
 ```bash
@@ -128,6 +129,48 @@ pymolt assess tests/artifacts/blaze --target-python 3.12 --json \
 pymolt assess tests/artifacts/flasgger --target-python 3.12 --risk     # CVE / wheels / abandonment
 pymolt assess tests/artifacts/flasgger --target-python 3.12 --no-cache # force a fresh re-resolve
 ```
+
+---
+
+## F — the flask boundary across two Flask releases (the Python 3.6 devcontainer)
+
+Flasgger is a Flask extension: its contract with Flask runs while requests are handled, so
+trace flasgger's own pytest suite under two Flask releases that both install on 3.6 (1.0.4 and
+2.0.3, both in its `tox.ini`). The run needs `tests/.devcontainer` (python:3.6 with flasgger's
+requirements); Flask 1.0.4 does not install on the host's Pythons. pymolt stays on the host;
+the container gets only the pure-stdlib watcher bundle.
+
+On the host, write the bundle where the container sees it (the devcontainer mounts `tests/`
+at `/workspace/tests`):
+
+```bash
+python -m pymolt.verify.export_watcher tests/artifacts/flasgger/.pymolt/watcher
+```
+
+In the container (`/workspace/tests/artifacts/flasgger`):
+
+```bash
+export PYTHONPATH=/workspace/tests/artifacts/flasgger/.pymolt/watcher
+export PYMOLT_TRACE_TARGET=flask
+pip install 'flask==1.0.4'
+PYMOLT_TRACE_OUT=/workspace/tests/artifacts/flasgger/.pymolt/old-{pid}.jsonl python -m pytest -q tests/
+pip install 'flask==2.0.3'
+PYMOLT_TRACE_OUT=/workspace/tests/artifacts/flasgger/.pymolt/new-{pid}.jsonl python -m pytest -q tests/
+cat .pymolt/old-*.jsonl > .pymolt/old.jsonl     # one file per process: merge them
+cat .pymolt/new-*.jsonl > .pymolt/new.jsonl
+```
+
+Back on the host:
+
+```bash
+pymolt verify tests/artifacts/flasgger \
+    --baseline tests/artifacts/flasgger/.pymolt/old.jsonl \
+    --post-migration tests/artifacts/flasgger/.pymolt/new.jsonl --json \
+  | jq '.contract | {diff, diff_clean}'
+```
+Expect: both recordings fold without error and hold flask boundary calls (the watcher survived
+Werkzeug's and Flask's C-level calls), and the pinned pair shows at least one behavioural
+change at the flask boundary: a non-zero `diff` count and `diff_clean: false`.
 
 ---
 

@@ -243,18 +243,19 @@ def test_container_paths_map_by_suffix_for_sites_and_the_executed_record(project
     assert got[_core("untested")] == ("not-run", "line")
 
 
-def test_unobservable_contacts_are_in_neither_denominator(project, tmp_path):
+def test_an_unobserved_symbols_existence_contact_stays_out_even_when_its_line_ran(
+        project, tmp_path):
     core = str(project / "app" / "core.py")
     ran = sorted(MODULE_LINES | TESTED_RAN | _lines(CORE, ["reads-ran", "setting"]))
     rep = _report(project, _trace(project, tmp_path, executed=_record(
         "line", {core: {"lines": ",".join(map(str, ran))}})))
     unobservable = [c for c in rep.contacts if c.status == "unobservable"]
-    assert [c.target for c in unobservable] == ["fakedep.SETTING"]
-    observable = rep.contacts_total - rep.contacts_unobservable
-    assert rep.coverage == pytest.approx(
-        (rep.contacts_recorded + rep.contacts_ran_not_recorded) / observable)
-    assert observable == rep.contacts_recorded + rep.contacts_ran_not_recorded \
-        + rep.contacts_not_run
+    assert [(c.target, c.why) for c in unobservable] == [("fakedep.SETTING", "existence")]
+    # the same counts as when SETTING's line did not run: it is in neither denominator
+    assert (rep.contacts_recorded, rep.contacts_ran_not_recorded, rep.contacts_not_run,
+            rep.contacts_unobservable) == (4, 1, 4, 1)
+    assert rep.coverage == pytest.approx(5 / 9)
+    assert rep.recall == pytest.approx(4 / 5)
 
 
 def test_the_inconclusive_reason_names_the_blind_split(project, tmp_path):

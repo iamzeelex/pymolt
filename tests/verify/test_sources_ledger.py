@@ -114,11 +114,20 @@ class TestApplyLedger:
         assert claim_for(pat()) is None
 
 
-def test_contacts_by_line_come_from_the_snapshot_text(tmp_path):
+def test_contacts_by_line_come_from_the_snapshot_text(tmp_path, monkeypatch):
+    from pymolt.verify import contact_map
+
     sources = {"app/m.py": "import requests\n\n\ndef f():\n    return requests.get('u')\n",
                "app/own.py": "import os\nfrom app import m\nm.f()\n"}
     got = contacts_by_line(sources, tmp_path)
     assert got == {"app/m.py": {5: {"requests.get"}}}
+
+    def reparse(units):
+        if units:
+            raise AssertionError(f"re-parsed {[module for module, _text in units]}")
+        return []
+
+    monkeypatch.setattr(contact_map, "_parse_units", reparse)
     assert contacts_by_line(sources, tmp_path) == got      # second call: served from the cache
 
 

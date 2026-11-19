@@ -109,6 +109,10 @@ def test_an_input_change_at_a_stable_site_is_judged_strictly():
     assert e.review and e.review.startswith("input changed") and not e.fails
     d, counts, by = judged(base, rep, post)
     assert by["billing.total"].fails and counts["strict"] == 1
+    # the report labels the failure as the input change it is
+    (finding,) = summarize(d)["failing"]
+    assert finding["change"] == "input changed"
+    assert finding["why"].startswith("input changed; stable across baseline runs")
 
 
 def test_a_replicate_that_lost_events_is_no_presence_evidence():
@@ -312,11 +316,11 @@ def _baseline_replicate_post(tmp_path, monkeypatch):
 def test_an_explicit_post_migration_recording_still_uses_the_replicate(tmp_path, monkeypatch):
     post = _baseline_replicate_post(tmp_path, monkeypatch)
     baseline = service.load_contract_state(tmp_path).baseline.trace_path
-    for against in (None, baseline):  # the CLI fills --baseline from the slot
-        rep = service.build_contract_report_from_state(
-            tmp_path, trace_override=str(post),
-            against_override=against or baseline)
-        assert rep.all_fact_diff["noise_measured"]["explained"] == 1
+    # --baseline naming the baseline slot's own recording (no --baseline is
+    # test_an_explicit_post_migration_recording_is_compared_with_the_baseline_slot)
+    rep = service.build_contract_report_from_state(
+        tmp_path, trace_override=str(post), against_override=baseline)
+    assert rep.all_fact_diff["noise_measured"]["explained"] == 1
     # another "before" recording is not the baseline the replicate measured
     other = tmp_path / "other.jsonl"
     other.write_bytes(Path(baseline).read_bytes())
@@ -466,16 +470,6 @@ def test_a_frequent_new_outcome_is_still_confirmed():
     d, counts, by = judged(_calls_run(), _calls_run(), _calls_run(raises=40, returns=36))
     assert any("confirmed deterministic" in n for n in by["Group.join"].notes)
     assert counts["confirmed"] == 1
-
-
-def test_a_strict_input_change_is_labelled_as_an_input_change():
-    base, rep = side(port=1, total=10), side(port=1, total=10)
-    post = side(port=1, total=10)
-    post.facts[1].input = {"bound": {"cart": "c2"}}
-    d, _, by = judged(base, rep, post)
-    (finding,) = summarize(d)["failing"]
-    assert finding["change"] == "input changed"
-    assert finding["why"].startswith("input changed; stable across baseline runs")
 
 
 # ── evidence that facts' counts hide: calls that moved between inputs ──────────────────────
