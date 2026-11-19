@@ -1,5 +1,16 @@
-from pymolt.ingestion.detect import detect_sources, _classify_requirements_fixation, _classify_pyproject_fixation
+from pathlib import Path
+
+import pytest
+
+import pymolt.ingestion.fallback_compiler as fallback_compiler
 from pymolt.core.enums import Mode, SourceFixation
+from pymolt.ingestion.detect import (
+    _classify_pyproject_fixation,
+    _classify_requirements_fixation,
+    detect_project_python_version,
+    detect_sources,
+    extract_declared_requirements,
+)
 
 
 def test_detect_sources_empty(tmp_path):
@@ -119,54 +130,43 @@ def test_detect_sources_conda_and_locks(tmp_path):
     assert locks["uv.lock"] is True
 
 
-from pymolt.ingestion.detect import detect_project_python_version, extract_declared_requirements
+_CLASSIFIERS = ("setup(\n    classifiers=[\n"
+                "        'Programming Language :: Python :: 3.10',\n"
+                "        'Programming Language :: Python :: 3.11',\n    ]\n)\n")
 
-def test_detect_project_python_version(tmp_path):
-    # Test .python-version
-    (tmp_path / ".python-version").write_text("3.6.1\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.6.1"
-    (tmp_path / ".python-version").unlink()
 
-    # Test pyproject.toml
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text("[project]\nrequires-python = \">=3.8\"\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.8"
-    pyproject.unlink()
+@pytest.fixture
+def no_host_interpreters(monkeypatch):
+    """Classifier picks ask which interpreters are installed; on the test host, none is."""
+    monkeypatch.setattr(fallback_compiler, "find_python_interpreter", lambda v, p=None: None)
 
-    # Test Pipfile
-    pipfile = tmp_path / "Pipfile"
-    pipfile.write_text("[requires]\npython_version = \"3.11\"\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.11"
-    pipfile.unlink()
 
-    # Test setup.py (python_requires)
-    setup_py = tmp_path / "setup.py"
-    setup_py.write_text("setup(\n    python_requires='>=3.9',\n)\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.9"
+@pytest.mark.parametrize("files, expected", [
+    ({".python-version": "3.6.1\n"}, "3.6.1"),
+    ({"pyproject.toml": "[project]\nrequires-python = \">=3.8\"\n"}, "3.8"),
+    ({"Pipfile": "[requires]\npython_version = \"3.11\"\n"}, "3.11"),
+    ({"setup.py": "setup(\n    python_requires='>=3.9',\n)\n"}, "3.9"),
+    # no interpreter installed: the highest declared classifier, not the lowest
+    ({"setup.py": _CLASSIFIERS}, "3.11"),
+    # a project-local venv says what the project runs on, ahead of what it declares
+    ({".venv/pyvenv.cfg": "version = 3.12.3\n",
+      "setup.py": "setup(classifiers=['Programming Language :: Python :: 3.8'])\n"}, "3.12"),
+    ({"setup.cfg": "[options]\npython_requires = >=3.11\n"}, "3.11"),
+    ({}, None),
+], ids=[".python-version", "pyproject", "Pipfile", "setup.py-python_requires",
+        "setup.py-classifiers", "local-venv-first", "setup.cfg", "nothing-declared"])
+def test_detect_project_python_version(tmp_path, no_host_interpreters, files, expected):
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    assert detect_project_python_version(tmp_path) == expected
 
-    # Test setup.py (classifiers fallback picks highest/best version)
-    setup_py.write_text("setup(\n    classifiers=[\n        'Programming Language :: Python :: 3.10',\n        'Programming Language :: Python :: 3.11',\n    ]\n)\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.11"
-    setup_py.unlink()
 
-    # Test local .venv precedence
-    venv_dir = tmp_path / ".venv"
-    venv_dir.mkdir()
-    (venv_dir / "pyvenv.cfg").write_text("version = 3.12.3\n", encoding="utf-8")
-    setup_py.write_text("setup(classifiers=['Programming Language :: Python :: 3.8'])\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.12"
-    import shutil
-    shutil.rmtree(venv_dir)
-    setup_py.unlink()
-
-    # Test setup.cfg
-    setup_cfg = tmp_path / "setup.cfg"
-    setup_cfg.write_text("[options]\npython_requires = >=3.11\n", encoding="utf-8")
-    assert detect_project_python_version(tmp_path) == "3.11"
-    setup_cfg.unlink()
-
-    # Non-existent/empty
-    assert detect_project_python_version(tmp_path) is None
+def test_classifiers_prefer_the_highest_installed_interpreter(tmp_path, monkeypatch):
+    (tmp_path / "setup.py").write_text(_CLASSIFIERS, encoding="utf-8")
+    monkeypatch.setattr(fallback_compiler, "find_python_interpreter",
+                        lambda v, p=None: Path("/usr/bin/python3.10") if v == "3.10" else None)
+    assert detect_project_python_version(tmp_path) == "3.10"
 
 
 def test_discover_python_environments(tmp_path):

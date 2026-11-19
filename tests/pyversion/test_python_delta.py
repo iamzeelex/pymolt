@@ -112,9 +112,21 @@ def test_a_failed_probe_degrades_to_data(tmp_path, monkeypatch):
     assert any("probe failed" in n for n in report.notes)
 
 
-def test_a_dependency_report_still_dumps_without_the_python_keys(tmp_path):
+def test_a_dependency_report_still_dumps_without_the_python_keys():
+    """The python additions are absent from a dependency report's dump, so it dumps as before."""
+    from pymolt.delta.models import DeltaReport
+
+    dump = DeltaReport(package="pandas", from_version="1.5.3", to_version="2.2.0",
+                       quality="complete").model_dump(mode="json")
+    assert dump["package"] == "pandas" and dump["from"] == "1.5.3" and dump["to"] == "2.2.0"
+    assert not {"subject", "sides", "import_errors", "type_relocations"} & set(dump)
+
+
+def test_a_python_report_dumps_its_subject_and_sides(tmp_path):
     dump = _delta(["imp"], tmp_path).model_dump(mode="json")
-    assert dump["subject"] == "python" and dump["sides"]
+    assert dump["subject"] == "python"
+    assert dump["sides"]["old"].startswith("knowledge:")
+    assert dump["sides"]["new"].startswith("probe:")
 
 
 def test_classify_origin():

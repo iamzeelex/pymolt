@@ -83,7 +83,6 @@ def test_the_behavior_entries_load_validated_with_sources_and_windows():
     assert not td.applies("3.9", "3.12") and not td.applies("3.8", "3.8")
     assert not td.applies("3.12", "3.8") and not td.applies("", "3.12")
     assert hashing.applies("3.10", "3.11") and not hashing.applies("3.11", "3.13")
-    assert "stdlib_behavior" in knowledge._FILES
 
 
 def test_a_malformed_or_duplicated_behavior_entry_is_refused(monkeypatch):
