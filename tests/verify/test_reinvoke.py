@@ -18,10 +18,11 @@ def test_reinvoke_captures_raise():
     assert r.error == "JSONDecodeError"
 
 
-def test_reinvoke_resolves_dotted_qualname():
-    r = reinvoke(PY, "json.dumps", args=[{"a": 1}])
+def test_reinvoke_resolves_a_qualname_through_a_class():
+    # module.Class.attr: the longest importable prefix, then attributes from there
+    r = reinvoke(PY, "collections.OrderedDict.fromkeys", args=[["a", "b"]])
     assert r.outcome == "returned"
-    assert r.value == '{"a": 1}'
+    assert r.value == {"__dict__": [["a", None], ["b", None]]}
 
 
 def test_reinvoke_from_pickle_blob(tmp_path):

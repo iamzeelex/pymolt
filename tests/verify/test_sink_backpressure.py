@@ -111,6 +111,7 @@ def test_the_drop_policy_still_counts_what_a_full_queue_refused(tmp_path):
     sink.close()
 
     counters = _meta(sink)["counters"]
+    assert counters["events_seen"] == n
     assert counters["backpressure_dropped"] > 0
     assert counters["events_written"] + counters["backpressure_dropped"] == n
     assert counters["dropped_events"] == counters["backpressure_dropped"]

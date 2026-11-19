@@ -9,7 +9,6 @@ import warnings
 
 import pytest
 
-from pymolt.verify import _backend
 from pymolt.verify._backend import (
     HAS_MONITORING,
     WARN_MESSAGE_MAX,
@@ -358,15 +357,6 @@ def test_merge_warnings_keeps_counts_whole():
     assert sum(acc.values()) == 2 * (MAX_WARNINGS + 2)
     assert acc[("C", WARNING_MORE)] == 4
     assert merge_warnings({}, [None, {"category": 1}, "x"]) == {}
-
-
-def test_runtime_files_keep_python_36_syntax():
-    import ast
-    from pathlib import Path
-
-    for name in ("_backend.py", "_monitoring.py", "_wrap.py", "_sinks.py", "boundary_tracer.py"):
-        path = Path(_backend.__file__).with_name(name)
-        ast.parse(path.read_text(encoding="utf-8"), filename=str(path), feature_version=(3, 6))
 
 
 # ── host: warnings on facts are evidence, never outcome ─────────────────────

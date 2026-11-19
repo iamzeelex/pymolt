@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import queue
 import sys
 
 from pymolt.verify import service
@@ -110,7 +109,7 @@ def test_runtime_metadata_propagates_to_result_slot_and_sidecar(tmp_path):
     assert service.load_contract_state(tmp_path).baseline == slot
 
 
-def test_sink_counts_sampling_and_backpressure_drops(tmp_path, monkeypatch):
+def test_sidecar_counts_sampling_drops(tmp_path, monkeypatch):
     monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0.25")
     monkeypatch.setattr("pymolt.verify._sinks.random.random", lambda: 0.9)
     sampled = JsonlSink(str(tmp_path / "sampled-{pid}.jsonl"))
@@ -121,23 +120,6 @@ def test_sink_counts_sampling_and_backpressure_drops(tmp_path, monkeypatch):
     assert sampled_metadata["counters"]["events_seen"] == 1
     assert sampled_metadata["counters"]["sampling_dropped"] == 1
     assert sampled_metadata["counters"]["dropped_events"] == 1
-
-    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "1")
-    # The ``drop`` policy: a full queue counts the event instead of waiting for the writer
-    # (the default ``block`` policy is covered by test_sink_backpressure).
-    pressured = JsonlSink(str(tmp_path / "pressured-{pid}.jsonl"), backpressure="drop")
-
-    def full(_event):
-        raise queue.Full
-
-    monkeypatch.setattr(pressured._queue, "put_nowait", full)
-    pressured.on_return("dep.pressured", {"bound": {}}, 1)
-    pressured.close()
-
-    pressured_metadata = json.loads(service.Path(pressured.metadata_path).read_text())
-    assert pressured_metadata["counters"]["events_seen"] == 1
-    assert pressured_metadata["counters"]["backpressure_dropped"] == 1
-    assert pressured_metadata["counters"]["dropped_events"] == 1
 
 
 def test_a_capture_through_a_one_slot_queue_keeps_every_event_and_states_the_wait(

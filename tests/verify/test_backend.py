@@ -103,9 +103,9 @@ def test_hook_never_swallows_target_exceptions_and_clears_pending(target):
     finally:
         be.stop()
     assert be._pending == {}        # stop() drains pending frames
-    # Under setprofile a Python raise is delivered as 'return' (documented limitation):
-    # boom() is recorded as a contact, just not as a raise.
-    assert any(r["qualname"] == PREFIX + ".boom" for r in sink.records.values())
+    # Recorded as a raise, typed: pytest.raises' __exit__ (a call) handles it.
+    (rec,) = [r for r in sink.records.values() if r["qualname"] == PREFIX + ".boom"]
+    assert rec["raised"] == "ValueError" and rec["result"] is None
 
 
 def test_records_capture_the_call_site_in_our_code(target):
@@ -117,7 +117,7 @@ def test_records_capture_the_call_site_in_our_code(target):
     where = rec["where"]
     assert where["func"] == "caller"
     assert where["file"].endswith("test_backend.py")
-    assert isinstance(where["line"], int)
+    assert where["line"] == caller.__code__.co_firstlineno + 1     # the ``return`` line
 
 
 def test_select_backend_auto_is_monitoring_on_312_and_setprofile_below():

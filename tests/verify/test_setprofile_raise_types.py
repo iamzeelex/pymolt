@@ -574,7 +574,7 @@ def test_a_raise_keeps_the_duration_it_had_when_its_frame_unwound(dep, profile_p
     assert dur < spin / 4
 
 
-def test_a_raise_still_parked_at_stop_is_recorded_untyped(dep, profile_path):
+def test_stop_inside_the_handler_types_the_parked_raise(dep, profile_path):
     sink = _Raises()
     be = SetProfileBackend(PREFIX, sink)
     be.start()
@@ -582,8 +582,10 @@ def test_a_raise_still_parked_at_stop_is_recorded_untyped(dep, profile_path):
         dep.boom(1)
     except ValueError:
         be.stop()           # stop is called inside the handler: that call event types it
-    assert sink.raises[0][0] == "ValueError"
+    assert [r[0] for r in sink.raises] == ["ValueError"]
 
+
+def test_a_raise_still_parked_at_stop_is_recorded_untyped(dep, profile_path):
     sink = _Raises()
     be = SetProfileBackend(PREFIX, sink)
     info = ("code", "q", {}, None, "q", None, None, time.perf_counter(), 0, True)

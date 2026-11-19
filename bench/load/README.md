@@ -199,6 +199,20 @@ python3 bench/load/run.py --pymolt $SNAP/.venv/bin/pymolt gate
 `run.json` records which pymolt ran (`provenance.pymolt_root`, `snapshot`, `git_head`) and,
 for the working tree, the dirty `pymolt/` files plus a hash of their diff.
 
+## In-process microbenchmark of the monitoring modes
+
+`microbench_monitoring.py` times one in-process workload with no tracer and under the
+`sys.monitoring` backend in each mode (discover, incremental, incremental after the settle,
+incremental re-opened, watch), checks every boundary call is counted, and exits 1 when the
+expected cost order does not hold. It needs Python 3.12+ and the repo importable:
+
+```bash
+.venv/bin/python bench/load/microbench_monitoring.py [--calls 60000] [--repeat 3]
+```
+
+It is a timing check, so like the gate it wants a quiet host. It used to be the opt-in test
+`test_microbenchmark_discover_vs_incremental_vs_watch` (`PYMOLT_BENCH=1`).
+
 ## Known caveats
 
 - **GIL hand-offs dominate saturated capture numbers on macOS.** Any Python-level profile
