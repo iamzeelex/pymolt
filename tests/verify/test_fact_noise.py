@@ -1148,6 +1148,48 @@ def test_a_raising_compiled_call_under_one_backend_family_stays_strict():
     assert [e.category for e in failing(diff_facts(old, new))] == [FactCategory.APPEARED]
 
 
+def _c_fact(symbol, line, text, outcomes=(("return", {"__opaque__": "unobserved:c-return"}),),
+            arg0=None):
+    inp = {"__c_call__": True} if arg0 is None else {"__c_call__": True, "arg0": arg0}
+    return fact(symbol, outcomes=outcomes, inp=inp, line=line, text=text)
+
+
+def test_a_new_raise_of_a_builtin_the_narrow_backend_records_fails_across_backends():
+    # setprofile sees builtin functions (``c_call`` / ``c_exception``): its capture recorded
+    # math.sqrt as a compiled call, so math.sqrt not raising at this site in the baseline is
+    # evidence, and the new raise is a regression, not an unobservable call.
+    old = fs(_c_fact("math.sqrt", 20, "r = math.sqrt(a)"), backends=("setprofile",))
+    new = fs(_c_fact("math.sqrt", 20, "r = math.sqrt(a)", arg0=4.0),
+             _c_fact("math.sqrt", 10, "s = math.sqrt(b)", (("raise", "ValueError"),), -1.0))
+    d = diff_facts(old, new)
+    (e,) = failing(d)
+    assert e.category is FactCategory.APPEARED and e.new_site.line == 10
+    assert "backend-unobservable" not in e.notes
+    assert d.verdict is VerificationVerdict.FAIL
+    # the reverse direction: the post-migration capture is the narrow one
+    d = diff_facts(fs(*new.facts, backends=("monitoring",)),
+                   fs(*old.facts, backends=("setprofile",)))
+    assert [x.category for x in failing(d)] == [FactCategory.DISAPPEARED]
+
+
+def test_a_new_raise_of_a_compiled_call_the_narrow_backend_never_recorded_stays_open():
+    # The baseline recorded other compiled calls, and lib.native.decode only through its
+    # wrapper (with inputs): setprofile never showed it can see this callable itself (a Cython
+    # function bound before the wrap), so its absence is still no evidence.
+    old = fs(_c_fact("math.sqrt", 20, "r = math.sqrt(a)"),
+             fact("lib.native.decode", {"b": "x"}, (("return", "x"),), line=30,
+                  text="v = decode(b)"), backends=("setprofile",))
+    new = fs(_c_fact("math.sqrt", 20, "r = math.sqrt(a)", arg0=4.0),
+             fact("lib.native.decode", {"b": "x"}, (("return", "x"),), line=30,
+                  text="v = decode(b)"),
+             _c_fact("lib.native.decode", 10, "w = decode(c)", (("raise", "ValueError"),), "c"))
+    d = diff_facts(old, new)
+    (e,) = [x for x in d.entries if x.symbol == "lib.native.decode" and x.new_site
+            and x.new_site.line == 10]
+    assert e.category is FactCategory.UNCOMPARABLE and "backend-unobservable" in e.notes
+    assert not failing(d) and d.verdict is VerificationVerdict.INCONCLUSIVE
+
+
 def test_qualname_pairing_needs_definition_lines_of_one_statement():
     # A closure named like the old one, forty lines further down: another statement.
     src = "\n" * 9 + "def h():\n    pass\n" + "\n" * 38 + "@lib.A.m\ndef g():\n    pass\n"

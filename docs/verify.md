@@ -248,6 +248,13 @@ Two captures from different Python versions are compared fairly:
 - an untyped raise (3.6–3.11: swallowed by C code, or handled without a call while another tool
   owns `sys.settrace`) matches any exception type;
 - C-level raise facts are left out when only one side's tracer records them;
+- a compiled call recorded only by the 3.12+ tracer, which sees every compiled call, is no
+  evidence of a change when the other side ran the 3.6–3.11 tracer, which sees builtin C
+  functions but not Cython functions or type calls: returning, it is explained; raising, it
+  cannot be compared. A callable the older tracer recorded as a compiled call elsewhere in its
+  capture is one it sees, so a new raise of it fails. The captures do not record what kind of
+  compiled callable was called, so a builtin that the older side never recorded stays not
+  comparable;
 - a decorator's call is attributed to the `def` line before 3.11 and to its `@` line after. It
   is compared within its decorated statement, including several decorators from one factory
   stacked on one function.

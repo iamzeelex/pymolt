@@ -359,6 +359,10 @@ All notable changes to pymolt. The format follows
   exercises those calls with stable values. It passed when every difference was noise a
   replicate measured, a call explained away as implicit, or an unverified edited site, though
   nothing showed the behaviour unchanged.
+- A compiled call that newly raises after a move from Python 3.6–3.11 to 3.12+ fails when the
+  baseline's tracer recorded that callable as a compiled call elsewhere: that tracer sees builtin
+  C functions, so the baseline's "no raise" is evidence. It was not comparable, as for a Cython
+  function the older tracer cannot see (which stays so).
 
 #### Plan and apply
 
