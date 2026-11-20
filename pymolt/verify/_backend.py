@@ -78,6 +78,8 @@ from ._identity import (
     bind_inputs,
     fallback_identity,
     frame_inputs,
+    held,
+    is_held,
     receiver_owner,
     sink_identity_fields,
     wrapper_call,
@@ -608,6 +610,16 @@ def mro_lookup(cls, name):
         if value is not NO_ARG:
             return value
     return None
+
+
+def bound_owner(obj):
+    """The class a compiled callable bound to a receiver is decided by: the receiver's class,
+    or the receiver itself when it is a class (``dict.fromkeys``). None when it is bound to
+    nothing or to a module (a module's function: decided by itself)."""
+    owner = getattr(obj, "__self__", None)
+    if owner is None or isinstance(owner, _MODULE_TYPE):
+        return None
+    return owner if isinstance(owner, type) else type(owner)
 
 
 def same_c_callable(a, b):
@@ -1420,9 +1432,11 @@ class FrameBackend(TraceBackend):
         # start is recorded once: both callbacks for an event run back to back in the same
         # thread, so the thread's last recorded frame (held, so its id cannot be reused)
         # identifies the duplicate exactly. Off (0.0) otherwise: holding frames costs memory.
+        # A frame holds its locals: it is released by its duplicate, when its call ends (the
+        # monitoring backend's return / unwind) or by the thread's next recorded start.
         self._dedupe_until = 0.0
         self._last_start = {}       # tid -> frame of the last recorded start
-        self._ccache = {}           # id(callable) -> (callable, sym | None): compiled decisions
+        self._ccache = {}           # id(callable) -> (held(callable), sym | None): compiled
         self._cmeth = {}            # (id(owner class), name) -> (owner, sym | None): bound builtins
         self._reset_c_cap()         # _ccount: cap key -> compiled calls recorded there
         self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
@@ -1584,9 +1598,11 @@ class FrameBackend(TraceBackend):
         if self._dedupe_until:
             if _monotonic() < self._dedupe_until:
                 tid = _get_ident()
-                if self._last_start.get(tid) is frame:
-                    return False            # the same start, delivered by the other tool
-                self._last_start[tid] = frame
+                last = self._last_start
+                if last.get(tid) is frame:
+                    last.pop(tid, None)     # the same start, delivered by the other tool
+                    return False
+                last[tid] = frame           # released by the duplicate or the call's end
             else:
                 self._dedupe_until = 0.0
                 self._last_start = {}
@@ -1719,16 +1735,15 @@ class FrameBackend(TraceBackend):
     def _c_sym(self, obj):
         """The ``module.qualname`` a compiled callable is recorded under, or None when it is
         not a dependency's (builtins, the stdlib and anything the matcher rejects). Decided
-        once per callable object (the entry holds it, so its id cannot be recycled). A builtin
-        method bound to an instance (``deque.popleft`` of one deque) is a new object on every
-        profile event, so it is decided once per (owner class, name) instead."""
+        once per callable object (the entry knows it again by ``held``: a weak reference
+        unless its module or class keeps it alive anyway). A builtin method bound to an
+        instance (``deque.popleft`` of one deque) is a new object on every profile event, and
+        holds its receiver, so it is decided once per (owner class, name) instead."""
         ent = self._ccache.get(id(obj))
-        if ent is not None and ent[0] is obj:
+        if ent is not None and is_held(ent[0], obj):
             return ent[1]
-        owner = getattr(obj, "__self__", None)
-        if owner is not None and not isinstance(owner, _MODULE_TYPE):
-            if not isinstance(owner, type):
-                owner = type(owner)
+        owner = bound_owner(obj)
+        if owner is not None:
             key = (id(owner), getattr(obj, "__name__", None))
             ment = self._cmeth.get(key)
             if ment is not None and ment[0] is owner:
@@ -1739,9 +1754,11 @@ class FrameBackend(TraceBackend):
             self._cmeth[key] = (owner, sym)
             return sym
         sym = self._c_decide(obj)
-        if len(self._ccache) >= _CODE_CACHE_MAX:
-            self._ccache.clear()
-        self._ccache[id(obj)] = (obj, sym)
+        ref = held(obj)         # never the callable itself unless its module or class holds it
+        if ref is not None:
+            if len(self._ccache) >= _CODE_CACHE_MAX:
+                self._ccache.clear()
+            self._ccache[id(obj)] = (ref, sym)
         return sym
 
     def _c_muted(self, frame, sym):

@@ -111,6 +111,13 @@ global events are dropped only afterwards, every call in flight is a recorded co
 shared state is a few dicts updated atomically, plus a lock taken only the first time a code
 object is recorded.
 
+Object lifetimes: the tracer never keeps the program's objects alive. What a CALL reaches is
+decided once per callable (``_call_kind``), and the call-site and binding-failure state
+remembers a callee; each knows the callable again by ``_identity.held``, a weak reference
+unless its class or module keeps it alive anyway. A builtin method bound to a receiver is
+decided per (receiver class, name), so no entry holds a receiver; a callable that takes no
+weak reference (a method-wrapper) is never known again (its call site does not settle).
+
 Coexistence: another tool (coverage.py, a debugger, cProfile) uses its own tool id; ids are
 tried in the order 4, 3, 2 (PROFILER_ID, cProfile's), 5 and never 0/1 (debugger/coverage).
 ``DISABLE`` is per tool. A disabled location stays disabled across ``free_tool_id`` (verified
@@ -143,7 +150,7 @@ from ._backend import (
     remove_warning_capture,
     same_c_callable,
 )
-from ._identity import _wrapped_of
+from ._identity import _WEAKREF, _wrapped_of, held
 from ._rawthreads import allocate_lock, stack_key
 from ._wrap import _WRAP_MARK, _WRAPPER_CODES, _partition_impact_targets, _WrapFinder
 
@@ -162,6 +169,7 @@ _MISSING = object()
 # (``d.items()`` is ``dict.items(d)`` under 3.12), and builtin methods bound to theirs.
 _DESCRIPTORS = (type(str.join), type(object.__init__), type(dict.__dict__["fromkeys"]))
 _BOUND_C = (type(len), type((0).__add__))
+_BUILTIN, _METHOD_WRAPPER = _BOUND_C
 # ``_inherited_call``: no dependency's call with this receiver, but it would be with another
 # one, so the call site must keep firing.
 _KEEP_SITE = object()
@@ -179,6 +187,7 @@ _CTOR_NAMES = frozenset(("__init__", "__new__", "__call__"))
 _K_NONE, _K_C, _K_PY = 0, 1, 2     # what a CALL reaches: nothing of ours / compiled / traced Python
 _SITE_STABLE = 2        # same callee this many times at one call site -> DISABLE the site
 _SITES_MAX = 200000
+_BOUND_OBJECTS_MAX = 4096   # bound builtin methods known by object (most are made per call)
 _SETTLE_GRACE = 1.0     # seconds the start de-duplication stays on after tool B is off
 _INHERIT_WALK_MAX = 50000   # classes walked to decide a callee is inherited by none of ours
 REOPEN = 5.0            # post-settle: seconds tool B stays on after a new line (the
@@ -490,9 +499,16 @@ class MonitoringBackend(FrameBackend):
         self._implicit = {}         # tool B's per-code decision entries
         self.armed = 0              # codes armed by call-site resolution
         self.last_armed_at = None   # monotonic: last code armed (A) or first recorded (A or B)
-        self._ckinds = {}           # id(callable) -> (callable, kind, sym, callee function | None)
-        self._csites = {}           # (id(code), offset) -> [code, same-callee count, callee]
-        self._lastcall = {}         # tid -> (code, offset, func): last traced Python call
+        # What a CALL reaches, decided once (``_call_kind``). No entry keeps the callable alive
+        # (``held``), nor what it holds: a receiver, captured cells, a partial's arguments.
+        # id(callable) -> (held(callable), kind, sym, callee (code, globals) | None, name | None)
+        self._ckinds = {}
+        # (id(receiver class), name) -> (None, kind, sym, None, None, class): the decision for
+        # a bound builtin method, made once per receiver class and name (``_bound_kind``)
+        self._cbound = {}
+        self._cbobj = {}            # id(bound builtin) -> (held, kind, sym, None, None): recent
+        self._csites = {}           # (id(code), offset) -> [code, same-callee count, held callee]
+        self._lastcall = {}         # tid -> (code, offset, callee (code, globals)): last traced
         self._craise = {}           # tid -> (info, code, offset): raise awaiting its type
         self._callname = {}         # tid -> (callee code, declared sym): decorator wrappers
         # Callees whose call is a dependency's for some receivers only (``_inherited_call``):
@@ -872,6 +888,8 @@ class MonitoringBackend(FrameBackend):
                 if info is not None and info[0] is code:
                     self._finish(info, OUTCOME_RETURN, retval,
                                  self._take_warnings(frame, code) if self._warned else None)
+                    if self._last_start:
+                        self._release_start(frame, info[8])
                     if self._rd_closed and len(_modules) != self._rd_token:
                         self._rd_revalidate()   # before our code sees what an import made
         except Exception:
@@ -888,11 +906,20 @@ class MonitoringBackend(FrameBackend):
                 if info is not None and info[0] is code:
                     self._finish(info, OUTCOME_RAISE, raised_label(exc),
                                  self._take_warnings(frame, code) if self._warned else None)
+                    if self._last_start:
+                        self._release_start(frame, info[8])
                     if self._rd_closed and len(_modules) != self._rd_token:
                         self._rd_revalidate()
         except Exception:
             pass
         return None     # PY_UNWIND cannot be disabled
+
+    def _release_start(self, frame, tid):
+        """A recorded call ended: its frame, kept to drop a start the other tool delivers
+        again (``_record``, the settle), is let go (no duplicate can come any more)."""
+        last = self._last_start
+        if last.get(tid) is frame:
+            last.pop(tid, None)
 
     # ── incremental: code ownership ────────────────────────────────────────────
     def _b_owns(self, code, g=None, module=None):
@@ -1151,9 +1178,11 @@ class MonitoringBackend(FrameBackend):
         keep = self._keep
         if keep:
             keep = keep.get((id(code), offset))
-            if (keep is not None and keep[1] is callable_ and keep[2] is type(arg0)
-                    and keep[0] is code):
-                return None     # the open site's last answer for this callee, receiver class
+            if keep is not None and keep[2] is type(arg0) and keep[0] is code:
+                ref = keep[1]   # held: a descriptor itself, a function by weak reference
+                if ref is callable_ or (type(ref) is _WEAKREF
+                                        and ref() is callable_ is not None):
+                    return None     # the open site's last answer for this callee, receiver class
         disable = None
         if self.mode == INCREMENTAL:
             disable = self._on_call_arm(code, offset, callable_, arg0)
@@ -1192,25 +1221,62 @@ class MonitoringBackend(FrameBackend):
             id(func.__code__) in self._impact_codes or self._target_module(module, None))
 
     def _call_kind(self, callable_):
-        """(object, kind, sym, callee) of what a CALL reaches, decided once per object."""
+        """(held object | None, kind, sym, callee, declared name) of what a CALL reaches.
+        ``callee`` is the Python function's ``(code, globals)``, never the function.
+
+        Cached per object (a function, partial, class, callable instance or compiled
+        callable), which the entry knows again by ``held``, so it keeps neither the object nor
+        what the object holds alive; an object that takes no weak reference is not cached. A
+        builtin method bound to a receiver (``f = d.items``) is a new object on every
+        attribute access and holds the receiver: decided once per (receiver class, name), as
+        ``_c_sym`` decides it (``_bound_kind``), then cached per object like the rest."""
         obj = callable_
-        if type(obj) is _METHOD:
+        t = type(obj)
+        if t is _METHOD:
             obj = obj.__func__
+            t = type(obj)
         ent = self._ckinds.get(id(obj))
-        if ent is not None and ent[0] is obj:
-            return ent
+        if ent is not None:
+            ref = ent[0]                    # ``is_held``, inline (hot path)
+            if ref is obj or (type(ref) is _WEAKREF and ref() is obj):
+                return ent
+        if t is _BUILTIN or t is _METHOD_WRAPPER:
+            ent = self._cbobj.get(id(obj))
+            if ent is not None:
+                ref = ent[0]
+                if type(ref) is _WEAKREF and ref() is obj:
+                    return ent
+            try:
+                owner = obj.__self__        # ``bound_owner``, inline
+                if owner is None or isinstance(owner, _MODULE):
+                    owner = None
+                elif not isinstance(owner, type):
+                    owner = type(owner)
+            except Exception:
+                owner = None                # decided below by itself, like an unbound one
+            if owner is not None:
+                ent = self._cbound.get((id(owner), obj.__name__))
+                if ent is None or ent[5] is not owner:
+                    ent = self._bound_kind(obj, owner)
+                if t is _METHOD_WRAPPER:    # takes no weak reference: not known again
+                    return ent
+                ent = (_WEAKREF(obj), ent[1], ent[2], None, None)
+                bobj = self._cbobj
+                if len(bobj) >= _BOUND_OBJECTS_MAX:
+                    bobj.clear()            # most are made per call: few are seen again
+                bobj[id(obj)] = ent
+                return ent
         kind, sym, callee, rename = _K_NONE, None, None, None
         try:
-            t = type(obj)
             if t is functools.partial:
                 inner = obj.func
                 if type(inner) is _METHOD:
                     inner = inner.__func__
                 if type(inner) is _FUNCTION and self._dep_function(inner):
-                    kind, callee = _K_PY, inner
+                    kind, callee = _K_PY, (inner.__code__, inner.__globals__)
             elif t is _FUNCTION:
                 if self._dep_function(obj):
-                    kind, callee = _K_PY, obj
+                    kind, callee = _K_PY, (obj.__code__, obj.__globals__)
                     rename = self._declared_name(obj)
             elif is_compiled_callable(obj):
                 sym = self._c_sym(obj)
@@ -1221,7 +1287,7 @@ class MonitoringBackend(FrameBackend):
                 if pairs:
                     func = pairs[-1][1]         # __init__ (it follows __new__ in the list)
                     if self._dep_function(func):
-                        kind, callee = _K_PY, func
+                        kind, callee = _K_PY, (func.__code__, func.__globals__)
                 elif not (obj.__flags__ & _HEAPTYPE):
                     module = getattr(obj, "__module__", None)
                     if (isinstance(module, str) and module and module != "builtins"
@@ -1230,13 +1296,32 @@ class MonitoringBackend(FrameBackend):
             else:
                 call = _mro_value(t, "__call__")
                 if type(call) is _FUNCTION and self._dep_function(call):
-                    kind, callee = _K_PY, call
+                    kind, callee = _K_PY, (call.__code__, call.__globals__)
         except Exception:
             kind, sym, callee, rename = _K_NONE, None, None, None
+        ref = held(obj)
+        ent = (ref, kind, sym, callee, rename)
+        if ref is not None:
+            self._ckinds_put(obj, ent)
+        return ent
+
+    def _ckinds_put(self, obj, ent):
         if len(self._ckinds) >= _CODE_CACHE_MAX:
             self._ckinds.clear()
-        ent = (obj, kind, sym, callee, rename)
         self._ckinds[id(obj)] = ent
+
+    def _bound_kind(self, obj, owner):
+        """``_call_kind`` of a compiled callable bound to a receiver whose class is ``owner``
+        (``bound_owner``), decided once per (owner, name): the entry holds the class, never
+        the receiver, and knows no object (its first field is None)."""
+        try:
+            sym = self._c_sym(obj)
+        except Exception:
+            sym = None
+        ent = (None, _K_NONE if sym is None else _K_C, sym, None, None, owner)
+        if len(self._cbound) >= _CODE_CACHE_MAX:
+            self._cbound.clear()
+        self._cbound[(id(owner), obj.__name__)] = ent
         return ent
 
     @staticmethod
@@ -1285,9 +1370,11 @@ class MonitoringBackend(FrameBackend):
                 # nor a class receiver (``cls``): it is decided by itself, not by its type.
                 t = type(callable_)
                 if (t is _FUNCTION or t in _DESCRIPTORS) and not issubclass(type(arg0), type):
-                    if len(self._keep) >= _SITES_MAX:
-                        self._keep.clear()
-                    self._keep[key] = (code, callable_, type(arg0))
+                    ref = held(callable_)
+                    if ref is not None:
+                        if len(self._keep) >= _SITES_MAX:
+                            self._keep.clear()
+                        self._keep[key] = (code, ref, type(arg0))
                 return True
         tid = stack_key()
         if kind != _K_C and csym is None:
@@ -1301,7 +1388,7 @@ class MonitoringBackend(FrameBackend):
                 if ent[4] is not None:
                     if len(self._callname) > 4096:
                         self._callname.clear()
-                    self._callname[tid] = (ent[3].__code__, ent[4])
+                    self._callname[tid] = (ent[3][0], ent[4])
                     self._renames = True
             if kind == _K_PY and ent[4] is not None:
                 # A callee that declares a name of its own (a decorator wrapper: its code is
@@ -1310,16 +1397,21 @@ class MonitoringBackend(FrameBackend):
                 # firing, later calls would take the code's name (locust: 2 calls of 6,572
                 # named ``Process.memory_info``, the rest the wrapper's closure name).
                 return True
+            # The same callee object twice in a row settles the site. It is known again by
+            # the entry's ``held`` reference (one weak reference per live object, so the same
+            # reference is the same object), never by the object: the site keeps no callee
+            # alive. An object that takes no weak reference is never known again.
+            ref = ent[0]
             site = self._csites.get(key)
             if site is None or site[0] is not code:
                 if len(self._csites) >= _SITES_MAX:
                     self._csites.clear()
-                self._csites[key] = [code, 1, ent[0]]
+                self._csites[key] = [code, 1, ref]
                 return None
-            if site[2] is ent[0]:
+            if ref is not None and site[2] is ref:
                 site[1] += 1
                 return False if site[1] >= _SITE_STABLE else None
-            site[1], site[2] = 1, ent[0]
+            site[1], site[2] = 1, ref
             return None
         site = self._csites.get(key)
         if site is not None:
@@ -1644,9 +1736,9 @@ class MonitoringBackend(FrameBackend):
                 except Exception:
                     pass
 
-    def _record_binding(self, frame, func):
-        ci = self._identity.code_identity(func.__code__, func.__globals__.get("__name__", ""),
-                                          func.__globals__)[0]
+    def _record_binding(self, frame, callee):
+        code, g = callee
+        ci = self._identity.code_identity(code, g.get("__name__", ""), g)[0]
         self._binding_failure(frame, ci.sym, ci.symq)
 
     def _discover_callable(self, callable_, arg0):

@@ -316,6 +316,11 @@ All notable changes to pymolt. The format follows
 - Recording a value runs none of its code: dict, list and set subclasses are read from what
   they store, and proxies such as werkzeug's `LocalProxy` are recorded as their own type.
   Flask's test suite failed under capture before.
+- The tracer no longer keeps the program's objects alive. Its caches held the callables it had
+  seen: a builtin method bound to a dict, list or dependency object kept that receiver alive,
+  as did a callable instance, a closure, a `functools.partial`, a decorator's wrapped method
+  and, during the incremental settle, a recorded call's frame. Their `__del__` ran late or
+  never and weak references to them stayed alive. The same facts are recorded.
 - gevent: the trace runtime stays off a monkeypatched `threading`, stdlib functions are never
   wrapped in place, and gevent-patched stdlib modules are not traced.
 - A forked child writes its own trace file, with its own writer and counters; it used to fill a
