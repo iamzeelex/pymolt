@@ -456,8 +456,8 @@ def _interpreter(minor):
     uv = shutil.which("uv")
     if uv is None:
         return None
-    proc = subprocess.run([uv, "python", "find", "--no-project", minor], capture_output=True,
-                          text=True, timeout=30, cwd="/")
+    proc = subprocess.run([uv, "python", "find", "--no-project", minor], stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, universal_newlines=True, timeout=30, cwd="/")
     found = proc.stdout.strip()
     return found if proc.returncode == 0 and found and Path(found).is_file() else None
 
@@ -467,8 +467,8 @@ def _run_scenarios(python, tmp_path):
     env["PYTHONPATH"] = str(REPO)
     script = tmp_path / "scenarios.py"
     script.write_text(SCENARIOS, encoding="utf-8")
-    proc = subprocess.run([python, str(script)], capture_output=True, text=True, env=env,
-                          timeout=120, cwd=str(tmp_path))
+    proc = subprocess.run([python, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, env=env, timeout=120, cwd=str(tmp_path))
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
 

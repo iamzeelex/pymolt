@@ -89,7 +89,6 @@ def test_audit_uses_saved_config(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
     
     # Mock orchestrate_ingestion to avoid running the real heavy resolver
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     
     mock_orchestrate = MagicMock()
@@ -146,7 +145,6 @@ def test_audit_fallback_warning(tmp_path, monkeypatch):
     # No config file is present in tmp_path
     (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
     
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph
     from pymolt.core.layers import IngestionReport
@@ -185,7 +183,6 @@ def test_audit_with_constraints(tmp_path, monkeypatch):
     constraint_file = tmp_path / "constraints.txt"
     constraint_file.write_text("pandas<2.0\n", encoding="utf-8")
     
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph
     from pymolt.core.layers import IngestionReport
@@ -240,7 +237,6 @@ def test_audit_json_output_is_pure_json(tmp_path, monkeypatch):
     # No config present: --json must still emit pure JSON (warning suppressed).
     (tmp_path / "requirements.txt").write_text("anyio==4.3.0\n", encoding="utf-8")
 
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph, Node
     from pymolt.core.layers import IngestionReport
@@ -338,7 +334,6 @@ def test_audit_risk_in_json(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("vulnlib==1.0\n", encoding="utf-8")
 
     import pymolt.adapters.pypi_metadata as pypi_mod
-    import pymolt.interfaces.cli.commands as commands
     import pymolt.risk.osv as osv_mod
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph, Node
@@ -415,7 +410,6 @@ def test_audit_interactive_overrides(tmp_path, monkeypatch):
         
     (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
     
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph, Node
     from pymolt.core.layers import IngestionReport
