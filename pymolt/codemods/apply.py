@@ -231,27 +231,66 @@ class RenameCallCodemod(cst.CSTTransformer):
                 )
         return updated
 
+    def _moves_module(self) -> bool:
+        """True when the rename also relocates the symbol to another module."""
+        return bool(self.new_module) and self.new_module != self.old_module
+
+    def _targets(self, imp: cst.ImportFrom) -> bool:
+        """Does this `from … import …` bring in the leaf we are renaming?"""
+        if imp.module is None or isinstance(imp.names, cst.ImportStar):
+            return False
+        if _dotted(imp.module) != self.old_module:
+            return False
+        return any(a.name.value == self.old_leaf for a in imp.names)
+
+    def _renamed(self, alias: cst.ImportAlias) -> cst.ImportAlias:
+        """Rename the alias' target leaf, preserving any `as` binding."""
+        return alias.with_changes(name=cst.Name(self.new_leaf))
+
     def leave_ImportFrom(
         self, original: cst.ImportFrom, updated: cst.ImportFrom
     ) -> cst.ImportFrom:
-        if updated.module is None or isinstance(updated.names, cst.ImportStar):
+        if not self._targets(updated):
             return updated
-        if _dotted(updated.module) != self.old_module:
-            return updated
-        new_names = []
-        changed = False
-        for alias in updated.names:
-            if alias.name.value == self.old_leaf:
-                changed = True
-                alias = alias.with_changes(name=cst.Name(self.new_leaf))
-            new_names.append(alias)
-        if not changed:
+        if self._moves_module() and len(updated.names) > 1:
+            # The line carries names we are NOT moving — rewriting `module` here
+            # would drag them to the new module too. leave_SimpleStatementLine
+            # splits it instead; leave this node untouched for it to find.
             return updated
         self.sites += 1
-        module = updated.module
-        if self.new_module and self.new_module != self.old_module:
-            module = _module_expr(self.new_module)
+        new_names = [
+            self._renamed(a) if a.name.value == self.old_leaf else a for a in updated.names
+        ]
+        module = _module_expr(self.new_module) if self._moves_module() else updated.module
         return updated.with_changes(names=new_names, module=module)
+
+    def leave_SimpleStatementLine(
+        self, original: cst.SimpleStatementLine, updated: cst.SimpleStatementLine
+    ) -> cst.SimpleStatementLine | cst.FlattenSentinel:
+        """Split a multi-name import whose leaf moves modules: the co-imported
+        names stay on the original module, the renamed one gets its own line.
+        (The single-name / same-module cases are handled in leave_ImportFrom.)"""
+        if len(updated.body) != 1 or not isinstance(updated.body[0], cst.ImportFrom):
+            return updated
+        imp = updated.body[0]
+        if not self._targets(imp) or not self._moves_module() or len(imp.names) <= 1:
+            return updated
+
+        self.sites += 1
+        others = [a for a in imp.names if a.name.value != self.old_leaf]
+        moved = [self._renamed(a) for a in imp.names if a.name.value == self.old_leaf]
+        kept = updated.with_changes(
+            body=[imp.with_changes(names=[_clean_last_comma(a) for a in others])]
+        )
+        new_line = cst.SimpleStatementLine(
+            body=[
+                cst.ImportFrom(
+                    module=_module_expr(self.new_module),
+                    names=[_clean_last_comma(a) for a in moved],
+                )
+            ]
+        )
+        return cst.FlattenSentinel([kept, new_line])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
