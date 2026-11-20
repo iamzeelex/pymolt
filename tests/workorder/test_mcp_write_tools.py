@@ -115,8 +115,11 @@ def test_with_allow_run_apply_asks_for_the_import_check(tmp_path, monkeypatch):
 def _normalize(view, root, plan_id):
     import re
 
-    text = json.dumps(view, sort_keys=True).replace(
-        "not checked: MCP server started without --allow-run", "not checked: not requested")
+    # The smoke import is on by default in the CLI and off on a server without --allow-run:
+    # each side says why it did not run, in its own words.
+    text = json.dumps(view, sort_keys=True)
+    text = re.sub(r'"smoke_import": "not checked: [^"]*"', '"smoke_import": "not checked"', text)
+    text = re.sub(r'smoke import not checked \([^;"]*\)', "smoke import not checked", text)
     text = text.replace(str(root.resolve()), "<root>").replace(str(root), "<root>")
     text = text.replace(plan_id, "<plan>").replace(plan_id[:8], "<plan8>")
     text = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+\-:\d]*", "<at>", text)

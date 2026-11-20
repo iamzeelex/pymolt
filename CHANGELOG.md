@@ -40,7 +40,7 @@ All notable changes to pymolt. The format follows
   restores the lines.
 - `apply` exits 1, and leaves nothing written, when a changed file that compiled before no
   longer compiles on the target Python (or on the base, where the change claims to run there),
-  or when `apply --smoke` finds a module that imported before and fails after. Running `apply`
+  or when the smoke import finds a module that imported before and fails after. Running `apply`
   again on an applied plan exits 0 and writes nothing.
 - After `apply`, `verify` judges the whole recorded surface, as it does without a plan: a
   changed call anywhere fails, and PASS needs every static symbol exercised, not only those on
@@ -163,8 +163,10 @@ All notable changes to pymolt. The format follows
   with each statement it lost.
 - `apply --step ID --record`, then `--record --done` or `--record --abort`, records an agent's or
   a person's edit as a step, with `--by`, `--actor`, `--claim`, `--expect` and `--pair`.
-- `apply --smoke` imports the changed modules in the target environment before and after the
-  write, and undoes the write when one that imported before fails after.
+- `apply` imports the changed modules in the target environment before and after the write
+  (the smoke import), and undoes the write when one that imported before fails after. It is on
+  by default; `--no-smoke` turns it off, and the receipt then reads "not checked: --no-smoke".
+  Over MCP it runs only on a server started with `--allow-run`.
 - `apply` lists the plan's advisories and manual items with their files and lines.
 - `rollback --step` undoes one step by the inverse of its effect and keeps later edits in the
   same files; `--cascade` rolls back the steps that depend on it first.

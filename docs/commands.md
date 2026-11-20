@@ -171,7 +171,7 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 | `--approve-agent` | A person approves this plan for agents, on a terminal (an attestation). Refused under `--agent` and `--json`. A re-plan or any change to the plan voids it |
 | `--agent` | The agent view. It writes pymolt steps only on a plan a person approved for agents; it refuses `--skip`, `--allow-no-baseline` and `--by person`. `--dry-run`, `--brief` and `--record` work on any plan |
 | `--allow-no-baseline` | Apply without a baseline capture; `verify` will then be INCONCLUSIVE |
-| `--smoke` | Also import the changed modules in the target environment setup names, before and after the write. A module that imported before and fails after undoes the write, and the ledger records the rollback. Without a target environment it is skipped, with the reason. It runs your code's import-time code |
+| `--no-smoke` | Skip the smoke import. By default apply imports the changed modules in the target environment setup names, before and after the write; a module that imported before and fails after undoes the write, and the ledger records the rollback. It runs your code's import-time code. When it does not run (`--no-smoke`, no target environment), the receipt says `not checked` and why |
 
 ### `pymolt verify [dir]`
 Compares the baseline and post-migration captures and prints `PASS`, `FAIL` or `INCONCLUSIVE` with

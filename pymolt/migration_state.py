@@ -379,7 +379,7 @@ def step_checks(check: SelfCheck | None, files: list[str] | None = None, *,
 
     smoke = check.smoke
     if smoke is None:
-        smoke_result = "not checked: not requested"
+        smoke_result = "not checked: not run"
     elif smoke.status == "skipped":
         smoke_result = f"not checked: {smoke.reason or 'skipped'}"
     elif smoke.status == "failed":

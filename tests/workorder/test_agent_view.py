@@ -177,4 +177,6 @@ def test_the_apply_view_names_the_next_command_and_brief(tmp_path):
     nxt = data["next"]
     assert nxt["command"] == "pymolt apply --step env-1 --record" and nxt["step"] == "env-1"
     assert nxt["brief"]["step"] == "env-1"
-    assert data["checks"]["mech-1"]["smoke_import"] == "not checked: not requested"
+    # The smoke import is on by default; this project names no target environment.
+    assert data["checks"]["mech-1"]["smoke_import"].startswith(
+        "not checked: setup names no target environment")

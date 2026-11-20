@@ -1,5 +1,5 @@
-"""apply checks its own write: a compile on the target (and the base) before it, and with
-``--smoke`` an import of the touched modules in the target environment around it."""
+"""apply checks its own write: a compile on the target (and the base) before it, and (unless
+``--no-smoke``) an import of the touched modules in the target environment around it."""
 from __future__ import annotations
 
 import json
@@ -7,12 +7,11 @@ import subprocess
 import sys
 
 import pytest
+from _apply import apply_migration_plan
 from typer.testing import CliRunner
 
-from _apply import apply_migration_plan
 from pymolt.apply_check import SmokeCheck, module_for, smoke_verdict
-from pymolt.codemods.models import DependencyMigration
-from pymolt.codemods.models import FilePreview
+from pymolt.codemods.models import DependencyMigration, FilePreview
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app
 from pymolt.migration_plan import (
@@ -93,7 +92,8 @@ def test_the_receipt_records_the_compile_and_a_failure_that_predates_the_plan(tm
     assert target.side == "target" and target.status == "passed"
     assert target.python == "3.12" and target.files == ["app0.py"]
     assert "SyntaxError" in target.pre_existing["app0.py"]
-    assert receipt.self_check.smoke is None
+    smoke = receipt.self_check.smoke              # not asked for: the receipt says so
+    assert (smoke.status, smoke.reason) == ("skipped", "turned off")
     assert MigrationReceipt.load(tmp_path).self_check == receipt.self_check
     assert "already failing before" in receipt.self_check.summary()
 
@@ -202,7 +202,7 @@ def test_a_smoke_failure_the_write_caused_restores_the_files(tmp_path):
     state = json.loads((tmp_path / ".pymolt" / "migrations" / plan.plan_id / "state.json")
                        .read_text())
     assert state["status"] == "rolled_back" and "smoke import failed" in state["error"]
-    # Without --smoke the same plan applies again in the same run, with a new epoch.
+    # Without the smoke import the same plan applies again in the same run, with a new epoch.
     again = apply_migration_plan(tmp_path, plan)
     assert (again.status, again.run_id) == ("applied", plan.plan_id)
     assert [s.epoch for s in again.steps.values()] == [5, 6]
@@ -257,13 +257,24 @@ def test_status_and_the_cli_show_the_self_check(tmp_path):
     _plan(tmp_path, GOOD_OLD, GOOD_NEW, target_env=True)
     runner = CliRunner()
 
-    applied = runner.invoke(app, ["apply", str(tmp_path), "--smoke"])
+    applied = runner.invoke(app, ["apply", str(tmp_path)])        # the smoke import is the default
 
     assert applied.exit_code == 0, applied.output
     assert "Self-check: compile on the target 3.12: 1 file(s) ok" in applied.output
     assert "smoke import on 3.12: 1 module(s) ok" in " ".join(applied.output.split())
     detail = build_status(tmp_path).phase("migration").detail
     assert "self-check: compile on the target 3.12: 1 file(s) ok" in detail
+
+
+def test_no_smoke_skips_the_import_and_the_receipt_says_so(tmp_path):
+    _plan(tmp_path, GOOD_OLD, GOOD_NEW, target_env=True)
+
+    applied = CliRunner().invoke(app, ["apply", str(tmp_path), "--no-smoke"])
+
+    assert applied.exit_code == 0, applied.output
+    assert "smoke import not checked (--no-smoke)" in " ".join(applied.output.split())
+    steps = MigrationReceipt.load(tmp_path).steps.values()
+    assert {s.checks["smoke_import"] for s in steps} == {"not checked: --no-smoke"}
 
 
 def test_the_cli_refusal_carries_the_self_check_and_exits_as_a_finding(tmp_path):

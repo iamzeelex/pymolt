@@ -956,9 +956,10 @@ def apply_plan_cmd(
         help="Apply without a baseline capture; verify will be INCONCLUSIVE",
     ),
     smoke: bool = typer.Option(
-        False, "--smoke",
-        help="Also import the changed modules in the target environment, before and after "
-             "the write; undo the write if it breaks an import",
+        True, "--smoke/--no-smoke",
+        help="Import the changed modules in the target environment, before and after the "
+             "write, and undo the write if it breaks an import. On by default; with "
+             "--no-smoke the receipt says it was not checked",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the receipt as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
@@ -1023,7 +1024,8 @@ def apply_plan_cmd(
         else:
             result = apply_steps(project_path, migration_plan, step=step, through=through,
                                  dry_run=dry_run, allow_no_baseline=allow_no_baseline,
-                                 smoke=smoke, agent=agent)
+                                 smoke=smoke, agent=agent,
+                                 smoke_reason=None if smoke else "--no-smoke")
     except MigrationCheckError as exc:
         if not json_output:
             console.print(f"[dim]Self-check: {escape(exc.check.summary())}[/dim]")
