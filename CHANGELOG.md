@@ -336,6 +336,9 @@ All notable changes to pymolt. The format follows
 
 #### Plan and apply
 
+- A rename that also moves a symbol to another module (`flask.Markup` → `markupsafe.Markup`)
+  moves only that name: `from flask import Markup, Flask` becomes `from flask import Flask` plus
+  `from markupsafe import Markup`, where it used to move `Flask` too.
 - A resolver failure in `plan` exits 2, with a JSON error under `--json` and `--agent`, instead
   of a traceback.
 - `apply` says that an empty plan changed no file.
