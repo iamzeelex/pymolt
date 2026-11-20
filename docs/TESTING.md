@@ -50,7 +50,7 @@ divergence** (`.python-version`=3.6.1 vs `Dockerfile`=3.6 vs `tox`=3.6…3.11); 
 (pypi:25, local:1), groups dev:20 / main:7.
 
 ```bash
-pymolt scan tests/artifacts/pyfolio      # setup.py project -> 1 root + a note (setup.py edges not yet classified)
+pymolt scan tests/artifacts/pyfolio      # setup.py project -> 1 root, edges from setup.py (source_file: setup.py)
 pymolt scan tests/artifacts/blaze        # many requirements-* -> roots `.`/`etc`, ~140 / ~64 edges
 pymolt scan tests/artifacts/flasgger --json | jq '.surfaces.project_roots[].path'
 ```

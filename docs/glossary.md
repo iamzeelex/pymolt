@@ -24,12 +24,13 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **approval** | A person's attested `apply --approve-agent`: agents may apply this plan's pymolt steps and roll one back. A re-plan or any change to the plan voids it |
 | **attestation** | A person's confirmation, typed on a terminal, kept outside the project with an HMAC. Only an attestation can judge an edit more leniently than a hand edit |
 | **ACCEPTED** | A changed outcome on an edited line that a person attested as intended: it counts as compared equal and is always printed, with who accepted it and when |
-| **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it |
+| **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it: a person (`needs_review`) or more evidence (`needs_evidence`) |
 | **finding** | One reported difference: failing facts grouped by symbol and call site, or a review item |
 | **API change** | A symbol your code uses that is removed, moved, or changed in signature, default or deprecation status between base and target |
 | **codemod** | A rewrite for one API or Python-version change, applied with LibCST |
 | **plan** | The API changes, the codemods applied to your files as a diff, and the predicted risks, saved for `apply` |
 | **step** | One unit of the plan: a recipe pymolt applies across every file it changes, or work for an agent or a person. `apply --step ID` applies one |
+| **executor** | Who carries out a step: `pymolt` (apply writes it), `agent` or `person` (they make the edit and record it with `apply --step ID --record`) |
 | **anchor** | A statement named by what it is (its code with the formatting stripped), its function or class and its neighbours, never by its line, so it is found again after lines move |
 | **run** | The application of one plan, opened by its first `apply`. Applying another plan closes it; its applied steps stay in effect |
 | **epoch** | One application of a step, numbered by its ledger event. A rollback ends it; applying the step again opens a new one |

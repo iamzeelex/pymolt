@@ -78,6 +78,9 @@ Principle: first make the instrument honest and the evaluation repeatable, so ev
 
 Each wave ends with the scripted evaluation (Docker now has 16 GB, so the six projects run in parallel) and a scorecard diff.
 
-**Owner decisions needed:**
-- B8: should a red baseline be accepted with a stamp? Needed before wave 0 ends.
-- Q1: may an imports-only baseline unlock `apply`? Q2: should assess check installs by default? Both needed before wave 3.
+**Owner decisions (taken):**
+- B8: a red baseline is kept with `capture --accept-failing`.
+- Q1: yes, an imports-only baseline may unlock `apply`, with the verdict capped below PASS
+  (decision 5 in `docs/design/apply-work-order.md`; optional stage 8, not built).
+- Q2: yes, install and import checks on by default in the CLI (decision 6). Only apply's smoke
+  import is built; assess's install/import ladder is wave 3, not built.

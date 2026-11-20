@@ -228,7 +228,8 @@ project root or the Python version, or when an input carried such a value into a
   is deterministic: a replicate with random hash seeds that agreed on 5 or more keys, a pinned hash
   seed, or a known cause, such as the field order Python 3.9 gives a TypedDict.
 - **Environment.** A difference at a call that reads an aspect of the environment that differs
-  between the captures (a curated list of readers) is a review item, never noise and never a pass.
+  between the captures (a curated list of readers) is never noise and never a pass: it needs
+  evidence, a post-migration capture in the baseline's environment.
 
 The report leads with findings, not with every compared fact:
 - a ledger: failing, review, expected by construction, explained, not comparable;

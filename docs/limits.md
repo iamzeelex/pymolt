@@ -29,8 +29,10 @@
 
 ### Judging a difference
 
-Each of these is a review item, so the verdict is INCONCLUSIVE until a person decides
-([verify.md](verify.md#run-noise)):
+Each of these makes the verdict INCONCLUSIVE, and the verdict says who settles it
+([verify.md](verify.md#run-noise)): a person for a hand edit's new value; more evidence for the
+others (a baseline replicate, or captures on the same platform), and a person for what a measured
+replicate still did not settle:
 - **A hand edit's new value.** When you changed a line and its call now returns something else,
   pymolt cannot tell whether you meant it. Only a new exception fails.
 - **A value that varies between runs**, when no baseline replicate measured the noise. Capture the

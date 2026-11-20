@@ -102,6 +102,10 @@ uvx hatch version 0.2.0rc1          # sets pymolt/__init__.py
 Move the changelog's *Unreleased* entries under `## [0.2.0rc1] - <date>`, commit as
 `chore: release 0.2.0rc1`, merge the PR.
 
+If the README's Install section still says the PyPI release is outdated, point it at PyPI in the
+same commit (`uv tool install pymolt`, or `pip install --pre pymolt` for an RC), and the same
+in `plugin/README.md`.
+
 In parallel, open `main` for the next minor: a PR to `main` with
 `uvx hatch version 0.3.0.dev0`, committed as `chore: open 0.3 development`.
 

@@ -287,8 +287,8 @@ All notable changes to pymolt. The format follows
 #### State files
 
 - `.pymolt/contract_state.json` is schema 2: its slot paths are relative to the project root.
-  A schema-1 file is read as before and saved as schema 2; pymolt 0.1 refuses a schema-2 file
-  as written by a newer pymolt.
+  A schema-1 file is read as before and saved as schema 2. pymolt 0.1 does not check the
+  schema, so do not go back to 0.1 on a project 0.2 has captured.
 - `status` shows a damaged or newer state file as a problem of its phase (`problems` in `--json`
   and `--agent`), with no next command and the file's remedy as the reason.
 - A command that updates a state file while another pymolt does waits for it (up to 60 s,
