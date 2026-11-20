@@ -25,8 +25,9 @@ before it produced, under the migration lock, all or nothing:
 7. **Ledger and receipt:** one ``apply`` event per step (its ``seq`` is the step's new epoch), its
    entries, the texts in the blob store, and a step receipt with ``checks`` and ``risk_ids``. A
    failure here reverses the writes.
-8. **Smoke import** (``--smoke``): on a failure the invocation is rolled back, with a ``rollback``
-   event per step, and the step receipts say why.
+8. **Smoke import** (on by default in the CLI, ``--no-smoke`` turns it off): on a failure the
+   invocation is rolled back, with a ``rollback`` event per step, and the step receipts say why.
+   When it does not run, the receipts say so and why (``not checked: <reason>``).
 
 ``--dry-run`` stops after 5 and returns the diff it would write. ``skip_step`` marks a step
 ``skipped`` (a ``skip`` event; its dependents stay blocked).
@@ -43,7 +44,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from pymolt.apply_check import SelfCheck
+from pymolt.apply_check import SelfCheck, SmokeCheck
 from pymolt.migration_plan import (
     Invocation,
     InvocationFile,
@@ -145,8 +146,9 @@ def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | Non
                 agent: bool = False, smoke_reason: str | None = None) -> ApplyResult:
     """Apply the selected pymolt steps of ``plan`` (module docstring). Under ``agent`` the
     plan must be approved for agents (``workorder.approval``), except for a dry run.
-    ``smoke_reason``: why the smoke import is not run, for the receipts (an MCP server started
-    without ``--allow-run``). Raises ``StepRefusal`` / ``MigrationConflictError`` (exit 2),
+    ``smoke_reason``: why the smoke import is not run, for the receipts (``--no-smoke``, an MCP
+    server started without ``--allow-run``); without one a call with ``smoke=False`` reads
+    "turned off". Raises ``StepRefusal`` / ``MigrationConflictError`` (exit 2),
     ``MigrationEvidenceError`` (exit 4), ``MigrationCheckError`` (exit 1) or
     ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if step and through:
@@ -483,7 +485,9 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
             return _commit(root, plan, run_id, state, receipt, ledger, [], texts, result,
                            start_fp=start_fp, start_setup=start_setup, baseline=baseline,
                            allow_no_baseline=allow_no_baseline, smoke=False,
-                           check=SelfCheck(compile=[]), smoke_before=None)
+                           check=SelfCheck(compile=[], smoke=SmokeCheck(
+                               status="skipped", reason="nothing written")),
+                           smoke_before=None)
         result.outcome = ("present" if present else
                           "already_applied" if noop or (not steps and not first_run) else
                           "nothing")
@@ -493,10 +497,9 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
 
     check, smoke_before = _check_before_write(
         root, _pseudo_plan(plan, texts.changed(), decided), smoke and not dry_run)
-    if smoke_reason and check.smoke is None:
-        from pymolt.apply_check import SmokeCheck
-
-        check.smoke = SmokeCheck(status="skipped", reason=smoke_reason)
+    if check.smoke is None and smoke_before is None:   # not run: the receipts say why
+        why = "dry run" if dry_run and smoke else smoke_reason or "turned off"
+        check.smoke = SmokeCheck(status="skipped", reason=why)
     result.self_check = check
     result.checks = {s.id: _checks(check, s, decisions) for s, decisions in decided}
     if dry_run:
@@ -672,7 +675,7 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
                 f"{failures}", check=check,
                 hint="The plan's rewrite broke an import that worked before it. The files are "
                      "as they were before apply, and the ledger records the rollback; fix the "
-                     "rewrite by hand, or apply without --smoke and let capture and verify "
+                     "rewrite by hand, or apply with --no-smoke and let capture and verify "
                      "judge it.")
         new_receipt.self_check = check
         for s, ds in decided:

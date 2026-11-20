@@ -70,8 +70,8 @@ A codemod is a match/rewrite template applied with LibCST, for example
 - **All or nothing.** `apply` prepares and parses every changed file before the first write, and a
   failed apply restores them all. `pymolt rollback` undoes a successful one.
 - **Self-checked.** `apply` compiles every changed file on the target Python before writing, the
-  dependency rewrites included, and `apply --smoke` imports the changed modules in the target
-  environment ([commands.md](commands.md#pymolt-apply-dir)).
+  dependency rewrites included, and then imports the changed modules in the target environment
+  unless `--no-smoke` is given ([commands.md](commands.md#pymolt-apply-dir)).
 
 ## The plan as steps
 

@@ -1,4 +1,4 @@
-"""apply's self-check: compile before writing, and an optional smoke import after.
+"""apply's self-check: compile before writing, and a smoke import around the write.
 
 **Compile** (always, before the first write). The frozen new source of every changed file is
 compiled on the target Python, and on the base Python for a change that claims to run there
@@ -7,10 +7,10 @@ fails where its old source compiled is a failure the plan introduced: apply refu
 nothing. A file that already failed before the rewrite is recorded as pre-existing; the plan's
 compile findings report it, and the rewrite did not cause it.
 
-**Smoke** (``apply --smoke``, around the write). The touched modules are imported in the
-target environment that setup names, once on the old code and once on the new. A module that
-imported before and fails after is a failure the plan introduced: apply restores the files.
-One that failed both times is pre-existing.
+**Smoke** (around the write; on by default in the CLI, ``apply --no-smoke`` turns it off). The
+touched modules are imported in the target environment that setup names, once on the old code
+and once on the new. A module that imported before and fails after is a failure the plan
+introduced: apply restores the files. One that failed both times is pre-existing.
 
 A check that cannot run (no interpreter, no target environment, a crashed or timed-out
 harness) is ``skipped`` with the reason: never "passed". Interpreters run through
@@ -74,7 +74,7 @@ class SelfCheck(BaseModel):
     """What apply checked about its own write (recorded on the receipt)."""
 
     compile: list[CompileCheck] = Field(default_factory=list)
-    smoke: SmokeCheck | None = None  # None: not requested (`apply --smoke`)
+    smoke: SmokeCheck | None = None  # None: not run (apply records why as a skipped check)
 
     def summary(self) -> str:
         """One line for status and the apply summary."""
@@ -93,7 +93,7 @@ class SelfCheck(BaseModel):
             parts.append("compile: no file changed")
         smoke = self.smoke
         if smoke is None:
-            parts.append("smoke import not requested")
+            parts.append("smoke import not run")
         elif smoke.status == "skipped":
             parts.append(f"smoke import not checked ({smoke.reason})")
         else:

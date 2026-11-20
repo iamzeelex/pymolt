@@ -4,11 +4,10 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from _apply import apply_migration_plan
+
 from pymolt.apply_ledger import build_entries, in_effect_entries, ledger_path, load_ledger
-from pymolt.codemods.models import DependencyMigration
-from pymolt.codemods.models import ApiImpact, CodemodPattern, FilePreview
+from pymolt.codemods.models import ApiImpact, CodemodPattern, DependencyMigration, FilePreview
 from pymolt.migration_plan import (
     MigrationPlan,
     create_migration_plan,
@@ -67,7 +66,7 @@ def test_apply_records_its_run_and_a_step_receipt_with_epoch_checks_and_links(tm
         "applied", 1, "pymolt", "preserve", ["m.py"], 1)
     assert set(step.checks) == {"compile_target", "compile_base", "smoke_import"}
     assert step.checks["compile_base"] == "not checked: no base claim"
-    assert step.checks["smoke_import"] == "not checked: not requested"
+    assert step.checks["smoke_import"] == "not checked: turned off"
     assert (saved.status, saved.progress, saved.in_effect) == ("applied", "complete", True)
     state = json.loads((tmp_path / ".pymolt" / "migrations" / receipt.run_id / "state.json")
                        .read_text())

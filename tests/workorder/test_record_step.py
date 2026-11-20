@@ -96,7 +96,7 @@ def test_record_snapshots_the_files_and_done_records_the_edit(tmp_path):
     step = _step(tmp_path, plan.plan_id, "sig-1")
     assert (step.status, step.epoch, step.executor, step.in_effect) == (
         "recorded", ev["seq"], "agent", True)
-    assert step.checks["smoke_import"].startswith("not checked")
+    assert step.checks["smoke_import"] == "not checked: pymolt did not write this step"
     assert _status(tmp_path, plan, "sig-1") == "recorded"
 
 
