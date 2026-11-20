@@ -6,21 +6,22 @@ __pycache__/
 # C extensions
 *.so
 
-# Distribution / packaging
+# Distribution / packaging. Anchored to the repo root: test fixtures and bench toy
+# projects may have their own build/, lib/ or dist/ that must stay tracked.
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
@@ -39,6 +40,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.mypy_cache/
 
 # Environments
 .env
@@ -59,9 +61,16 @@ venv.bak/
 # Ruff cache
 .ruff_cache/
 
+# Leftovers of a conflicted merge or cherry-pick
+*.orig
+*.rej
+
 # local pymolt cache
 .pymolt_cache/
 .pymolt/
+# target manifest pymolt writes when run on this repo itself
+/requirements-target.txt
+/environment-target.yml
 
 # exported watcher bundle (regenerable: pymolt contract export-watcher)
 /bundle/
@@ -75,15 +84,11 @@ Thumbs.db
 
 # Migration Test Projects
 tests/artifacts/*
-tests/artifacts/flasgger/
-tests/artifacts/blaze/
-tests/artifacts/pyfolio/
-.old
+/.old
 .research
 .agent.md
-.out
-out
-.pymolt/env_config.json
+/.out
+/out
 .codegraph
 .claude
 CLAUDE.md
