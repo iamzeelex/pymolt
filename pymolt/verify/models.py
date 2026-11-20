@@ -178,13 +178,8 @@ class ContractSlot(BaseModel):
     # The container this capture ran in (None = it ran locally): lets later phases reach the
     # same interpreter and map its paths back to the project.
     runner: RunnerSpec | None = None
-    # Coverage-based gap summary (TEST_SUITE captures only) — what fraction of the
-    # project's static dependency-usage sites the test suite actually exercised. None/0
-    # when unavailable (coverage not installed, non-TEST_SUITE capture, or the second
-    # coverage pass failed) so OLD contract_state.json files still load unchanged.
-    coverage_pct: float | None = None
-    covered_sites: int = 0
-    blind_sites: int = 0
+    # Schema-2 files may still carry ``coverage_pct``/``covered_sites``/``blind_sites`` (a
+    # second run of the suite under coverage, since removed): extra keys are ignored on load.
     # Fingerprint of the world this capture was taken in (manifest content, base
     # Python, toolset, container). A baseline is a recording of an environment
     # that stops existing the moment you migrate, so the only way to know the

@@ -34,7 +34,6 @@ from __future__ import annotations
 import glob
 import gzip
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -59,7 +58,6 @@ from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
 from pymolt.state_io import atomic_write_bytes, atomic_write_json, state_lock
-from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
@@ -81,7 +79,6 @@ from pymolt.verify.facts import (
     record_site_text,
     snapshot_path,
 )
-from pymolt.verify.gaps import classify_gaps, scan_usage_sites
 from pymolt.verify.inconclusive import (
     NEEDS_EVIDENCE,
     NEEDS_REVIEW,
@@ -1614,45 +1611,6 @@ def _diagnostic_path(project_dir: Path, when: str) -> Path:
     return directory / f"{when}-{stamp}-{uuid.uuid4().hex[:8]}.jsonl"
 
 
-def _coverage_available() -> bool:
-    """Whether the optional ``coverage`` package is importable — a thin seam so tests can
-    monkeypatch the degrade path without depending on the real environment."""
-    return importlib.util.find_spec("coverage") is not None
-
-
-def _build_coverage_data(project_dir: Path, pytest_args: list[str]) -> dict:
-    """Thin seam over ``coverage.run_coverage_json`` so tests can inject a fake report
-    instead of shelling out to a real ``coverage run``."""
-    return run_coverage_json(str(project_dir), pytest_args)
-
-
-def _coverage_gap_summary(
-    project_dir: Path, command: list[str],
-) -> tuple[float | None, int, int, list[str]]:
-    """Best-effort coverage-based gap summary for a TEST_SUITE capture: a SECOND
-    ``coverage run`` pass over the project's own test suite, overlaid onto every static
-    dependency-usage site (``gaps.scan_usage_sites`` / ``classify_gaps``), folded into
-    ``(coverage_pct, covered_sites, blind_sites, notes)``.
-
-    Degrades to ``(None, 0, 0, [note])`` rather than raising — a capture must never fail
-    just because ``coverage`` isn't installed or this second pass errors for any reason.
-    """
-    if not _coverage_available():
-        return None, 0, 0, [
-            "coverage package not installed — skipping coverage-based gap summary"
-        ]
-    try:
-        pytest_args = list(command[1:])
-        coverage_data = _build_coverage_data(project_dir, pytest_args)
-        sites = scan_usage_sites(str(project_dir))
-        report = classify_gaps(sites, coverage_data)
-        total = report.covered + report.blind
-        pct = round(report.covered / total * 100.0, 2) if total else None
-        return pct, report.covered, report.blind, []
-    except Exception as e:  # noqa: BLE001 — coverage is best-effort, never fails the capture
-        return None, 0, 0, [f"coverage-based gap summary failed: {e}"]
-
-
 def capture_named_trace(
     project_dir: str | Path, when: str, mode: CaptureMode, *,
     command: list[str] | None = None, target: str = "all", backend: str = "auto",
@@ -1679,12 +1637,6 @@ def capture_named_trace(
     baseline capture of a legacy project runs in its configured container
     instead of silently running against the local interpreter. Pass
     ``container`` explicitly to override.
-
-    For ``mode == TEST_SUITE``, also computes a coverage-based gap summary (what fraction
-    of the project's static dependency-usage sites the suite actually exercised — see
-    ``_coverage_gap_summary``) and stamps it onto the slot's ``coverage_pct``/
-    ``covered_sites``/``blind_sites``. Best-effort: degrades to ``None``/``0``/``0`` (logged,
-    never raised) when ``coverage`` isn't installed or the second pass fails.
 
     A command that exits non-zero is refused as evidence unless ``accept_failing`` is set
     and the run recorded events; the slot is then stamped ``red`` (still ``valid``).
@@ -1835,16 +1787,6 @@ def capture_named_trace(
         staged_path.touch()
     validity, validity_reason = _capture_validity(
         result, staged_path, accept_failing=accept_failing)
-    # The coverage pass re-runs the command: before the state lock, which only guards the
-    # slot update below (load, archive the displaced capture, promote, save).
-    coverage_pct: float | None = None
-    covered_sites = blind_sites = 0
-    if mode == CaptureMode.TEST_SUITE and validity is CaptureValidity.VALID:
-        coverage_pct, covered_sites, blind_sites, coverage_notes = _coverage_gap_summary(
-            project_dir, list(command),
-        )
-        for note in coverage_notes:
-            logger.info("capture_named_trace(%s): %s", when, note)
     with state_lock(project_dir, operation=f"capture {when}"):
         state = load_contract_state(project_dir)
         archived_previous = None
@@ -1906,7 +1848,6 @@ def capture_named_trace(
             command=list(command), target=target, events=result.events, processes=result.processes,
             command_log=result.command_log, returncode=result.returncode, env_note=env_note,
             runner=runner_spec,
-            coverage_pct=coverage_pct, covered_sites=covered_sites, blind_sites=blind_sites,
             env_fingerprint=environment_fingerprint(project_dir),
             env_setup_fingerprint=environment_setup_fingerprint(project_dir),
             archived_previous=archived_previous,

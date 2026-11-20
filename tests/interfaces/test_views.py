@@ -295,7 +295,7 @@ def test_assess_full_report_is_the_json_payload(tmp_path):
 _CAPTURE_KEYS = {
     "when", "accepted", "validity", "validity_reason", "events", "processes", "returncode",
     "trace_path", "command_log", "filled_slots", "env_note", "duration_seconds",
-    "dropped_events", "coverage_pct", "archived_previous", "impact_targets",
+    "dropped_events", "archived_previous", "impact_targets",
     "deployment_id", "request_id", "correlation_id", "metadata_path", "red",
 }
 

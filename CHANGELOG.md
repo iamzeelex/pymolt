@@ -324,6 +324,11 @@ All notable changes to pymolt. The format follows
   (`/work/...`) map back to the project.
 - Capture paths and the target environment are resolved against the project, not the working
   directory, and the target venv's `python` is not resolved through its symlink.
+- `capture --mode tests` runs the test suite once. When the `coverage` package was importable,
+  it ran the suite a second time as `coverage run -m pytest` with the command's first word
+  dropped, on the host even for a container capture, and wrote `.coverage` and `coverage.json`
+  into the project. The second coverage figure it gave (`coverage_pct` in `status` and the
+  capture view) is gone: coverage is `verify`'s, the contacts that ran.
 
 #### Verify
 
