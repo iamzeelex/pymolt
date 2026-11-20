@@ -338,6 +338,10 @@ All notable changes to pymolt. The format follows
   nested checkouts.
 - `verify` names the side that is missing, and a refused `capture` returns `ok: false` with a
   hint that matches the cause.
+- An operator between two dependency objects (`Version(a) > Version(b)`) no longer leaves the
+  reflected method (`__lt__`) BLIND as ran but not recorded, which made a capture pair with no
+  code change INCONCLUSIVE with recall below 100%. Python calls one of the two methods: either
+  recorded at the statement confirms both, and the pair counts once in coverage and recall.
 
 #### Plan and apply
 

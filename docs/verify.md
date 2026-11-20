@@ -271,6 +271,10 @@ the only one):
 | not run | The statement never ran: a test or run gap |
 | unobservable | No trace can record it (see below) |
 
+An operator names two methods: `a > b` names the left operand's `__gt__` and the right
+operand's `__lt__`, which Python calls only when the first returns NotImplemented. At one
+statement the two count as one contact, recorded when either was.
+
 - **Coverage** = (recorded + ran, not recorded) / the contacts that are not unobservable: how much
   of the dependency surface the run reached, the analogue of pytest's line coverage.
 - **Recall** = recorded / (recorded + ran, not recorded): how much of what ran the tracer caught.
