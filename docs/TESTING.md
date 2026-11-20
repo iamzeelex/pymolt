@@ -100,7 +100,7 @@ pymolt verify tests/artifacts/flasgger --json \
 
 ---
 
-## D — sandbox probe (`--probe-python`): re-invoke captured contacts under a version
+## D — probe (`--probe-python`): re-invoke captured contacts under a version
 
 The probe needs the dependency **installed in the target venv**. The artifacts' deps aren't in
 this venv, so on flasgger the probes report `error`/`opaque-inputs`. To see a real

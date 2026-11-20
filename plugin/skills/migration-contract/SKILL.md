@@ -75,7 +75,7 @@ how verify judges it.
 - **Undo one step:** `pymolt rollback . --step ID --agent`.
 
 A person decides, and `--agent` refuses: the approval itself, a whole-run rollback,
-`rollback --force` or `--cascade`, `verify --auto-rollback`, `verify --accept`, `apply --skip`
+`rollback --force` or `--cascade`, `verify --accept`, `apply --skip`
 and `apply --allow-no-baseline`. Say what is needed and leave it to the person.
 
 ## Reading verify

@@ -244,6 +244,9 @@ All notable changes to pymolt. The format follows
 
 #### Verify
 
+- `verify`'s golden, canary and shadow options (`--golden-before`, `--golden-after`, `--policy`,
+  `--metrics`, `--auto-rollback`, `--shadow`) are hidden until 0.3: no command makes their input
+  files yet. They still work for a script that writes those files.
 - A dynamic-only symbol whose facts all compared equal no longer blocks PASS.
 - The baseline is judged against the environment the migration started from. Bumping the pins
   of the same manifest keeps both the baseline and the plan valid; another manifest file, base

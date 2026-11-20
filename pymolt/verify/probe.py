@@ -1,4 +1,4 @@
-"""Probe captured contacts under a target dependency version (sandbox → report).
+"""Probe captured contacts under a target dependency version (re-invoke → report).
 
 For each contact in a trace whose inputs are *reconstructible* (JSON-able values,
 or — later — a dill snapshot), re-invoke it under the target venv's interpreter
