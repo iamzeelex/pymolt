@@ -1,0 +1,9 @@
+tests/verify/test_normalize.py
+tests/verify/test_sinks.py
+tests/verify/test_sink_backpressure.py
+tests/verify/test_backend.py
+tests/verify/test_identity.py
+tests/verify/test_wrap.py
+tests/verify/test_runtime_outcomes.py
+tests/verify/test_setprofile_raise_types.py
+tests/verify/test_stdlib_not_wrapped.py

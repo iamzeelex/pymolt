@@ -91,7 +91,9 @@ def _swallow(fn, *args):
 def test_python_level_raise_is_recorded_as_raise_not_return_none(target):
     sink, _ = _trace(target, lambda m: _swallow(m.boom, 1))
     rec = _by_name(sink)["boom"]
-    assert rec["raised"] == UNTYPED_RAISE
+    # A raise, never a None return. Its type is read when the one-shot trace event reaches the
+    # caller (it does on 3.6 and 3.7 here); otherwise the raise is recorded untyped.
+    assert rec["raised"] in (UNTYPED_RAISE, "ValueError")
     assert rec["result"] is None
 
 
@@ -109,8 +111,12 @@ def test_genuine_none_returns_stay_returns(target):
 
 def test_return_none_through_finally_is_not_a_raise(target):
     rec = _by_name(_trace(target, lambda m: m.finally_return())[0])["finally_return"]
-    # (On <=3.7 this case is reported as AMBIGUOUS_OUTCOME; the host suite runs on 3.12+.)
-    assert rec["raised"] is None and rec["result"] is None
+    if sys.version_info < (3, 8):
+        # The documented 3.6/3.7 limit (docs/limits.md): the bytecode cannot tell this return
+        # from a raise, so it is reported as ambiguous, never as a plain None return.
+        assert rec["raised"] is None and rec["result"] == normalize(AMBIGUOUS_OUTCOME)
+    else:
+        assert rec["raised"] is None and rec["result"] is None
 
 
 def test_generator_suspension_is_not_a_raise(target):

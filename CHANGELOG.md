@@ -226,6 +226,12 @@ All notable changes to pymolt. The format follows
 
 ### Changed
 
+- CI runs the injected tracer's tests on Python 3.6 and 3.7 as well (3.8 and 3.11 ran already),
+  checks pyflakes errors with ruff, installs from the lock file (`--locked`) and pins every
+  GitHub Action by commit. The package no longer claims Python 3.13 (14 tests fail there; see
+  docs/limits.md), and `install.sh` installs on Python 3.12. `pytest` skips the `integration`
+  tests unless asked (`-m integration`).
+
 #### Capture and tracer
 
 - On Python 3.12+, `--backend auto` traces with `sys.monitoring` instead of `sys.setprofile`.

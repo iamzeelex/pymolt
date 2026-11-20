@@ -334,7 +334,9 @@ def test_injected_runtime_is_pure_stdlib():
         " or m.startswith('pymolt.core.')];"
         "assert not bad, bad"
     )
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    # stdout=/stderr=PIPE and universal_newlines: 3.6 has no capture_output= or text=
+    r = subprocess.run([sys.executable, "-c", code], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, universal_newlines=True)
     assert r.returncode == 0, r.stderr
 
 
