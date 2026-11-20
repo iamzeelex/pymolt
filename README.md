@@ -68,7 +68,7 @@ pymolt verify .
 - For a long-running app, capture with `--mode command -- python app.py` (Ctrl+C ends it), or with `--mode attach` for a process you start yourself.
 
 > [!WARNING]
-> **Capturing a service under load costs throughput.** On a Flask + SQLAlchemy + pydantic service on Python 3.12, driven at full load, capture cut throughput by about 20% once steady (19.0–20.5%), and to 71–72% of normal in the first 30 s. At 200 requests/s, below full load, p99 latency rose by 5%. On Python 3.6–3.11 the cost under load has not been measured; test suites there run 2.7–11.8× slower. Capture on a replica or a canary, or with that much spare capacity.
+> **Capturing a service under load costs throughput.** On a Flask + SQLAlchemy + pydantic service on Python 3.12, driven at full load, capture cut throughput by about 20% once steady (19.0–20.5%), and to 71–72% of normal in the first 30 s. At 200 requests/s, below full load, p99 latency rose by 5%. On Python 3.6–3.11 the cost under load has not been measured; test suites there run 2.3–10.8× slower. Capture on a replica or a canary, or with that much spare capacity.
 - For a project that runs in a container, `setup --container NAME` makes the baseline capture run inside it.
 
 Every option is in [docs/commands.md](docs/commands.md).
@@ -102,7 +102,7 @@ Where pymolt cannot help yet:
 - **Some exception types on 3.6–3.11 test suites.** A raise that C code swallows (`hasattr`, `getattr` or `next` with a default) is recorded without its type. So is a raise handled without any call (`except ValueError: pass`) while another tool, such as coverage or a debugger, owns `sys.settrace`.
 - **Compiled calls.** A C function is recorded without its result, and its arguments are not compared.
 - **Late contacts in long runs (3.12+).** A dunder, property or generator call first made late in a run is recorded when its line of your code had not run before. It is missed on a line that already ran and only later reaches a dependency this way (`x[k]` on dicts for an hour, then on a DataFrame).
-- **Overhead.** A service at full load on Python 3.12 loses about 20% of its throughput while it is captured (see the warning under [Usage](#usage)). A test suite on Python 3.6 runs 2.7–11.8× slower. The cost of capturing a loaded service on 3.6–3.11 has not been measured.
+- **Overhead.** A service at full load on Python 3.12 loses about 20% of its throughput while it is captured (see the warning under [Usage](#usage)). A test suite on Python 3.6 runs 2.3–10.8× slower. The cost of capturing a loaded service on 3.6–3.11 has not been measured.
 
 The full list, the measured overhead and where pymolt was tried are in [docs/limits.md](docs/limits.md).
 
