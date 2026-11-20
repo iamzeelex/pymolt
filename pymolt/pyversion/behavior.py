@@ -34,12 +34,12 @@ from __future__ import annotations
 
 import ast
 import os
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pymolt.core.stdlib import is_stdlib
 from pymolt.pyversion.guards import evaluate_guard, parse_version
 
 CAUSE = "typing-typeddict-annotations-order"
@@ -58,7 +58,13 @@ _ORDERED_BUILTINS = {"list": (0, 1), "tuple": (0, 1), "dict": (0, 1), "enumerate
 _ORDERED_EXTERNAL = {"collections.OrderedDict": (0, 1), "itertools.chain": (0, None)}
 # a generator fed to these is consumed without its order reaching the result
 _ORDER_FREE = {"set", "frozenset", "sorted", "len", "any", "all", "sum", "min", "max"}
-_STDLIB = frozenset(getattr(sys, "stdlib_module_names", ())) | {"typing_extensions"}
+
+
+def _std(top: str) -> bool:
+    """A stdlib module in any Python version (not only the host's), or typing_extensions."""
+    return top == "typing_extensions" or is_stdlib(top)
+
+
 _SKIP_DIRS = {".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules", "vendor",
               "__pycache__", ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".pymolt",
               ".pymolt_cache", "site-packages", "build", "dist", ".eggs"}
@@ -206,12 +212,12 @@ class _Project:
         return out
 
     def module_value(self, dotted: str) -> _Value:
-        found = self.module(dotted) if dotted.split(".")[0] not in _STDLIB else None
+        found = self.module(dotted) if not _std(dotted.split(".")[0]) else None
         return _Mod(found) if found else _Ext(dotted)
 
     def from_value(self, sources: list[str], name: str, seen: frozenset) -> _Value | None:
         for source in sources:
-            if source.split(".")[0] in _STDLIB or self.module(source) is None:
+            if _std(source.split(".")[0]) or self.module(source) is None:
                 continue
             target = self.module(source)
             value = self.value_of(target, name, seen)
@@ -297,7 +303,7 @@ class _Project:
 
     def _absent_on_base(self, stmt: ast.ImportFrom, name: str) -> bool:
         """``from typing import TypedDict`` on a base that has no ``typing.TypedDict``."""
-        if stmt.level or not stmt.module or stmt.module.split(".")[0] not in _STDLIB:
+        if stmt.level or not stmt.module or not _std(stmt.module.split(".")[0]):
             return False
         return _present(f"{stmt.module}.{name}", self.base) is False
 
@@ -307,7 +313,7 @@ class _Project:
                     self._absent_on_base(stmt, a.name) for a in stmt.names):
                 return True
             if isinstance(stmt, ast.Import) and any(
-                    a.name.split(".")[0] in _STDLIB and a.name != "typing_extensions"
+                    _std(a.name.split(".")[0]) and a.name != "typing_extensions"
                     and _present(a.name, self.base) is False for a in stmt.names):
                 return True
         return False

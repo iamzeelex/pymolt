@@ -91,7 +91,6 @@ import logging
 import math
 import os
 import re
-import sys
 import tokenize
 import warnings
 from collections import Counter, defaultdict
@@ -105,6 +104,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_container, to_host
+from pymolt.core.stdlib import is_stdlib
 from pymolt.state_io import atomic_write_json
 from pymolt.verify import dict_order as _order
 from pymolt.verify import environment as _env
@@ -6979,7 +6979,7 @@ def _apply_noise(entries: list[FactEntry], prov: _Provenance,
         if reason is None and e.category is FactCategory.APPEARED and leaf in _APPEAR_HOOKS:
             reason = "implicit protocol hook"
         if (reason is None and e.category is FactCategory.APPEARED
-                and e.symbol.split(".")[0] in sys.stdlib_module_names
+                and is_stdlib(e.symbol.split(".")[0])
                 and e.symbol.split(".")[0] not in old_packages):
             reason = "asymmetric instrumentation: stdlib package traced on the new side only"
         if reason is None and leaf == "__setitem__":

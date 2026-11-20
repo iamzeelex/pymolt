@@ -43,7 +43,6 @@ import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -57,6 +56,7 @@ from pydantic import BaseModel, Field
 
 from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
+from pymolt.core.stdlib import is_stdlib
 from pymolt.ingestion.config import EnvConfig
 from pymolt.state_io import atomic_write_bytes, atomic_write_json, state_lock
 from pymolt.verify.coverage import run_coverage_json
@@ -360,7 +360,8 @@ def _is_python_move(project_dir: str | Path) -> bool:
 
 def _stdlib_top(name: str) -> str | None:
     top = name.split(".")[0]
-    return top if top in sys.stdlib_module_names and top != "__future__" else None
+    # every version's stdlib, not the host's: `imp` is stdlib on a 3.6 base run from 3.12
+    return top if is_stdlib(top) and top != "__future__" else None
 
 
 def _stdlib_modules_on_lines(source: str, lines: set[int]) -> set[str]:
