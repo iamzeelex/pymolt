@@ -117,3 +117,28 @@ def test_a_zero_risk_move_does_not_claim_all_clear_while_evidence_is_partial():
         "Python 3.11→3.12: 0 risk(s) (0 certain); 0 fixed by the plan; none rated, the "
         "evidence is incomplete (evidence partial: see data.python.notes)")
     assert python_summary_line(SimpleNamespace(python=None)) is None
+
+
+@pytest.mark.parametrize("runner", [None, object()], ids=["host base", "container base"])
+def test_the_compile_check_gets_the_base_interpreter_when_it_is_local(tmp_path, monkeypatch,
+                                                                       runner):
+    # A local base interpreter proves a target SyntaxError is new (or pre-existing); a base in
+    # a container cannot run this check, so the base stays the version's grammar estimate.
+    seen = {}
+
+    def spy(root, exe, **kwargs):
+        seen.update(kwargs)
+        return {"findings": [], "failure": None}
+
+    monkeypatch.setattr("pymolt.pyversion.facts.find_target_interpreter",
+                        lambda *a, **k: sys.executable)
+    monkeypatch.setattr(pyplan, "_base_side", lambda root, base: (sys.executable, runner))
+    from pymolt.pyversion import facts
+
+    delta = facts.python_delta     # the stdlib delta runs as with no base: not under test here
+    monkeypatch.setattr(facts, "python_delta", lambda *a, **k: delta(
+        *a, **{**k, "base_executable": None, "base_runner": None}))
+    monkeypatch.setattr("pymolt.pyversion.compile_check.compile_check", spy)
+    pyplan.plan_python(_project(tmp_path), "3.11", "3.12", _sites())
+    assert seen["base_python"] == "3.11"
+    assert seen["base_executable"] == (sys.executable if runner is None else None)
