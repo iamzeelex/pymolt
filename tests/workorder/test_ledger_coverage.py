@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from _apply import apply_migration_plan
 from pymolt.apply_ledger import (
     EntryAttrs,
     LedgerEvent,
@@ -14,10 +15,10 @@ from pymolt.apply_ledger import (
 )
 from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview
-from pymolt.migration_plan import apply_migration_plan, create_migration_plan
+from pymolt.migration_plan import create_migration_plan
 from pymolt.migration_state import MigrationReceipt, ReceiptRun, StepReceipt
 from pymolt.verify import service
-from pymolt.verify.facts import DiffContext, _line_map, _Provenance
+from pymolt.verify.facts import DiffContext, _line_map, _Provenance, _vouches
 from pymolt.verify.models import CaptureMode, ContractSlot, ContractState
 from pymolt.workorder.coverage import ledger_coverage
 
@@ -47,6 +48,12 @@ def _receipt(*runs, steps=None):
                             source_manifest="requirements.txt",
                             runs=[ReceiptRun(run_id=r, opened_at="t") for r in runs],
                             steps=steps or {})
+
+
+def _vouched(prov, file, line, side):
+    """pymolt vouches for the line: the entry that decides it claims ``preserve``."""
+    entry = prov.covering(file, line, side)
+    return entry is not None and _vouches(entry)
 
 
 def test_apply_rollback_reapply_with_another_rebase_sees_exactly_one_generation(tmp_path):
@@ -158,7 +165,7 @@ def test_the_strictest_claim_wins_where_entries_overlap():
         ctx = DiffContext(old_sources={"m.py": T0}, new_sources={"m.py": T1},
                           edits=ledger_coverage({"m.py": T0}, {"m.py": T1}, group).entries)
         prov = _Provenance(ctx, None)
-        assert prov.ledger_covers("m.py", 6, 1) is strict
+        assert _vouched(prov, "m.py", 6, 1) is strict
         assert prov.covering("m.py", 5, 1) is None
 
 
@@ -286,5 +293,5 @@ def test_a_single_run_is_located_where_v1_put_it(tmp_path):
                                       edits=cov.entries), None)
     for side, text in ((0, before), (1, after)):
         for n in range(1, len(text.splitlines()) + 1):
-            assert prov_v1.ledger_covers("m.py", n, side) == prov_v2.ledger_covers(
-                "m.py", n, side), (side, n)
+            assert _vouched(prov_v1, "m.py", n, side) == _vouched(
+                prov_v2, "m.py", n, side), (side, n)

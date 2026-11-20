@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _apply import apply_migration_plan
 
 from pymolt.codemods import service as codemod_service
 from pymolt.codemods.models import DependencyMigration
@@ -152,7 +153,7 @@ def _project(root: Path) -> None:
 
 
 def test_plan_then_apply_writes_the_expected_rewrite(tmp_path, fake_deltas, monkeypatch):
-    from pymolt.migration_plan import MigrationPlan, apply_migration_plan
+    from pymolt.migration_plan import MigrationPlan
 
     _project(tmp_path)
     monkeypatch.setattr(codemod_service, "resolve_codemod_migrations",

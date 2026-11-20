@@ -115,10 +115,6 @@ class CodemodRunResult(BaseModel):
     """Every file that raised >=1 advisory, INCLUDING files with zero rewrites
     (e.g. a file whose sole deprecated call is `return df.lookup(...)`: 0
     sites, 1 advisory) — an advisory-only file must surface here, not vanish."""
-    downgraded: list[str] = Field(default_factory=list)
-    """Summaries of rules the provider downgraded during fetch (threaded up from
-    CodemodBundle.downgraded, merged across packages) so interfaces can show
-    them."""
 
     @property
     def files_changed(self) -> int:

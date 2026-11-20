@@ -1,4 +1,4 @@
-"""One persisted verdict across contract, cascade, golden, and canary evidence."""
+"""One persisted verdict across contract, golden, and canary evidence."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
-from pymolt.core.enums import Verdict
-from pymolt.verify.models import GoldenDiff, VerificationVerdict, VerifyReport
+from pymolt.verify.models import GoldenDiff, VerificationVerdict
 from pymolt.verify.policy import AutoRollbackDecision, CanaryPolicyEvaluation
 from pymolt.verify.report import ContractReport
 from pymolt.verify.shadow import ShadowReport
@@ -78,29 +77,6 @@ class UnifiedVerificationReport(BaseModel):
             return None
 
 
-def _cascade_evidence(report: VerifyReport) -> VerificationEvidence:
-    verdicts = [item.verdict for item in report.results]
-    if Verdict.BEHAVIOR_CHANGED in verdicts:
-        verdict = VerificationVerdict.FAIL
-    elif Verdict.NEEDS_ACTION in verdicts or not verdicts:
-        verdict = VerificationVerdict.INCONCLUSIVE
-    else:
-        verdict = VerificationVerdict.PASS
-    reasons = [
-        f"{item.node.name}: {item.verdict.value}"
-        for item in report.results
-        if item.verdict is not Verdict.BEHAVIOR_STABLE
-    ]
-    if not report.results:
-        reasons.append("cascade produced no node evidence")
-    return VerificationEvidence(
-        name="cascade",
-        verdict=verdict,
-        reasons=reasons,
-        details={"nodes": len(report.results), "coverage": report.coverage_summary},
-    )
-
-
 def _golden_evidence(diff: GoldenDiff) -> VerificationEvidence:
     if diff.changed or diff.missing:
         verdict = VerificationVerdict.FAIL
@@ -128,7 +104,6 @@ def build_unified_verification(
     *,
     run_id: str | None = None,
     comparator_profile: str = "exact",
-    cascade: VerifyReport | None = None,
     golden: GoldenDiff | None = None,
     canary: CanaryPolicyEvaluation | None = None,
     shadow: ShadowReport | None = None,
@@ -149,8 +124,6 @@ def build_unified_verification(
             "impact_filter_active": contract.impact_filter_active,
         },
     )]
-    if cascade is not None:
-        evidence.append(_cascade_evidence(cascade))
     if golden is not None:
         evidence.append(_golden_evidence(golden))
     if canary is not None:

@@ -151,10 +151,6 @@ def project_classes(root: Path) -> tuple[dict[str, _ProjectClass], _Parsed]:
     return classes, parsed
 
 
-def _is_project(dotted: str, classes: dict[str, _ProjectClass]) -> bool:
-    return dotted in classes
-
-
 def dependency_bases(dotted: str, classes: dict[str, _ProjectClass],
                      _seen: set[str] | None = None) -> list[str]:
     """The dependency (non-project) bases of a project class, nearest first (MRO-ish)."""

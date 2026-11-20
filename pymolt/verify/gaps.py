@@ -39,14 +39,6 @@ class GapReport(BaseModel):
     blind: int = 0
     unknown: int = 0
 
-    def by_dependency(self) -> dict:
-        """{dependency: {"covered": n, "blind": n}} for a quick per-dep view."""
-        out: dict = {}
-        for s in self.sites:
-            d = out.setdefault(s.dependency, {"covered": 0, "blind": 0, "unknown": 0})
-            d["covered" if s.covered else ("blind" if s.covered is False else "unknown")] += 1
-        return out
-
     def blind_sites(self) -> list[UsageSite]:
         return [s for s in self.sites if s.covered is False]
 

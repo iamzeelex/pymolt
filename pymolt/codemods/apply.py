@@ -1178,11 +1178,6 @@ def preview_repo(
     return previews
 
 
-def write_preview(preview: FilePreview) -> None:
-    """Persist a single reviewed preview's new source to disk (on Accept)."""
-    write_previews([preview])
-
-
 def write_previews(previews: list[FilePreview]) -> None:
     """Persist an exact reviewed preview batch in one rollback boundary.
 

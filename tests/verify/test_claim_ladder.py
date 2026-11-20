@@ -8,6 +8,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from _traces import diff_traces
 
 from pymolt.verify.facts import (
     OPAQUE_REPRESENTATION,
@@ -17,7 +18,6 @@ from pymolt.verify.facts import (
     FactCategory,
     Outcome,
     _content_unseen,
-    diff_traces,
     expectation_met,
 )
 from pymolt.verify.models import VerificationVerdict

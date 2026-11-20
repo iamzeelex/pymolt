@@ -4,12 +4,12 @@ from __future__ import annotations
 import gzip
 import json
 
+from _apply import apply_migration_plan
 from pymolt.apply_ledger import EventFile, LedgerEvent, append_ledger, load_ledger
 from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import CodemodPattern, FilePreview
 from pymolt.migration_plan import (
     _migration_lock,
-    apply_migration_plan,
     create_migration_plan,
     rollback_migration,
 )

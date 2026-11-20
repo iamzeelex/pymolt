@@ -266,52 +266,6 @@ def list_project_containers(project_dir: str | Path) -> list[dict[str, str]]:
     return out
 
 
-def list_running_containers() -> list[dict[str, str]]:
-    """Every running Docker container (id, name, python) — for interactive selection.
-
-    Unlike :func:`find_running_containers_for_project`, this applies NO project
-    bind-mount filter, so the user can pick any container. Python is probed
-    best-effort; "" when it could not be determined.
-    """
-    if not shutil.which("docker"):
-        return []
-    try:
-        res = subprocess.run(
-            ["docker", "ps", "-q"], capture_output=True, text=True, check=True, timeout=5
-        )
-        ids = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-    except Exception:
-        return []
-    if not ids:
-        return []
-    try:
-        data = json.loads(subprocess.run(
-            ["docker", "inspect", *ids], capture_output=True, text=True, check=True, timeout=5
-        ).stdout)
-    except Exception:
-        return []
-
-    out: list[dict[str, str]] = []
-    for d in data:
-        cid = d.get("Id", "")[:12]
-        name = d.get("Name", "").lstrip("/")
-        python = ""
-        for cmd in ("python", "python3"):
-            try:
-                r = subprocess.run(
-                    ["docker", "exec", cid, cmd, "-c",
-                     PYTHON_VERSION_PROBE],
-                    capture_output=True, text=True, timeout=3,
-                )
-                if r.returncode == 0 and r.stdout.strip():
-                    python = r.stdout.strip()
-                    break
-            except Exception:
-                pass
-        out.append({"id": cid, "name": name, "python": python})
-    return out
-
-
 def find_running_containers_for_project(project_dir: Path, version: str) -> list[dict[str, str]]:
     """Search for running Docker containers that bind-mount the project directory
     (or its parent) and have a matching python version.

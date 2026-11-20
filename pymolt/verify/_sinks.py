@@ -1366,9 +1366,6 @@ class FactSink(object):
                     raised or "<unknown>" if kind == "raise" else None, None, dur, None,
                     warnings or None))
 
-    def _input_json(self, inputs):
-        return self._input_json_order(inputs)[0]
-
     def _input_json_order(self, inputs):
         """``(canonical JSON of the order-stripped input, its order map or None)``; an
         oversize input is a digest of the stripped JSON (no order)."""

@@ -742,29 +742,6 @@ def _plan_runs(root: Path, plan_id: str) -> list[MigrationRunState]:
     return sorted(runs, key=lambda item: (item.attempt, item.prepared_at))
 
 
-def apply_migration_plan(
-    project_dir: str | Path,
-    plan: MigrationPlan,
-    *,
-    allow_no_baseline: bool = False,
-    smoke: bool = False,
-):
-    """Apply every pymolt step of ``plan`` whose dependencies are in effect (``pymolt apply .``,
-    ``workorder.apply.apply_steps``). Before the first write every changed file is compiled
-    (``apply_check``); with ``smoke`` the touched modules are also imported in the target
-    environment, before and after the write, and a module the write broke undoes it. Raises
-    ``MigrationCheckError`` for either failure. Returns the receipt, whose ``outcome`` is
-    ``already_applied`` when every step was in effect already (nothing written)."""
-    from pymolt.migration_state import MigrationReceipt
-    from pymolt.workorder.apply import apply_steps
-
-    result = apply_steps(project_dir, plan, allow_no_baseline=allow_no_baseline, smoke=smoke)
-    receipt = result.receipt or MigrationReceipt.load(project_dir)
-    if receipt is not None:
-        receipt.mark_outcome("applied" if result.outcome == "applied" else "already_applied")
-    return receipt
-
-
 def needs_recovery(state: MigrationRunState | None) -> bool:
     """The run's last invocation was interrupted (or a run from before invocations were
     recorded was left prepared or failed: it has no step statuses, which a run gets once one
@@ -935,16 +912,6 @@ def _smoke_after(root: Path, state):
         python = python or python_after
     return smoke_verdict(modules, before, after, exe=exe, python=python,
                          before_why=before_why, after_why=after_why, left_out=left_out)
-
-
-def _undo_write(previews: list[FilePreview]) -> None:
-    from pymolt.codemods.apply import write_previews
-
-    write_previews([
-        FilePreview(path=p.path, old_source=p.new_source, new_source=p.old_source,
-                    sites=p.sites)
-        for p in previews
-    ])
 
 
 def _restore_ledger(snapshot) -> None:

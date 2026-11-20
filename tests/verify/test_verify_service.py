@@ -316,7 +316,7 @@ class TestCaptureNamedTrace:
 class TestCoverageGapSummary:
     """capture_named_trace's TEST_SUITE-only coverage-based gap summary. All real
     `coverage run` invocations are avoided — `_build_coverage_data` is monkeypatched to
-    inject a fake report, mirroring how coverage.py's build_coverage_map takes an
+    inject a fake report, mirroring how coverage.py's run_coverage_json takes an
     injectable `runner`."""
 
     def _write_dependency_usage(self, tmp_path):

@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import sys
 
+from _apply import apply_migration_plan
+
 from pymolt.ingestion.config import EnvConfig, ToolChoice
-from pymolt.migration_plan import MigrationPlan, apply_migration_plan, create_migration_plan
+from pymolt.migration_plan import MigrationPlan, create_migration_plan
 from pymolt.migration_state import MigrationReceipt
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, ContractSlot, ContractState

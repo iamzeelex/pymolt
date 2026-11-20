@@ -105,14 +105,6 @@ class SelfCheck(BaseModel):
         return "; ".join(parts)
 
 
-class SelfCheckError(RuntimeError):
-    """The self-check found a failure the plan introduced. ``check``: the full result."""
-
-    def __init__(self, message: str, check: SelfCheck) -> None:
-        super().__init__(message)
-        self.check = check
-
-
 # ── compile ───────────────────────────────────────────────────────────────────────────────
 
 

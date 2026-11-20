@@ -185,7 +185,6 @@ the evidence. Details are in [verify.md](verify.md).
 | `--golden-before`, `--golden-after` | Golden snapshots from before and after |
 | `--policy`, `--metrics`, `--auto-rollback` | Canary policy and metrics, and rollback when a required gate fails |
 | `--shadow` | Shadow operations; unsafe writes are left out |
-| `--cascade` | A cascade report to include |
 | `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
 | `--strict` | Review every accepted change instead of counting it equal |
 | `--verbose`, `-v` | Also show what was explained away: masked noise, replicate-explained differences |

@@ -218,11 +218,6 @@ class MigrationReceipt(BaseModel):
                 out.append(path)
         return out
 
-    def closed_runs(self) -> list[ReceiptRun]:
-        """The closed runs, most recently closed first."""
-        return sorted((r for r in self.runs if r.closed),
-                      key=lambda r: r.closed_at or "", reverse=True)
-
     def starting_fingerprint(self, project_dir: str | Path) -> str | None:
         """The environment fingerprint this migration started from; None if unrecorded.
 

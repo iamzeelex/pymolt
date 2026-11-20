@@ -265,13 +265,6 @@ def _first_statement(source: str) -> cst.BaseStatement:
     return cst.parse_module(_encode_metavars(source)).body[0]
 
 
-def match_statement(pattern_src: str, node: cst.CSTNode) -> dict[str, cst.CSTNode] | None:
-    """Return metavar bindings if `node` matches the pattern, else None."""
-    pattern = _first_statement(pattern_src)
-    binds: dict[str, cst.CSTNode] = {}
-    return binds if _match(pattern, node, binds) else None
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # The rewriter — substitute bound metavariables (and rename block-local temps)
 # into the template

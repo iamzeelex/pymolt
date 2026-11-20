@@ -12,7 +12,6 @@ from pydantic import BaseModel
 
 from pymolt.core.enums import Mode, SourceFixation
 from pymolt.core.generated import is_pymolt_generated
-from pymolt.ingestion.probes import PYTHON_VERSION_PROBE
 
 logger = logging.getLogger(__name__)
 
@@ -488,145 +487,6 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
     return requirements
 
 
-class DiscoveredEnvironment(BaseModel):
-    name: str
-    path: Path
-    executable: Path
-    version: str | None = None
-    kind: str  # "project_venv", "active_venv", "conda", "pyenv", "poetry", "pipenv", "uv", "system"
-
-
-def discover_python_environments(project_dir: str | Path = ".") -> list[DiscoveredEnvironment]:
-    """Scan the project and host system for all available Python environments and interpreters,
-    similar to IDE interpreter discovery in PyCharm and VS Code.
-    """
-    project_path = Path(project_dir).expanduser().resolve()
-    is_windows = os.name == "nt"
-    sub_dir = "Scripts" if is_windows else "bin"
-    exe_name = "python.exe" if is_windows else "python"
-    exe_name_3 = "python3.exe" if is_windows else "python3"
-
-    envs: list[DiscoveredEnvironment] = []
-    seen_executables: set[Path] = set()
-
-    def add_env(name: str, path: Path, exe: Path, kind: str, ver: str | None = None):
-        try:
-            exe_resolved = exe.resolve()
-            if exe_resolved in seen_executables:
-                return
-            if not exe.is_file() and not (path / "pyvenv.cfg").is_file():
-                return
-            seen_executables.add(exe_resolved)
-            if not ver:
-                ver = _extract_pyvenv_version(path)
-            if not ver and exe.is_file():
-                try:
-                    res = subprocess.run(
-                        [str(exe), "-c", PYTHON_VERSION_PROBE],
-                        capture_output=True, text=True, timeout=2
-                    )
-                    if res.returncode == 0:
-                        ver = res.stdout.strip()
-                except Exception:
-                    pass
-            envs.append(DiscoveredEnvironment(
-                name=name,
-                path=path,
-                executable=exe,
-                version=ver,
-                kind=kind,
-            ))
-        except Exception:
-            pass
-
-    # 1. Project-local virtual environments
-    ignored_names = {".git", ".pymolt", ".pymolt_cache", ".pytest_cache", "__pycache__", "tests", "pymolt"}
-    if project_path.is_dir():
-        try:
-            for item in project_path.iterdir():
-                if item.is_dir() and item.name not in ignored_names:
-                    bin_path = item / sub_dir / exe_name
-                    bin_path3 = item / sub_dir / exe_name_3
-                    target_exe = bin_path if bin_path.is_file() else bin_path3
-                    if target_exe.is_file() or (item / "pyvenv.cfg").is_file():
-                        add_env(f"{item.name} (project)", item, target_exe, "project_venv")
-        except Exception:
-            pass
-
-    # 2. Currently active environment
-    active_venv = os.environ.get("VIRTUAL_ENV")
-    if active_venv:
-        av_path = Path(active_venv)
-        exe = av_path / sub_dir / exe_name
-        add_env("Active Virtualenv (VIRTUAL_ENV)", av_path, exe, "active_venv")
-
-    active_conda = os.environ.get("CONDA_PREFIX")
-    if active_conda:
-        ac_path = Path(active_conda)
-        exe = ac_path / sub_dir / exe_name
-        add_env(f"Active Conda ({ac_path.name})", ac_path, exe, "conda")
-
-    # 3. Pyenv versions (~/.pyenv/versions/*)
-    pyenv_dir = Path.home() / ".pyenv" / "versions"
-    if pyenv_dir.is_dir():
-        try:
-            for item in pyenv_dir.iterdir():
-                if item.is_dir():
-                    exe = item / sub_dir / exe_name
-                    if not exe.is_file():
-                        exe = item / sub_dir / exe_name_3
-                    if exe.is_file():
-                        add_env(f"pyenv: {item.name}", item, exe, "pyenv")
-        except Exception:
-            pass
-
-    # 4. Conda environments (~/.conda/envs/*, ~/miniconda3/envs/*, ~/anaconda3/envs/*)
-    conda_base_dirs = [
-        Path.home() / ".conda" / "envs",
-        Path.home() / "miniconda3" / "envs",
-        Path.home() / "anaconda3" / "envs",
-        Path.home() / "miniforge3" / "envs",
-        Path("/opt/conda/envs"),
-    ]
-    for cb in conda_base_dirs:
-        if cb.is_dir():
-            try:
-                for item in cb.iterdir():
-                    if item.is_dir():
-                        exe = item / sub_dir / exe_name
-                        if exe.is_file():
-                            add_env(f"conda: {item.name}", item, exe, "conda")
-            except Exception:
-                pass
-
-    # 5. Poetry cache environments (~/.cache/pypoetry/virtualenvs/*)
-    poetry_dir = Path.home() / ".cache" / "pypoetry" / "virtualenvs"
-    if poetry_dir.is_dir():
-        try:
-            for item in poetry_dir.iterdir():
-                if item.is_dir():
-                    exe = item / sub_dir / exe_name
-                    if exe.is_file():
-                        add_env(f"poetry: {item.name}", item, exe, "poetry")
-        except Exception:
-            pass
-
-    # 6. System / Toolchain Python interpreters
-    system_candidates = [
-        "python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3.8", "python3.7", "python3", "python",
-        "/opt/homebrew/bin/python3", "/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3.11",
-        "/usr/local/bin/python3", "/usr/bin/python3"
-    ]
-    for cand in system_candidates:
-        resolved = shutil.which(cand) or (Path(cand) if Path(cand).is_file() else None)
-        if resolved:
-            p_res = Path(resolved)
-            if p_res.is_file():
-                add_env(f"System ({p_res.name})", p_res.parent, p_res, "system")
-
-    return envs
-
-
 def detect_local_environments(project_dir: str | Path) -> list[str]:
     """Scan the project directory for standard virtual environment directories and custom python envs."""
     project_path = Path(project_dir)
@@ -655,8 +515,6 @@ def detect_local_environments(project_dir: str | Path) -> list[str]:
 
 def detect_system_tools() -> dict[str, str | None]:
     """Scan the host system for availability of common environment and package tools."""
-    import shutil
-    import subprocess
     tools = {
         "uv": shutil.which("uv"),
         "poetry": shutil.which("poetry"),

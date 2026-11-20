@@ -591,10 +591,6 @@ class FactDiff(BaseModel):
             out[e.category.value] += 1
         return out
 
-    def by_category(self, category: FactCategory | str) -> list[FactEntry]:
-        cat = FactCategory(category)
-        return [e for e in self.entries if e.category is cat]
-
     def failures(self) -> list[FactEntry]:
         return [e for e in self.entries if e.fails]
 
@@ -2942,12 +2938,6 @@ class _Provenance:
         return [ln for ln in range(span[0], span[1] + 1)
                 if m[side].get(ln, ("gone", None))[0] != "same"]
 
-    def ledger_covers_site(self, file: str, line: int | None, side: int) -> bool:
-        """The ledger vouches for the call's own line, or for every edited line of the
-        definition span it belongs to."""
-        entry = self.covering_site(file, line, side)
-        return entry is not None and _vouches(entry)
-
     def covering_site(self, file: str, line: int | None, side: int) -> Mapping | None:
         """The entry whose claim judges a call (design 5.1): the one deciding its own line;
         else, when every edited line of the definition span it belongs to is covered, the least
@@ -3157,12 +3147,6 @@ class _Provenance:
                         if current is None or _claim_rank(e) > _claim_rank(current):
                             table[ln] = e
         return (self._cover.get((file, side)) or {}).get(line)
-
-    def ledger_covers(self, file: str, line: int | None, side: int) -> bool:
-        """pymolt vouches for the line: the entry that decides it claims ``preserve``. A
-        heuristic edit (no claim) or an ``intended`` one judges like a hand edit."""
-        entry = self.covering(file, line, side)
-        return entry is not None and _vouches(entry)
 
     def stmt_info(self, side: int, v: "_V") -> tuple | None:
         """``(kind, target, call leaf)`` of the one simple statement at the fact's line."""
@@ -4172,20 +4156,11 @@ def _substitute(value: Any, tokens: list[tuple[int, str]]) -> Any:
     return _walk_leaves(value, leaf)
 
 
-def _run_like(token: str) -> bool:
-    """A single word that looks like a per-run value: 4+ characters with a digit (a port, an
-    id, a temp name). A whole changed leaf (a JSON document, a URL) is not one: a toy whose
-    input changed because its upstream call changed must not read as a noisy workload."""
-    return len(token) >= 4 and _WORD.fullmatch(token) is not None \
-        and any(c.isdigit() for c in token)
-
-
 @dataclass
 class _NoiseState:
     """What the noise rules saw during one diff (the R10 trigger reads it)."""
 
     sources: frozenset = frozenset()     # source symbols volatile on both sides
-    run_like_substitutions: int = 0
     old: _Masker | None = None
     new: _Masker | None = None
 
@@ -4801,26 +4776,6 @@ def _soften_evicted(entries: list[FactEntry], old: FactSet, new: FactSet) -> Non
         if fs.tally_sites is None or (e.symbol, site.file, site.func) in fs.tally_sites:
             e.category = FactCategory.UNCOMPARABLE
             e.notes.append(f"possibly-evicted:{side}")
-
-
-def diff_traces(
-    old_path: str | Path,
-    new_path: str | Path,
-    *,
-    root: str | Path | None = None,
-    old_root: str | Path | None = None,
-    new_root: str | Path | None = None,
-    profile: DiffProfile | str = DiffProfile.EXACT,
-    context: DiffContext | None = None,
-    order_causes: Sequence["OrderCause"] = (),
-) -> FactDiff:
-    """Load two traces (each with its own sidecar site_text) and diff them.
-
-    ``old_root``/``new_root`` default to ``root``; pass them separately when the two captures
-    ran from different checkouts (or a container and the host)."""
-    old = load_facts(old_path, root=old_root if old_root is not None else root)
-    new = load_facts(new_path, root=new_root if new_root is not None else root)
-    return diff_facts(old, new, profile=profile, context=context, order_causes=order_causes)
 
 
 _PSEUDO_SCOPES = ("<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>", "<lambda>")
@@ -6619,7 +6574,6 @@ def _explain_change(o: _V, n: _V, cmp: OutcomeComparison,
     subs = input_substitutions(of.input, nf.input)
     if not subs:
         return cmp, None
-    noise.run_like_substitutions += sum(1 for a, b in subs if _run_like(a) and _run_like(b))
     olds = [(k, a) for k, (a, _) in enumerate(subs)]
     news = [(k, b) for k, (_, b) in enumerate(subs)]
     mo = [Outcome(kind=x.kind, value=_substitute(x.value, olds) if x.kind == "return"

@@ -17,7 +17,6 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec
-from pymolt.core.enums import EvidenceLevel, TestStatus, TraceScope, Verdict
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +47,6 @@ class CaptureValidity(StrEnum):
     MISSING = "missing"
 
 
-class VerificationOutcome(BaseModel):
-    """A verdict plus the concrete facts that prevented a stronger result."""
-
-    verdict: VerificationVerdict
-    reasons: list[str] = Field(default_factory=list)
-
-
 class TraceArtifactQuality(BaseModel):
     """Cheap structural validation of a JSON/JSONL trace artifact."""
 
@@ -66,15 +58,6 @@ class TraceArtifactQuality(BaseModel):
     reason: str | None = None
 
 
-class TestOutcome(BaseModel):
-    """L1 input: how the suite touching a node behaved across the version pair."""
-
-    __test__ = False  # not a pytest test class
-
-    status: TestStatus
-    detail: dict[str, Any] = Field(default_factory=dict)
-
-
 class GoldenDiff(BaseModel):
     """L2 result: value-level diff of golden-master snapshots across the version pair."""
 
@@ -84,15 +67,6 @@ class GoldenDiff(BaseModel):
 
     def is_clean(self) -> bool:
         return not (self.changed or self.missing)
-
-
-class NodeRef(BaseModel):
-    """Identity of a node under verification: a dependency and the version pair to cross."""
-
-    name: str
-    old_version: str
-    new_version: str
-    trace_prefix: str  # dependency import prefix to trace, e.g. "flask"
 
 
 class BoundaryDiff(BaseModel):
@@ -132,26 +106,6 @@ class BoundaryDiff(BaseModel):
             "appeared": len(self.appeared),
             "skipped_opaque": len(self.skipped_opaque),
         }
-
-
-class NodeVerifyResult(BaseModel):
-    """Per-node behavioral fact + how it was reached + where it is unsure."""
-
-    node: NodeRef
-    verdict: Verdict
-    evidence_level: EvidenceLevel          # which cascade level produced the verdict
-    detail: dict[str, Any] = Field(default_factory=dict)  # the L1/L2/L3 payload behind it
-    # opaque comparisons, coverage gaps, nondeterminism
-    honesty: list[str] = Field(default_factory=list)
-
-
-class VerifyReport(BaseModel):
-    """Per-run aggregate. Both scopes produce this same shape; only breadth differs."""
-
-    results: list[NodeVerifyResult] = Field(default_factory=list)
-    scope: TraceScope
-    coverage_summary: dict[str, Any] = Field(default_factory=dict)  # exercised vs blind counts
-    warnings: list[str] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

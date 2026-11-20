@@ -4,23 +4,22 @@ dependency on an earlier one reproduces its effect when that earlier step is lef
 from __future__ import annotations
 
 import pytest
+from _oracles import independent_pairs, replay_changes, run_recipe
 
 from pymolt.codemods.apply import preview_repo, preview_rules_repo
 from pymolt.codemods.models import CodemodPattern
 from pymolt.codemods.rules import CodemodRule
 from pymolt.migration_plan import create_migration_plan
-from pymolt.workorder.builder import StepRecorder, replay_changes
+from pymolt.workorder.builder import StepRecorder
 from pymolt.workorder.depends import (
     CROWDED,
     assign_depends_on,
     depends,
-    independent_pairs,
     provided_names,
     used_names,
 )
 from pymolt.workorder.edits import make_edit
 from pymolt.workorder.models import PlanStep, StepDo, StepRecipe
-from pymolt.workorder.recipes import run_recipe
 
 
 def _rule(match, rewrite):

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _traces import diff_traces
 
 from pymolt.verify._sinks import FactSink, JsonlSink, write_snapshot_file
 from pymolt.verify.facts import (
@@ -14,7 +15,6 @@ from pymolt.verify.facts import (
     collect_site_text,
     compare_outcomes,
     diff_facts,
-    diff_traces,
     fold_facts,
     iter_snapshot,
     iter_trace_records,
@@ -76,8 +76,13 @@ def run_diff(tmp_path, old, new, *, old_text=None, new_text=None, profile="exact
     return diff_traces(o, n, root=ROOT, profile=profile)
 
 
+def _by_category(diff, category):
+    cat = FactCategory(category)
+    return [e for e in diff.entries if e.category is cat]
+
+
 def only(diff, category):
-    found = diff.by_category(category)
+    found = _by_category(diff, category)
     assert len(found) == 1, diff.counts()
     return found[0]
 
@@ -259,7 +264,7 @@ def test_rewritten_call_without_partner_is_inconclusive(tmp_path):
     d = run_diff(tmp_path, old, new,
                  old_text={**text_at(10, "x = lib.a(1)"), **text_at(11, "y = lib.b(2)")},
                  new_text=text_at(10, "x = lib.c(1)"))
-    rewritten = d.by_category(FactCategory.REWRITTEN)
+    rewritten = _by_category(d, FactCategory.REWRITTEN)
     assert [(e.symbol, e.comparison) for e in rewritten] == [
         ("lib.a", Comparison.EQUAL), ("lib.b", Comparison.MISSING)]
     assert d.is_clean() and d.verdict is VerificationVerdict.INCONCLUSIVE
@@ -615,7 +620,7 @@ def test_diff_of_snapshots_equals_diff_of_the_equivalent_jsonl(tmp_path):
     assert {c for c, *_ in categories(from_facts)} == {
         "equal", "changed", "disappeared", "appeared", "drift"}
     assert from_facts.verdict is from_jsonl.verdict is VerificationVerdict.FAIL
-    equal = {e.symbol: e for e in from_facts.by_category("equal")}
+    equal = {e.symbol: e for e in _by_category(from_facts, "equal")}
     assert (equal["m.a"].old_count, equal["m.a"].new_count) == (2, 1)  # counts survive
 
 
@@ -702,7 +707,7 @@ def test_a_fact_the_evicting_side_dropped_is_unsampled_under_complete_tallies(tm
     new = load_facts(snapshot_of(tmp_path, "n", calls, max_facts=8), root=ROOT)
     assert new.tallies_complete
     d = diff_facts(old, new)
-    assert not d.by_category("disappeared") and d.unsampled > 0
+    assert not _by_category(d, "disappeared") and d.unsampled > 0
     assert d.verdict is VerificationVerdict.INCONCLUSIVE  # eviction still blocks PASS
 
 
@@ -713,8 +718,8 @@ def test_a_fact_the_evicting_side_dropped_is_uncomparable_not_disappeared(tmp_pa
     new = load_facts(snapshot_of(tmp_path, "n", calls, max_facts=8, max_tallies=1), root=ROOT)
     assert not new.tallies_complete
     d = diff_facts(old, new)
-    assert not d.by_category("disappeared")
-    dropped = d.by_category("uncomparable")
+    assert not _by_category(d, "disappeared")
+    dropped = _by_category(d, "uncomparable")
     assert dropped and all("possibly-evicted:new" in e.notes for e in dropped)
     assert d.verdict is VerificationVerdict.INCONCLUSIVE
     assert d.to_boundary_diff().skipped_opaque[0]["reason"] == "evicted"
@@ -905,7 +910,7 @@ def test_a_vanished_call_site_is_disappeared_exactly(tmp_path, monkeypatch):
     new = sampled_snapshot(tmp_path, monkeypatch, "n",
                            [c for c in WORKLOAD if c[0] != "m.put"])
     d = diff_facts(old, new)
-    gone = d.by_category("disappeared")
+    gone = _by_category(d, "disappeared")
     assert gone and {e.symbol for e in gone} == {"m.put"}
     assert all(e.level is ComparisonLevel.EXACT and "absent-from-tallies" in e.notes
                for e in gone)
@@ -917,7 +922,7 @@ def test_a_site_only_tallies_saw_still_disappears(tmp_path, monkeypatch):
     old = sampled_snapshot(tmp_path, monkeypatch, "o", calls, first="0", rate="0.0001")
     new = sampled_snapshot(tmp_path, monkeypatch, "n", WORKLOAD, first="0", rate="0.0001")
     assert not any(f.symbol == "m.rare" for f in old.facts)  # never sampled
-    e = next(e for e in diff_facts(old, new).by_category("disappeared") if e.symbol == "m.rare")
+    e = next(e for e in _by_category(diff_facts(old, new), "disappeared") if e.symbol == "m.rare")
     assert "from-tallies" in e.notes and e.old_count == 3
 
 
@@ -958,7 +963,7 @@ def test_without_complete_tallies_the_diff_is_unchanged(tmp_path, monkeypatch):
     new = sampled_snapshot(tmp_path, monkeypatch, "n", WORKLOAD, seed=2)
     new.tallies_complete = False  # e.g. a declined call that was never tallied
     d = diff_facts(old, new)
-    assert d.by_category("disappeared")  # unsampled inputs look vanished: no PASS
+    assert _by_category(d, "disappeared")  # unsampled inputs look vanished: no PASS
     assert d.verdict is VerificationVerdict.FAIL
 
 
@@ -1239,7 +1244,7 @@ def test_property_read_does_not_make_a_handle(tmp_path):
     new = [rv("lib.mk", {"bound": {}}, result=gobj(exit_code=2)),
            rv("lib.G.output", {"bound": {"self": {"__opaque__": "lib.G"}}}, line=11)]
     d = run_diff(tmp_path, old, new)
-    assert [x.symbol for x in d.by_category(FactCategory.CHANGED)] == ["lib.mk"]
+    assert [x.symbol for x in _by_category(d, FactCategory.CHANGED)] == ["lib.mk"]
 
 
 def test_value_object_keeps_exact_attribute_comparison(tmp_path):

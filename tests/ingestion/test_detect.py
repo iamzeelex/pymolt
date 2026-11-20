@@ -169,15 +169,6 @@ def test_classifiers_prefer_the_highest_installed_interpreter(tmp_path, monkeypa
     assert detect_project_python_version(tmp_path) == "3.10"
 
 
-def test_discover_python_environments(tmp_path):
-    from pymolt.ingestion.detect import discover_python_environments
-    venv_dir = tmp_path / ".venv"
-    venv_dir.mkdir()
-    (venv_dir / "pyvenv.cfg").write_text("version = 3.11.4\n", encoding="utf-8")
-    envs = discover_python_environments(tmp_path)
-    assert any(e.name.startswith(".venv") for e in envs)
-
-
 def test_extract_declared_requirements(tmp_path):
     # Test requirements.txt
     req_txt = tmp_path / "requirements.txt"

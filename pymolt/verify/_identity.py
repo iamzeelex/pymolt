@@ -661,11 +661,6 @@ def sink_identity_fields(sink):
     return frozenset(accepted)
 
 
-def sink_accepts_identity(sink):
-    """True if the sink takes ``sym``/``symq`` (a v2 sink)."""
-    return "sym" in sink_identity_fields(sink)
-
-
 def fallback_identity(code, module):
     """The identity used when ``code_identity`` itself failed: v1 name, all args kept."""
     module = module or ""

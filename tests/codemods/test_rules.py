@@ -8,7 +8,6 @@ from pymolt.codemods.rules import (
     CodemodRule,
     apply_rule,
     apply_rule_detailed,
-    match_statement,
     verify_rule,
 )
 
@@ -38,24 +37,6 @@ RENAME = CodemodRule(
     test_before="for k, v in s.iteritems():\n    pass",
     test_after="for k, v in s.items():\n    pass",
 )
-
-
-class TestMatch:
-    def test_captures_metavars(self):
-        import libcst as cst
-
-        node = cst.parse_module("out = frame.lookup(a, b)").body[0]
-        binds = match_statement("$RESULT = $DF.lookup($ROWS, $COLS)", node)
-        assert binds is not None
-        assert {k: v.value for k, v in binds.items()} == {
-            "RESULT": "out", "DF": "frame", "ROWS": "a", "COLS": "b",
-        }
-
-    def test_non_match_returns_none(self):
-        import libcst as cst
-
-        node = cst.parse_module("out = frame.merge(a, b)").body[0]
-        assert match_statement("$RESULT = $DF.lookup($ROWS, $COLS)", node) is None
 
 
 class TestApplyCompound:
