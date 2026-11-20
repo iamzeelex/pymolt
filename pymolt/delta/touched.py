@@ -20,22 +20,22 @@ from __future__ import annotations
 
 import ast
 import re
-import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from pymolt.core.stdlib import is_stdlib as _stdlib_top
+
 _ATTR = re.compile(r"\.([A-Za-z_]\w*)")
 _MARKERS = ("__object__", "__type__", "__opaque__")
 _SELF_KEYS = ("self", "cls", "obj")
-_STDLIB = frozenset(getattr(sys, "stdlib_module_names", ())) | {"__future__"}
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox", ".nox",
               "build", "dist", ".pymolt", ".pymolt_cache"}
 _MAX_FILES = 4000
 
 
 def is_stdlib(spelling: str) -> bool:
-    return spelling.split(".")[0] in _STDLIB
+    return _stdlib_top(spelling.split(".")[0])   # every version's stdlib, not the host's
 
 
 # ── project classes and their dependency bases ───────────────────────────────────────────

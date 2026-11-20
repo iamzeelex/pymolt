@@ -336,6 +336,10 @@ All notable changes to pymolt. The format follows
 
 #### Plan and apply
 
+- Standard-library membership comes from the bundled lifetimes of every Python version, never
+  from the interpreter pymolt runs on. On 3.12, `imp`, `distutils` and `asynchat` used to count
+  as third-party in the delta's touched symbols, the behaviour checks, the default `--stdlib`
+  set and the noise rule for stdlib packages traced on one side.
 - `plan`'s compile check runs on the base interpreter too when that interpreter is on the host,
   so a target SyntaxError the base also has (a Python 2 leftover) is marked as already there and
   one the move introduced is marked as new. It used to estimate the base from its grammar only.
