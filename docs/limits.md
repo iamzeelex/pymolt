@@ -127,13 +127,13 @@ Two cases go the other way. Both still fail, although they may be noise:
 | Workload | Measured |
 |---|---|
 | Test suites, Python 3.6 in emulated containers (`setprofile`), six legacy projects | 2.7–11.8× slower ([scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md)) |
-| A Flask + SQLAlchemy + pydantic service on Python 3.12 (`sys.monitoring`), saturated | 16.8% lower throughput once steady; 74–76% of normal throughput in the first 30 s; 0 dropped calls |
-| Same service at 200 requests/s | p99 latency ×1.01; output about 2 MB per day |
+| A Flask + SQLAlchemy + pydantic service on Python 3.12 (`sys.monitoring`), saturated | 19–20.5% lower throughput once steady (median 19.3%); 71–72% of normal throughput in the first 30 s; 0 dropped calls |
+| Same service at 200 requests/s | p99 latency ×1.05; output about 1.2 MB per day |
 | Your code calling a Cython function in a hot loop, 3.12 | 13–16 µs per call, every call recorded |
 
-The service numbers are from one load-gate run on 2026-11-15, with 16.8% saturated loss. Later
-runs measured 18.9% (wave G) and about 20% on a busy host (2026-11-17), against a gate of 20%. A
-clean re-measure on a quiet host is still owed ([bench/load/RESULTS.md](../bench/load/RESULTS.md)).
+The service numbers are from the load gate on the 0.2 release code, on a quiet host, 2026-11-20
+([bench/load/RESULTS.md](../bench/load/RESULTS.md)). The saturated loss passes the 20% gate by
+0.7 points; one of its three repeats measured 20.5%.
 The cost of capturing a loaded service on Python 3.6–3.11 (`setprofile`, then targeted wrappers)
 has not been measured.
 
