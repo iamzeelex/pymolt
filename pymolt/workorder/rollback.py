@@ -66,6 +66,7 @@ from pymolt.migration_plan import (
     _sha256,
     recover_invocation,
 )
+from pymolt.state_io import state_lock
 
 
 @dataclass
@@ -681,59 +682,63 @@ def _commit(root: Path, receipt, run_id: str, state, plan: MigrationPlan, ledger
     _save_run_state(run_dir, state.model_copy(update={"invocation": invocation}))
     previews = [FilePreview(path=str(_project_file(root, rel)), old_source=old,
                             new_source=new, sites=0) for rel, (old, new) in written.items()]
-    contract = load_contract_state(root)
-    original_contract = contract.model_copy(deep=True)
-    original_receipt = receipt.model_copy(deep=True) if receipt is not None else None
-    ledger_before = LedgerSnapshot.take(root)
-    state_path = root / ".pymolt" / "contract_state.json"
-    write_previews(previews)
-    archived: str | None = None
-    restored = list(written)
-    try:
-        if records:
-            append_ledger(root, records, ledger=ledger)
-        steps_state = {**(state.steps or {}), **{e.step_id: "rolled_back" for e in events}}
-        new_receipt = None
-        if receipt is not None:
-            new_receipt = receipt_after_rollback(root, receipt, plan, run_id, now, events,
-                                                 restore, invocation.id)
-            new_receipt.save(root)
-        live = new_receipt is not None and any(
-            st.in_effect for st in new_receipt.steps_of(run_id).values())
-        _save_run_state(run_dir, state.model_copy(update={
-            "status": "applied" if live else "rolled_back", "rolled_back_at": now,
-            "steps": steps_state,
-            "invocation": invocation.model_copy(update={"status": "done"})}))
-        # The post-migration capture stays while the code it recorded is still on disk;
-        # otherwise it is set aside, kept among the diagnostics (row 5).
-        post = "kept" if contract.post_migration is not None else None
-        post_trace = contract.post_migration.trace_path if contract.post_migration else None
-        if contract.post_migration is not None and restored and _capture_recorded(
-                contract.post_migration, plan, events, restored, force=force):
-            archived = set_aside_post_migration(root, contract, run_id)
-            contract.save(state_path)
-            aside = contract.diagnostic_captures[-1]
-            post, post_trace = "set_aside", aside.trace_path
-    except BaseException as metadata_exc:
-        _restore_ledger(ledger_before)
+    # The capture state may change (the post-migration capture set aside): its load, the
+    # write and the save, or the restore on failure, hold the state lock (inside the
+    # migration lock, the lock order of ``pymolt.state_io``).
+    with state_lock(root, operation="rollback"):
+        contract = load_contract_state(root)
+        original_contract = contract.model_copy(deep=True)
+        original_receipt = receipt.model_copy(deep=True) if receipt is not None else None
+        ledger_before = LedgerSnapshot.take(root)
+        state_path = root / ".pymolt" / "contract_state.json"
+        write_previews(previews)
+        archived: str | None = None
+        restored = list(written)
         try:
-            write_previews([FilePreview(path=p.path, old_source=p.new_source,
-                                        new_source=p.old_source, sites=0) for p in previews])
-        except BaseException as restore_exc:
-            raise RuntimeError(
-                "source rollback succeeded, metadata failed, and restoring the applied "
-                f"state was incomplete: {restore_exc}"
-            ) from metadata_exc
-        try:
-            _save_run_state(run_dir, state)
-            if original_receipt is not None:
-                original_receipt.save(root)
-            if archived is not None and original_contract.post_migration is not None:
-                restore_archived_capture(archived, original_contract.post_migration.trace_path)
-            original_contract.save(state_path)
-        except OSError:
-            pass
-        raise
+            if records:
+                append_ledger(root, records, ledger=ledger)
+            steps_state = {**(state.steps or {}), **{e.step_id: "rolled_back" for e in events}}
+            new_receipt = None
+            if receipt is not None:
+                new_receipt = receipt_after_rollback(root, receipt, plan, run_id, now, events,
+                                                     restore, invocation.id)
+                new_receipt.save(root)
+            live = new_receipt is not None and any(
+                st.in_effect for st in new_receipt.steps_of(run_id).values())
+            _save_run_state(run_dir, state.model_copy(update={
+                "status": "applied" if live else "rolled_back", "rolled_back_at": now,
+                "steps": steps_state,
+                "invocation": invocation.model_copy(update={"status": "done"})}))
+            # The post-migration capture stays while the code it recorded is still on disk;
+            # otherwise it is set aside, kept among the diagnostics (row 5).
+            post = "kept" if contract.post_migration is not None else None
+            post_trace = contract.post_migration.trace_path if contract.post_migration else None
+            if contract.post_migration is not None and restored and _capture_recorded(
+                    contract.post_migration, plan, events, restored, force=force):
+                archived = set_aside_post_migration(root, contract, run_id)
+                contract.save(state_path)
+                aside = contract.diagnostic_captures[-1]
+                post, post_trace = "set_aside", aside.trace_path
+        except BaseException as metadata_exc:
+            _restore_ledger(ledger_before)
+            try:
+                write_previews([FilePreview(path=p.path, old_source=p.new_source,
+                                            new_source=p.old_source, sites=0) for p in previews])
+            except BaseException as restore_exc:
+                raise RuntimeError(
+                    "source rollback succeeded, metadata failed, and restoring the applied "
+                    f"state was incomplete: {restore_exc}"
+                ) from metadata_exc
+            try:
+                _save_run_state(run_dir, state)
+                if original_receipt is not None:
+                    original_receipt.save(root)
+                if archived is not None and original_contract.post_migration is not None:
+                    restore_archived_capture(archived, original_contract.post_migration.trace_path)
+                original_contract.save(state_path)
+            except OSError:
+                pass
+            raise
     return RollbackResult(plan=plan, run_id=run_id, rolled_back_at=now, steps=ended,
                           kept=kept, files_restored=restored, post=post, post_trace=post_trace)
 

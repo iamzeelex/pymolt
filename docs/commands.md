@@ -250,6 +250,14 @@ anything.
 `--json` and `--agent`), with no next command and the remedy as the reason. The caches
 (`.pymolt/cache/` and the noise profile) are different: a damaged cache is rebuilt.
 
+Every file pymolt writes, caches and reports included, is written to a temporary file next to
+it and then renamed over it, so a crash or a full disk leaves the old file or the new one. Two
+pymolt commands may run on one project at once (CI jobs sharing a checkout, an agent and a
+person): their updates of a state file take turns through `.pymolt/state.lock`, which a
+command waits up to 60 seconds for, then exits with code 3 naming the process that holds it.
+`apply`, `rollback`, `apply --approve-agent` and `verify --accept` also hold
+`.pymolt/migration.lock` for their whole run and are refused at once while another holds it.
+
 ## Tools
 
 | Command | Description |

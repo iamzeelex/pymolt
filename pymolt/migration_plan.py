@@ -10,10 +10,7 @@ temporary transaction files have been removed.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
-import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -24,7 +21,18 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
-from pymolt.state_io import keep_remedy, load_state, rebuild_remedy, schema_version
+from pymolt.state_io import (
+    MIGRATION_LOCK,
+    FileLock,
+    LockBusy,
+    atomic_write_json,
+    holds_state_lock,
+    keep_remedy,
+    load_state,
+    rebuild_remedy,
+    schema_version,
+    state_lock,
+)
 from pymolt.verify.predict import PredictionReport
 from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP_ID, PlanStep
 
@@ -63,52 +71,23 @@ class MigrationCheckError(MigrationPlanError):
 
 @contextmanager
 def _migration_lock(project_dir: str | Path, operation: str):
-    """Serialize source mutations; the OS releases this lock after a crash."""
+    """Serialize source mutations; the OS releases this lock after a crash. Refused at once
+    (``MigrationConflictError``) while another operation holds it, this thread included.
+    Taken before the state lock, never while holding it (``pymolt.state_io``)."""
     root = Path(project_dir).resolve()
-    lock_path = root / ".pymolt" / "migration.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    stream = lock_path.open("a+", encoding="utf-8")
-    release = None
+    if holds_state_lock(root):
+        raise RuntimeError("lock order: migration.lock is taken before state.lock, never "
+                           "while holding it")
+    lock = FileLock(root / MIGRATION_LOCK, operation, timeout=0)
     try:
-        try:
-            try:
-                import fcntl
-
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-                def release():
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-            except ImportError:  # pragma: no cover - Windows compatibility
-                import msvcrt
-
-                stream.seek(0)
-                if not stream.read(1):
-                    stream.write("\0")
-                    stream.flush()
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-
-                def release():
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        except (BlockingIOError, OSError) as exc:
-            stream.seek(0)
-            owner = stream.read().strip() or "unknown owner"
-            raise MigrationConflictError(
-                f"another migration operation is active ({owner})"
-            ) from exc
-        stream.seek(0)
-        stream.truncate()
-        json.dump({"pid": os.getpid(), "operation": operation, "started_at": _now()}, stream)
-        stream.flush()
-        os.fsync(stream.fileno())
-        try:
-            yield
-        finally:
-            if release is not None:
-                stream.seek(0)
-                release()
+        lock.acquire()
+    except LockBusy as exc:
+        raise MigrationConflictError(
+            f"another migration operation is active ({exc.holder})") from exc
+    try:
+        yield
     finally:
-        stream.close()
+        lock.release()
 
 
 def _now() -> str:
@@ -117,27 +96,6 @@ def _now() -> str:
 
 def _sha256(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
-
-
-def _atomic_json(path: Path, payload: dict) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(staged_name, path)
-    except BaseException:
-        try:
-            os.unlink(staged_name)
-        except OSError:
-            pass
-        raise
-    return path
 
 
 PLAN_KIND = "plan"
@@ -331,9 +289,11 @@ class MigrationPlan(BaseModel):
         self, project_dir: str | Path, path: str | Path | None = None
     ) -> Path:
         target = plan_path(project_dir, path)
-        if target.resolve() == plan_path(project_dir).resolve():
+        if target.resolve() != plan_path(project_dir).resolve():
+            return atomic_write_json(target, self.model_dump(mode="json"))
+        with state_lock(project_dir, operation="plan"):
             MigrationPlan.load(project_dir)     # never replaces a damaged or newer saved plan
-        return _atomic_json(target, self.model_dump(mode="json"))
+            return atomic_write_json(target, self.model_dump(mode="json"))
 
     def save_planned(self, project_dir: str | Path, path: str | Path | None = None) -> Path:
         """Save the plan ``pymolt plan`` made, then drop the blobs retention no longer keeps
@@ -746,7 +706,7 @@ def _load_run_state(path: Path) -> MigrationRunState | None:
 
 
 def _save_run_state(run_dir: Path, state: MigrationRunState) -> Path:
-    return _atomic_json(run_dir / "state.json", state.model_dump(mode="json"))
+    return atomic_write_json(run_dir / "state.json", state.model_dump(mode="json"))
 
 
 def _plan_runs(root: Path, plan_id: str) -> list[MigrationRunState]:

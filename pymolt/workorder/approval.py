@@ -21,11 +21,10 @@ from pathlib import Path
 from pymolt.migration_plan import (
     MigrationConflictError,
     MigrationPlan,
-    _atomic_json,
     _now,
     _run_dir,
 )
-from pymolt.state_io import read_state_json, rebuild_remedy
+from pymolt.state_io import atomic_write_json, read_state_json, rebuild_remedy
 
 SCOPE = ("pymolt-steps", "rollback-step")
 APPROVAL_FILE = "approval.json"
@@ -83,7 +82,7 @@ def approve(project_dir: str | Path, plan: MigrationPlan, *, attester) -> dict:
         payload = {"plan_id": plan.plan_id, "plan_sha256": digest, "run_id": run_id,
                    "scope": list(SCOPE), "approved_at": _now(), "attestation": record["id"],
                    "user": record.get("user")}
-        _atomic_json(approval_path(root, run_id), payload)
+        atomic_write_json(approval_path(root, run_id), payload)
     return payload
 
 

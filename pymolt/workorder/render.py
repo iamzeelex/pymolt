@@ -265,8 +265,9 @@ def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None)
     out = Path(path).expanduser() if path else DEFAULT_PLAN_MD
     if not out.is_absolute():
         out = root / out
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(plan_markdown(plan), encoding="utf-8")
+    from pymolt.state_io import atomic_write_text
+
+    atomic_write_text(out, plan_markdown(plan))
     return out
 
 

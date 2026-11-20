@@ -1,14 +1,32 @@
 """``pymolt.state_io``: a state file is read strictly (missing is None; damaged or newer
-raises ``StateFileError`` naming the file and what to do)."""
+raises ``StateFileError`` naming the file and what to do), written atomically, and changed
+under the state lock."""
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
 import pickle
+import stat
+import threading
+import time
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
-from pymolt.state_io import StateFileError, ignoring, load_state, read_state_json
+from pymolt.state_io import (
+    StateFileError,
+    StateLockTimeout,
+    atomic_write_bytes,
+    atomic_write_json,
+    atomic_write_text,
+    holds_state_lock,
+    ignoring,
+    load_state,
+    read_state_json,
+    state_lock,
+)
 
 KIND, REMEDY = "capture state", "Move it into .pymolt/archive/ to keep it, then capture again."
 
@@ -157,3 +175,156 @@ def test_ignoring_reads_the_named_files_as_missing_inside_the_block_only(tmp_pat
         assert _read(path) is None
     with pytest.raises(StateFileError):
         _read(path)
+
+
+# ── atomic writes ─────────────────────────────────────────────────────────────────────────
+
+
+def _no_temp_files(directory) -> bool:
+    return not [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_failed_replace_leaves_the_old_file_and_no_temp_file(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    path.write_text('{"old": true}\n', encoding="utf-8")
+
+    def refuse(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(OSError, match="No space left"):
+        atomic_write_json(path, {"new": True})
+
+    assert path.read_text(encoding="utf-8") == '{"old": true}\n'
+    assert _no_temp_files(tmp_path)
+
+
+def test_a_failed_write_leaves_the_old_file_and_no_temp_file(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    path.write_bytes(b"old")
+
+    def broken_fsync(fd):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "fsync", broken_fsync)
+    with pytest.raises(OSError, match="Input/output"):
+        atomic_write_bytes(path, b"new")
+
+    assert path.read_bytes() == b"old" and _no_temp_files(tmp_path)
+
+
+def test_json_round_trips_with_indent_sorted_keys_and_a_final_newline(tmp_path):
+    path = tmp_path / "deep" / "dir" / "state.json"            # parents are created
+
+    atomic_write_json(path, {"b": 1, "a": [1, 2]}, indent=2, sort_keys=True)
+
+    text = path.read_text(encoding="utf-8")
+    assert text == json.dumps({"a": [1, 2], "b": 1}, indent=2, sort_keys=True) + "\n"
+    assert json.loads(text) == {"a": [1, 2], "b": 1}
+    atomic_write_json(path, {"x": "y"}, indent=None)
+    assert path.read_text(encoding="utf-8") == '{"x": "y"}\n'
+
+
+def test_a_replaced_file_keeps_its_permissions_and_a_new_one_gets_the_usual_ones(tmp_path):
+    kept = tmp_path / "requirements-target.txt"
+    kept.write_text("a==1\n", encoding="utf-8")
+    os.chmod(kept, 0o640)
+    fresh = tmp_path / "PLAN.md"
+
+    atomic_write_text(kept, "a==2\n")
+    atomic_write_text(fresh, "# plan\n")
+
+    umask = os.umask(0)
+    os.umask(umask)
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o640
+    assert stat.S_IMODE(fresh.stat().st_mode) == 0o666 & ~umask
+    assert kept.read_text(encoding="utf-8") == "a==2\n"
+
+
+# ── the state lock ────────────────────────────────────────────────────────────────────────
+
+
+def _append(path: Path, line: str) -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line + "\n")
+        stream.flush()
+
+
+def _lines(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def _child_waits_for_the_lock(root: str, log: str) -> None:
+    """In another process: say it is about to wait, take the lock, say it has it."""
+    _append(Path(log), "child waiting")
+    with state_lock(root, timeout=30, operation="child"):
+        _append(Path(log), "child acquired")
+
+
+def _wait_until(predicate, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("timed out")
+        time.sleep(0.01)
+
+
+def test_a_second_process_waits_until_the_first_releases_the_state_lock(tmp_path):
+    log = tmp_path / "log"
+    context = multiprocessing.get_context("spawn")
+
+    with state_lock(tmp_path, operation="parent"):
+        child = context.Process(target=_child_waits_for_the_lock, args=(str(tmp_path), str(log)))
+        child.start()
+        _wait_until(lambda: "child waiting" in _lines(log))
+        time.sleep(0.3)                     # the child is inside state_lock, polling
+        _append(log, "parent releasing")
+    child.join(30)
+
+    assert child.exitcode == 0
+    assert _lines(log) == ["child waiting", "parent releasing", "child acquired"]
+
+
+def _attempt(root, results: list, timeout: float = 0.2) -> None:
+    try:
+        with state_lock(root, timeout=timeout, operation="other"):
+            results.append("acquired")
+    except StateLockTimeout as exc:
+        results.append(exc)
+
+
+def _from_another_thread(root, timeout: float = 0.2):
+    results: list = []
+    thread = threading.Thread(target=_attempt, args=(root, results, timeout))
+    thread.start()
+    thread.join(10)
+    return results[0]
+
+
+def test_the_state_lock_is_reentrant_in_a_thread_and_held_until_the_outer_exit(tmp_path):
+    with state_lock(tmp_path):
+        with state_lock(tmp_path):                  # a locked writer calling another
+            assert holds_state_lock(tmp_path)
+        assert holds_state_lock(tmp_path)
+        assert isinstance(_from_another_thread(tmp_path), StateLockTimeout)
+    assert not holds_state_lock(tmp_path)
+    assert _from_another_thread(tmp_path) == "acquired"
+
+
+def test_a_state_lock_timeout_names_the_holder(tmp_path):
+    with state_lock(tmp_path, operation="capture baseline"):
+        error = _from_another_thread(tmp_path, timeout=0.1)
+
+    assert isinstance(error, StateLockTimeout)
+    assert f"pid {os.getpid()} (capture baseline) since " in str(error)
+    assert "waited 0.1s for .pymolt/state.lock" in str(error)
+
+
+def test_the_migration_lock_is_never_taken_inside_the_state_lock(tmp_path):
+    from pymolt.migration_plan import _migration_lock
+
+    with state_lock(tmp_path), pytest.raises(RuntimeError, match="lock order"):
+        with _migration_lock(tmp_path, "apply"):
+            pass
+    with _migration_lock(tmp_path, "apply"), state_lock(tmp_path):    # the right order
+        assert holds_state_lock(tmp_path)

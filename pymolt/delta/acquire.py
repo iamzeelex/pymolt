@@ -43,6 +43,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from pymolt.delta.fetch import Fetcher, FetchError
+from pymolt.state_io import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -418,10 +419,10 @@ def _from_pypi(root: Path, dist: str, version: str, fetcher: Fetcher,
         dest.mkdir(parents=True)
         unpacked.rename(final_src)
         kind = "wheel" if filename.endswith(".whl") else "sdist"
-        (dest / _MARKER).write_text(json.dumps({
+        atomic_write_json(dest / _MARKER, {
             "dist": dist, "version": version, "kind": kind, "file": filename, "origin": "pypi",
             "url": url, "bytes": size,
-        }, indent=2), encoding="utf-8")
+        })
         search_dir, roots = find_layout(final_src, dist)
         return Acquired(dist, version, kind, filename, "pypi", search_dir, roots,
                         bytes_downloaded=size)

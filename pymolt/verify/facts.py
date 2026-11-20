@@ -93,7 +93,6 @@ import os
 import re
 import sys
 import tokenize
-import uuid
 import warnings
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -106,6 +105,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec, inspect_container, to_container, to_host
+from pymolt.state_io import atomic_write_json
 from pymolt.verify import dict_order as _order
 from pymolt.verify import environment as _env
 from pymolt.verify._sinks import (
@@ -1349,17 +1349,9 @@ def store_site_text(trace_path: str | Path, site_text: Mapping[str, str]) -> str
     merged = payload.get("site_text") if isinstance(payload.get("site_text"), dict) else {}
     merged = {**merged, **dict(site_text)}
     payload["site_text"] = merged
-    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with pending.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-        os.replace(pending, path)
+        atomic_write_json(path, payload, indent=2, sort_keys=True)
     except OSError:
-        try:
-            pending.unlink()
-        except OSError:
-            pass
         return None
     return str(path)
 

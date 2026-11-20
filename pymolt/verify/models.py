@@ -6,10 +6,7 @@ from CLI, MCP, or as a library (``.agent.md``). Like the IngestionReport, every 
 carries its own trust level (``evidence_level``) and where it is unsure (``honesty``), so a
 downstream consumer never has to ask "how good is this verdict?".
 """
-import json
 import logging
-import os
-import tempfile
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -17,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec
-from pymolt.state_io import load_state
+from pymolt.state_io import atomic_write_json, load_state
 
 logger = logging.getLogger(__name__)
 
@@ -276,21 +273,6 @@ class ContractState(BaseModel):
                           newest=CONTRACT_STATE_SCHEMA_VERSION, remedy=CONTRACT_STATE_REMEDY)
 
     def save(self, path: Path) -> None:
-        """Atomically write state so interruption cannot destroy active evidence."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, staged = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self._anchored(path.parent.parent), stream, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(staged, path)
-        except BaseException:
-            try:
-                os.unlink(staged)
-            except OSError:
-                pass
-            raise
+        """Atomically write state so interruption cannot destroy active evidence. A caller
+        that read the state to change it holds ``state_lock`` around both."""
+        atomic_write_json(path, self._anchored(path.parent.parent))

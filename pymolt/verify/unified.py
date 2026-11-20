@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from pymolt.state_io import load_state, rebuild_remedy
+from pymolt.state_io import atomic_write_json, load_state, rebuild_remedy, state_lock
 from pymolt.verify.models import GoldenDiff, VerificationVerdict
 from pymolt.verify.policy import AutoRollbackDecision, CanaryPolicyEvaluation
 from pymolt.verify.report import ContractReport
@@ -53,26 +50,12 @@ class UnifiedVerificationReport(BaseModel):
     steps_run: str | None = None
 
     def save(self, project_dir: str | Path) -> Path:
+        """Write the verdict (with its steps' judgements) atomically, under the state lock;
+        never over a damaged or newer one (``StateFileError``)."""
         path = Path(project_dir) / VERIFICATION_PATH
-        UnifiedVerificationReport.load(project_dir)     # never replaces a damaged or newer one
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, staged = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.model_dump(mode="json"), stream, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(staged, path)
-        except BaseException:
-            try:
-                os.unlink(staged)
-            except OSError:
-                pass
-            raise
-        return path
+        with state_lock(project_dir, operation="verify"):
+            UnifiedVerificationReport.load(project_dir)
+            return atomic_write_json(path, self.model_dump(mode="json"))
 
     @classmethod
     def load(cls, project_dir: str | Path) -> UnifiedVerificationReport | None:

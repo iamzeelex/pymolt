@@ -30,6 +30,7 @@ from pymolt.setup.pythons import (
     get_eol_versions,
     version_floor,
 )
+from pymolt.state_io import state_lock
 
 # The resolution toolsets offered, in display order.
 _TOOL_ORDER = ["uv", "conda", "poetry", "container", "system"]
@@ -437,7 +438,9 @@ def apply_setup(
         target_env_created=choices.target_env_created,
         target_env_path=choices.target_env_path,
     )
-    config.save(pymolt_dir / "env_config.json")
+    with state_lock(project_path, operation="setup"):
+        EnvConfig.load(pymolt_dir / "env_config.json")      # still not damaged nor newer
+        config.save(pymolt_dir / "env_config.json")
     return config
 
 

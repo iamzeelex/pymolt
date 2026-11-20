@@ -279,6 +279,8 @@ All notable changes to pymolt. The format follows
   as written by a newer pymolt.
 - `status` shows a damaged or newer state file as a problem of its phase (`problems` in `--json`
   and `--agent`), with no next command and the file's remedy as the reason.
+- A command that updates a state file while another pymolt does waits for it (up to 60 s,
+  `.pymolt/state.lock`), then exits 3 naming the process that holds the lock.
 
 ### Removed
 
@@ -346,6 +348,13 @@ All notable changes to pymolt. The format follows
   `contract_state.json`, `migration_plan.json`, `migration_state.json`, `apply_ledger.json`,
   `verification.json`, and each run's `state.json`, `plan.json` and `approval.json` (see
   [docs/commands.md](docs/commands.md#damaged-or-newer-state-files)).
+- Every file pymolt writes is written atomically (a temporary file, fsynced, then renamed): a
+  crash or a full disk no longer leaves a torn `env_config.json`, `PLAN.md`, target manifest,
+  `--agent` report or cache.
+- Two pymolt commands on one project no longer lose each other's update: a capture's slot
+  update of `contract_state.json`, `setup`, the saved plan and verdict, the assess overrides
+  and the post-migration capture a `rollback` sets aside take turns under one lock. Two
+  captures of different slots at once used to drop one of them.
 
 ## [0.1.0] - 2026-09-26
 

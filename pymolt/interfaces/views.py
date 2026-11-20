@@ -131,10 +131,10 @@ def truncation_note(shown: int, dropped: int, full_report_path: str | None) -> s
 
 def write_full_report(project_dir: str | Path, name: str, payload: Any) -> str:
     """Write ``payload`` to ``.pymolt/agent/<name>.json`` and return the path."""
-    out_dir = Path(project_dir) / AGENT_REPORT_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{name}.json"
-    out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    from pymolt.state_io import atomic_write_json
+
+    out_path = Path(project_dir) / AGENT_REPORT_DIR / f"{name}.json"
+    atomic_write_json(out_path, payload, indent=2, default=str)
     return str(out_path)
 
 

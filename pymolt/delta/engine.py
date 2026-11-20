@@ -51,6 +51,7 @@ from pymolt.delta.models import (
 )
 from pymolt.delta.probe import MARK, PROBE_VERSION
 from pymolt.delta.static_side import UNEVALUATED, static_probe
+from pymolt.state_io import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -435,10 +436,9 @@ def run_probe(
         stamps = stamps_now(site_dirs)
         if stamps is not None:
             try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps({
+                atomic_write_json(cache, {
                     "stamps": stamps, "meta": run.meta, "results": run.results,
-                }), encoding="utf-8")
+                }, indent=None)
             except OSError as exc:
                 log.debug("delta probe cache not written: %s", exc)
     return run
@@ -1400,9 +1400,7 @@ class _Run:
             return run
         run.seconds = round(time.perf_counter() - t0, 3)
         try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"meta": run.meta, "results": run.results}),
-                             encoding="utf-8")
+            atomic_write_json(cache, {"meta": run.meta, "results": run.results}, indent=None)
         except OSError as exc:
             log.debug("delta static cache not written: %s", exc)
         return run
@@ -1571,9 +1569,7 @@ class _Run:
             self.stats["fetch_s"] = round(time.perf_counter() - t0, 3)
         if changed:
             try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(cache, indent=1, sort_keys=True),
-                                      encoding="utf-8")
+                atomic_write_json(cache_path, cache, indent=1, sort_keys=True)
             except OSError as exc:
                 log.debug("delta hint cache not written: %s", exc)
 

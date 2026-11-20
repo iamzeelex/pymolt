@@ -27,6 +27,8 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
+from pymolt.state_io import atomic_write_bytes, atomic_write_text
+
 MAX_RELEASES = 8
 _TAIL = 65536
 
@@ -158,7 +160,7 @@ class Fetcher:
                 raise FetchError(f"PyPI answered {r.status_code} for {dist}")
             self.bytes += len(r.content)
             self.requests += 1
-            f.write_bytes(r.content)
+            atomic_write_bytes(f, r.content)
         return json.loads(f.read_text(encoding="utf-8")).get("releases") or {}
 
     def member(self, dist: str, version: str, files: list[dict], member: str) -> str | None:
@@ -173,8 +175,7 @@ class Fetcher:
             return None
         text = self._range_member(wheels[0]["url"], member)
         if text is not None:
-            self.dir.mkdir(parents=True, exist_ok=True)
-            cached.write_text(text, encoding="utf-8")
+            atomic_write_text(cached, text)
         return text
 
     def _get(self, url: str, start: int, end: int) -> bytes:

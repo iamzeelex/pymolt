@@ -6,7 +6,6 @@ missing keys, silent dropping of unknown keys (forward/backward migration), and
 a ``schema_version`` so future changes can be migrated deliberately.
 """
 
-import json
 import logging
 from enum import Enum
 from pathlib import Path
@@ -14,7 +13,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 
 from pymolt.adapters.python_runner import RunnerSpec
-from pymolt.state_io import load_state, rebuild_remedy
+from pymolt.state_io import atomic_write_json, load_state, rebuild_remedy
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +95,6 @@ class EnvConfig(BaseModel):
                           remedy=CONFIG_REMEDY)
 
     def save(self, path: Path) -> None:
-        """Write the config as JSON (creating the parent directory if needed)."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.model_dump(mode="json"), f, indent=2)
+        """Write the config as JSON, atomically (creating the parent directory if needed). A
+        caller that read the config to change it holds ``state_lock`` around both."""
+        atomic_write_json(path, self.model_dump(mode="json"))

@@ -57,9 +57,6 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
-import os
-import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import zip_longest
@@ -70,7 +67,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_core import ValidationError
 
 from pymolt.anchors import Anchor, Statement, StatementIndex
-from pymolt.state_io import StateFileError, keep_remedy, read_state_json, validation_detail
+from pymolt.state_io import (
+    StateFileError,
+    atomic_write_bytes,
+    atomic_write_json,
+    keep_remedy,
+    read_state_json,
+    validation_detail,
+)
 
 LEDGER_SCHEMA = "pymolt.apply_ledger/2"
 LEDGER_SCHEMA_V1 = "pymolt.apply_ledger/1"
@@ -459,20 +463,8 @@ def _ledger_version(data: dict[str, Any]) -> int:
 
 def save_ledger(project_dir: str | Path, ledger: Ledger) -> Path:
     """Write the ledger atomically (the caller holds the migration lock)."""
-    path = ledger_path(project_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = ledger.model_dump(mode="json", by_alias=True)
-    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
-    try:
-        pending.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(pending, path)
-    except BaseException:
-        try:
-            pending.unlink()
-        except OSError:
-            pass
-        raise
-    return path
+    return atomic_write_json(ledger_path(project_dir),
+                             ledger.model_dump(mode="json", by_alias=True))
 
 
 def append_ledger(project_dir: str | Path,
@@ -514,9 +506,7 @@ class LedgerSnapshot:
             except OSError:
                 pass
             return
-        pending = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.pending")
-        pending.write_bytes(self.data)
-        os.replace(pending, self.path)
+        atomic_write_bytes(self.path, self.data)
 
 
 # ── in effect (verify's input) ────────────────────────────────────────────────────────────

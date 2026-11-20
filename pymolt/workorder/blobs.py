@@ -27,12 +27,12 @@ import gzip
 import hashlib
 import json
 import logging
-import os
 import re
-import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+from pymolt.state_io import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +82,7 @@ def ensure_gitignore(project_dir: str | Path) -> Path:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
-    try:
-        pending.write_bytes(data)
-        os.replace(pending, path)
-    except BaseException:
-        try:
-            pending.unlink()
-        except OSError:
-            pass
-        raise
+    atomic_write_bytes(path, data)
 
 
 def put_text(project_dir: str | Path, text: str) -> str:
@@ -231,7 +222,9 @@ def collect_blobs(project_dir: str | Path, *, ledger: Any = _UNSET,
             removed.append(digest)
         except OSError:
             continue
-    for partial in blobs_dir(root).glob(".*.pending"):
+    # A write interrupted before its rename (``state_io.atomic_write_bytes``; ``.pending``:
+    # an older pymolt's). Blobs are written under the migration lock, which the caller holds.
+    for partial in [*blobs_dir(root).glob(".*.tmp"), *blobs_dir(root).glob(".*.pending")]:
         try:
             partial.unlink()
         except OSError:

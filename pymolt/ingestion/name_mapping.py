@@ -132,14 +132,11 @@ class NameMapper:
         self.grayskull_mapping = pypi_to_conda
         for conda_name, info in conda_to_pypi.items():
             self.reverse_mapping.setdefault(conda_name, info)
+        from pymolt.state_io import atomic_write_json
+
         try:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"pypi_to_conda": pypi_to_conda, "conda_to_pypi": conda_to_pypi},
-                    f,
-                    indent=2,
-                )
+            atomic_write_json(self.cache_file,
+                              {"pypi_to_conda": pypi_to_conda, "conda_to_pypi": conda_to_pypi})
         except OSError as e:
             logger.warning("Could not write name-mapping cache %s: %s", self.cache_file, e)
         return True

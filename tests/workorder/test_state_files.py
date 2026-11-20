@@ -11,7 +11,7 @@ from _stepwise import APP, RECIPES, plan_for
 from typer.testing import CliRunner
 
 from pymolt.interfaces.cli.commands import app
-from pymolt.state_io import StateFileError
+from pymolt.state_io import StateFileError, StateLockTimeout
 from pymolt.verify import service
 from pymolt.verify.models import CONTRACT_STATE_SCHEMA_VERSION, CaptureMode, ContractState
 from pymolt.workorder.apply import apply_steps
@@ -230,3 +230,21 @@ def test_a_version_3_capture_state_is_refused_as_newer(tmp_path):
     assert info.value.problem == "newer"
     with pytest.raises(StateFileError):
         service.load_contract_state(tmp_path)
+
+
+def test_a_state_lock_held_too_long_exits_3_naming_its_holder(tmp_path, monkeypatch):
+    (tmp_path / "requirements.txt").write_text("a\n", encoding="utf-8")
+
+    def busy(project_dir, **kwargs):
+        raise StateLockTimeout(tmp_path / ".pymolt" / "state.lock", "pid 7 (capture baseline)",
+                               60)
+
+    monkeypatch.setattr("pymolt.setup.service.state_lock", busy)
+    result = runner.invoke(app, [
+        "setup", str(tmp_path), "--manifest", "requirements.txt", "--tool", "system",
+        "--base-python", "3.11", "--target-python", "3.12", "--json"])
+
+    assert result.exit_code == 3, result.output
+    failure = json.loads(result.stdout)
+    assert "pid 7 (capture baseline)" in failure["error"] and failure["hint"]
+    assert not (tmp_path / ".pymolt" / "env_config.json").exists()

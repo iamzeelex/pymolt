@@ -28,10 +28,8 @@ status unchanged; the next save copies it to ``.pymolt/archive/`` first.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
-import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,7 +38,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr
 
 from pymolt.apply_check import SelfCheck
-from pymolt.state_io import keep_remedy, load_state, schema_version
+from pymolt.state_io import atomic_write_json, keep_remedy, load_state, schema_version
 
 MIGRATION_STATE_SCHEMA_VERSION = 2
 RECEIPT_KIND = "apply receipt"
@@ -311,23 +309,7 @@ class MigrationReceipt(BaseModel):
         path = receipt_path(project_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         _archive_v1(path)
-        fd, staged_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.model_dump(mode="json"), stream, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(staged_name, path)
-        except BaseException:
-            try:
-                os.unlink(staged_name)
-            except OSError:
-                pass
-            raise
-        return path
+        return atomic_write_json(path, self.model_dump(mode="json"))
 
 
 def receipt_path(project_dir: str | Path) -> Path:

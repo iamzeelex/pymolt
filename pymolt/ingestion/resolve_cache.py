@@ -77,8 +77,9 @@ def load(cache_root: Path, key: str) -> DependencyGraph | None:
 def store(cache_root: Path, key: str, graph: DependencyGraph) -> None:
     """Persist a resolved graph (best-effort; never raises)."""
     path = _cache_path(cache_root, key)
+    from pymolt.state_io import atomic_write_text
+
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(graph.model_dump_json(), encoding="utf-8")
+        atomic_write_text(path, graph.model_dump_json())
     except OSError as e:
         logger.debug("Could not write resolve cache %s: %s", path, e)

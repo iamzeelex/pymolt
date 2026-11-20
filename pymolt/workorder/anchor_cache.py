@@ -18,10 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-import uuid
 from pathlib import Path
 from typing import Any
+
+from pymolt.state_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -166,10 +166,8 @@ class AnchorCache:
             from pymolt.workorder.blobs import ensure_gitignore
 
             ensure_gitignore(self.root)
-            pending = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.pending")
-            pending.write_text(json.dumps({"schema": CACHE_SCHEMA, "files": files,
-                                           "anchors": anchors}), encoding="utf-8")
-            os.replace(pending, self.path)
+            atomic_write_json(self.path, {"schema": CACHE_SCHEMA, "files": files,
+                                          "anchors": anchors}, indent=None)
             self.dirty = False
         except OSError:
             logger.debug("could not save the anchor cache", exc_info=True)

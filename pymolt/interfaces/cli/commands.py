@@ -41,6 +41,7 @@ from pymolt.setup.pythons import (
     get_eol_versions,
     version_floor,
 )
+from pymolt.state_io import atomic_write_text
 
 
 # Typer renders sub-app panels after command panels, so "Behavioural proof" lands at
@@ -51,7 +52,8 @@ class _FlowOrderGroup(TyperGroup):
 
     Also the one place a damaged or newer state file (``StateFileError``) becomes a failure:
     whichever command reads it exits 2 with the file, what is wrong and the remedy, as JSON
-    under ``--json``/``--agent``."""
+    under ``--json``/``--agent``; and a state lock another pymolt held too long
+    (``StateLockTimeout``) exits 3."""
 
     def list_commands(self, ctx):
         names = super().list_commands(ctx)
@@ -65,12 +67,19 @@ class _FlowOrderGroup(TyperGroup):
         return name, command, rest
 
     def invoke(self, ctx):
-        from pymolt.state_io import StateFileError
+        from pymolt.state_io import StateFileError, StateLockTimeout
 
         try:
             return super().invoke(ctx)
         except StateFileError as exc:
-            fail_state_file(exc, json_output=ctx.meta.get("pymolt.machine_output", False))
+            fail_state_file(exc, json_output=self._machine(ctx))
+        except StateLockTimeout as exc:     # another pymolt held the state lock too long
+            fail(str(exc), hint=exc.hint, code=EXIT_ENVIRONMENT, json_output=self._machine(ctx))
+
+    @staticmethod
+    def _machine(ctx) -> bool:
+        """``--json`` or ``--agent`` on the command line (``resolve_command`` noted it)."""
+        return ctx.meta.get("pymolt.machine_output", False)
 
 
 _FLOW_ORDER = [
@@ -697,8 +706,7 @@ def plan(
         patch_path = Path(patch_file)
         if not patch_path.is_absolute():
             patch_path = project_path / patch_path
-        patch_path.parent.mkdir(parents=True, exist_ok=True)
-        patch_path.write_text("\n".join(patches), encoding="utf-8")
+        atomic_write_text(patch_path, "\n".join(patches))
     else:
         patch_path = None
 
@@ -2113,8 +2121,16 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             else:
                 config["target_overrides"].pop(pkg_to_override, None)
 
-            # Persist through the schema so the file stays valid and versioned.
-            EnvConfig.model_validate(config).save(config_file)
+            # Persist through the schema so the file stays valid and versioned. The config
+            # was read long before (a person answers prompts): re-read it under the state
+            # lock and change only the overrides, so a setup run meanwhile is kept.
+            from pymolt.state_io import state_lock
+
+            with state_lock(config_file.parent.parent, operation="assess: overrides"):
+                saved = EnvConfig.load(config_file)
+                fresh = saved if saved is not None else EnvConfig.model_validate(config)
+                fresh.target_overrides = dict(config["target_overrides"])
+                fresh.save(config_file)
 
 
 @app.command(rich_help_panel="Migration")
@@ -2725,8 +2741,7 @@ def _render_or_write_patches(
         output = Path(patch_file)
         if not output.is_absolute():
             output = project_path / output
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("\n".join(patches), encoding="utf-8")
+        atomic_write_text(output, "\n".join(patches))
         err.print(f"[dim]patch written → {output}[/dim]")
 
 

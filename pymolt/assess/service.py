@@ -23,6 +23,7 @@ from pymolt.core.graph import DependencyGraph
 from pymolt.ingestion.detect import detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 from pymolt.risk.models import RiskReport
+from pymolt.state_io import atomic_write_text
 
 
 class AssessResult(BaseModel):
@@ -403,7 +404,7 @@ def write_target_manifest(project_path, target_graph, selected_tool, target_pyth
             lines.append("  - pip:")
             lines += [f"    - {d}" for d in pip_deps]
         target_file = project_path / "environment-target.yml"
-        target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write_text(target_file, "\n".join(lines) + "\n")
         return target_file
 
     # PyPI requirements file.
@@ -429,7 +430,7 @@ def write_target_manifest(project_path, target_graph, selected_tool, target_pyth
         else:
             out.append(f"{name}=={version}")
     target_file = project_path / "requirements-target.txt"
-    target_file.write_text("\n".join(out) + "\n", encoding="utf-8")
+    atomic_write_text(target_file, "\n".join(out) + "\n")
     return target_file
 
 
