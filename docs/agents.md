@@ -124,6 +124,6 @@ before each call.
 | `assess` | which versions move or conflict, what needs manual work, how to build the target environment, optional risk scores |
 | `capture` | runs your test or app command with the tracer and keeps the capture. It runs a process on your machine, so it exists only with `--allow-run` |
 | `plan` | the API changes, Python breakage, codemods and predicted risks, as a saved plan, its steps, unified diffs and the first agent step's brief. It also writes `.pymolt/PLAN.md` |
-| `verify` | the verdict, coverage and recall with their granularity, which predicted risks came true, and which dependency calls changed |
+| `verify` | the verdict (an INCONCLUSIVE one with whether it needs a person or evidence, and what settles each reason), coverage and recall with their granularity, which predicted risks came true, and which dependency calls changed |
 | `apply` | applies the plan's pymolt steps on an approved plan, records the agent's own edits as steps (`record`, then `record` with `done`), or returns a dry run or a step's brief. It writes only on an approved plan |
 | `rollback` | rolls back one step of an approved plan |

@@ -32,6 +32,8 @@ pymolt rollback . --step ID --agent           # undo one step
   any change voids it. Never work around it. Record every edit you make, or verify judges it
   as a hand edit. Person steps are the user's: relay the brief.
 - `verify . --step ID` exits 0 verified, 1 failed, 4 needs review or evidence.
+  An INCONCLUSIVE verdict's `data.inconclusive_kind` says who settles it: `needs_review` is a
+  person's, `needs_evidence` yours (`data.inconclusive_causes[].settle` says how).
 - A person decides, and `--agent` refuses: a whole-run rollback, `rollback --force` or
   `--cascade`, `verify --auto-rollback`, `verify --accept`, `apply --skip`,
   `apply --allow-no-baseline`.

@@ -264,6 +264,33 @@ def test_rules_9_to_11_a_step_verify_judged(tmp_path, judgement, command, reason
     assert reason in status.next_reason
 
 
+@pytest.mark.parametrize(("evidence", "settle", "command", "reason"), [
+    ("not-exercised", "add a test that reaches its sites, then capture post-migration again",
+     None, "Step mech-1 needs evidence: add a test that reaches its sites"),
+    ("uncomparable", "capturing again does not settle it: the watcher records the first "
+                     "2,000 compiled calls per call site", None,
+     "Step mech-1 needs evidence: capturing again does not settle it"),
+    # Noise: the existing replicate rule (here the baseline can be replicated as it is).
+    ("noise", "capture a baseline replicate", "pymolt capture baseline --replicate",
+     "Step mech-1 needs evidence: differences at its sites may be run-to-run noise"),
+])
+def test_rule_11_says_what_settles_the_step_by_its_cause(tmp_path, evidence, settle, command,
+                                                         reason):
+    plan = plan_for(tmp_path, {M: (APP, RECIPES)})
+    apply_steps(tmp_path, plan)
+    skip_step(tmp_path, plan, "env-1", "bumped by hand")
+    post_capture(tmp_path, M)
+    _judge(tmp_path, plan, {"mech-1": {"status": "needs_evidence", "epoch": 1,
+                                       "evidence": evidence, "settle": settle}})
+
+    status = build_status(tmp_path)
+
+    assert (status.next_command, status.next_step) == (command, "mech-1")
+    assert status.next_reason.startswith(reason)
+    if evidence == "uncomparable":
+        assert "add a test" not in status.next_reason
+
+
 def test_rule_12_done(tmp_path):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan)

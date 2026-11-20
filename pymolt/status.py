@@ -60,6 +60,9 @@ class FunnelStatus(BaseModel):
     steps: list[dict] = Field(default_factory=list)
     # The step the next command (or note) is about, when it is about one.
     next_step: str | None = None
+    # The saved verdict's kind when it is INCONCLUSIVE and counts for this migration:
+    # ``needs_review`` (a person must look) or ``needs_evidence`` (design decision 7).
+    inconclusive_kind: str | None = None
 
     def phase(self, name: str) -> PhaseState | None:
         return next((p for p in self.phases if p.phase == name), None)
@@ -620,10 +623,13 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
                         + (f", recall {round(judged.recall * 100)}%"
                            if judged.recall is not None else "")
                         + f" (granularity {judged.coverage_granularity})")
+        kind = verification.inconclusive_kind
+        status.inconclusive_kind = kind.value if kind is not None else None
         report = PhaseState(
             phase="report",
             state=DONE,
-            detail=f"verdict: {verification.verdict.value}{coverage}",
+            detail=f"verdict: {verification.verdict.value}"
+                   + (f" ({_KIND_LABEL[kind.value]})" if kind is not None else "") + coverage,
         )
     status.phases.append(report)
 
@@ -677,7 +683,49 @@ def _steps_phase(projection) -> PhaseState | None:
     return PhaseState(phase="steps", state=state, detail=detail)
 
 
-_REPLICATE_REASON = "a baseline replicate would tell"  # service._fact_diff_reasons
+# A schema-1 verdict carries no causes: its replicate reason is found by its text
+# (``service._fact_diff_causes``).
+_REPLICATE_REASON = "a baseline replicate would tell"
+_KIND_LABEL = {"needs_review": "needs a person", "needs_evidence": "needs evidence"}
+
+
+def _noise_settles(verification) -> bool:
+    """A baseline replicate settles part of the saved INCONCLUSIVE verdict: one of its causes
+    is unmeasured noise (rule 11's replicate rule)."""
+    if verification is None or verification.verdict.value != "inconclusive":
+        return False
+    causes = getattr(verification, "inconclusive_causes", None)
+    if getattr(verification, "schema_version", 1) >= 2 and causes is not None:
+        return any(c.cause == "noise" for c in causes)
+    return any(_REPLICATE_REASON in r for r in verification.reasons)
+
+
+def _replicate_rule(status: FunnelStatus, *, by_hand: bool, can_replicate,
+                    step: str | None = None) -> None:
+    """Measure run-to-run noise with a baseline replicate: it must run the baseline's code in
+    its environment, so after a migration it means putting that back first."""
+    lead = (f"Step {step} needs evidence: differences at its sites may be run-to-run noise."
+            if step else
+            "The verdict is INCONCLUSIVE on differences that may be run-to-run noise.")
+    status.next_step = step
+    if can_replicate():
+        status.next_command = "pymolt capture baseline --replicate"
+        status.next_reason = (
+            f"{lead} Run the baseline's command again (same code, same environment) so verify "
+            "can measure that noise, then verify again.")
+    elif by_hand:
+        status.next_command = None
+        status.next_reason = (
+            f"{lead} A baseline replicate measures it but must run the baseline's code in its "
+            "environment: put that back, `pymolt capture baseline --replicate`, redo the "
+            "migration, verify. (`pymolt capture baseline --runs 2` records both before "
+            "migrating.)")
+    else:
+        status.next_command = "pymolt rollback ."
+        status.next_reason = (
+            f"{lead} A baseline replicate measures it but must run the baseline's code in its "
+            "environment: roll back, `pymolt capture baseline --replicate`, apply again, "
+            "verify. (`pymolt capture baseline --runs 2` records both before migrating.)")
 
 
 def _decide_next(
@@ -760,7 +808,15 @@ def _decide_next(
         status.next_command = "pymolt verify ."
         status.next_reason = "Both captures exist. Compare them."
         return
-    if projection is not None and _decide_judged(status, projection):
+    def replicate(step: str | None = None) -> bool:
+        # The replicate rule applies while no usable replicate exists (verify already applies
+        # one) and the baseline it repeats is current.
+        if has_replicate or baseline.state != DONE:
+            return False
+        _replicate_rule(status, by_hand=by_hand, can_replicate=can_replicate, step=step)
+        return True
+
+    if projection is not None and _decide_judged(status, projection, verification, replicate):
         return
     if verification is not None and verification.verdict.value == "fail":
         if by_hand:
@@ -772,37 +828,25 @@ def _decide_next(
         status.next_command = "pymolt rollback ."
         status.next_reason = "The verdict is FAIL. Rollback restores the files apply changed."
         return
-    if (verification is not None and verification.verdict.value == "inconclusive"
-            and not has_replicate and baseline.state == DONE
-            and any(_REPLICATE_REASON in r for r in verification.reasons)):
-        if can_replicate():
-            status.next_command = "pymolt capture baseline --replicate"
-            status.next_reason = (
-                "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. Run "
-                "the baseline's command again (same code, same environment) so verify can "
-                "measure that noise, then verify again.")
-        elif by_hand:
-            status.next_command = None
-            status.next_reason = (
-                "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. A "
-                "baseline replicate measures it but must run the baseline's code in its "
-                "environment: put that back, `pymolt capture baseline --replicate`, redo the "
-                "migration, verify. (`pymolt capture baseline --runs 2` records both before "
-                "migrating.)")
-        else:
-            status.next_command = "pymolt rollback ."
-            status.next_reason = (
-                "The verdict is INCONCLUSIVE on differences that may be run-to-run noise. A "
-                "baseline replicate measures it but must run the baseline's code in its "
-                "environment: roll back, `pymolt capture baseline --replicate`, apply again, "
-                "verify. (`pymolt capture baseline --runs 2` records both before migrating.)")
+    if _noise_settles(verification) and replicate():
         return
     status.next_command = None
-    status.next_reason = (
-        "Done: the verdict is PASS."
-        if verification is not None and verification.verdict.value == "pass"
-        else "The verdict is INCONCLUSIVE; its reasons name the missing evidence."
-    )
+    status.next_reason = _verdict_reason(verification)
+
+
+def _verdict_reason(verification) -> str:
+    """The last rule: done on PASS; on INCONCLUSIVE, who settles it (its kind) and how."""
+    if verification is not None and verification.verdict.value == "pass":
+        return "Done: the verdict is PASS."
+    kind = getattr(verification, "inconclusive_kind", None)
+    if kind is None:
+        return "The verdict is INCONCLUSIVE; its reasons name the missing evidence."
+    settle = next((c.settle for c in verification.inconclusive_causes if c.kind == kind), None)
+    if kind.value == "needs_review":
+        return ("The verdict is INCONCLUSIVE and needs a person: "
+                + (settle or "review its findings") + ".")
+    return ("The verdict is INCONCLUSIVE and needs evidence: "
+            + (settle or "its reasons name what is missing") + ".")
 
 
 def _decide_steps(status: FunnelStatus, projection, receipt, post: PhaseState,
@@ -857,8 +901,12 @@ def _decide_steps(status: FunnelStatus, projection, receipt, post: PhaseState,
     return False
 
 
-def _decide_judged(status: FunnelStatus, projection) -> bool:
-    """Design 6, rules 9 to 11: a step verify judged for its current epoch."""
+def _decide_judged(status: FunnelStatus, projection, verification=None,
+                   replicate=lambda step=None: False) -> bool:
+    """Design 6, rules 9 to 11: a step verify judged for its current epoch. Rule 11 says what
+    settles the step's evidence: the replicate rule for noise (``replicate``, which reports
+    whether it applies), else its judgement's ``settle`` (a test that reaches its sites by
+    default)."""
     failed = projection.first("failed")
     if failed is not None:
         status.next_step = failed.id
@@ -882,9 +930,15 @@ def _decide_judged(status: FunnelStatus, projection) -> bool:
         return True
     evidence = projection.first("needs_evidence")
     if evidence is not None:
+        steps = getattr(verification, "steps", None) or {}
+        judged = steps.get(evidence.id) if isinstance(steps, dict) else None
+        judged = judged if isinstance(judged, dict) else {}
+        if judged.get("evidence") == "noise" and replicate(evidence.id):
+            return True
         status.next_step = evidence.id
         status.next_command = None
-        status.next_reason = (f"Step {evidence.id} needs evidence: add a test that reaches its "
-                              "sites, then capture post-migration again.")
+        settle = judged.get("settle") or ("add a test that reaches its sites, then capture "
+                                          "post-migration again")
+        status.next_reason = f"Step {evidence.id} needs evidence: {settle}."
         return True
     return False

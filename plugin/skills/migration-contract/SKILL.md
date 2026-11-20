@@ -92,6 +92,9 @@ Read the coverage numbers to the user:
   (3.6–3.11, recall is a lower bound), `file` (older captures), `symbol`.
 - `data.changes`: dependency calls that now return or raise something else, or stopped.
   `baseline_stale` true means a capture describes another environment: capture again.
+- INCONCLUSIVE: `data.inconclusive_kind` says who settles it. `needs_review` is a person's:
+  relay the findings, never accept them. `needs_evidence` is yours to gather:
+  `data.inconclusive_causes[].settle` says what to capture or test.
 
 ## Rules
 

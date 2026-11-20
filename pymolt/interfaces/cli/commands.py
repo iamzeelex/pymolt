@@ -344,7 +344,9 @@ def verify_migration(
 
     from pymolt.interfaces.cli.output import require_file
     from pymolt.interfaces.cli.verify_cmd import (
+        _inconclusive_note,
         _render_contract_report,
+        _step_lines,
         _verification_exit,
     )
     from pymolt.migration_plan import MigrationPlanError, rollback_migration
@@ -563,15 +565,12 @@ def verify_migration(
         saved_lines.append(note)
     console.print(Panel(
         f"[bold {border}]{unified.verdict.value.upper()}[/bold {border}]"
+        f"{_inconclusive_note(unified)}"
         f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
         title="Verdict", border_style=border, expand=False,
     ))
     if judged is not None:
-        lines = [f"[bold]{escape(judged['status'])}[/bold]"
-                 + (f" (epoch {judged['epoch']})" if judged.get("epoch") else "")]
-        for key in ("failing", "review", "unexercised"):
-            for item in judged.get(key) or ():
-                lines.append(f"{key}: {escape(str(item))}")
+        lines = _step_lines(judged)
         for r in judged.get("risks") or ():
             lines.append(f"risk {escape(r['id'])}: {escape(r['result'])}"
                          + (f" ({escape(r['fix'])})" if r.get("fix") else ""))

@@ -201,6 +201,8 @@ def status_view(report) -> dict:
         "next_reason": report.next_reason,
         "notes": list(report.notes),
     }
+    if report.inconclusive_kind is not None:
+        data["inconclusive_kind"] = report.inconclusive_kind
     if report.steps:
         data["steps"] = lists.cap("steps", list(report.steps))
         data["steps_total"] = len(report.steps)
@@ -1189,6 +1191,23 @@ def _findings_data(summary: dict) -> dict:
     }
 
 
+def inconclusive_line(unified) -> str | None:
+    """One line for an INCONCLUSIVE verdict: whether it needs a person or evidence (its
+    ``inconclusive_kind``) and what settles the first such reason. None otherwise."""
+    kind = getattr(unified, "inconclusive_kind", None)
+    if kind is None:
+        return None
+    causes = list(getattr(unified, "inconclusive_causes", None) or ())
+    settle = next((c.settle for c in causes if c.kind == kind), None)
+    line = ("Needs a person" if kind.value == "needs_review" else "Needs evidence") \
+        + (f": {settle}." if settle else ".")
+    if kind.value == "needs_review":
+        more = sum(1 for c in causes if c.kind.value == "needs_evidence")
+        if more:
+            line += f" It also needs evidence ({more} reason(s))."
+    return line
+
+
 def saved_verdict_note(compared, saved_path) -> str | None:
     """What saving a verdict meant, when it is not the usual verdict on the two captures.
 
@@ -1218,6 +1237,12 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
     data: dict[str, Any] = {
         "verdict": verdict,
         "reasons": list(unified.reasons),
+        # INCONCLUSIVE only: needs_review (a person must look) or needs_evidence (more or
+        # better captures); each reason with its kind and what settles it.
+        "inconclusive_kind": (unified.inconclusive_kind.value
+                              if unified.inconclusive_kind is not None else None),
+        "inconclusive_causes": [c.model_dump(mode="json")
+                                for c in unified.inconclusive_causes],
         "saved_path": str(saved_path) if saved_path is not None else None,
         "compared_recordings": (rep.compared.model_dump(mode="json")
                                 if getattr(rep, "compared", None) is not None else None),
@@ -1242,6 +1267,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
     }
     lines = [f"VERDICT: {verdict.upper()}"
              + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]
+    settles = inconclusive_line(unified)
+    if settles:
+        lines.append(settles)
     if rep.baseline_stale:
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
@@ -1315,7 +1343,8 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
     elif verdict == "fail":
         hint = "Behaviour changed: fix the listed calls, capture post-migration again, verify."
     elif verdict == "inconclusive":
-        hint = "Read the reasons: usually a fresh capture or more coverage (BLIND) is needed."
+        hint = settles or ("Read the reasons: usually a fresh capture or more coverage (BLIND) "
+                           "is needed.")
     else:
         hint = None
     return ok("\n".join(lines), lists.finish(data, list(rep.notes)),
