@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main, "release/**"]
+  workflow_call:  # release.yml runs the same checks on the tagged commit before publishing
 
 permissions:
   contents: read
