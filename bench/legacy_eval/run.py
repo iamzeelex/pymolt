@@ -165,12 +165,15 @@ PROJECT_OVERRIDES = ("image", "platform", "base_python", "target_python")
 
 
 class Project:
-    def __init__(self, name, cfg, defaults, pymolt: str, out: Path):
+    def __init__(self, name, cfg, defaults, pymolt: str, out: Path, artifacts: Path | None = None):
         self.name, self.cfg = name, cfg
         # a project may override the container defaults (a newer base Python, a native platform)
         self.d = {**defaults, **{k: cfg[k] for k in PROJECT_OVERRIDES if k in cfg}}
         self.pymolt = pymolt
-        self.art = (REPO / cfg["artifact"]).resolve()
+        # `--artifacts DIR`: the checkout whose tests/artifacts the bench containers mount (a
+        # worktree has none initialised); default: this checkout's
+        art = Path(cfg["artifact"])
+        self.art = ((artifacts / art.name) if artifacts else (REPO / art)).resolve()
         self.out = (out / name).resolve()
         self.container = f"pymolt-bench-{name}"
         self.tcfg = cfg.get("target_container")  # None: the target env is a host venv
@@ -289,6 +292,18 @@ class Project:
                 timeout_s=600,
             )
             return r.ok
+        mount = subprocess.run(
+            ["docker", "inspect", "-f",
+             '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}', container],
+            capture_output=True, text=True).stdout.strip()
+        if mount and Path(mount).resolve() != self.art:
+            # reusing it would run pymolt on one checkout and the container on another: every
+            # phase then fails or scans nothing, silently
+            with open(lg, "a", encoding="utf-8") as fh:
+                fh.write(f"container {container} mounts {mount}, not {self.art}; run with "
+                         f"--artifacts pointing at that checkout's tests/artifacts, or remove "
+                         f"the container\n")
+            return False
         if insp.stdout.strip() != "true":
             return run_proc(
                 ["docker", "start", container],
@@ -815,6 +830,11 @@ class Project:
                 self.cleanup()
             except Exception as e:
                 self.prep["cleanup_error"] = repr(e)
+            # Emulated containers are heavy: leave none running between projects (the next run
+            # starts it again; the installed dependencies stay in it).
+            for name in (self.container, self.target_container):
+                if name:
+                    subprocess.run(["docker", "stop", name], capture_output=True, timeout=120)
             for p in PHASES:
                 self.rec.setdefault(
                     p, {"outcome": "not-reached", "wall_s": 0, "rc": None, "numbers": {}}
@@ -979,6 +999,9 @@ def cmd_run(a) -> int:
             sys.exit(f"{tool} not on PATH")
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    artifacts = Path(a.artifacts).resolve() if a.artifacts else None
+    if artifacts is not None and not artifacts.is_dir():
+        sys.exit(f"--artifacts {artifacts} is not a directory")
     d = cfg["defaults"]
     images = {(p.get("image", d["image"]), p.get("platform", d["platform"]))
               for p in (cfg["projects"][n] for n in names)}
@@ -1000,7 +1023,7 @@ def cmd_run(a) -> int:
     lock = threading.Lock()
 
     def work(n):
-        res = Project(n, cfg["projects"][n], d, pymolt, out).run()
+        res = Project(n, cfg["projects"][n], d, pymolt, out, artifacts).run()
         with lock:
             results[n] = res
             write_scorecard(
@@ -1086,6 +1109,9 @@ def main(argv=None) -> int:
     r.add_argument("--pymolt", required=True, help="path to the pymolt executable under test")
     r.add_argument("--out", required=True, help="output directory (logs, scorecard.json/.md)")
     r.add_argument("--parallel", type=int, default=1)
+    r.add_argument("--artifacts",
+                   help="the tests/artifacts directory to use (default: this checkout's); for a "
+                        "worktree, the main checkout's, where the submodules and containers are")
     r.set_defaults(fn=cmd_run)
     d = sub.add_parser("diff", help="print which scorecard cells changed")
     d.add_argument("a")
