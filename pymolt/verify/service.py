@@ -63,6 +63,7 @@ from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
+    CONTENT_UNSEEN,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
@@ -3361,10 +3362,16 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
     def uncomparable(reason: str, mechanism: str) -> InconclusiveCause:
         return cause(reason, NEEDS_EVIDENCE, "uncomparable", SETTLE_UNCOMPARABLE[mechanism])
 
+    unseen = sum(1 for e in entries
+                 if any(str(n).startswith(CONTENT_UNSEEN) for n in e.get("notes") or ()))
+    if unseen:
+        causes.append(uncomparable(
+            f"{unseen} edited call(s) whose attested expectation cannot be checked: only the "
+            "types of their outcomes are visible, not the values", "content-unseen"))
     unpaired = sum(
         1 for e in entries
         if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
-    )
+    ) - unseen
     if unpaired:
         causes.append(uncomparable(
             f"{unpaired} rewritten call site(s) could not be paired with a post-migration call",

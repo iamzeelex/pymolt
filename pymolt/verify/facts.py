@@ -686,6 +686,8 @@ class FactDiff(BaseModel):
                     reason = "call-shape"
                 elif e.comparison is Comparison.MISSING:
                     reason = "rewritten-unpaired"
+                elif any(n.startswith(CONTENT_UNSEEN) for n in e.notes):
+                    reason = "content-unseen"
                 else:
                     reason = "nondeterministic-unrecorded"
                 out.skipped_opaque.append({**_legacy_record(e, old_side=e.old is not None),
@@ -6854,6 +6856,11 @@ _OPAQUE_REPRESENTATION_REVIEW = (
     "`pymolt verify . --accept ID`")
 
 
+#: The note of an attested expectation that cannot be checked because the content it is about
+#: is not visible (``_content_unseen``): uncomparable, not FAIL and not ACCEPTED (design 5.1).
+CONTENT_UNSEEN = "content unseen"
+
+
 def _content_unseen(e: FactEntry, old: list[Outcome], new: list[Outcome]) -> bool:
     """The difference lies only in returned content verify cannot see: both sides raise the
     same types (or none), both return, and the entry was compared by type only or a returned
@@ -6871,7 +6878,10 @@ def _content_unseen(e: FactEntry, old: list[Outcome], new: list[Outcome]) -> boo
 def _judge_intended(e: FactEntry, entry: Mapping, old: list[Outcome],
                     new: list[Outcome]) -> bool:
     """A changed outcome on a line an ``intended`` entry decides (design 5.1). With a
-    person-attested expectation: ACCEPTED when it is met, FAIL otherwise. Unattested, with a
+    person-attested expectation: ACCEPTED when it is met; uncomparable when it cannot be checked
+    because only the types are visible (``_content_unseen``, a ``representation`` expectation):
+    no evidence against the claim and none for it, so values settle it; FAIL otherwise (a
+    visible violation). Unattested, with a
     stated ``representation`` expectation: FAIL when the change is visibly more than that
     (another value, a new raise); a review when only the type is visible (``_content_unseen``),
     as under the hand rule; DRIFT when only the representation changed (the hand rules, below).
@@ -6887,6 +6897,11 @@ def _judge_intended(e: FactEntry, entry: Mapping, old: list[Outcome],
                           "at": info.get("at"), "attestation": info.get("id"),
                           "step": entry.get("step_id")}
             e.notes.append(f"accepted: a person's attested expectation ({expect})")
+            return True
+        if expect == "representation" and _content_unseen(e, old, new):
+            e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
+            e.notes.append(f"{CONTENT_UNSEEN}: the attested expectation {expect} cannot be "
+                           "checked; verify sees the outcomes' types but not their values")
             return True
         e.category = FactCategory.REWRITTEN           # stays CHANGED: fails
         e.notes.append(f"the attested expectation {expect} is not met")

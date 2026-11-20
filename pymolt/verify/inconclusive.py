@@ -27,6 +27,7 @@ from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
+    CONTENT_UNSEEN,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
@@ -54,7 +55,7 @@ SETTLE_ENVIRONMENT = ("capture post-migration again in the baseline's environmen
 SETTLE_NOT_EXERCISED = "add a test that reaches those sites, then capture post-migration again"
 
 #: Why a fact could not be compared (``uncomparable_mechanism``) -> what settles it. Only the
-#: first three are settled by capturing again; the cap, the backends and a lost distribution are
+#: first four are settled by capturing again; the cap, the backends and a lost distribution are
 #: properties of the watcher, so the same capture comes out the same.
 SETTLE_UNCOMPARABLE = {
     "evicted": ("capture the side that evicted facts again with a higher "
@@ -62,6 +63,9 @@ SETTLE_UNCOMPARABLE = {
     "dropped": "capture the side that dropped events again",
     "unpaired": ("add a test that runs the edited statements, then capture post-migration "
                  "again"),
+    "content-unseen": ("capture both sides again with `--privacy values`: the attested "
+                       "expectation is then checked against the values (one recorded as "
+                       "opaque, truncated or cyclic stays unseen)"),
     "c-site-capped": ("capturing again does not settle it: the watcher records the first 2,000 "
                       "compiled calls per call site and counts the rest; a test that makes "
                       "fewer calls there does"),
@@ -128,6 +132,8 @@ def uncomparable_mechanism(e: Any) -> str:
         return "c-site-capped"
     if has(CALL_SHAPE):
         return "call-shape"
+    if has(CONTENT_UNSEEN):
+        return "content-unseen"
     if _value(_get(e, "category")) == "rewritten":
         return "unpaired"
     return "distribution-lost"

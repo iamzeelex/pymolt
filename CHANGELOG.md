@@ -342,6 +342,11 @@ All notable changes to pymolt. The format follows
   reflected method (`__lt__`) BLIND as ran but not recorded, which made a capture pair with no
   code change INCONCLUSIVE with recall below 100%. Python calls one of the two methods: either
   recorded at the statement confirms both, and the pair counts once in coverage and recall.
+- A person-attested `representation` expectation whose values `verify` cannot see (compared by
+  type only, or recorded as opaque) makes the change not comparable, needing evidence (capture
+  both sides with `--privacy values`). It failed, while the same change without the
+  attestation was a review item: attesting made the verdict worse with nothing against the
+  claim. A visible violation still fails.
 
 #### Plan and apply
 
