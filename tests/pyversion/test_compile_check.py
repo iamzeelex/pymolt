@@ -1,7 +1,10 @@
 """The compile check: the target interpreter compiles every project file."""
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +45,29 @@ def test_a_python2_leftover_is_marked_as_failing_on_the_base_too(tmp_path):
     assert by_file["bad_new.py"]["base"] is None
 
 
+def _interpreter(minor: str) -> str | None:
+    uv = shutil.which("uv")
+    if uv is None:
+        return None
+    proc = subprocess.run([uv, "python", "find", "--no-project", minor], capture_output=True,
+                          text=True, timeout=30, cwd="/")
+    found = proc.stdout.strip()
+    return found if proc.returncode == 0 and found and Path(found).is_file() else None
+
+
 def test_an_interpreter_that_cannot_start_is_a_failure_not_a_crash(tmp_path):
     result = compile_check(tmp_path, "/nonexistent/python")
     assert result["failure"] and result["findings"] == []
+
+
+def test_a_real_base_interpreter_proves_which_errors_are_new(tmp_path):
+    # Nested same-quote f-strings parse on 3.12 only: compiled on a 3.11 "target" against a
+    # 3.12 "base", that error is the move's (False); a Python 2 leftover fails on both (True).
+    target = _interpreter("3.11")
+    if target is None:
+        pytest.skip("needs a 3.11 interpreter (uv python install 3.11)")
+    (tmp_path / "new_fstring.py").write_text('x = f"{"a"}"\n')
+    (tmp_path / "py2.py").write_text("print 'hello'\n")
+    result = compile_check(tmp_path, target, base_python="3.12", base_executable=sys.executable)
+    by_file = {f["file"]: f["base"] for f in result["findings"] if f["kind"] == "SyntaxError"}
+    assert by_file == {"new_fstring.py": False, "py2.py": True}

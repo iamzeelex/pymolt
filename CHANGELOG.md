@@ -336,6 +336,9 @@ All notable changes to pymolt. The format follows
 
 #### Plan and apply
 
+- `plan`'s compile check runs on the base interpreter too when that interpreter is on the host,
+  so a target SyntaxError the base also has (a Python 2 leftover) is marked as already there and
+  one the move introduced is marked as new. It used to estimate the base from its grammar only.
 - A rename that also moves a symbol to another module (`flask.Markup` → `markupsafe.Markup`)
   moves only that name: `from flask import Markup, Flask` becomes `from flask import Flask` plus
   `from markupsafe import Markup`, where it used to move `Flask` too.

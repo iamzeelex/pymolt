@@ -72,7 +72,11 @@ def plan_python_stage(project_dir: str | Path, base_python: str, target_python: 
                           | _inherited_stdlib_spellings(root, notes))
     findings: list[dict[str, Any]] = []
     if exe:
-        checked = compile_check(root, exe, base_python=base_python)
+        # A local base interpreter proves which target errors are new and which were there
+        # before (a Python 2 leftover); a base in a container cannot run this check, so the
+        # base side stays an estimate from the base version's grammar.
+        checked = compile_check(root, exe, base_python=base_python,
+                                base_executable=base_exe if base_runner is None else None)
         findings = checked["findings"]
         if checked.get("failure"):
             notes.append(f"compile check: {checked['failure']}")
