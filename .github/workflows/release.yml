@@ -80,8 +80,15 @@ jobs:
           name: dist
           path: dist/
 
+  # The tagged commit passes the same checks as a pull request (ci.yml) before anything is
+  # published: a tag never ships a commit whose tests fail.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   publish:
-    needs: build
+    needs: [build, ci]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

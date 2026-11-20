@@ -114,7 +114,8 @@ git push origin v0.2.0rc1
 ```
 
 The Release workflow checks the tag (canonical, equals `__version__`, on `main` or
-`release/0.2`), builds, publishes to PyPI and creates a GitHub pre-release.
+`release/0.2`), runs the CI checks (`test`, `package`) on the tagged commit, builds, and only
+when they pass publishes to PyPI and creates a GitHub pre-release.
 
 **4. Test the RC as users get it**, from PyPI, not from the checkout:
 
