@@ -412,10 +412,13 @@ def apply_setup(
 
     Also creates the ``.pymolt`` folder and adds the config to ``.gitignore``
     (best-effort). Every side effect outside ``.pymolt/`` is appended to ``notes``
-    when given, so the caller can say what it changed in the user's project.
+    when given, so the caller can say what it changed in the user's project. Refuses
+    (``StateFileError``) to replace a damaged config or one a newer pymolt wrote.
     """
     project_path = Path(project_dir)
     pymolt_dir = project_path / ".pymolt"
+    # A damaged config, or one a newer pymolt wrote, is not replaced (``StateFileError``).
+    EnvConfig.load(pymolt_dir / "env_config.json")
     pymolt_dir.mkdir(parents=True, exist_ok=True)
     (pymolt_dir / "cache").mkdir(exist_ok=True)
     added = _ensure_gitignore(project_path)

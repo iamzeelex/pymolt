@@ -14,13 +14,21 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 from pymolt.adapters.python_runner import RunnerSpec
+from pymolt.state_io import load_state
 
 logger = logging.getLogger(__name__)
 
-CONTRACT_STATE_SCHEMA_VERSION = 1
+# 2: every slot path is stored relative to the project root (a version-1 file, with absolute
+# paths, is read as it is: ``load_contract_state`` anchors both, and the next save writes 2).
+CONTRACT_STATE_SCHEMA_VERSION = 2
+CONTRACT_STATE_KIND = "capture state"
+CONTRACT_STATE_REMEDY = (
+    "It points at the captured recordings. Restore it from version control or a backup if you "
+    "have one; otherwise move it into .pymolt/archive/ and capture again (the baseline before "
+    "any code change). The recordings themselves stay in .pymolt/contract_traces/.")
 
 
 class VerificationVerdict(StrEnum):
@@ -236,6 +244,7 @@ class ContractState(BaseModel):
         """The state as JSON with every slot path stored relative to the project root
         (``root``), so the file stays valid whatever directory pymolt runs from."""
         payload = self.model_dump(mode="json")
+        payload["schema_version"] = CONTRACT_STATE_SCHEMA_VERSION
         base = Path(root).resolve()
 
         def relative(value):
@@ -260,24 +269,11 @@ class ContractState(BaseModel):
 
     @classmethod
     def load(cls, path: Path) -> "ContractState | None":
-        """Read and validate the state file.
-
-        Returns ``None`` when the file is missing or its contents are
-        unreadable/invalid (the caller decides how to degrade); never raises.
-        """
-        if not path.is_file():
-            return None
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not read contract state %s: %s", path, e)
-            return None
-        try:
-            return cls.model_validate(raw)
-        except ValidationError as e:
-            logger.warning("contract state %s failed validation, ignoring: %s", path, e)
-            return None
+        """Read and validate the state file: None when it is missing. A damaged file, or
+        one written by a newer pymolt, raises ``StateFileError`` (``pymolt.state_io``): read
+        as empty, the next capture would overwrite every slot's pointer."""
+        return load_state(path, cls, kind=CONTRACT_STATE_KIND,
+                          newest=CONTRACT_STATE_SCHEMA_VERSION, remedy=CONTRACT_STATE_REMEDY)
 
     def save(self, path: Path) -> None:
         """Atomically write state so interruption cannot destroy active evidence."""

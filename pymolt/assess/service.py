@@ -472,15 +472,19 @@ def baseline_tests_passed(project_dir: str | Path) -> bool:
 
     Reads ``.pymolt/contract_state.json`` — the baseline slot's ``returncode``. This
     ties the medallion to existing machinery: Silver is earned by the contract phase,
-    not asserted. "Passed" means rc == 0, not merely "the command ran".
+    not asserted. "Passed" means rc == 0, not merely "the command ran". A state file that
+    is not JSON, or a newer pymolt's, raises ``StateFileError``.
     """
-    import json
+    from pymolt.state_io import read_state_json
+    from pymolt.verify.models import (
+        CONTRACT_STATE_KIND,
+        CONTRACT_STATE_REMEDY,
+        CONTRACT_STATE_SCHEMA_VERSION,
+    )
 
-    path = Path(project_dir) / ".pymolt" / "contract_state.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
+    data = read_state_json(Path(project_dir) / ".pymolt" / "contract_state.json",
+                           kind=CONTRACT_STATE_KIND, newest=CONTRACT_STATE_SCHEMA_VERSION,
+                           remedy=CONTRACT_STATE_REMEDY)
     slot = (data or {}).get("baseline")
     return isinstance(slot, dict) and slot.get("returncode") == 0
 

@@ -9,14 +9,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from pymolt.state_io import load_state, rebuild_remedy
 from pymolt.verify.models import GoldenDiff, VerificationVerdict
 from pymolt.verify.policy import AutoRollbackDecision, CanaryPolicyEvaluation
 from pymolt.verify.report import ContractReport
 from pymolt.verify.shadow import ShadowReport
 
 VERIFICATION_PATH = Path(".pymolt/verification.json")
+#: The newest ``verification.json`` schema this pymolt reads (a higher one is refused as newer).
+VERIFICATION_SCHEMA_NEWEST = 2
+VERIFICATION_KIND = "saved verdict"
+VERIFICATION_REMEDY = rebuild_remedy("run `pymolt verify .` to judge again")
 
 
 class VerificationEvidence(BaseModel):
@@ -49,6 +54,7 @@ class UnifiedVerificationReport(BaseModel):
 
     def save(self, project_dir: str | Path) -> Path:
         path = Path(project_dir) / VERIFICATION_PATH
+        UnifiedVerificationReport.load(project_dir)     # never replaces a damaged or newer one
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, staged = tempfile.mkstemp(
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -70,11 +76,10 @@ class UnifiedVerificationReport(BaseModel):
 
     @classmethod
     def load(cls, project_dir: str | Path) -> UnifiedVerificationReport | None:
-        path = Path(project_dir) / VERIFICATION_PATH
-        try:
-            return cls.model_validate_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValidationError):
-            return None
+        """The saved verdict; None when there is none. A damaged file, or one written by a
+        newer pymolt, raises ``StateFileError``."""
+        return load_state(Path(project_dir) / VERIFICATION_PATH, cls, kind=VERIFICATION_KIND,
+                          newest=VERIFICATION_SCHEMA_NEWEST, remedy=VERIFICATION_REMEDY)
 
 
 def _golden_evidence(diff: GoldenDiff) -> VerificationEvidence:

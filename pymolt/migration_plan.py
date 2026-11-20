@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
-from pydantic_core import ValidationError
 
 from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
+from pymolt.state_io import keep_remedy, load_state, rebuild_remedy, schema_version
 from pymolt.verify.predict import PredictionReport
 from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP_ID, PlanStep
 
@@ -138,6 +138,25 @@ def _atomic_json(path: Path, payload: dict) -> Path:
             pass
         raise
     return path
+
+
+PLAN_KIND = "plan"
+PLAN_REMEDY = rebuild_remedy("run `pymolt plan .` to plan again")
+FROZEN_PLAN_KIND = "frozen plan of an apply run"
+FROZEN_PLAN_REMEDY = keep_remedy("the texts this run's rollback restores")
+RUN_STATE_KIND = "apply run state"
+RUN_STATE_REMEDY = keep_remedy("this run's rollback information")
+
+
+def _plan_file_kind(project_dir: str | Path, source: Path) -> tuple[str, str]:
+    """What a plan file is to a person (the saved plan, a run's frozen copy, or a plan file
+    given on the command line) and the remedy when it is damaged."""
+    if source.parent.parent.name == "migrations" and source.parent.parent.parent.name == \
+            ".pymolt":
+        return FROZEN_PLAN_KIND, FROZEN_PLAN_REMEDY
+    if source.resolve() == plan_path(project_dir).resolve():
+        return PLAN_KIND, PLAN_REMEDY
+    return PLAN_KIND, "Pass a readable plan file, or run `pymolt plan .` to plan again."
 
 
 def plan_path(project_dir: str | Path, path: str | Path | None = None) -> Path:
@@ -292,26 +311,29 @@ class MigrationPlan(BaseModel):
     def load(
         cls, project_dir: str | Path, path: str | Path | None = None
     ) -> MigrationPlan | None:
+        """The plan at ``path`` (default: the saved plan; a schema-1 plan is read as one
+        synthetic step); None when there is none. A damaged plan, or one written by a newer
+        pymolt, raises ``StateFileError``."""
         source = plan_path(project_dir, path)
-        if not source.is_file():
-            return None
-        try:
-            with source.open(encoding="utf-8") as stream:
-                data = json.load(stream)
-            if isinstance(data, dict) and data.get("schema_version", 1) == 1:
+        kind, remedy = _plan_file_kind(project_dir, source)
+
+        def adapt(data: dict) -> MigrationPlan:
+            if schema_version(data) == 1:
                 from pymolt.workorder.v1 import read_v1
 
                 return read_v1(cls, data)
             return cls.model_validate(data)
-        except (OSError, json.JSONDecodeError, ValidationError):
-            return None
+
+        return load_state(source, cls, kind=kind, newest=PLAN_SCHEMA_VERSION, remedy=remedy,
+                          adapt=adapt)
 
     def save(
         self, project_dir: str | Path, path: str | Path | None = None
     ) -> Path:
-        return _atomic_json(
-            plan_path(project_dir, path), self.model_dump(mode="json")
-        )
+        target = plan_path(project_dir, path)
+        if target.resolve() == plan_path(project_dir).resolve():
+            MigrationPlan.load(project_dir)     # never replaces a damaged or newer saved plan
+        return _atomic_json(target, self.model_dump(mode="json"))
 
     def save_planned(self, project_dir: str | Path, path: str | Path | None = None) -> Path:
         """Save the plan ``pymolt plan`` made, then drop the blobs retention no longer keeps
@@ -718,11 +740,9 @@ def _run_dir(project_dir: str | Path, run_id: str) -> Path:
 
 
 def _load_run_state(path: Path) -> MigrationRunState | None:
-    try:
-        with path.open(encoding="utf-8") as stream:
-            return MigrationRunState.model_validate(json.load(stream))
-    except (OSError, json.JSONDecodeError, ValidationError):
-        return None
+    """A run's ``state.json``; None when there is none. Damaged: ``StateFileError``."""
+    return load_state(path, MigrationRunState, kind=RUN_STATE_KIND, newest=None,
+                      remedy=RUN_STATE_REMEDY)
 
 
 def _save_run_state(run_dir: Path, state: MigrationRunState) -> Path:

@@ -272,6 +272,14 @@ All notable changes to pymolt. The format follows
 - The Claude Code plugin drives the CLI with `--agent` and starts no MCP server.
 - The `mcp` extra is pinned to `mcp>=1.2,<2`.
 
+#### State files
+
+- `.pymolt/contract_state.json` is schema 2: its slot paths are relative to the project root.
+  A schema-1 file is read as before and saved as schema 2; pymolt 0.1 refuses a schema-2 file
+  as written by a newer pymolt.
+- `status` shows a damaged or newer state file as a problem of its phase (`problems` in `--json`
+  and `--agent`), with no next command and the file's remedy as the reason.
+
 ### Removed
 
 - `verify --cascade FILE`: it read a per-node cascade report that nothing produces. The
@@ -325,6 +333,19 @@ All notable changes to pymolt. The format follows
 - `assess` keeps a base Python taken from setup's guess marked as assumed.
 - `status` recognises a migration made by hand; it called the post-migration capture stale.
 - `succession` says what its knowledge covers instead of "no known path".
+
+#### State files
+
+- A damaged state file in `.pymolt/` (unreadable, not JSON, or not what pymolt expects) or one
+  written by a newer pymolt is refused instead of read as missing: every command that needs it
+  exits 2, naming the file, what is wrong and what to do (JSON under `--json` and `--agent`), and
+  nothing overwrites it. A damaged `contract_state.json` used to be read as empty, so the next
+  `capture` replaced it and the other slots lost their recordings; a damaged receipt or ledger
+  made `apply` and `verify` act as if no run existed. `capture` refuses before it runs the
+  command, `plan` and `verify` before they compute anything. Covered: `env_config.json`,
+  `contract_state.json`, `migration_plan.json`, `migration_state.json`, `apply_ledger.json`,
+  `verification.json`, and each run's `state.json`, `plan.json` and `approval.json` (see
+  [docs/commands.md](docs/commands.md#damaged-or-newer-state-files)).
 
 ## [0.1.0] - 2026-09-26
 

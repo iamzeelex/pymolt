@@ -334,18 +334,23 @@ def _post_not_in(root, receipt, ledger) -> set[tuple[str, str]]:
 def _judgements(root, run_id: str) -> dict[str, dict]:
     """``verification.json``'s ``steps`` (``{id: {status, epoch, ...}}``) when it judged this
     run; {} otherwise (``verify`` writes it per step)."""
-    import json
     from pathlib import Path
 
-    from pymolt.verify.unified import VERIFICATION_PATH
+    from pymolt.state_io import read_state_json
+    from pymolt.verify.unified import (
+        VERIFICATION_KIND,
+        VERIFICATION_PATH,
+        VERIFICATION_REMEDY,
+        VERIFICATION_SCHEMA_NEWEST,
+    )
 
-    try:
-        data = json.loads((Path(root) / VERIFICATION_PATH).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    # A damaged saved verdict raises StateFileError: it is not read as "no judgement".
+    data = read_state_json(Path(root) / VERIFICATION_PATH, kind=VERIFICATION_KIND,
+                           newest=VERIFICATION_SCHEMA_NEWEST, remedy=VERIFICATION_REMEDY)
+    if data is None:
         return {}
-    steps = data.get("steps") if isinstance(data, dict) else None
-    judged_run = (data.get("steps_run") or data.get("run_id")) if isinstance(data, dict) \
-        else None
+    steps = data.get("steps")
+    judged_run = data.get("steps_run") or data.get("run_id")
     if not isinstance(steps, dict) or judged_run not in (None, run_id):
         return {}
     compared = ((data.get("contract") or {}).get("compared") or {})

@@ -9,6 +9,10 @@ So the order is *projected*, not enforced. This module reads what is already on
 disk (``.pymolt/env_config.json``, ``.pymolt/contract_state.json``, the target
 manifest) and reports the state of each phase plus the single next command —
 orientation without a state machine. It decides nothing and writes nothing.
+
+A state file that is damaged, or was written by a newer pymolt (``pymolt.state_io``), does
+not make status fail: it is read as missing, and reported as a problem of the phase it
+belongs to, with no next command and its remedy as the reason.
 """
 
 from __future__ import annotations
@@ -35,6 +39,9 @@ class PhaseState(BaseModel):
     state: str          # done | todo | stale | blocked
     detail: str = ""    # what was found, or what is missing
     blocker: str = ""   # why this cannot run yet (state == blocked)
+    # A state file of this phase is damaged or newer (``StateFileError.as_dict()``); the
+    # phase is then blocked on it.
+    problem: dict | None = None
 
 
 class EnvironmentCheck(BaseModel):
@@ -60,6 +67,9 @@ class FunnelStatus(BaseModel):
     steps: list[dict] = Field(default_factory=list)
     # The step the next command (or note) is about, when it is about one.
     next_step: str | None = None
+    # Every damaged or newer state file found (``StateFileError.as_dict()`` plus ``phase``),
+    # in funnel order; while there is one, there is no next command.
+    problems: list[dict] = Field(default_factory=list)
 
     def phase(self, name: str) -> PhaseState | None:
         return next((p for p in self.phases if p.phase == name), None)
@@ -461,7 +471,130 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     ``check_environments`` also reports whether the configured environments exist
     (``docker inspect`` for a container). Off by default: the ``next →`` line every
     command prints must stay cheap.
+
+    Never raises on a damaged or newer state file: each is read as missing and reported
+    (``problems``, and the phase it belongs to), with no next command.
     """
+    from pymolt.state_io import StateFileError, ignoring
+
+    found = {exc.path.resolve(): exc for exc in _state_file_problems(Path(project_dir))}
+    for _ in range(len(_STATE_FILE_PHASES) + 8):   # a file the scan missed: once more
+        try:
+            with ignoring(found):
+                status = _build_status(project_dir, check_environments=check_environments)
+        except StateFileError as exc:
+            if exc.path.resolve() in found:
+                raise
+            found[exc.path.resolve()] = exc
+            continue
+        if found:
+            _report_problems(status, list(found.values()))
+        return status
+    raise RuntimeError("status: too many damaged state files")  # pragma: no cover
+
+
+#: Which phase a state file belongs to, by name (the files of ``.pymolt/migrations/<run>/``
+#: are the migration's).
+_STATE_FILE_PHASES = {
+    "env_config.json": "setup",
+    "contract_state.json": "baseline",
+    "migration_plan.json": "plan",
+    "migration_state.json": "migration",
+    "apply_ledger.json": "migration",
+    "verification.json": "report",
+}
+
+
+def _problem_phase(path: Path) -> str:
+    if path.parent.parent.name == "migrations":
+        return "migration"
+    return _STATE_FILE_PHASES.get(path.name, "migration")
+
+
+def _state_file_problems(root: Path) -> list:
+    """Every damaged or newer state file of the project. The small ones are read with their
+    own loaders; the plans, the ledger and the saved verdict, which can be large (or costly
+    to adapt from schema 1), as JSON only: ``build_status`` reads them in full and reports
+    what fails there too."""
+    from pymolt.apply_ledger import LEDGER_KIND, LEDGER_REMEDY, _ledger_version
+    from pymolt.ingestion.config import EnvConfig
+    from pymolt.migration_plan import (
+        FROZEN_PLAN_KIND,
+        FROZEN_PLAN_REMEDY,
+        PLAN_KIND,
+        PLAN_REMEDY,
+        _load_run_state,
+    )
+    from pymolt.migration_state import MigrationReceipt
+    from pymolt.state_io import StateFileError, read_state_json
+    from pymolt.verify.models import ContractState
+    from pymolt.verify.unified import (
+        VERIFICATION_KIND,
+        VERIFICATION_REMEDY,
+        VERIFICATION_SCHEMA_NEWEST,
+    )
+    from pymolt.workorder.approval import APPROVAL_FILE, APPROVAL_KIND, APPROVAL_REMEDY
+    from pymolt.workorder.models import PLAN_SCHEMA_VERSION
+
+    state = root / ".pymolt"
+    problems: list[StateFileError] = []
+
+    def check(read) -> None:
+        try:
+            read()
+        except StateFileError as exc:
+            problems.append(exc)
+
+    check(lambda: EnvConfig.load(state / "env_config.json"))
+    check(lambda: ContractState.load(state / "contract_state.json"))
+    check(lambda: read_state_json(state / "migration_plan.json", kind=PLAN_KIND,
+                                  newest=PLAN_SCHEMA_VERSION, remedy=PLAN_REMEDY))
+    check(lambda: MigrationReceipt.load(root))
+    check(lambda: read_state_json(state / "apply_ledger.json", kind=LEDGER_KIND, newest=2,
+                                  remedy=LEDGER_REMEDY, version_of=_ledger_version))
+    check(lambda: read_state_json(state / "verification.json", kind=VERIFICATION_KIND,
+                                  newest=VERIFICATION_SCHEMA_NEWEST,
+                                  remedy=VERIFICATION_REMEDY))
+    runs = state / "migrations"
+    for run in sorted(runs.iterdir()) if runs.is_dir() else ():
+        if not run.is_dir():
+            continue
+        check(lambda run=run: _load_run_state(run / "state.json"))
+        check(lambda run=run: read_state_json(run / "plan.json", kind=FROZEN_PLAN_KIND,
+                                              newest=PLAN_SCHEMA_VERSION,
+                                              remedy=FROZEN_PLAN_REMEDY))
+        check(lambda run=run: read_state_json(run / APPROVAL_FILE, kind=APPROVAL_KIND,
+                                              newest=None, remedy=APPROVAL_REMEDY))
+    return problems
+
+
+def _report_problems(status: FunnelStatus, problems: list) -> None:
+    """Each damaged or newer state file as a problem of its phase; no next command, and the
+    first problem's remedy (in funnel order) as the reason."""
+    order = [p.phase for p in status.phases]
+    rows = sorted(({**exc.as_dict(), "phase": _problem_phase(exc.path)} for exc in problems),
+                  key=lambda row: order.index(row["phase"]) if row["phase"] in order
+                  else len(order))
+    status.problems = rows
+    for row in rows:
+        index = next((i for i, p in enumerate(status.phases) if p.phase == row["phase"]),
+                     None)
+        if index is None:
+            status.phases.append(PhaseState(phase=row["phase"], state=BLOCKED,
+                                            blocker=row["error"], detail=row["error"],
+                                            problem=row))
+            continue
+        phase = status.phases[index]
+        if phase.problem is None:
+            status.phases[index] = phase.model_copy(update={
+                "state": BLOCKED, "blocker": row["error"], "problem": row})
+    status.next_command = None
+    status.next_step = None
+    status.next_reason = rows[0]["remedy"]
+
+
+def _build_status(project_dir: str | Path, *, check_environments: bool = False
+                  ) -> FunnelStatus:
     from pymolt.ingestion.config import EnvConfig
     from pymolt.ingestion.detect import detect_sources
     from pymolt.migration_state import MigrationReceipt
@@ -645,6 +778,8 @@ def _projection(project_path: Path, receipt, post_slot):
     """The saved plan's steps, projected (None: no plan of steps, or the projection failed:
     status then reads as before steps). ``post_newer``: a post-migration capture was taken
     after the plan was made."""
+    from pymolt.state_io import StateFileError
+
     try:
         from pymolt.workorder.state import project_steps
 
@@ -652,6 +787,8 @@ def _projection(project_path: Path, receipt, post_slot):
         projection.post_newer = bool(
             post_slot is not None and projection.created_at
             and not _capture_precedes(post_slot.captured_at, projection.created_at))
+    except StateFileError:
+        raise                           # build_status reports it as a problem
     except Exception:  # noqa: BLE001 - orientation must never break on a step it cannot read
         import logging
 

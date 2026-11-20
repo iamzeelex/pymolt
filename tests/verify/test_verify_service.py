@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, CaptureValidity, ContractState
 
@@ -438,11 +440,16 @@ class TestContractStateRoundTrip:
         loaded = ContractState.load(path)
         assert loaded == state
 
-    def test_load_corrupt_file_returns_none(self, tmp_path):
+    def test_load_corrupt_file_raises(self, tmp_path):
+        from pymolt.state_io import StateFileError
+
         path = tmp_path / ".pymolt" / "contract_state.json"
         path.parent.mkdir(parents=True)
         path.write_text("not json{{{")
-        assert ContractState.load(path) is None
+        with pytest.raises(StateFileError, match="capture state"):
+            ContractState.load(path)
+        with pytest.raises(StateFileError):            # never read as an empty state
+            service.load_contract_state(tmp_path)
 
     def test_load_contract_state_defaults_to_empty(self, tmp_path):
         state = service.load_contract_state(tmp_path)

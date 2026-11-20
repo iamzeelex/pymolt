@@ -1359,7 +1359,9 @@ def same_slot_path(project_dir: str | Path, a: str | None, b: str | None) -> boo
 
 
 def load_contract_state(project_dir: str | Path) -> ContractState:
-    """The current capture state, or a fresh empty one if none is persisted yet.
+    """The current capture state, or a fresh empty one if none is persisted yet. A damaged
+    file, or one written by a newer pymolt, raises ``StateFileError``: it is never read as
+    empty (the next save would drop every slot's pointer).
 
     Every slot path comes back absolute (anchored to the project root), whatever the
     current directory is; they are stored relative (see ``ContractState.save``).
@@ -1712,6 +1714,9 @@ def capture_named_trace(
     # Anchor everything to the project root: a relative project dir would otherwise put
     # stored paths (and the target env lookup) relative to whichever directory pymolt ran in.
     project_dir = Path(os.path.abspath(project_dir))
+    # A state file the capture could not save into refuses it now (``StateFileError``), not
+    # after the command ran for minutes.
+    load_contract_state(project_dir)
     if privacy is None:
         privacy = "values" if mode is CaptureMode.TEST_SUITE else "shape"
     sampling_source = "caller"
@@ -2260,6 +2265,7 @@ def start_attached_capture(
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
 
     project_dir = Path(os.path.abspath(project_dir))
+    load_contract_state(project_dir)        # refuses a state file collect could not save into
     if sample_rate is None:
         sample_rate = default_sample_rate(CaptureMode.LIVE_ATTACH)
     watcher_env = trace_env(
@@ -2553,6 +2559,7 @@ def finalize_attached_capture(
     The slot's sample rate is the one the watcher ran with (its sidecar), else
     ``sample_rate``, else the attach default."""
     project_dir = Path(os.path.abspath(project_dir))
+    load_contract_state(project_dir)        # refuses before anything moves
     out_path = Path(out_path)
     _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
@@ -2691,9 +2698,13 @@ def build_contract_report_from_state(
     no diff; neither -> trace=None (today's all-BLIND behavior, unchanged).
     """
     from pymolt.migration_state import MigrationReceipt
+    from pymolt.verify.unified import UnifiedVerificationReport
 
     state = load_contract_state(project_dir)
     receipt = MigrationReceipt.load(project_dir)
+    # verify saves its verdict over the saved one: a damaged or newer file refuses it now
+    # (``StateFileError``), before the comparison.
+    UnifiedVerificationReport.load(project_dir)
 
     if changed_api_paths is None:
         from pymolt.migration_state import plans_in_effect

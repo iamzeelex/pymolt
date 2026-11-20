@@ -103,9 +103,12 @@ class TestConfigModelIsTheLastLineOfDefence:
         assert EnvConfig(target_python="").target_python == ""
 
     def test_a_corrupt_file_on_disk_does_not_load(self, tmp_path):
+        from pymolt.state_io import StateFileError
+
         path = tmp_path / "env_config.json"
         path.write_text(json.dumps({"base_python": "q"}), encoding="utf-8")
-        assert EnvConfig.load(path) is None
+        with pytest.raises(StateFileError, match="is not a Python version"):
+            EnvConfig.load(path)
 
 
 class TestOptions:

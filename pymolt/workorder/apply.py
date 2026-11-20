@@ -206,11 +206,11 @@ def _check_frozen(root: Path, run_id: str, plan: MigrationPlan) -> None:
 
 
 def _load_ledger(root: Path, receipt):
-    from pymolt.apply_ledger import Ledger, ledger_path, load_ledger
+    """The ledger, or an empty one when there is none (a damaged one raises
+    ``StateFileError``)."""
+    from pymolt.apply_ledger import Ledger, load_ledger
 
     ledger = load_ledger(root, receipt=receipt)
-    if ledger is None and ledger_path(root).exists():
-        raise MigrationPlanError(f"the apply ledger cannot be read: {ledger_path(root)}")
     return ledger if ledger is not None else Ledger()
 
 

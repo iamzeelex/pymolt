@@ -25,6 +25,7 @@ from pymolt.migration_plan import (
     _now,
     _run_dir,
 )
+from pymolt.state_io import read_state_json, rebuild_remedy
 
 SCOPE = ("pymolt-steps", "rollback-step")
 APPROVAL_FILE = "approval.json"
@@ -36,8 +37,20 @@ def plan_digest(plan: MigrationPlan) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
+APPROVAL_KIND = "agent approval"
+APPROVAL_REMEDY = rebuild_remedy(
+    "a person approves the plan for agents again with `pymolt apply . --approve-agent`")
+
+
 def approval_path(root: Path, run_id: str) -> Path:
     return _run_dir(root, run_id) / APPROVAL_FILE
+
+
+def read_approval(root: Path, run_id: str) -> dict | None:
+    """The run's approval record; None when there is none. A damaged one raises
+    ``StateFileError``."""
+    return read_state_json(approval_path(root, run_id), kind=APPROVAL_KIND, newest=None,
+                           remedy=APPROVAL_REMEDY)
 
 
 def approve(project_dir: str | Path, plan: MigrationPlan, *, attester) -> dict:
@@ -51,6 +64,7 @@ def approve(project_dir: str | Path, plan: MigrationPlan, *, attester) -> dict:
     root = Path(project_dir).resolve()
     with _migration_lock(root, "apply --approve-agent"):
         run_id, _state = run_for(root, plan, MigrationReceipt.load(root))
+        read_approval(root, run_id)         # never replaces a damaged approval
         digest = plan_digest(plan)
         pymolt_steps = [s.id for s in plan.steps if s.executor == "pymolt"]
         text = (f"Approve plan {plan.plan_id[:8]} for agents: they may apply its "
@@ -79,12 +93,10 @@ def check_approval(project_dir: str | Path, plan: MigrationPlan, run_id: str,
     from pymolt.attest import AttestationStore
 
     root = Path(project_dir).resolve()
-    path = approval_path(root, run_id)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = read_approval(root, run_id)
+    if data is None:
         return "no person approved this plan for agents"
-    if not isinstance(data, dict) or data.get("plan_id") != plan.plan_id:
+    if data.get("plan_id") != plan.plan_id:
         return "the approval is for another plan (a re-plan voids it)"
     digest = plan_digest(plan)
     if data.get("plan_sha256") != digest:
@@ -131,4 +143,4 @@ def require_rollback_approval(project_dir: str | Path, run_id: str | None) -> No
 
 
 __all__ = ["APPROVAL_FILE", "SCOPE", "approval_path", "approve", "check_approval",
-           "plan_digest", "require_approval", "require_rollback_approval"]
+           "plan_digest", "read_approval", "require_approval", "require_rollback_approval"]

@@ -82,6 +82,21 @@ def fail(
     raise typer.Exit(code=code)
 
 
+def fail_state_file(exc, *, json_output: bool = False) -> NoReturn:
+    """A damaged state file, or one a newer pymolt wrote (``pymolt.state_io.StateFileError``):
+    exit 2 with the message and the remedy as the hint; under ``--json``/``--agent`` the
+    envelope also carries ``path``, ``kind``, ``problem``, ``detail`` and ``remedy``."""
+    fail(exc.headline, hint=exc.remedy, code=EXIT_USAGE, json_output=json_output,
+         extra=exc.fields())
+
+
+def wants_machine_output(args: list[str]) -> bool:
+    """Whether a command line asks for ``--json`` or ``--agent`` (before any ``--``: what
+    follows is the captured command's own arguments)."""
+    head = args[:args.index("--")] if "--" in args else args
+    return any(arg in ("--json", "--agent") for arg in head)
+
+
 def require_project_dir(project_dir: str | Path, *, json_output: bool = False) -> Path:
     """Resolve a project directory argument, or fail with EXIT_USAGE.
 

@@ -141,7 +141,7 @@ def _load(root: Path, run_id: str | None):
         raise MigrationConflictError(f"migration {effective[:8]} is not rollback-ready (missing)")
     plan = MigrationPlan.load(root, run_dir / "plan.json")
     if plan is None:
-        raise MigrationPlanError(f"frozen plan for {effective[:8]} is unreadable")
+        raise MigrationPlanError(f"frozen plan for {effective[:8]} is missing")
     recovered = recover_invocation(root, state, plan)
     if recovered is not None:
         state = recovered
@@ -150,11 +150,11 @@ def _load(root: Path, run_id: str | None):
 
 
 def _ledger(root: Path, receipt):
-    from pymolt.apply_ledger import Ledger, ledger_path, load_ledger
+    """The ledger, or an empty one when there is none (a damaged one raises
+    ``StateFileError``)."""
+    from pymolt.apply_ledger import Ledger, load_ledger
 
     ledger = load_ledger(root, receipt=receipt)
-    if ledger is None and ledger_path(root).exists():
-        raise MigrationPlanError(f"the apply ledger cannot be read: {ledger_path(root)}")
     return ledger if ledger is not None else Ledger()
 
 

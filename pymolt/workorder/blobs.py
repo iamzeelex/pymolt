@@ -18,7 +18,7 @@ The store holds copies of project source, so it writes ``.pymolt/.gitignore`` wi
   ledger).
 
 ``collect_blobs`` removes the rest; ``plan`` and ``apply`` run it under the migration lock. It
-removes nothing when the ledger or the receipt exists but cannot be read.
+removes nothing when the ledger or the receipt is damaged (``StateFileError``).
 """
 
 from __future__ import annotations
@@ -207,21 +207,22 @@ def collect_blobs(project_dir: str | Path, *, ledger: Any = _UNSET,
     """Remove the blobs retention does not keep; returns their hashes. The caller holds the
     migration lock. Nothing is removed while the ledger or the receipt exists but cannot be
     read: what it references is unknown."""
+    from pymolt.state_io import StateFileError
+
     root = Path(project_dir)
     if not blobs_dir(root).is_dir():
         return []
-    if receipt is _UNSET:
-        from pymolt.migration_state import MigrationReceipt, receipt_path
+    try:
+        if receipt is _UNSET:
+            from pymolt.migration_state import MigrationReceipt
 
-        receipt = MigrationReceipt.load(root)
-        if receipt is None and receipt_path(root).exists():
-            return []
-    if ledger is _UNSET:
-        from pymolt.apply_ledger import ledger_path, load_ledger
+            receipt = MigrationReceipt.load(root)
+        if ledger is _UNSET:
+            from pymolt.apply_ledger import load_ledger
 
-        ledger = load_ledger(root, receipt=receipt)
-        if ledger is None and ledger_path(root).exists():
-            return []
+            ledger = load_ledger(root, receipt=receipt)
+    except StateFileError:
+        return []                       # what a damaged receipt or ledger references is unknown
     keep = referenced(root, ledger, receipt)
     removed: list[str] = []
     for digest in sorted(stored(root) - keep):

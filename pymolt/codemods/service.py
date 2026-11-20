@@ -567,6 +567,13 @@ def build_migration_plan(
     # Each recipe's change to each file, in application order: the plan's automated steps.
     recorder = StepRecorder()
     config, target_path = plan_inputs(root, target_file)
+    # The state the plan is bound to and replaces: a damaged or newer file refuses the plan
+    # now (``StateFileError``), not after the engine ran.
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.verify.service import load_contract_state
+
+    load_contract_state(root)
+    MigrationPlan.load(root)
     notes: list[str] = []
     migrations, source_desc = resolve_codemod_migrations(
         root, target_dependency_file=target_path, config=config.model_dump(mode="json"),

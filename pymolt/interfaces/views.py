@@ -174,7 +174,8 @@ def status_view(report) -> dict:
     """``FunnelStatus`` -> view. Everything fits, so there is no full report."""
     lists = _Lists()
     phases = [
-        {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker}
+        {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker,
+         **({"problem": p.problem} if p.problem else {})}
         for p in report.phases
     ]
     checks = [check.model_dump(mode="json") for check in report.checks]
@@ -188,6 +189,9 @@ def status_view(report) -> dict:
         if names:
             lines.append(f"{label}: {', '.join(names)}.")
     warnings: list[str] = []
+    for problem in report.problems:     # a damaged or newer state file: fix it first
+        warnings.append(problem["error"])
+        lines.append(f"PROBLEM {problem['error']}")
     for c in report.checks:
         if c.state != "ok":
             warnings.append(f"{c.name}: {c.detail}" + (f" ({c.hint})" if c.hint else ""))
@@ -201,6 +205,8 @@ def status_view(report) -> dict:
         "next_reason": report.next_reason,
         "notes": list(report.notes),
     }
+    if report.problems:
+        data["problems"] = list(report.problems)
     if report.steps:
         data["steps"] = lists.cap("steps", list(report.steps))
         data["steps_total"] = len(report.steps)

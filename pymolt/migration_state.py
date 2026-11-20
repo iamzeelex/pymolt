@@ -38,11 +38,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr
-from pydantic_core import ValidationError
 
 from pymolt.apply_check import SelfCheck
+from pymolt.state_io import keep_remedy, load_state, schema_version
 
 MIGRATION_STATE_SCHEMA_VERSION = 2
+RECEIPT_KIND = "apply receipt"
+RECEIPT_REMEDY = keep_remedy(
+    "the rollback information of every apply run; without it pymolt cannot tell which runs "
+    "are in effect, nor roll them back")
 #: The step a schema-1 run is read as.
 V1_STEP = "v1"
 
@@ -263,18 +267,20 @@ class MigrationReceipt(BaseModel):
 
     @classmethod
     def load(cls, project_dir: str | Path) -> MigrationReceipt | None:
-        path = receipt_path(project_dir)
-        if not path.is_file():
-            return None
-        try:
-            with path.open(encoding="utf-8") as stream:
-                data = json.load(stream)
+        """The receipt set (a schema-1 file read as one); None when there is none. A damaged
+        file, or one written by a newer pymolt, raises ``StateFileError``: read as none, apply
+        and verify would act on a world without the runs it records."""
+        root = Path(project_dir)
+
+        def adapt(data: dict) -> MigrationReceipt:
             receipt = cls.model_validate(data)
-        except (OSError, json.JSONDecodeError, ValidationError):
-            return None
-        if isinstance(data, dict) and int(data.get("schema_version") or 1) < 2:
-            receipt._adapt_v1(Path(project_dir))
-        return receipt
+            if schema_version(data) < 2:
+                receipt._adapt_v1(root)
+            return receipt
+
+        return load_state(receipt_path(root), cls, kind=RECEIPT_KIND,
+                          newest=MIGRATION_STATE_SCHEMA_VERSION, remedy=RECEIPT_REMEDY,
+                          adapt=adapt)
 
     def _adapt_v1(self, root: Path) -> None:
         """Read a schema-1 receipt as a receipt set: its run, and its step ``v1``."""
@@ -403,7 +409,8 @@ def plan_paths_in_effect(receipt: Any) -> list[str]:
 
 
 def plans_in_effect(project_dir: str | Path, receipt: Any) -> list:
-    """The ``MigrationPlan`` of each run in effect, latest first (unreadable ones left out)."""
+    """The ``MigrationPlan`` of each run in effect, latest first (missing ones left out; a
+    damaged one raises ``StateFileError``)."""
     from pymolt.migration_plan import MigrationPlan
 
     plans = []

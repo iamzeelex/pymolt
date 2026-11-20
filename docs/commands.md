@@ -221,6 +221,35 @@ after that step. Otherwise it still describes the code and is kept.
 | `--force` | Also discard edits made after apply (the whole run only) |
 | `--agent` | With `--step`, on a plan a person approved for agents. A whole run, `--force` and `--cascade` are refused: a person does those |
 
+## Damaged or newer state files
+
+pymolt keeps its state in `.pymolt/`: `env_config.json` (setup's choices), `contract_state.json`
+(the captures), `migration_plan.json` (the plan), `migration_state.json` (apply's receipt),
+`apply_ledger.json` (the ledger), `verification.json` (the saved verdict), and each apply run's
+`migrations/<run-id>/state.json`, `plan.json` and `approval.json`. A missing file is simply not
+there yet. A file that cannot be read, is not JSON, or does not match what pymolt expects is
+**damaged**; one with a higher `schema_version` than this pymolt reads was written by a **newer**
+pymolt. pymolt never reads either as missing and never overwrites it: every command that needs
+the file exits with code 2, naming the file, what is wrong and what to do; `--json` and `--agent`
+print it as JSON with `path`, `kind`, `problem` (`damaged` or `newer`), `detail` and `remedy`.
+`capture` refuses before it runs your command, and `plan` and `verify` before they compute
+anything.
+
+- A newer file: upgrade pymolt.
+- The plan, the setup choices, the saved verdict or an approval: move the file into
+  `.pymolt/archive/` to keep it, then run the command that rebuilds it (`pymolt plan .`,
+  `pymolt setup .`, `pymolt verify .`, or a person's `pymolt apply . --approve-agent`).
+- The capture state points at the recordings, which stay in `.pymolt/contract_traces/`:
+  restore it from version control or a backup if you can; otherwise move it aside and capture
+  again (a baseline can only be captured before the code changes).
+- The receipt, the ledger and a run's files hold what rollback needs: restore them from
+  version control, a backup or `.pymolt/archive/` before anything else, and do not delete
+  them.
+
+`status` does not fail on such a file: it shows it as a problem of its phase (`problems` in
+`--json` and `--agent`), with no next command and the remedy as the reason. The caches
+(`.pymolt/cache/` and the noise profile) are different: a damaged cache is rebuilt.
+
 ## Tools
 
 | Command | Description |
