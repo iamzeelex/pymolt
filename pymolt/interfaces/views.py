@@ -1307,8 +1307,13 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         summary = (rep.all_fact_diff or fact_diff).get("summary")
         if summary:
             data["findings"] = _findings_data(summary)
-            for f in data["findings"]["failing"][:3]:
+            failing = data["findings"]["failing"]
+            total = summary.get("failing_total", len(summary.get("failing") or []))
+            for f in failing[:3]:
                 lines.append(f"FAIL {f['symbol']} at {f['site']}: {f['why']}.")
+            if total > 3:   # the agent must not read three as all of them
+                lines.append(f"FAIL ... and {total - 3} more ({total} in all; "
+                             f"data.findings.failing lists up to {len(failing)}).")
             for r in data["findings"]["review"]:
                 lines.append(f"REVIEW {r['entries']} {r['reason']}: {r['action']}.")
         counted = ", ".join(f"{k} {v}" for k, v in data["change_counts"].items())

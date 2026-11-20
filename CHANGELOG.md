@@ -346,6 +346,11 @@ All notable changes to pymolt. The format follows
 
 #### Verify
 
+- A review the measured baseline replicate did not explain no longer says to capture a replicate:
+  it asks a person to review it (fix, or `verify --accept`).
+- `verify --agent` says how many failing findings its summary leaves out ("and N more"), so an
+  agent does not read the first three as all of them.
+- A deprecation that says "Instead access X directly" names X as the successor.
 - The post-migration capture after `apply` adds the plan's symbols to what it records instead
   of narrowing to them, which produced false DISAPPEARED entries.
 - The static contact map skips hidden, virtualenv and build directories, `*.egg-info` and

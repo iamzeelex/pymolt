@@ -42,6 +42,9 @@ SUCCESSOR_RES = [
     re.compile(r"[Uu]se\s+:\w+:`~?([A-Za-z_][\w\.]*)`"),
     re.compile(r"[Uu]se\s+['\"`]?([A-Za-z_][\w\.\(\)]*)['\"`]?\s+(?:instead|to )"),
     re.compile(r"[Ii]mport (?:them|it) directly from\s+['\"`]?([\w\.]+)"),
+    # "Instead access pandas.testing directly", "instead, import X directly"
+    re.compile(r"\b[Ii]nstead,?\s+(?:access|import|use)\s+" + _ROLE + _Q + _ID + _Q
+               + r"\s+directly"),
     re.compile(r"[Ss]ubclass(?:ing)?\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?"),
     # "use `X`" / "Please use 'X'" with the name quoted: any continuation
     re.compile(r"\b[Uu]se\s+(?:the\s+)?[`'\"]~?@?" + _ID + r"(?:\(\))?[`'\"]"),

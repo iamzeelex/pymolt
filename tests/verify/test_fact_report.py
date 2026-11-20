@@ -45,6 +45,16 @@ def test_failing_findings_group_by_site_and_sort_kind_type_value():
     assert s["ledger"]["failing"] == 5 and s["failing_total"] == 3
 
 
+def test_a_replicate_is_not_asked_for_again_once_one_was_measured():
+    from pymolt.verify.fact_report import AFTER_REPLICATE
+
+    diff = mixed_diff()
+    diff.noise_measured = {"runs": 2}      # a baseline replicate was measured
+    (r,) = summarize(diff)["review"]
+    assert r["reason"] == "input changed" and r["action"] == AFTER_REPLICATE
+    assert "--replicate" not in r["action"] and "--accept" in r["action"]
+
+
 def test_review_findings_carry_their_reason_and_action():
     s = summarize(mixed_diff())
     (r,) = s["review"]
