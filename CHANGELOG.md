@@ -369,6 +369,9 @@ All notable changes to pymolt. The format follows
 
 #### Plan and apply
 
+- `rollback --step` of a recorded agent or person step sets aside the post-migration capture
+  that recorded the edit, as for a pymolt step. It was kept, and `status` went on showing its
+  stale verdict.
 - `apply --dry-run` prints the diff as it is; a `[` in it showed as `\[`.
 - The brief of a step for a changed default no longer promises that passing the old value keeps
   the old outcome (pandas 2 reads `numeric_only=None` as `False`): it says to check it.

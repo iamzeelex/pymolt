@@ -130,6 +130,28 @@ def test_row_5_the_capture_is_set_aside_only_when_it_recorded_the_step(tmp_path)
     assert state.diagnostic_captures[-1].set_aside_by == plan.plan_id
 
 
+def test_row_5_a_capture_that_recorded_an_agents_edit_is_set_aside_with_it(tmp_path):
+    """An agent or person step has no plan edits: the record's own event says what the file
+    became, and a capture whose snapshot holds that text recorded the code the rollback takes
+    away (it used to be kept, and status went on showing its stale verdict)."""
+    from _stepwise import manual_step, with_steps
+
+    from pymolt.workorder.record import record_step
+
+    plan = with_steps(tmp_path, plan_for(tmp_path, {M: (APP, RECIPES)}),
+                      manual_step(tmp_path, M, 7, sid="sig-1"))
+    record_step(tmp_path, plan, "sig-1")
+    (tmp_path / M).write_text(read(tmp_path, M).replace("return a.h(x)", "return a.k(x)"),
+                              encoding="utf-8")
+    record_step(tmp_path, plan, "sig-1", done=True)
+    post_capture(tmp_path, M)                           # it records the agent's edit
+
+    result = rollback_steps(tmp_path, step="sig-1")
+
+    assert result.post == "set_aside"
+    assert service.load_contract_state(tmp_path).post_migration is None
+
+
 def test_row_5_a_capture_whose_snapshot_lacks_the_file_is_kept(tmp_path):
     plan = plan_for(tmp_path, {M: (APP, RECIPES)})
     apply_steps(tmp_path, plan, step="mech-1")
