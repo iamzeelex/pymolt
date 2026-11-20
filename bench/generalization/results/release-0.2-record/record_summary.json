@@ -1,0 +1,1271 @@
+{
+  "totals": {
+    "equiv_sites": 198,
+    "equiv_unverified": 116,
+    "change_fail_ok": 9,
+    "change_total": 10,
+    "mutations": 27,
+    "mutations_pass": 0,
+    "mutations_not_mutated": 0,
+    "equiv_unverified_share": "116 of 198"
+  },
+  "toys": {
+    "click": {
+      "equiv": "pass",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 12,
+        "equal": 12,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 0,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 12,
+          "equal": 11,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 0,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 12,
+          "equal": 11,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 0,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 12,
+          "equal": 11,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 0,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": []
+      }
+    },
+    "django": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 14,
+        "equal": 4,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 10,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 12,
+        "edited": {
+          "sites": 13,
+          "equal": 4,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 9,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              0,
+              1
+            ]
+          ],
+          [
+            "sig-1",
+            [
+              12
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 12,
+        "edited": {
+          "sites": 13,
+          "equal": 4,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 9,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              0,
+              1
+            ]
+          ],
+          [
+            "sig-1",
+            [
+              12
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 12,
+        "edited": {
+          "sites": 13,
+          "equal": 4,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 9,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              0,
+              1
+            ]
+          ]
+        ]
+      }
+    },
+    "jinja2": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 23,
+        "equal": 15,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 8,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 4,
+        "edited": {
+          "sites": 20,
+          "equal": 10,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 9,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              1,
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              4
+            ]
+          ],
+          [
+            "sig-12",
+            [
+              5
+            ]
+          ],
+          [
+            "sig-5",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-12",
+            [
+              8
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 4,
+        "edited": {
+          "sites": 20,
+          "equal": 10,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 9,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              1,
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              4
+            ]
+          ],
+          [
+            "sig-12",
+            [
+              5
+            ]
+          ],
+          [
+            "sig-5",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-12",
+            [
+              8
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 4,
+        "edited": {
+          "sites": 20,
+          "equal": 10,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 9,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              1,
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-12",
+            [
+              5
+            ]
+          ],
+          [
+            "sig-5",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-12",
+            [
+              8
+            ]
+          ]
+        ]
+      }
+    },
+    "networkx": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 32,
+        "equal": 4,
+        "representation_only": 1,
+        "review": 0,
+        "unverified": 27,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 30,
+          "equal": 4,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 25,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-4",
+            [
+              7
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "inconclusive",
+        "fact_verdict": "pass",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 30,
+          "equal": 4,
+          "representation_only": 1,
+          "review": 0,
+          "unverified": 25,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-4",
+            [
+              7
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "inconclusive",
+        "fact_verdict": "pass",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 30,
+          "equal": 4,
+          "representation_only": 1,
+          "review": 0,
+          "unverified": 25,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-4",
+            [
+              7
+            ]
+          ]
+        ]
+      }
+    },
+    "pandas": {
+      "equiv": "pass",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 1,
+        "equal": 1,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 0,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": []
+    },
+    "pydantic": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 21,
+        "equal": 8,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 13,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 5,
+        "edited": {
+          "sites": 20,
+          "equal": 7,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 13,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              4,
+              5
+            ]
+          ],
+          [
+            "beh-2",
+            [
+              7
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 5,
+        "edited": {
+          "sites": 20,
+          "equal": 7,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 13,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              4,
+              5
+            ]
+          ],
+          [
+            "beh-2",
+            [
+              7
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 5,
+        "edited": {
+          "sites": 20,
+          "equal": 7,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 13,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-2",
+            [
+              2
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              4
+            ]
+          ],
+          [
+            "beh-2",
+            [
+              7
+            ]
+          ]
+        ]
+      }
+    },
+    "pyyaml": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 3,
+        "equal": 2,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 1,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 0,
+        "edited": {
+          "sites": 3,
+          "equal": 1,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 1,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 0,
+        "edited": {
+          "sites": 3,
+          "equal": 1,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 1,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 0,
+        "edited": {
+          "sites": 3,
+          "equal": 1,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 1,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              2
+            ]
+          ]
+        ]
+      }
+    },
+    "sqlalchemy": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 66,
+        "equal": 20,
+        "representation_only": 0,
+        "review": 3,
+        "unverified": 43,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "inconclusive",
+        "fact_verdict": "inconclusive",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 36,
+          "equal": 0,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 36,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-20",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-11",
+            [
+              1
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              2,
+              3,
+              4
+            ]
+          ],
+          [
+            "sig-5",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              7
+            ]
+          ],
+          [
+            "sig-15",
+            [
+              8
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              9
+            ]
+          ],
+          [
+            "sig-7",
+            [
+              10
+            ]
+          ],
+          [
+            "sig-16",
+            [
+              11
+            ]
+          ],
+          [
+            "sig-22",
+            [
+              12
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "inconclusive",
+        "fact_verdict": "inconclusive",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 36,
+          "equal": 0,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 36,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-20",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-11",
+            [
+              1
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              2,
+              3,
+              4
+            ]
+          ],
+          [
+            "sig-5",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              7
+            ]
+          ],
+          [
+            "sig-15",
+            [
+              8
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              9
+            ]
+          ],
+          [
+            "sig-7",
+            [
+              10
+            ]
+          ],
+          [
+            "sig-16",
+            [
+              11
+            ]
+          ],
+          [
+            "sig-22",
+            [
+              12
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "inconclusive",
+        "fact_verdict": "inconclusive",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 36,
+          "equal": 0,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 36,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-20",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-11",
+            [
+              1
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              3,
+              4
+            ]
+          ],
+          [
+            "sig-5",
+            [
+              6
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              7
+            ]
+          ],
+          [
+            "sig-15",
+            [
+              8
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              9
+            ]
+          ],
+          [
+            "sig-7",
+            [
+              10
+            ]
+          ],
+          [
+            "sig-16",
+            [
+              11
+            ]
+          ],
+          [
+            "sig-22",
+            [
+              12
+            ]
+          ]
+        ]
+      }
+    },
+    "stdlib": {
+      "equiv": "inconclusive",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 18,
+        "equal": 8,
+        "representation_only": 0,
+        "review": 0,
+        "unverified": 10,
+        "failed": 0,
+        "accepted": 0
+      },
+      "change_missing": [],
+      "mut-preserve": {
+        "verdict": "inconclusive",
+        "fact_verdict": "inconclusive",
+        "mutated_edit": 5,
+        "edited": {
+          "sites": 13,
+          "equal": 0,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 13,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-4",
+            [
+              5
+            ]
+          ],
+          [
+            "beh-2",
+            [
+              7,
+              8
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              9
+            ]
+          ],
+          [
+            "sig-8",
+            [
+              11
+            ]
+          ],
+          [
+            "sig-10",
+            [
+              12
+            ]
+          ],
+          [
+            "sig-11",
+            [
+              13
+            ]
+          ],
+          [
+            "sig-9",
+            [
+              14
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "inconclusive",
+        "fact_verdict": "inconclusive",
+        "mutated_edit": 5,
+        "edited": {
+          "sites": 13,
+          "equal": 0,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 13,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              0
+            ]
+          ],
+          [
+            "sig-4",
+            [
+              5
+            ]
+          ],
+          [
+            "beh-2",
+            [
+              7,
+              8
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              9
+            ]
+          ],
+          [
+            "sig-8",
+            [
+              11
+            ]
+          ],
+          [
+            "sig-10",
+            [
+              12
+            ]
+          ],
+          [
+            "sig-11",
+            [
+              13
+            ]
+          ],
+          [
+            "sig-9",
+            [
+              14
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "inconclusive",
+        "fact_verdict": "inconclusive",
+        "mutated_edit": 5,
+        "edited": {
+          "sites": 13,
+          "equal": 0,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 13,
+          "failed": 0,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              0
+            ]
+          ],
+          [
+            "beh-2",
+            [
+              7,
+              8
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              9
+            ]
+          ],
+          [
+            "sig-8",
+            [
+              11
+            ]
+          ],
+          [
+            "sig-10",
+            [
+              12
+            ]
+          ],
+          [
+            "sig-11",
+            [
+              13
+            ]
+          ],
+          [
+            "sig-9",
+            [
+              14
+            ]
+          ]
+        ]
+      }
+    },
+    "urllib3": {
+      "equiv": "fail",
+      "change": "fail",
+      "equiv_edited": {
+        "sites": 8,
+        "equal": 2,
+        "representation_only": 1,
+        "review": 0,
+        "unverified": 4,
+        "failed": 1,
+        "accepted": 0
+      },
+      "change_missing": [
+        "urllib3.response.HTTPResponse.stream"
+      ],
+      "mut-preserve": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 6,
+          "equal": 1,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 4,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              1
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              2,
+              3
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              4
+            ]
+          ]
+        ]
+      },
+      "mut-intended": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 6,
+          "equal": 1,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 4,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              1
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              2,
+              3
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              4
+            ]
+          ]
+        ]
+      },
+      "mut-beside": {
+        "verdict": "fail",
+        "fact_verdict": "fail",
+        "mutated_edit": 2,
+        "edited": {
+          "sites": 6,
+          "equal": 1,
+          "representation_only": 0,
+          "review": 0,
+          "unverified": 4,
+          "failed": 1,
+          "accepted": 0
+        },
+        "records": [
+          [
+            "sig-1",
+            [
+              1
+            ]
+          ],
+          [
+            "sig-3",
+            [
+              3
+            ]
+          ],
+          [
+            "sig-2",
+            [
+              4
+            ]
+          ]
+        ]
+      }
+    }
+  }
+}

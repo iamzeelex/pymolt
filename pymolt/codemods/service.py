@@ -1,14 +1,17 @@
 """
 pymolt/codemods/service.py
 
-UI-agnostic codemod orchestration: turn an upgrade set
-into codemod patterns/rules (via the Axiom Graph service) and apply them
-locally.
+UI-agnostic codemod orchestration: turn an upgrade set into codemod
+patterns/rules, preview them locally, and build the migration plan from the
+previews (``pymolt apply`` writes the plan; nothing here writes source).
 
-Migration policy (per package): if the server returned Tier-2 rules, apply
+The provider is ``pymolt.delta.provider.LocalDeltaProvider``: it computes the API
+changes from the old and new environments on this machine.
+
+Migration policy (per package): if the provider returned Tier-2 rules, apply
 RULES ONLY for that package (its Tier-1 patterns are re-expressed as kind-
-tagged rules server-side — applying both would double-apply). If it returned no
-rules (old server), the Tier-1 patterns path runs unchanged.
+tagged rules — applying both would double-apply). If it returned no rules,
+the Tier-1 patterns path runs unchanged.
 
 No printing / prompting here — callers own their I/O.
 """
@@ -16,6 +19,7 @@ No printing / prompting here — callers own their I/O.
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -26,19 +30,16 @@ from pymolt.assess.service import (
     resolve_chosen_source,
 )
 from pymolt.codemods.apply import (
-    apply_mixed_to_repo,
-    apply_rules_to_repo,
-    apply_to_repo,
     preview_mixed_repo,
     preview_repo,
     preview_rules_repo,
 )
-from pymolt.codemods.client import AxiomGraphClient, DependencyMigration
 from pymolt.codemods.models import (
     ApiImpact,
     CodemodBundle,
     CodemodPattern,
     CodemodRunResult,
+    DependencyMigration,
     FileChange,
     FilePreview,
     ProgressSink,
@@ -71,9 +72,43 @@ def migrations_from_rows(rows: list[dict]) -> list[DependencyMigration]:
     return migrations
 
 
-def migrations_from_assess_result(result: AssessResult) -> list[DependencyMigration]:
-    """Convert an AssessResult's comparison rows into codemod migrations."""
-    return migrations_from_rows(list(result.rows))
+_WITNESSABLE = ("upgrade", "unchanged", "added")
+
+
+def witness_rows(
+    rows: list[dict], witnessed: dict[str, str] | None,
+) -> tuple[list[dict], list[str]]:
+    """Comparison rows with the baseline side set to what the baseline capture ran.
+
+    A baseline manifest that does not pin a package is resolved today, to its newest
+    release: the plan would then compute API changes from a version the app never ran
+    (pandas 3.x instead of the 1.5 the baseline captured). The capture's record is
+    witnessed, so it wins, and each correction is reported. Returns ``(rows, notes)``;
+    rows without a record pass through unchanged.
+    """
+    if not witnessed:
+        return rows, []
+    from packaging.utils import canonicalize_name
+
+    out: list[dict] = []
+    notes: list[str] = []
+    for row in rows:
+        name = row.get("name")
+        ran = witnessed.get(canonicalize_name(name)) if isinstance(name, str) else None
+        target = row.get("target_version")
+        if (ran is None or row.get("status") not in _WITNESSABLE
+                or target in (None, "unpinned") or ran == row.get("baseline_version")):
+            out.append(row)
+            continue
+        resolved = row.get("baseline_version")
+        status = "upgrade" if ran != target else "unchanged"
+        out.append({**row, "baseline_version": ran, "status": status})
+        if "upgrade" not in (status, row.get("status")):
+            continue                        # the correction changes no migration
+        notes.append(f"{name}: the baseline capture ran {ran}"
+                     + (f" (the baseline manifest resolves to {resolved} today)"
+                        if resolved not in (None, "unpinned") else ""))
+    return out, notes
 
 
 def _config_value(config: dict | EnvConfig | None, key: str, default=None):
@@ -84,7 +119,9 @@ def _config_value(config: dict | EnvConfig | None, key: str, default=None):
     return getattr(config, key, default)
 
 
-def _match_source(sources: list[DiscoveredSource], source_ref: str | Path) -> DiscoveredSource | None:
+def _match_source(
+    sources: list[DiscoveredSource], source_ref: str | Path
+) -> DiscoveredSource | None:
     ref = Path(source_ref).expanduser()
     ref_name = ref.name
     for src in sources:
@@ -183,6 +220,24 @@ def _resolve_graph_for_source(
     raise ValueError(f"Could not resolve dependency source {source_path} in {project_dir}")
 
 
+def _resolver_failure(side: str, manifest: str | Path, exc: subprocess.CalledProcessError):
+    """A resolver (uv) failure while planning, as a :class:`PlanInputError`.
+
+    The summary is the resolver's own first error line, not a Python traceback; the
+    hint names the culprits and the way out.
+    """
+    from pymolt.assess.service import describe_resolver_failure
+
+    found = describe_resolver_failure(exc)
+    name = Path(manifest).name
+    culprits = f"Culprit(s): {', '.join(found.culprits)}. " if found.culprits else ""
+    return PlanInputError(
+        f"the {side} manifest {name} does not resolve: {found}",
+        f"{culprits}Fix or loosen them, then run `pymolt assess .` and plan again. "
+        "No source files were changed.",
+    )
+
+
 def migrations_from_dependency_file(
     project_dir: str | Path,
     target_dependency_file: str | Path,
@@ -210,7 +265,9 @@ def migrations_from_dependency_file(
             # CWD — especially then: that is the case that silently succeeds
             # with another repo's manifest instead of failing loudly.
             target_dependency_file = candidate
-    cfg = config if config is not None else EnvConfig.load(project_path / ".pymolt" / "env_config.json")
+    cfg = config if config is not None else EnvConfig.load(
+        project_path / ".pymolt" / "env_config.json"
+    )
 
     baseline_manifest = _config_value(cfg, "selected_manifest")
     baseline_tool = _config_value(cfg, "selected_tool", "uv")
@@ -219,35 +276,57 @@ def migrations_from_dependency_file(
     base_python = _config_value(cfg, "base_python")
     container_id = _config_value(cfg, "container_id")
 
-    baseline_graph, _, baseline_warning = _resolve_graph_for_source(
-        project_path,
-        baseline_manifest or project_path,
-        base_python=base_python,
-        container_id=container_id,
-        tool=baseline_tool,
-        use_cache=use_cache,
-    )
+    try:
+        baseline_graph, _, baseline_warning = _resolve_graph_for_source(
+            project_path,
+            baseline_manifest or project_path,
+            base_python=base_python,
+            container_id=container_id,
+            tool=baseline_tool,
+            use_cache=use_cache,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise _resolver_failure("baseline", baseline_manifest or project_path, exc) from exc
     # The target side is resolved fresh under the TARGET Python and must never
     # go through the legacy container (see the invariant in CLAUDE.md). Passing
     # the baseline container here made the lookup search for a 3.13 interpreter
     # inside a 3.6 image, find nothing, and report the live container as "not
     # running" — degrading a resolve that was never supposed to use it.
-    target_graph, _, target_warning = _resolve_graph_for_source(
-        target_dependency_file,
-        target_dependency_file,
-        base_python=_config_value(cfg, "target_python") or base_python,
-        container_id=None,
-        tool="uv" if baseline_tool == "container" else baseline_tool,
-        use_cache=use_cache,
-    )
+    try:
+        target_graph, _, target_warning = _resolve_graph_for_source(
+            target_dependency_file,
+            target_dependency_file,
+            base_python=_config_value(cfg, "target_python") or base_python,
+            container_id=None,
+            tool="uv" if baseline_tool == "container" else baseline_tool,
+            use_cache=use_cache,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise _resolver_failure("target", target_dependency_file, exc) from exc
 
     if warnings is not None:
         for w in (baseline_warning, target_warning):
             if w:
                 warnings.append(w)
 
-    rows = build_comparison_rows(baseline_graph, target_graph, target_python="target", target_error=None)
+    rows = build_comparison_rows(
+        baseline_graph, target_graph, target_python="target", target_error=None
+    )
+    rows, notes = witness_rows(rows, witnessed_baseline(project_path))
+    if warnings is not None:
+        warnings.extend(notes)
     return migrations_from_rows(rows)
+
+
+def witnessed_baseline(project_dir: str | Path) -> dict[str, str] | None:
+    """The versions the baseline capture ran, if it recorded them (see ``witness_rows``)."""
+    from pymolt.verify.service import witnessed_distributions
+
+    try:
+        return witnessed_distributions(project_dir, "baseline")
+    except Exception as exc:  # a broken state file must not break planning
+        log.warning("could not read the baseline capture's versions: %s", exc)
+        return None
 
 
 def resolve_codemod_migrations(
@@ -265,8 +344,10 @@ def resolve_codemod_migrations(
     (e.g. a configured container that is no longer running) is appended to it.
     """
     if assess_result is not None and assess_result.rows:
-        migrations = migrations_from_assess_result(assess_result)
-        return migrations, f"cached assess result ({len(assess_result.rows)} row(s))"
+        rows, notes = witness_rows(list(assess_result.rows), witnessed_baseline(project_dir))
+        if warnings is not None:
+            warnings.extend(notes)
+        return migrations_from_rows(rows), f"cached assess result ({len(rows)} row(s))"
 
     if target_dependency_file:
         migrations = migrations_from_dependency_file(
@@ -282,6 +363,16 @@ def resolve_codemod_migrations(
         "No cached assess result is available; provide a target dependency file "
         "(for example requirements-target.txt or environment-target.yml)."
     )
+
+
+def codemod_provider(project_dir: str | Path, *, online: bool = False):
+    """The codemod source for a project: the local delta engine.
+
+    ``online`` lets it fetch intermediate releases (package names and versions only).
+    """
+    from pymolt.delta.provider import LocalDeltaProvider
+
+    return LocalDeltaProvider(project_dir, online=online)
 
 
 def _split_bundles(
@@ -347,62 +438,19 @@ def _merge_run_results(a: CodemodRunResult, b: CodemodRunResult) -> CodemodRunRe
     )
 
 
-def run_codemods(
-    root: str | Path,
-    migrations: list[DependencyMigration],
-    *,
-    base_url: str,
-    write: bool = False,
-    client: AxiomGraphClient | None = None,
-    progress: Callable[[str], None] | None = None,
-) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], CodemodRunResult]:
-    """
-    Fetch patterns/rules for `migrations` from Axiom Graph and apply them under
-    `root` (per package: rules if the server returned any, else patterns).
-
-    Returns (by_package, run_result). Dry-run unless write=True. Auto-apply
-    only writes confidence=="verified" rules (see `apply.apply_rules_to_repo`);
-    `run_result.downgraded` carries the rules the client downgraded on fetch.
-    Raises AxiomGraphError if the service is unreachable (caller decides UX).
-
-    `progress`, if given, is called with human-readable status lines as each
-    phase (fetch → local verify → apply) starts, so an interface can show that work
-    is happening instead of appearing to hang on a long server-side analysis.
-    """
-    client = client or AxiomGraphClient(base_url)
-    bundles = client.fetch_bundle(migrations, progress=progress)
-    by_pkg, rules_flat, patterns_flat, downgraded = _split_bundles(bundles)
-
-    if progress:
-        n = len(rules_flat) + len(patterns_flat)
-        progress(f"Applying {n} codemod(s) under {root} via LibCST…")
-
-    if not rules_flat:
-        # No package returned rules (old server, or nothing to migrate) — the
-        # Tier-1 path runs byte-identical to today.
-        result = apply_to_repo(root, patterns_flat, write=write)
-    elif patterns_flat:
-        result = apply_mixed_to_repo(
-            root, rules_flat, patterns_flat, write=write
-        )
-    else:
-        rules_result = apply_rules_to_repo(root, rules_flat, write=write)
-        result = rules_result
-    result.downgraded = downgraded
-    return by_pkg, result
-
-
 def preview_codemods(
     root: str | Path,
     migrations: list[DependencyMigration],
     *,
-    base_url: str,
-    client: AxiomGraphClient | None = None,
+    client=None,
     progress: Callable[[str], None] | None = None,
     on_recipes: Callable[[dict[str, list[CodemodPattern] | list[CodemodRule]]], None] | None = None,
     on_impacts: Callable[[dict[str, list[ApiImpact]]], None] | None = None,
     on_file: ProgressSink = None,
     auto_apply_only: bool = False,
+    online: bool = False,
+    on_downgraded: Callable[[list[str]], None] | None = None,
+    on_step=None,
 ) -> tuple[dict[str, list[CodemodPattern] | list[CodemodRule]], list[FilePreview]]:
     """
     Fetch patterns/rules for `migrations` and compute per-file before/after
@@ -410,30 +458,30 @@ def preview_codemods(
     cards; the engineer accepts each one before it lands on disk.
 
     Signature intentionally unchanged: still a 2-tuple, with no separate
-    "downgraded" list. A rule the client downgraded already carries
+    "downgraded" list. A rule the provider downgraded already carries
     confidence=="heuristic" on the returned `FilePreview.rules`, which is what
     the review card renders — so the downgrade is
-    visible without widening this return type. `run_codemods` has room to
-    carry the fuller `CodemodRunResult.downgraded` list because it returns a
-    model, not a bare tuple; `preview_codemods` does not, and callers (interfaces,
-    tests) already destructure exactly two values.
+    visible without widening this return type (``on_downgraded`` hands over the
+    fuller list); callers (interfaces, tests) destructure exactly two values.
 
     `progress` reports phase transitions (fetch → preview), `on_recipes` hands
     over the fetched recipe set the moment it is known (before the walk starts,
     so an interface can show what is about to be applied), and `on_file`
     reports every file the walk scans. ``on_impacts`` exposes the structured
-    Axiom delta paths for persistence in the local migration plan. All four are
-    pure observers — none of
-    them changes what is returned.
-
-    Raises AxiomGraphError if the service is unreachable (caller decides UX).
+    API-change paths for persistence in the local migration plan, and
+    ``on_downgraded`` the summaries of the rules the provider downgraded (the plan
+    lists them for a person). ``on_step(recipe, path, before, after)`` sees each
+    recipe's change to each kept file, in application order (the plan's steps).
+    All six are pure observers — none of them changes what is returned.
     """
-    client = client or AxiomGraphClient(base_url)
+    client = client or codemod_provider(root, online=online)
     bundles = client.fetch_bundle(migrations, progress=progress)
-    by_pkg, rules_flat, patterns_flat, _downgraded = _split_bundles(bundles)
+    by_pkg, rules_flat, patterns_flat, downgraded = _split_bundles(bundles)
 
     if on_recipes:
         on_recipes(by_pkg)
+    if on_downgraded:
+        on_downgraded(list(downgraded))
     if on_impacts:
         on_impacts({name: bundle.impacts for name, bundle in bundles.items()})
     if progress:
@@ -441,13 +489,145 @@ def preview_codemods(
         progress(f"Previewing {n} codemod(s) under {root} via LibCST…")
 
     if not rules_flat:
-        return by_pkg, preview_repo(root, patterns_flat, on_file=on_file)
+        return by_pkg, preview_repo(root, patterns_flat, on_file=on_file, on_step=on_step)
 
     if patterns_flat:
         return by_pkg, preview_mixed_repo(
             root, rules_flat, patterns_flat, on_file=on_file,
-            verified_only=auto_apply_only,
+            verified_only=auto_apply_only, on_step=on_step,
         )
     return by_pkg, preview_rules_repo(
-        root, rules_flat, on_file=on_file, verified_only=auto_apply_only
+        root, rules_flat, on_file=on_file, verified_only=auto_apply_only, on_step=on_step
     )
+
+
+# ── the migration plan ───────────────────────────────────────────────────────
+# `pymolt plan` (CLI and MCP) and `pymolt succession --plan` build the one plan
+# that `pymolt apply` writes. Every source change goes through it.
+
+_TARGET_MANIFESTS = ("requirements-target.txt", "environment-target.yml")
+
+
+class PlanInputError(ValueError):
+    """A plan cannot be built from what is on disk. ``hint`` says what to run."""
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
+def plan_inputs(project_dir: str | Path, target_file: str | Path | None = None):
+    """The saved setup and the target manifest a plan is bound to.
+
+    Returns ``(config, target_path)``; raises :class:`PlanInputError` when setup
+    or assess has not run.
+    """
+    root = Path(project_dir)
+    config = EnvConfig.load(root / ".pymolt" / "env_config.json")
+    if config is None:
+        raise PlanInputError(
+            "pymolt is not configured for this project",
+            "Run `pymolt setup .` and `pymolt assess .` first.",
+        )
+    if not target_file:
+        target_file = next(
+            (name for name in _TARGET_MANIFESTS if (root / name).is_file()), None
+        )
+    if not target_file:
+        raise PlanInputError(
+            "no pinned target manifest is available",
+            "Run `pymolt assess .` before creating a plan.",
+        )
+    target_path = Path(target_file)
+    if not target_path.is_absolute():
+        target_path = root / target_path
+    if not target_path.is_file():
+        raise PlanInputError(f"target manifest does not exist: {target_path}", "")
+    return config, target_path
+
+
+def build_migration_plan(
+    project_dir: str | Path,
+    *,
+    target_file: str | Path | None = None,
+    progress: Callable[[str], None] | None = None,
+    online: bool = False,
+):
+    """Preview the verified codemods for the target manifest and freeze them as a plan.
+
+    Returns ``(plan, previews, source_desc, by_pkg)``. Nothing is saved or written:
+    callers save the plan, and only `pymolt apply` changes source files. The API
+    changes are computed locally; `online` lets the engine fetch intermediate releases
+    (names and versions only). Raises :class:`PlanInputError`.
+    """
+    from pymolt.migration_plan import create_migration_plan
+    from pymolt.workorder.builder import StepRecorder
+
+    root = Path(project_dir)
+    # Each recipe's change to each file, in application order: the plan's automated steps.
+    recorder = StepRecorder()
+    config, target_path = plan_inputs(root, target_file)
+    # The state the plan is bound to and replaces: a damaged or newer file refuses the plan
+    # now (``StateFileError``), not after the engine ran.
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.verify.service import load_contract_state
+
+    load_contract_state(root)
+    MigrationPlan.load(root)
+    notes: list[str] = []
+    migrations, source_desc = resolve_codemod_migrations(
+        root, target_dependency_file=target_path, config=config.model_dump(mode="json"),
+        warnings=notes,
+    )
+    if notes:
+        # Where the from-versions came from (the baseline capture's record over today's
+        # resolve of an unpinned manifest) and any degraded resolve, stated, not implied.
+        source_desc = f"{source_desc}; " + "; ".join(notes)
+    scanned: set[str] = set()
+    impacts: dict[str, list[ApiImpact]] = {}
+    by_pkg: dict[str, list[CodemodPattern] | list[CodemodRule]] = {}
+    previews: list[FilePreview] = []
+    downgraded: list[str] = []
+    provider = codemod_provider(root, online=online)
+    if migrations:
+        by_pkg, previews = preview_codemods(
+            root, migrations, client=provider, progress=progress,
+            on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
+            auto_apply_only=True, on_downgraded=downgraded.extend, on_step=recorder.record,
+        )
+        recorder.note_packages(by_pkg)
+    # The provider's delta reports feed the plan's risk prediction as-is, so the facts are
+    # computed once.
+    delta_reports = getattr(provider, "reports", None) or None
+    python_move = None
+    if config.base_python and config.target_python:
+        from pymolt.pyversion.plan import same_python_minor
+
+        if not same_python_minor(config.base_python, config.target_python):
+            python_move = (config.base_python, config.target_python)
+    python_stage = None
+    if python_move is not None:
+        # The python fixes join the dependency rewrites in one preview, so the plan's file
+        # changes (and the diffs the interfaces render) hold both.
+        from pymolt.pyversion.plan import plan_python_stage
+
+        try:
+            python_stage = plan_python_stage(root, *python_move, previews=previews,
+                                             on_step=recorder.record)
+            previews = python_stage.previews
+        except Exception:  # noqa: BLE001 - create_migration_plan reports a failed python part
+            python_stage = None
+    plan = create_migration_plan(
+        root, previews, migrations,
+        target_python=config.target_python or "unknown",
+        source_manifest=config.selected_manifest or "unknown",
+        target_manifest_path=target_path,
+        files_scanned=len(scanned),
+        impacts=impacts,
+        delta_reports=delta_reports,
+        python_move=python_move,
+        python_stage=python_stage,
+        downgraded=downgraded,
+        recorder=recorder,
+    )
+    return plan, previews, source_desc, by_pkg

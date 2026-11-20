@@ -93,11 +93,6 @@ def get_available_python_versions() -> list[str]:
     return ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
 
 
-def bundled_eol_map() -> dict[str, str]:
-    """The offline-bundled Python EOL table (no network) — for scan/recon."""
-    return dict(_EOL_FALLBACK)
-
-
 def classify_eol(version: str, eol_map: dict[str, str]) -> tuple[str | None, str]:
     """Return ``(eol_date, status)`` where status is supported|soon|eol|unknown."""
     match = re.match(r"^(\d+\.\d+)", version)

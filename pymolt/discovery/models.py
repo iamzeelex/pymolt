@@ -58,22 +58,6 @@ class ProjectRoot(BaseModel):
     version_evidence: list[VersionEvidence] = Field(default_factory=list)
     is_workspace_member: bool = False
 
-    def distinct_versions(self) -> list[str]:
-        """Distinct concrete (major.minor) versions across the intended-runtime evidence.
-
-        Only authoritative single-runtime sources (Dockerfile/.python-version/
-        requires-python/Pipfile) live in ``version_evidence``; the tox/nox test
-        matrix is intentionally excluded (see :meth:`tested_versions`), so this
-        reflects genuine disagreement about the runtime, not a wide CI matrix.
-        """
-        seen = []
-        for ev in self.version_evidence:
-            if ev.version:
-                mm = ".".join(ev.version.split(".")[:2])
-                if mm not in seen:
-                    seen.append(mm)
-        return seen
-
     def runtime_versions(self) -> list[str]:
         """Distinct concrete (major.minor) versions among intended-runtime sources."""
         seen: list[str] = []
@@ -109,21 +93,6 @@ class ProjectRoot(BaseModel):
                 if rmm and fmm and rmm < fmm:
                     out.append((rv, constraint))
         return out
-
-    def tested_versions(self) -> list[str]:
-        """The CPython support window from tox/nox, as sorted distinct major.minor."""
-        seen: set[str] = set()
-        for tn in self.tox_nox:
-            for v in tn.declared_versions:
-                seen.add(".".join(v.split(".")[:2]))
-
-        def _key(v: str) -> list[int]:
-            try:
-                return [int(p) for p in v.split(".")]
-            except ValueError:
-                return [0]
-
-        return sorted(seen, key=_key)
 
 
 class SurfaceMap(BaseModel):

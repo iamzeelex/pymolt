@@ -1,0 +1,43 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "kind": "stdlib_behavior",
+  "version": "2026-11-16",
+  "about": "Behaviour changes between Python minors that keep every name in place, so the presence sweep (stdlib_changes / stdlib_lifetimes) cannot see them. Each entry names the release that changed it, the effect class (dict-order: a dict's insertion order; hash-order: set/frozenset iteration order of str keys), the static detector that finds affected project code (null: none), and how to make the code independent of it. Each source says what pymolt verified and how.",
+  "entries": [
+    {
+      "id": "typing-typeddict-annotations-order",
+      "symbols": ["typing.TypedDict", "typing.get_type_hints"],
+      "changed_in": "3.9",
+      "effect": "dict-order",
+      "detector": "typeddict-inherited-annotations-iteration",
+      "detail": "The __annotations__ (and typing.get_type_hints) of a TypedDict class with a TypedDict base list the base fields first on Python 3.9+; Python 3.8 lists the class's own fields first. A dict, row or message built by iterating them changes key order; the key set does not change.",
+      "old": "own fields first, then each base's fields in base order (each base ordered the same way)",
+      "new": "each base's fields first in base order (each base ordered the same way), then own fields",
+      "hint": "Iterate an explicit field tuple (or sort the keys) wherever the order reaches bytes or text: serialized messages, CSV columns, rendered output.",
+      "notes": [
+        "A field a class re-declares keeps its first position on both sides: 3.8 puts it among the own fields, 3.9+ where the base declared it.",
+        "A TypedDict with no TypedDict base, or one that declares no fields of its own over a single base, keeps its order.",
+        "typing_extensions.TypedDict already uses the 3.9 order on Python 3.8 from typing_extensions 3.7.4.2 on (3.7.4 and 3.7.4.1 re-export typing's), so a class built on it does not change order.",
+        "Membership tests, len() and sorted() are unaffected; only iteration order is."
+      ],
+      "source": "pymolt, verified 2026-11-16: a TypedDict hierarchy (three levels, two bases, a diamond, a re-declared field, a functional-syntax base, a class with no own fields) printed list(X.__annotations__) and list(typing.get_type_hints(X)) on CPython 3.8.20, 3.9.23, 3.10.18, 3.11.13, 3.12.11, 3.13.13 and 3.14.0 (uv-managed interpreters): 3.8 lists own fields then the bases' (recursively), 3.9-3.14 the bases' then own, get_type_hints in the same order as __annotations__. Mechanism read in Lib/typing.py _TypedDictMeta.__new__: 3.8.20 builds the own annotations, then anns.update() from each base (line 1751); 3.9.23 updates from each base first, then annotations.update(own_annotations) (lines 1963-1967). typing_extensions.TypedDict checked on 3.8.20 with versions 3.7.4, 3.7.4.1 (typing's, own first) and 3.7.4.2, 3.7.4.3, 3.10.0.0, 4.0.0, 4.13.2 (bases first). Seen in practice: locust builds its stats messages from StatsEntryDict.__annotations__.keys(), so their msgpack bytes reorder between 3.8 and 3.12.",
+      "date": "2026-11-16"
+    },
+    {
+      "id": "str-hash-siphash13",
+      "symbols": ["builtins.hash", "builtins.set", "builtins.frozenset", "sys.hash_info"],
+      "changed_in": "3.11",
+      "effect": "hash-order",
+      "detector": null,
+      "detail": "The str/bytes hash algorithm (sys.hash_info.algorithm) is siphash24 up to Python 3.10 and siphash13 from 3.11, so hash values differ even under the same PYTHONHASHSEED: the iteration order of a set or frozenset of str never carries across 3.10 -> 3.11, and within one minor it varies per process unless PYTHONHASHSEED is fixed.",
+      "old": "siphash24",
+      "new": "siphash13",
+      "hint": "Never let a set's iteration order reach bytes or text: sort it, or keep a list. Pinning PYTHONHASHSEED makes runs of one minor repeatable but does not carry the order across 3.10 -> 3.11.",
+      "notes": [
+        "A hash-ordered difference between a 3.10 baseline and a 3.11+ capture is expected noise, not a behaviour change of the project."
+      ],
+      "source": "pymolt, verified 2026-11-16: sys.hash_info.algorithm printed siphash24 on CPython 3.8.20, 3.9.23 and 3.10.18 and siphash13 on 3.11.13, 3.12.11, 3.13.13 and 3.14.0 (uv-managed interpreters); under PYTHONHASHSEED=0, hash('pymolt') and the iteration order of one set of eight str keys were identical across 3.8-3.10 and across 3.11-3.14 but differed between 3.10 and 3.11; on 3.12.11, seeds 0 and 1 gave different orders.",
+      "date": "2026-11-16"
+    }
+  ]
+}

@@ -17,7 +17,7 @@ from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.interfaces.cli.commands import app
 from pymolt.migration_plan import create_migration_plan
 from pymolt.migration_state import MigrationReceipt
-from pymolt.status import build_status
+from pymolt.status import build_status, detect_workload_command
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode, VerificationVerdict
 from pymolt.verify.report import ContractReport
@@ -30,10 +30,10 @@ def _manifest(project, contents="flask==2.0.3\n"):
     (project / "requirements.txt").write_text(contents, encoding="utf-8")
 
 
-def _configure(project, *, target="3.12"):
+def _configure(project, *, target="3.12", base="3.11"):
     EnvConfig(
         selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
-        base_python="3.11", target_python=target,
+        base_python=base, target_python=target,
     ).save(project / ".pymolt" / "env_config.json")
 
 
@@ -110,7 +110,7 @@ class TestProgression:
         status = build_status(tmp_path)
         assert _state(status, "assess") == "done"
         assert _state(status, "baseline") == "todo"
-        assert "capture --when baseline" in status.next_command
+        assert "capture baseline" in status.next_command
         assert "cannot be done later" in status.next_reason
 
     def test_baseline_captured_points_at_plan(self, tmp_path):
@@ -145,7 +145,7 @@ class TestProgression:
         status = build_status(tmp_path)
 
         assert _state(status, "migration") == "done"
-        assert "capture --when post-migration" in status.next_command
+        assert "capture post-migration" in status.next_command
 
     def test_both_captured_points_at_the_report(self, tmp_path):
         _manifest(tmp_path)
@@ -176,9 +176,38 @@ class TestProgression:
 
         assert _state(status, "report") == "done"
         assert status.next_command is None
-        assert "complete" in status.next_reason.lower()
+        assert "PASS" in status.next_reason
 
-    def test_post_capture_without_receipt_is_stale(self, tmp_path):
+    def test_a_verdict_on_another_post_migration_recording_is_not_the_migrations(self,
+                                                                                 tmp_path):
+        """`verify --post-migration OTHER` saves its verdict, naming what it compared; status
+        counts only a verdict whose post-migration side is the post-migration capture."""
+        from pymolt.verify.report import ComparedRecordings
+
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(tmp_path, "baseline")
+        receipt = _receipt(tmp_path, baseline)
+        post = _capture(tmp_path, "post_migration")
+
+        def save(after: str, after_capture: str | None) -> None:
+            build_unified_verification(
+                ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS,
+                               compared=ComparedRecordings(
+                                   after=after, after_capture=after_capture,
+                                   before=baseline.trace_path, before_capture="baseline")),
+                run_id=receipt.run_id,
+            ).save(tmp_path)
+
+        save(str(tmp_path / "elsewhere.jsonl"), None)
+        assert _state(build_status(tmp_path), "report") == "todo"
+        save(post.trace_path, "post-migration")
+        assert _state(build_status(tmp_path), "report") == "done"
+
+    def test_post_capture_without_receipt_is_a_migration_by_hand(self, tmp_path):
+        """plan and apply are optional: a post-migration capture since the baseline, with no
+        apply run, records a migration made by hand."""
         _manifest(tmp_path)
         _configure(tmp_path)
         (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
@@ -187,9 +216,10 @@ class TestProgression:
 
         status = build_status(tmp_path)
 
-        assert _state(status, "migration") == "todo"
-        assert _state(status, "post-migration") == "stale"
-        assert status.next_command == "pymolt plan ."
+        assert _state(status, "migration") == "done"
+        assert "made by hand" in status.phase("migration").detail
+        assert _state(status, "post-migration") == "done"
+        assert status.next_command == "pymolt verify ."
 
 
 class TestWorseThanNotDone:
@@ -220,13 +250,220 @@ class TestWorseThanNotDone:
         _configure(tmp_path)
         (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
         _capture(tmp_path, "baseline")
-        _manifest(tmp_path, "flask==3.0.0\n")   # the world moved
+        _configure(tmp_path, base="3.10")   # the setup moved: another base Python
 
         status = build_status(tmp_path)
 
         assert _state(status, "baseline") == "stale"
-        assert "capture --when baseline" in status.next_command
-        assert "no longer describes" in status.next_reason
+        assert "capture baseline" in status.next_command
+        assert "does not match" in status.next_reason
+
+    def test_a_capture_taken_before_setup_is_stale(self, tmp_path):
+        """It records no environment, so `apply` rejects it — status must not call it done."""
+        _manifest(tmp_path)
+        _capture(tmp_path, "baseline")          # no config yet: no fingerprint
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        assert baseline.state == "stale"
+        assert "before setup" in baseline.detail
+        assert "capture baseline" in status.next_command
+
+
+class TestManualMigration:
+    """No `pymolt apply` (a migration done by hand or by an agent): bumping pins in the
+    same manifest is the migration, so the baseline stays its starting point."""
+
+    def test_only_manifest_contents_moved_keeps_the_baseline_done(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        _capture(tmp_path, "baseline")
+        _manifest(tmp_path, "flask==3.0.0\n")   # pins bumped in the same file
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        assert baseline.state == "done"
+        assert "taken as the migration's starting point" in baseline.detail
+        assert "capture baseline" not in status.next_command
+
+
+    def _hand_project(self, project):
+        _manifest(project)
+        _configure(project)
+        (project / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        (project / "app.py").write_text("import json\n", encoding="utf-8")
+        return _capture(project, "baseline")
+
+    def test_code_edited_since_the_baseline_points_at_the_post_migration_capture(self,
+                                                                                tmp_path):
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "done"
+        assert "1 file(s) changed since the baseline" in status.phase("migration").detail
+        assert "optional" in status.phase("plan").detail
+        assert status.next_command.startswith("pymolt capture post-migration")
+
+    def test_pins_bumped_with_no_code_change_are_a_migration_too(self, tmp_path):
+        self._hand_project(tmp_path)
+        _manifest(tmp_path, "flask==3.0.0\n")
+
+        status = build_status(tmp_path)
+
+        assert "pins changed since the baseline" in status.phase("migration").detail
+        assert status.next_command.startswith("pymolt capture post-migration")
+
+    def test_nothing_changed_since_the_baseline_still_points_at_plan(self, tmp_path):
+        self._hand_project(tmp_path)
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "todo"
+        assert status.next_command == "pymolt plan ."
+
+    def test_a_valid_saved_plan_still_points_at_apply(self, tmp_path):
+        self._hand_project(tmp_path)
+        _plan(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # unrelated edit\n", encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "migration") == "todo"
+        assert status.next_command == "pymolt apply ."
+
+    def test_a_verdict_completes_a_migration_by_hand(self, tmp_path):
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+        _capture(tmp_path, "post_migration")
+
+        def verdict(value):
+            build_unified_verification(
+                ContractReport(root=str(tmp_path), verdict=value), run_id=None,
+            ).save(tmp_path)
+            return build_status(tmp_path)
+
+        passed = verdict(VerificationVerdict.PASS)
+        assert _state(passed, "report") == "done"
+        assert passed.next_command is None and "PASS" in passed.next_reason
+        failed = verdict(VerificationVerdict.FAIL)
+        assert failed.next_command is None             # no apply run to roll back
+        assert "nothing to roll back" in failed.next_reason
+
+    def test_an_inconclusive_verdict_says_who_settles_it(self, tmp_path):
+        """Decision 7: the next reason, the report phase and the agent view say whether the
+        INCONCLUSIVE verdict needs a person or evidence, and what settles it."""
+        from pymolt.interfaces import views
+        from pymolt.verify.inconclusive import NEEDS_EVIDENCE, NEEDS_REVIEW, cause
+
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+        _capture(tmp_path, "post_migration")
+        blind = cause("2 static dependency symbol(s) were not exercised", NEEDS_EVIDENCE,
+                      "not-exercised", "add a test that reaches those sites, then capture "
+                      "post-migration again")
+        review = cause("1 edited call(s) need review: json.dumps", NEEDS_REVIEW, "review",
+                       "a person reviews each finding")
+
+        def verdict(*causes):
+            build_unified_verification(ContractReport(
+                root=str(tmp_path), verdict=VerificationVerdict.INCONCLUSIVE,
+                verdict_reasons=[c.reason for c in causes], inconclusive_causes=list(causes),
+            ), run_id=None).save(tmp_path)
+            return build_status(tmp_path)
+
+        evidence = verdict(blind)
+        assert evidence.next_command is None and evidence.inconclusive_kind == "needs_evidence"
+        assert evidence.next_reason == ("The verdict is INCONCLUSIVE and needs evidence: add a "
+                                        "test that reaches those sites, then capture "
+                                        "post-migration again.")
+        assert evidence.phase("report").detail.startswith("verdict: inconclusive (needs "
+                                                          "evidence)")
+        person = verdict(blind, review)
+        assert person.inconclusive_kind == "needs_review"
+        assert person.next_reason.startswith("The verdict is INCONCLUSIVE and needs a person: "
+                                             "a person reviews each finding")
+        assert views.status_view(person)["data"]["inconclusive_kind"] == "needs_review"
+
+    def test_a_post_capture_older_than_the_baseline_is_stale(self, tmp_path):
+        from pymolt.verify.models import ContractState
+
+        baseline = self._hand_project(tmp_path)
+        post = _capture(tmp_path, "post_migration")
+        state = ContractState.load(tmp_path / ".pymolt" / "contract_state.json")
+        state.post_migration = post.model_copy(update={"captured_at": "2020-01-01T00:00:00+00:00"})
+        state.save(tmp_path / ".pymolt" / "contract_state.json")
+        assert baseline.captured_at > "2020"
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "post-migration") == "stale"
+        assert "before the migration" in status.phase("post-migration").detail
+
+
+class TestBaselineAfterAMigration:
+    """Once a migration is recorded the baseline describes where it started, not the
+    project as it is now — an upgraded manifest is the migration, not staleness."""
+
+    def _migrated(self, project, **receipt):
+        _manifest(project)
+        _configure(project)
+        (project / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(project, "baseline")
+        receipt.setdefault("environment_fingerprint", service.environment_fingerprint(project))
+        return _receipt(project, baseline, **receipt)
+
+    def test_manifest_upgraded_by_the_migration_keeps_the_baseline_done(self, tmp_path):
+        self._migrated(tmp_path)
+        _manifest(tmp_path, "flask==3.0.0\n")   # the migration's own upgrade
+        _capture(tmp_path, "post_migration")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "baseline") == "done"
+        assert _state(status, "migration") == "done"
+        assert _state(status, "post-migration") == "done"
+        assert status.next_command == "pymolt verify ."
+
+    def test_post_capture_older_than_the_manifest_is_stale(self, tmp_path):
+        self._migrated(tmp_path)
+        _manifest(tmp_path, "flask==3.0.0\n")
+        _capture(tmp_path, "post_migration")
+        _manifest(tmp_path, "flask==3.1.0\n")   # moved again after the post capture
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "baseline") == "done"
+        assert _state(status, "post-migration") == "stale"
+        assert "capture post-migration" in status.next_command
+
+    def test_baseline_from_another_starting_point_is_stale(self, tmp_path):
+        receipt = self._migrated(tmp_path, environment_fingerprint="0" * 16)
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        assert baseline.state == "stale"
+        assert f"migration run {receipt.run_id[:8]} started from" in baseline.detail
+
+    def test_unrecorded_starting_point_is_not_vouched_for(self, tmp_path):
+        self._migrated(tmp_path, environment_fingerprint=None)
+        _manifest(tmp_path, "flask==3.0.0\n")
+        _configure(tmp_path, base="3.10")   # the setup moved too, not only the pins
+
+        status = build_status(tmp_path)
+
+        baseline = status.phase("baseline")
+        # Not stale on the evidence — re-capturing now would record the migrated
+        # world — but the detail must not read as a clean bill of health.
+        assert baseline.state == "done"
+        assert "cannot be confirmed" in baseline.detail
 
 
 class TestStatusCommand:
@@ -261,3 +498,45 @@ class TestStatusCommand:
         result = runner.invoke(app, ["status", str(tmp_path / "nope"), "--json"])
         assert result.exit_code == EXIT_USAGE
         assert json.loads(result.stdout)["ok"] is False
+
+
+class TestEnvironmentChecks:
+    """What `doctor` used to report: whether the configured environments exist."""
+
+    def test_detects_pytest_workload_without_running_it(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+
+        assert detect_workload_command(tmp_path) == ["python", "-m", "pytest"]
+
+    def test_checks_only_when_asked(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+
+        assert build_status(tmp_path).checks == []
+        checks = {c.name: c for c in build_status(tmp_path, check_environments=True).checks}
+
+        assert checks["base environment"].state == "warning"
+        assert checks["target environment"].state == "warning"
+        assert "setup" in checks["target environment"].hint
+
+    def test_a_missing_target_environment_is_an_error(self, tmp_path):
+        _manifest(tmp_path)
+        EnvConfig(
+            selected_manifest="requirements.txt", selected_tool=ToolChoice.UV,
+            base_python="3.11", target_python="3.12",
+            target_env_path=str(tmp_path / ".venv-target"),
+        ).save(tmp_path / ".pymolt" / "env_config.json")
+
+        checks = {c.name: c for c in build_status(tmp_path, check_environments=True).checks}
+
+        assert checks["target environment"].state == "error"
+
+    def test_status_command_prints_the_checks(self, tmp_path):
+        _manifest(tmp_path)
+        _configure(tmp_path)
+
+        result = runner.invoke(app, ["status", str(tmp_path)])
+
+        assert result.exit_code == 0
+        assert "target environment" in result.stdout
+

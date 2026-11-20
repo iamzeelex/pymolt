@@ -6,21 +6,26 @@ from CLI, MCP, or as a library (``.agent.md``). Like the IngestionReport, every 
 carries its own trust level (``evidence_level``) and where it is unsure (``honesty``), so a
 downstream consumer never has to ask "how good is this verdict?".
 """
-import json
 import logging
-import os
-import tempfile
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, computed_field
+from pydantic import BaseModel, Field, computed_field
 
-from pymolt.core.enums import EvidenceLevel, TestStatus, TraceScope, Verdict
+from pymolt.adapters.python_runner import RunnerSpec
+from pymolt.state_io import atomic_write_json, load_state
 
 logger = logging.getLogger(__name__)
 
-CONTRACT_STATE_SCHEMA_VERSION = 1
+# 2: every slot path is stored relative to the project root (a version-1 file, with absolute
+# paths, is read as it is: ``load_contract_state`` anchors both, and the next save writes 2).
+CONTRACT_STATE_SCHEMA_VERSION = 2
+CONTRACT_STATE_KIND = "capture state"
+CONTRACT_STATE_REMEDY = (
+    "It points at the captured recordings. Restore it from version control or a backup if you "
+    "have one; otherwise move it into .pymolt/archive/ and capture again (the baseline before "
+    "any code change). The recordings themselves stay in .pymolt/contract_traces/.")
 
 
 class VerificationVerdict(StrEnum):
@@ -36,6 +41,30 @@ class VerificationVerdict(StrEnum):
     INCONCLUSIVE = "inconclusive"
 
 
+class InconclusiveKind(StrEnum):
+    """Who settles an INCONCLUSIVE reason (design decision 7): a person must look
+    (``needs_review``), or more or better captures settle it (``needs_evidence``). When both are
+    present ``needs_review`` wins, as in the step statuses."""
+
+    NEEDS_REVIEW = "needs_review"
+    NEEDS_EVIDENCE = "needs_evidence"
+
+
+class InconclusiveCause(BaseModel):
+    """One reason a verdict is INCONCLUSIVE, with its kind, set where the reason is made.
+
+    ``cause``: ``review`` (a person must look), ``noise`` (a baseline replicate settles it),
+    ``environment`` (the captures ran in different environments), ``not-exercised`` (a site no
+    run reached), ``uncomparable`` (a fact or value that could not be compared), ``capture``
+    (a capture missing, invalid, stale or unlike the other), ``static-map`` (no static
+    contact to judge), ``metric`` (a canary metric missing). ``settle``: what settles it."""
+
+    reason: str
+    kind: InconclusiveKind
+    cause: str
+    settle: str
+
+
 class CaptureValidity(StrEnum):
     """Whether a captured trace is eligible to act as named evidence."""
 
@@ -45,13 +74,6 @@ class CaptureValidity(StrEnum):
     EMPTY = "empty"
     CORRUPT = "corrupt"
     MISSING = "missing"
-
-
-class VerificationOutcome(BaseModel):
-    """A verdict plus the concrete facts that prevented a stronger result."""
-
-    verdict: VerificationVerdict
-    reasons: list[str] = Field(default_factory=list)
 
 
 class TraceArtifactQuality(BaseModel):
@@ -65,15 +87,6 @@ class TraceArtifactQuality(BaseModel):
     reason: str | None = None
 
 
-class TestOutcome(BaseModel):
-    """L1 input: how the suite touching a node behaved across the version pair."""
-
-    __test__ = False  # not a pytest test class
-
-    status: TestStatus
-    detail: dict[str, Any] = Field(default_factory=dict)
-
-
 class GoldenDiff(BaseModel):
     """L2 result: value-level diff of golden-master snapshots across the version pair."""
 
@@ -83,15 +96,6 @@ class GoldenDiff(BaseModel):
 
     def is_clean(self) -> bool:
         return not (self.changed or self.missing)
-
-
-class NodeRef(BaseModel):
-    """Identity of a node under verification: a dependency and the version pair to cross."""
-
-    name: str
-    old_version: str
-    new_version: str
-    trace_prefix: str  # dependency import prefix to trace, e.g. "flask"
 
 
 class BoundaryDiff(BaseModel):
@@ -133,26 +137,6 @@ class BoundaryDiff(BaseModel):
         }
 
 
-class NodeVerifyResult(BaseModel):
-    """Per-node behavioral fact + how it was reached + where it is unsure."""
-
-    node: NodeRef
-    verdict: Verdict
-    evidence_level: EvidenceLevel          # which cascade level produced the verdict
-    detail: dict[str, Any] = Field(default_factory=dict)  # the L1/L2/L3 payload behind it
-    # opaque comparisons, coverage gaps, nondeterminism
-    honesty: list[str] = Field(default_factory=list)
-
-
-class VerifyReport(BaseModel):
-    """Per-run aggregate. Both scopes produce this same shape; only breadth differs."""
-
-    results: list[NodeVerifyResult] = Field(default_factory=list)
-    scope: TraceScope
-    coverage_summary: dict[str, Any] = Field(default_factory=dict)  # exercised vs blind counts
-    warnings: list[str] = Field(default_factory=list)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Persisted contract capture state — ``.pymolt/contract_state.json``. Names a
 # captured dynamic trace as "baseline" (pre-migration) or "post_migration"
@@ -191,13 +175,11 @@ class ContractSlot(BaseModel):
     # "baseline → container abc123" or "running locally"). Defaults so OLD
     # .pymolt/contract_state.json files (written before this existed) still load.
     env_note: str | None = None
-    # Coverage-based gap summary (TEST_SUITE captures only) — what fraction of the
-    # project's static dependency-usage sites the test suite actually exercised. None/0
-    # when unavailable (coverage not installed, non-TEST_SUITE capture, or the second
-    # coverage pass failed) so OLD contract_state.json files still load unchanged.
-    coverage_pct: float | None = None
-    covered_sites: int = 0
-    blind_sites: int = 0
+    # The container this capture ran in (None = it ran locally): lets later phases reach the
+    # same interpreter and map its paths back to the project.
+    runner: RunnerSpec | None = None
+    # Schema-2 files may still carry ``coverage_pct``/``covered_sites``/``blind_sites`` (a
+    # second run of the suite under coverage, since removed): extra keys are ignored on load.
     # Fingerprint of the world this capture was taken in (manifest content, base
     # Python, toolset, container). A baseline is a recording of an environment
     # that stops existing the moment you migrate, so the only way to know the
@@ -205,6 +187,11 @@ class ContractSlot(BaseModel):
     # re-check them at report time. None on old state files, and on projects
     # with no config to fingerprint — absence is "unknown", never "fresh".
     env_fingerprint: str | None = None
+    # The same without the manifest's contents: which manifest file, base Python,
+    # toolset and container. A baseline whose setup is unchanged while only the
+    # manifest's contents moved is still the starting point of a migration that
+    # bumped pins (see ``service.environment_setup_fingerprint``). None = unknown.
+    env_setup_fingerprint: str | None = None
     # The previous recording this one displaced, if any: overwriting a capture
     # archives it instead of deleting it, and this is where it went.
     archived_previous: str | None = None
@@ -223,14 +210,37 @@ class ContractSlot(BaseModel):
     correlation_id: str | None = None
     backend: str | None = None
     impact_targets: list[str] = Field(default_factory=list)
+    # Stdlib top-level modules traced as dependencies (PYMOLT_TRACE_STDLIB; Python moves).
+    traced_stdlib: list[str] = Field(default_factory=list)
     metadata_path: str | None = None
+    # ``<trace>.sources.json``: text + sha256 of every project file with a fact (None: an older
+    # capture, or none could be written).
+    sources_path: str | None = None
     events_seen: int | None = None
     dropped_events: int | None = None
     sampling_dropped: int | None = None
     backpressure_dropped: int | None = None
     write_failures: int | None = None
     sink_failures: int | None = None
+    # Seconds the traced program waited for a JSONL trace writer that fell behind (summed over
+    # threads and processes): every event was kept, at that cost in timing. None = unknown.
+    backpressure_wait_seconds: float | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
+    # Processes where tracing was requested but the watcher could not load (untraced).
+    activation_failures: list[dict] = Field(default_factory=list)
+    # A "red" baseline: the command exited non-zero (failing tests) but recorded events,
+    # and the capture was accepted on purpose (``--accept-failing``). Holds
+    # ``{"returncode": int, "failed": int | None, "summary": str}``; None = not red.
+    # The slot is still ``valid``; the stamp only says the run was not green.
+    red: dict | None = None
+    # A baseline replicate: the ``captured_at`` of the baseline whose command it re-ran on the
+    # same code in the same environment (None for every other slot). A replicate whose
+    # baseline was replaced is stale and ignored.
+    replicate_of: str | None = None
+    # A post-migration capture set aside by ``pymolt rollback``: the run id of the migration
+    # whose rollback restored the code it recorded (None for every other slot). Kept among the
+    # diagnostic captures, its recording moved to the archive so no later capture overwrites it.
+    set_aside_by: str | None = None
 
 
 class ContractState(BaseModel):
@@ -239,47 +249,49 @@ class ContractState(BaseModel):
     schema_version: int = CONTRACT_STATE_SCHEMA_VERSION
     baseline: ContractSlot | None = None
     post_migration: ContractSlot | None = None
+    # The baseline's command run a second time (``pymolt capture baseline --replicate``):
+    # what differs between the two runs is run-to-run noise (``verify.replicate``).
+    baseline_replicate: ContractSlot | None = None
     # Failed/empty/corrupt attempts are durable diagnostics, but never replace
     # either active evidence slot above.
     diagnostic_captures: list[ContractSlot] = Field(default_factory=list)
 
+    def _anchored(self, root: Path) -> dict:
+        """The state as JSON with every slot path stored relative to the project root
+        (``root``), so the file stays valid whatever directory pymolt runs from."""
+        payload = self.model_dump(mode="json")
+        payload["schema_version"] = CONTRACT_STATE_SCHEMA_VERSION
+        base = Path(root).resolve()
+
+        def relative(value):
+            if not value:
+                return value
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                return value
+            try:
+                return candidate.resolve().relative_to(base).as_posix()
+            except (ValueError, OSError):
+                return value
+
+        slots = [payload.get("baseline"), payload.get("post_migration"),
+                 payload.get("baseline_replicate"),
+                 *(payload.get("diagnostic_captures") or [])]
+        for slot in slots:
+            if isinstance(slot, dict):
+                for key in ("trace_path", "metadata_path", "command_log", "sources_path"):
+                    slot[key] = relative(slot.get(key))
+        return payload
+
     @classmethod
     def load(cls, path: Path) -> "ContractState | None":
-        """Read and validate the state file.
-
-        Returns ``None`` when the file is missing or its contents are
-        unreadable/invalid (the caller decides how to degrade); never raises.
-        """
-        if not path.is_file():
-            return None
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not read contract state %s: %s", path, e)
-            return None
-        try:
-            return cls.model_validate(raw)
-        except ValidationError as e:
-            logger.warning("contract state %s failed validation, ignoring: %s", path, e)
-            return None
+        """Read and validate the state file: None when it is missing. A damaged file, or
+        one written by a newer pymolt, raises ``StateFileError`` (``pymolt.state_io``): read
+        as empty, the next capture would overwrite every slot's pointer."""
+        return load_state(path, cls, kind=CONTRACT_STATE_KIND,
+                          newest=CONTRACT_STATE_SCHEMA_VERSION, remedy=CONTRACT_STATE_REMEDY)
 
     def save(self, path: Path) -> None:
-        """Atomically write state so interruption cannot destroy active evidence."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, staged = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.model_dump(mode="json"), stream, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(staged, path)
-        except BaseException:
-            try:
-                os.unlink(staged)
-            except OSError:
-                pass
-            raise
+        """Atomically write state so interruption cannot destroy active evidence. A caller
+        that read the state to change it holds ``state_lock`` around both."""
+        atomic_write_json(path, self._anchored(path.parent.parent))

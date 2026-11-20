@@ -1,0 +1,105 @@
+{
+  "schema": "pymolt.knowledge/1",
+  "kind": "succession",
+  "version": "2026-11-15",
+  "about": "Curated framework-succession edges: where code written for a dead framework era should go.",
+  "index": {
+    "keras": ["keras-to-tf-keras", "keras-to-torch"],
+    "tensorflow": ["tf1-to-tf2"],
+    "tensorflow<2": ["tf1-to-tf2"]
+  },
+  "entries": [
+    {
+      "id": "keras-to-tf-keras",
+      "source": "keras -> tensorflow.keras: Keras 2.3 was the last multi-backend release",
+      "date": "2026-11-15",
+      "edge": {
+        "from_framework": "keras",
+        "to_framework": "tensorflow.keras",
+        "strategy": "in_place",
+        "summary": "Standalone Keras was absorbed into TensorFlow 2 as tf.keras; re-point imports.",
+        "patterns": [
+          {
+            "old_qualname": "keras",
+            "new_qualname": "tensorflow.keras",
+            "kind": "rewrite-module",
+            "confidence": "high",
+            "evidence": ["curated framework succession: keras.* -> tensorflow.keras.*"]
+          }
+        ],
+        "confidence": "curated",
+        "evidence": ["Keras 2.3 was the last multi-backend release; TF2 ships tf.keras"],
+        "doc_link": "https://keras.io/getting_started/faq/#whats-the-difference-between-keras-and-tfkeras",
+        "notes": [
+          "keras.engine.* internals (e.g. keras.engine.Layer) have no clean tf.keras twin; those sites land in the manual zone, not an auto-shim."
+        ]
+      }
+    },
+    {
+      "id": "tf1-to-tf2",
+      "source": "tensorflow<2 -> tensorflow>=2: the symbols Google's tf_upgrade_v2 routes through tf.compat.v1",
+      "date": "2026-11-15",
+      "edge": {
+        "from_framework": "tensorflow<2",
+        "to_framework": "tensorflow>=2",
+        "strategy": "in_place",
+        "summary": "TF2 removed the TF1 graph/session API; route the calls through tf.compat.v1.",
+        "patterns": [
+          {"old_qualname": "tensorflow.Session", "new_qualname": "tensorflow.compat.v1.Session", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.Session -> tensorflow.compat.v1.Session"]},
+          {"old_qualname": "tensorflow.Session", "new_qualname": "tensorflow.compat.v1.Session", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.Session -> tensorflow.compat.v1.Session"]},
+          {"old_qualname": "tensorflow.placeholder", "new_qualname": "tensorflow.compat.v1.placeholder", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.placeholder -> tensorflow.compat.v1.placeholder"]},
+          {"old_qualname": "tensorflow.placeholder", "new_qualname": "tensorflow.compat.v1.placeholder", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.placeholder -> tensorflow.compat.v1.placeholder"]},
+          {"old_qualname": "tensorflow.get_variable", "new_qualname": "tensorflow.compat.v1.get_variable", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.get_variable -> tensorflow.compat.v1.get_variable"]},
+          {"old_qualname": "tensorflow.get_variable", "new_qualname": "tensorflow.compat.v1.get_variable", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.get_variable -> tensorflow.compat.v1.get_variable"]},
+          {"old_qualname": "tensorflow.global_variables_initializer", "new_qualname": "tensorflow.compat.v1.global_variables_initializer", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.global_variables_initializer -> tensorflow.compat.v1.global_variables_initializer"]},
+          {"old_qualname": "tensorflow.global_variables_initializer", "new_qualname": "tensorflow.compat.v1.global_variables_initializer", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.global_variables_initializer -> tensorflow.compat.v1.global_variables_initializer"]},
+          {"old_qualname": "tensorflow.variable_scope", "new_qualname": "tensorflow.compat.v1.variable_scope", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.variable_scope -> tensorflow.compat.v1.variable_scope"]},
+          {"old_qualname": "tensorflow.variable_scope", "new_qualname": "tensorflow.compat.v1.variable_scope", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.variable_scope -> tensorflow.compat.v1.variable_scope"]},
+          {"old_qualname": "tensorflow.assign", "new_qualname": "tensorflow.compat.v1.assign", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.assign -> tensorflow.compat.v1.assign"]},
+          {"old_qualname": "tensorflow.assign", "new_qualname": "tensorflow.compat.v1.assign", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.assign -> tensorflow.compat.v1.assign"]},
+          {"old_qualname": "tensorflow.log", "new_qualname": "tensorflow.math.log", "kind": "rewrite-attr", "confidence": "high", "evidence": ["curated framework succession: tensorflow.log -> tensorflow.math.log"]},
+          {"old_qualname": "tensorflow.log", "new_qualname": "tensorflow.math.log", "kind": "rewrite-import", "confidence": "high", "evidence": ["curated framework succession: tensorflow.log -> tensorflow.math.log"]}
+        ],
+        "confidence": "curated",
+        "evidence": ["Google's tf_upgrade_v2 rewrites these symbols to tf.compat.v1"],
+        "doc_link": "https://www.tensorflow.org/guide/migrate",
+        "notes": [
+          "compat.v1 keeps TF1 code RUNNING on TF2: it is a life-support shim, not a real port to eager/Keras. It is the cheapest path, with the lowest ceiling.",
+          "Both call shapes migrate: `tf.Session()` (rewrite-attr) and `from tensorflow import Session` (rewrite-import). This is a curated subset of the graph API; for the full sweep, Google's tf_upgrade_v2 remains the exhaustive tool."
+        ]
+      }
+    },
+    {
+      "id": "keras-to-torch",
+      "source": "keras -> torch+torchvision: torchvision ships maskrcnn_resnet50_fpn",
+      "date": "2026-11-15",
+      "edge": {
+        "from_framework": "keras",
+        "to_framework": "torch+torchvision",
+        "strategy": "transplant",
+        "summary": "Re-init from torchvision's Mask R-CNN; port the weights, not the framework.",
+        "abstraction_mappings": [
+          {"from_symbol": "keras.Model", "to_symbol": "torch.nn.Module", "mechanical": false, "notes": "subclass nn.Module; define forward()"},
+          {"from_symbol": "keras.layers.Conv2D", "to_symbol": "torch.nn.Conv2d", "mechanical": true, "notes": "NHWC->NCHW; kernel/stride args reorder"},
+          {"from_symbol": "keras.layers.BatchNormalization", "to_symbol": "torch.nn.BatchNorm2d", "mechanical": true},
+          {"from_symbol": "keras.layers.Dense", "to_symbol": "torch.nn.Linear", "mechanical": true},
+          {"from_symbol": "keras.layers.MaxPooling2D", "to_symbol": "torch.nn.MaxPool2d", "mechanical": true},
+          {"from_symbol": "model.fit", "to_symbol": "a manual training loop", "mechanical": false, "notes": "torch has no .fit(); write the loop"}
+        ],
+        "scaffold_hint": "from torchvision.models.detection import maskrcnn_resnet50_fpn\nmodel = maskrcnn_resnet50_fpn(weights=None, num_classes=<your N>)\n# keep matterport's Config/Dataset; drop mrcnn.model: torchvision IS the model.",
+        "weight_conversion": {
+          "from_format": ".h5",
+          "to_format": ".pth",
+          "approach": "Read Keras layer weights with h5py, map each conv/bn/linear tensor into the torchvision state_dict by name+shape, transposing conv kernels (KHWC->OIHW).",
+          "notes": "Backbone (ResNet) maps cleanly; the RPN/heads differ, so expect manual alignment."
+        },
+        "confidence": "curated",
+        "evidence": ["torchvision.models.detection.maskrcnn_resnet50_fpn is the maintained equivalent"],
+        "doc_link": "https://pytorch.org/vision/stable/models/mask_rcnn.html",
+        "notes": [
+          "Highest durability, highest effort. pymolt does NOT auto-rewrite this: it renders the plan and verifies behavioural equivalence (old .h5 vs new .pth must agree on the same inputs)."
+        ]
+      }
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 {
-  "root": "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+  "root": "tests/artifacts/flasgger",
   "files_scanned": 67,
   "contacts": [
     {

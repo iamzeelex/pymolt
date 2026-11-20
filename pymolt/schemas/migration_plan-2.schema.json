@@ -1,0 +1,2275 @@
+{
+  "$defs": {
+    "Anchor": {
+      "description": "A statement named by content and context, made on one text (see the module docstring).",
+      "properties": {
+        "count": {
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "frames": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Frames",
+          "type": "array"
+        },
+        "func": {
+          "title": "Func",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "key": {
+          "pattern": "^[0-9a-f]{16}$",
+          "title": "Key",
+          "type": "string"
+        },
+        "key_kind": {
+          "default": "ast",
+          "enum": [
+            "ast",
+            "tokens"
+          ],
+          "title": "Key Kind",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "next": {
+          "title": "Next",
+          "type": "string"
+        },
+        "nth": {
+          "minimum": 0,
+          "title": "Nth",
+          "type": "integer"
+        },
+        "prev": {
+          "title": "Prev",
+          "type": "string"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "site_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Site Text"
+        },
+        "stmt": {
+          "title": "Stmt",
+          "type": "string"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Symbol"
+        }
+      },
+      "required": [
+        "id",
+        "file",
+        "scope",
+        "func",
+        "stmt",
+        "key",
+        "prev",
+        "next",
+        "nth",
+        "count"
+      ],
+      "title": "Anchor",
+      "type": "object"
+    },
+    "BeforeAfter": {
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before"
+        }
+      },
+      "title": "BeforeAfter",
+      "type": "object"
+    },
+    "CallWarning": {
+      "description": "A deprecation-family warning a dependency call issued while it ran (runtime\nevidence of an announced API change). Evidence, never part of a fact's outcome.",
+      "properties": {
+        "category": {
+          "title": "Category",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "message"
+      ],
+      "title": "CallWarning",
+      "type": "object"
+    },
+    "CodemodPattern": {
+      "description": "A symbol replacement the delta engine derived: old \u2192 new.",
+      "properties": {
+        "confidence": {
+          "default": "medium",
+          "title": "Confidence",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "new_qualname": {
+          "title": "New Qualname",
+          "type": "string"
+        },
+        "old_qualname": {
+          "title": "Old Qualname",
+          "type": "string"
+        },
+        "requires_import": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requires Import"
+        },
+        "runs_on_base": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runs On Base"
+        },
+        "scope": {
+          "default": "dependency",
+          "title": "Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "old_qualname",
+        "new_qualname",
+        "kind"
+      ],
+      "title": "CodemodPattern",
+      "type": "object"
+    },
+    "CodemodRule": {
+      "properties": {
+        "condition": {
+          "default": "always",
+          "title": "Condition",
+          "type": "string"
+        },
+        "confidence": {
+          "default": "heuristic",
+          "title": "Confidence",
+          "type": "string"
+        },
+        "doc_link": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doc Link"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "from_version": {
+          "title": "From Version",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "library": {
+          "title": "Library",
+          "type": "string"
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "new_qualname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New Qualname"
+        },
+        "old_qualname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old Qualname"
+        },
+        "result_var": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Var"
+        },
+        "rewrite": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rewrite",
+          "type": "array"
+        },
+        "runtime_precondition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Precondition"
+        },
+        "test_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Test After"
+        },
+        "test_before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Test Before"
+        },
+        "to_version": {
+          "title": "To Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "library",
+        "from_version",
+        "to_version",
+        "match",
+        "rewrite"
+      ],
+      "title": "CodemodRule",
+      "type": "object"
+    },
+    "DeltaSummary": {
+      "properties": {
+        "changes": {
+          "default": 0,
+          "title": "Changes",
+          "type": "integer"
+        },
+        "from_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Version"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "package": {
+          "title": "Package",
+          "type": "string"
+        },
+        "quality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quality"
+        },
+        "subject": {
+          "default": "dependency",
+          "title": "Subject",
+          "type": "string"
+        },
+        "to_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To Version"
+        }
+      },
+      "required": [
+        "package"
+      ],
+      "title": "DeltaSummary",
+      "type": "object"
+    },
+    "Effect": {
+      "description": "A step's change in one file without positions, over statement keys (anchors 1.4).\n\n``replace``: ``[old key, new key]`` pairs; ``insert``/``delete``: statements only one side\nhas; ``imports_inserted``: imports added at module scope, whose position is free (they\ncompare as a set). ``key_kind`` is ``tokens`` when a side did not parse: those keys do not\nnormalise redundant parentheses, and ``depends_on`` falls back to the scope (1.5.3).",
+      "properties": {
+        "delete": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Delete",
+          "type": "array"
+        },
+        "imports_inserted": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Imports Inserted",
+          "type": "array"
+        },
+        "insert": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Insert",
+          "type": "array"
+        },
+        "key_kind": {
+          "default": "ast",
+          "enum": [
+            "ast",
+            "tokens"
+          ],
+          "title": "Key Kind",
+          "type": "string"
+        },
+        "replace": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Replace",
+          "type": "array"
+        }
+      },
+      "title": "Effect",
+      "type": "object"
+    },
+    "Hunk": {
+      "description": "One difflib opcode between a step's before-text and after-text, 1-based like the ledger.\n\n``old`` and ``new`` are physical lines with their line endings, so applying a step's hunks\nin order to its before-text rebuilds its after-text byte for byte. A pure insertion has\n``old`` empty and ``old_start`` the line it goes before; a pure deletion has ``new`` empty.\n``anchors``: the ids of the step's ``anchors_old``/``anchors_new`` this hunk meets.",
+      "properties": {
+        "anchors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Anchors",
+          "type": "array"
+        },
+        "new": {
+          "items": {
+            "type": "string"
+          },
+          "title": "New",
+          "type": "array"
+        },
+        "new_start": {
+          "title": "New Start",
+          "type": "integer"
+        },
+        "old": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Old",
+          "type": "array"
+        },
+        "old_start": {
+          "title": "Old Start",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "old_start",
+        "new_start"
+      ],
+      "title": "Hunk",
+      "type": "object"
+    },
+    "ListedSite": {
+      "description": "A python site that is listed, not rated: guarded, version-dead or pre-existing.",
+      "properties": {
+        "fact": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fact"
+        },
+        "guard": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Guard"
+        },
+        "kind": {
+          "enum": [
+            "guarded",
+            "version-dead",
+            "pre-existing"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "reached_at": {
+          "anyOf": [
+            {
+              "enum": [
+                "import",
+                "call"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reached At"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "scope": {
+          "default": "python",
+          "title": "Scope",
+          "type": "string"
+        },
+        "site": {
+          "$ref": "#/$defs/RiskSite"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "symbol",
+        "site",
+        "reason"
+      ],
+      "title": "ListedSite",
+      "type": "object"
+    },
+    "ManifestPin": {
+      "description": "One requirements line a ``manifest-pin`` step rewrites: ``old`` as the manifest has it,\n``new`` with the target's pin (extras and marker kept).",
+      "properties": {
+        "from_version": {
+          "title": "From Version",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "new": {
+          "title": "New",
+          "type": "string"
+        },
+        "old": {
+          "title": "Old",
+          "type": "string"
+        },
+        "to_version": {
+          "title": "To Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "from_version",
+        "to_version",
+        "old",
+        "new"
+      ],
+      "title": "ManifestPin",
+      "type": "object"
+    },
+    "ManualDo": {
+      "description": "What an agent or a person does. Text from dependencies and from the project is data,\nnever instructions (1.10). ``suggestion``: a rule's rewrite template, shown as a suggestion\nonly. ``commands``: build commands (``target-env``). ``lines``: the exact manifest lines a\nperson changes (a ``manifest-pin`` pymolt does not write).",
+      "properties": {
+        "before_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BeforeAfter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "commands": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Commands",
+          "type": "array"
+        },
+        "consumers": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3,
+          "title": "Consumers",
+          "type": "array"
+        },
+        "lines": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Lines",
+          "type": "array"
+        },
+        "pitfalls": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Pitfalls",
+          "type": "array"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignatureChange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "successor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Successor"
+        },
+        "suggestion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suggestion"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "ManualDo",
+      "type": "object"
+    },
+    "PlanStep": {
+      "description": "One step of the work order (design 1.2).",
+      "properties": {
+        "basis": {
+          "anyOf": [
+            {
+              "enum": [
+                "same-object",
+                "same-signature",
+                "verified-rule",
+                "python-fixer",
+                "target-manifest",
+                "manual"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Basis"
+        },
+        "checks_at_plan": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checks At Plan"
+        },
+        "claim": {
+          "anyOf": [
+            {
+              "enum": [
+                "preserve",
+                "intended"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "do": {
+          "$ref": "#/$defs/StepDo"
+        },
+        "edits": {
+          "items": {
+            "$ref": "#/$defs/StepEdit"
+          },
+          "title": "Edits",
+          "type": "array"
+        },
+        "effort": {
+          "$ref": "#/$defs/StepEffort"
+        },
+        "executor": {
+          "enum": [
+            "pymolt",
+            "agent",
+            "person"
+          ],
+          "title": "Executor",
+          "type": "string"
+        },
+        "from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From"
+        },
+        "id": {
+          "pattern": "^((env|mech|sig|beh)-[0-9]+|v1)$",
+          "title": "Id",
+          "type": "string"
+        },
+        "key": {
+          "pattern": "^[0-9a-f]{10}$",
+          "title": "Key",
+          "type": "string"
+        },
+        "package": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package"
+        },
+        "phase": {
+          "enum": [
+            "env",
+            "mechanical",
+            "signature",
+            "behaviour"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "runs_on_base": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runs On Base"
+        },
+        "scope": {
+          "default": "dependency",
+          "enum": [
+            "dependency",
+            "python",
+            "env"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "status": {
+          "const": "planned",
+          "default": "planned",
+          "title": "Status",
+          "type": "string"
+        },
+        "symbol": {
+          "$ref": "#/$defs/StepSymbol"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "To"
+        },
+        "type": {
+          "enum": [
+            "manifest-pin",
+            "target-env",
+            "codemod",
+            "python-fix",
+            "manual-rewrite",
+            "api-change",
+            "python-manual",
+            "behaviour-change",
+            "review"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "verify": {
+          "$ref": "#/$defs/StepVerify"
+        },
+        "where": {
+          "items": {
+            "$ref": "#/$defs/Anchor"
+          },
+          "title": "Where",
+          "type": "array"
+        },
+        "why": {
+          "$ref": "#/$defs/StepWhy"
+        }
+      },
+      "required": [
+        "id",
+        "key",
+        "phase",
+        "type",
+        "title",
+        "executor",
+        "do"
+      ],
+      "title": "PlanStep",
+      "type": "object"
+    },
+    "PlannedAdvisory": {
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "integer"
+        },
+        "line": {
+          "title": "Line",
+          "type": "integer"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "severity",
+        "reason"
+      ],
+      "title": "PlannedAdvisory",
+      "type": "object"
+    },
+    "PlannedApiImpact": {
+      "properties": {
+        "explanation": {
+          "title": "Explanation",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "package": {
+          "title": "Package",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "replacement_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replacement Path"
+        },
+        "risk": {
+          "title": "Risk",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "transition_confidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transition Confidence"
+        },
+        "transition_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Transition Reason"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "state",
+        "risk",
+        "explanation",
+        "package"
+      ],
+      "title": "PlannedApiImpact",
+      "type": "object"
+    },
+    "PlannedDependency": {
+      "properties": {
+        "from_version": {
+          "title": "From Version",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "to_version": {
+          "title": "To Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "from_version",
+        "to_version"
+      ],
+      "title": "PlannedDependency",
+      "type": "object"
+    },
+    "PlannedFileChange": {
+      "properties": {
+        "claims": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Claims",
+          "type": "object"
+        },
+        "new_sha256": {
+          "title": "New Sha256",
+          "type": "string"
+        },
+        "new_source": {
+          "title": "New Source",
+          "type": "string"
+        },
+        "old_sha256": {
+          "title": "Old Sha256",
+          "type": "string"
+        },
+        "old_source": {
+          "title": "Old Source",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "recipes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recipes",
+          "type": "array"
+        },
+        "runs_on_base": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runs On Base"
+        },
+        "sites": {
+          "default": 0,
+          "title": "Sites",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "old_sha256",
+        "new_sha256",
+        "old_source",
+        "new_source"
+      ],
+      "title": "PlannedFileChange",
+      "type": "object"
+    },
+    "PlannedManualItem": {
+      "description": "Work the plan leaves to a person: a curated rule that matched a file but is not\nverified, so apply does not write it (``path`` set, ``lines`` where it would rewrite), or\na rule the provider downgraded that matched no site (``path`` None).",
+      "properties": {
+        "lines": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Lines",
+          "type": "array"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule": {
+          "title": "Rule",
+          "type": "string"
+        },
+        "sites": {
+          "default": 0,
+          "title": "Sites",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rule",
+        "reason"
+      ],
+      "title": "PlannedManualItem",
+      "type": "object"
+    },
+    "PredictedRisk": {
+      "properties": {
+        "basis": {
+          "default": "trace",
+          "enum": [
+            "trace",
+            "static"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "calls": {
+          "default": 0,
+          "title": "Calls",
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "fact": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fact"
+        },
+        "facts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Facts",
+          "type": "array"
+        },
+        "fix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fix"
+        },
+        "fixed_by": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Fixed By",
+          "type": "array"
+        },
+        "fixed_by_plan": {
+          "default": false,
+          "title": "Fixed By Plan",
+          "type": "boolean"
+        },
+        "guard": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Guard"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "package": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Package"
+        },
+        "reached_at": {
+          "anyOf": [
+            {
+              "enum": [
+                "import",
+                "call"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reached At"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "scope": {
+          "default": "dependency",
+          "title": "Scope",
+          "type": "string"
+        },
+        "site": {
+          "$ref": "#/$defs/RiskSite"
+        },
+        "step_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step Id"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/RiskTier"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/CallWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "tier",
+        "symbol",
+        "site",
+        "reason"
+      ],
+      "title": "PredictedRisk",
+      "type": "object"
+    },
+    "PredictionReport": {
+      "description": "The risks a plan predicts, and what they rest on.",
+      "properties": {
+        "deltas": {
+          "items": {
+            "$ref": "#/$defs/DeltaSummary"
+          },
+          "title": "Deltas",
+          "type": "array"
+        },
+        "guarded": {
+          "items": {
+            "$ref": "#/$defs/ListedSite"
+          },
+          "title": "Guarded",
+          "type": "array"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "pre_existing": {
+          "items": {
+            "$ref": "#/$defs/ListedSite"
+          },
+          "title": "Pre Existing",
+          "type": "array"
+        },
+        "risks": {
+          "items": {
+            "$ref": "#/$defs/PredictedRisk"
+          },
+          "title": "Risks",
+          "type": "array"
+        },
+        "schema": {
+          "default": "pymolt.risks/2",
+          "title": "Schema",
+          "type": "string"
+        },
+        "status": {
+          "default": "complete",
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "title": "PredictionReport",
+      "type": "object"
+    },
+    "RiskSite": {
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "func": {
+          "title": "Func",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "nth": {
+          "default": 0,
+          "title": "Nth",
+          "type": "integer"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        }
+      },
+      "required": [
+        "file",
+        "func"
+      ],
+      "title": "RiskSite",
+      "type": "object"
+    },
+    "RiskTier": {
+      "enum": [
+        "certain",
+        "high",
+        "medium",
+        "low"
+      ],
+      "title": "RiskTier",
+      "type": "string"
+    },
+    "SignatureChange": {
+      "properties": {
+        "diff": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Diff",
+          "type": "array"
+        },
+        "new": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New"
+        },
+        "old": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old"
+        }
+      },
+      "title": "SignatureChange",
+      "type": "object"
+    },
+    "StepBaseline": {
+      "description": "What the baseline capture saw at the step's sites: ``calls`` summed over them.",
+      "properties": {
+        "calls": {
+          "default": 0,
+          "title": "Calls",
+          "type": "integer"
+        },
+        "sites": {
+          "default": 0,
+          "title": "Sites",
+          "type": "integer"
+        },
+        "warnings": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "title": "StepBaseline",
+      "type": "object"
+    },
+    "StepDelta": {
+      "description": "The deciding delta fact, as text (``old``/``new``: defaults or signatures).",
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "new": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New"
+        },
+        "old": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old"
+        },
+        "param": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Param"
+        }
+      },
+      "title": "StepDelta",
+      "type": "object"
+    },
+    "StepDo": {
+      "description": "Exactly one of ``recipe`` (a pymolt step) and ``manual`` (any other).",
+      "properties": {
+        "manual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManualDo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recipe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepRecipe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "StepDo",
+      "type": "object"
+    },
+    "StepEdit": {
+      "description": "What a pymolt step changes in one file. The anchors are made on the step's own\nbefore-text (``anchors_old``) and after-text (``anchors_new``), with ``nth``, ``count`` and\nthe neighbours computed there (1.4, 1.5.2).",
+      "properties": {
+        "after_sha256": {
+          "title": "After Sha256",
+          "type": "string"
+        },
+        "anchors_new": {
+          "items": {
+            "$ref": "#/$defs/Anchor"
+          },
+          "title": "Anchors New",
+          "type": "array"
+        },
+        "anchors_old": {
+          "items": {
+            "$ref": "#/$defs/Anchor"
+          },
+          "title": "Anchors Old",
+          "type": "array"
+        },
+        "before_sha256": {
+          "title": "Before Sha256",
+          "type": "string"
+        },
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "hunks": {
+          "items": {
+            "$ref": "#/$defs/Hunk"
+          },
+          "title": "Hunks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "file",
+        "before_sha256",
+        "after_sha256"
+      ],
+      "title": "StepEdit",
+      "type": "object"
+    },
+    "StepEffort": {
+      "properties": {
+        "files": {
+          "default": 0,
+          "title": "Files",
+          "type": "integer"
+        },
+        "sites": {
+          "default": 0,
+          "title": "Sites",
+          "type": "integer"
+        },
+        "size": {
+          "default": "none",
+          "enum": [
+            "none",
+            "trivial",
+            "small",
+            "medium",
+            "large"
+          ],
+          "title": "Size",
+          "type": "string"
+        },
+        "why": {
+          "default": "",
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "title": "StepEffort",
+      "type": "object"
+    },
+    "StepRecipe": {
+      "description": "What pymolt runs for the step. ``keys``: each member's ``recipe_key``, in application\norder. ``rule`` (a ``rule``), ``patterns`` (a ``pattern``, or a ``move-group``'s members,\nwhich ``MoveNamesCodemod`` applies together; ``move`` is its old and new module) or\n``pins`` (a ``manifest-pin``). A ``whole-file`` recipe is a file's whole change that the\nplan did not split by recipe (a schema-1 plan, or a preview with no recorded chain): it is\napplied only from its frozen text and cannot be re-run. ``sites``: a re-run is restricted to\nthe step's anchors (``anchors``), or runs on the whole file (``all``).",
+      "properties": {
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Keys",
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "rule",
+            "pattern",
+            "move-group",
+            "manifest-pin",
+            "whole-file"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "move": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "string"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Move"
+        },
+        "patterns": {
+          "items": {
+            "$ref": "#/$defs/CodemodPattern"
+          },
+          "title": "Patterns",
+          "type": "array"
+        },
+        "pins": {
+          "items": {
+            "$ref": "#/$defs/ManifestPin"
+          },
+          "title": "Pins",
+          "type": "array"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodemodRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sites": {
+          "default": "anchors",
+          "enum": [
+            "anchors",
+            "all"
+          ],
+          "title": "Sites",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "StepRecipe",
+      "type": "object"
+    },
+    "StepSymbol": {
+      "description": "The dependency symbols of the step. ``new`` is the pairing anchor verify pairs the old\ncalls with (5.1).",
+      "properties": {
+        "new": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "New"
+        },
+        "old": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Old"
+        }
+      },
+      "title": "StepSymbol",
+      "type": "object"
+    },
+    "StepVerify": {
+      "description": "How verify judges the step (1.5.5). ``judge``: ``strict`` for ``preserve``,\n``expectation`` for ``intended``, ``none`` for an env step. ``tests``: None while the capture\nrecords no test ids (``note`` says so). ``command``: the baseline's command. ``uncovered``:\nsites ``not-run`` or ``unobservable``, which end ``needs_evidence`` unless a test reaches\nthem.",
+      "properties": {
+        "command": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command"
+        },
+        "expect": {
+          "anyOf": [
+            {
+              "enum": [
+                "any",
+                "representation"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expect"
+        },
+        "judge": {
+          "default": "none",
+          "enum": [
+            "strict",
+            "expectation",
+            "none"
+          ],
+          "title": "Judge",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "sites": {
+          "items": {
+            "$ref": "#/$defs/VerifySite"
+          },
+          "title": "Sites",
+          "type": "array"
+        },
+        "tests": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tests"
+        },
+        "uncovered": {
+          "default": 0,
+          "title": "Uncovered",
+          "type": "integer"
+        }
+      },
+      "title": "StepVerify",
+      "type": "object"
+    },
+    "StepWhy": {
+      "description": "Why the step exists. ``risk_ids``: the plan-time ids of the risks it addresses, persisted\n(they are the links calibration reads, never recomputed from a later plan). ``claim``: why\nan agent or person step has its claim and expectation (``workorder.manual.default_claim``):\nthe kind of successor the delta facts show, or why the claim was not loosened.",
+      "properties": {
+        "baseline": {
+          "$ref": "#/$defs/StepBaseline"
+        },
+        "claim": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Claim"
+        },
+        "delta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StepDelta"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "evidence": {
+          "items": {
+            "maxLength": 300,
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "risk_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Risk Ids",
+          "type": "array"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "enum": [
+                "certain",
+                "high",
+                "medium",
+                "low"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tier"
+        }
+      },
+      "title": "StepWhy",
+      "type": "object"
+    },
+    "VerifySite": {
+      "description": "One site verify judges the step at. ``anchor``: a ``where`` anchor id (None for a site\nwith no line, reached only statically). ``baseline_calls``: the baseline's calls of the\nstep's symbol there. ``coverage``: whether the baseline capture recorded it.",
+      "properties": {
+        "anchor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor"
+        },
+        "baseline_calls": {
+          "default": 0,
+          "title": "Baseline Calls",
+          "type": "integer"
+        },
+        "coverage": {
+          "default": "unknown",
+          "enum": [
+            "recorded",
+            "ran-not-recorded",
+            "not-run",
+            "unobservable",
+            "unknown"
+          ],
+          "title": "Coverage",
+          "type": "string"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "func": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Func"
+        }
+      },
+      "title": "VerifySite",
+      "type": "object"
+    }
+  },
+  "$id": "pymolt.plan/2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "adapted_from": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Adapted From"
+    },
+    "advisories": {
+      "items": {
+        "$ref": "#/$defs/PlannedAdvisory"
+      },
+      "title": "Advisories",
+      "type": "array"
+    },
+    "baseline_captured_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Baseline Captured At"
+    },
+    "baseline_trace_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Baseline Trace Path"
+    },
+    "baseline_trace_sha256": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Baseline Trace Sha256"
+    },
+    "changes": {
+      "items": {
+        "$ref": "#/$defs/PlannedFileChange"
+      },
+      "title": "Changes",
+      "type": "array"
+    },
+    "compile_findings": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Compile Findings",
+      "type": "array"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "dependencies": {
+      "items": {
+        "$ref": "#/$defs/PlannedDependency"
+      },
+      "title": "Dependencies",
+      "type": "array"
+    },
+    "environment_fingerprint": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Environment Fingerprint"
+    },
+    "environment_setup_fingerprint": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Environment Setup Fingerprint"
+    },
+    "files_scanned": {
+      "default": 0,
+      "title": "Files Scanned",
+      "type": "integer"
+    },
+    "impacts": {
+      "items": {
+        "$ref": "#/$defs/PlannedApiImpact"
+      },
+      "title": "Impacts",
+      "type": "array"
+    },
+    "manual": {
+      "items": {
+        "$ref": "#/$defs/PlannedManualItem"
+      },
+      "title": "Manual",
+      "type": "array"
+    },
+    "plan_id": {
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "python": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Python"
+    },
+    "risks": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PredictionReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "source_manifest": {
+      "title": "Source Manifest",
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/PlanStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "target_manifest_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Manifest Path"
+    },
+    "target_manifest_sha256": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Manifest Sha256"
+    },
+    "target_python": {
+      "title": "Target Python",
+      "type": "string"
+    },
+    "type_relocations": {
+      "items": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "title": "Type Relocations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "target_python",
+    "source_manifest"
+  ],
+  "title": "MigrationPlan",
+  "type": "object"
+}

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from pymolt.codemods import apply as apply_module
-from pymolt.codemods.apply import apply_pattern, apply_to_repo
+from pymolt.codemods.apply import apply_pattern, apply_patterns, apply_to_repo
 from pymolt.codemods.models import CodemodPattern
 
 
@@ -18,15 +18,6 @@ def _rewrite_import():
         old_qualname="flask.helpers.safe_join",
         new_qualname="werkzeug.utils.safe_join",
         kind="rewrite-import",
-        confidence="high",
-    )
-
-
-def _rename_call():
-    return CodemodPattern(
-        old_qualname="mypkg.old_api",
-        new_qualname="mypkg.new_api",
-        kind="rename-call",
         confidence="high",
     )
 
@@ -104,19 +95,74 @@ class TestApplyPattern:
         out, _ = apply_pattern(src, _rewrite_import())
         assert "# keep" in out
 
-    def test_rename_call_and_import(self):
-        src = "from mypkg import old_api\nr = old_api(1)\n"
-        out, sites = apply_pattern(src, _rename_call())
-        assert "import new_api" in out
-        assert "new_api(1)" in out
-        assert "old_api" not in out
-        assert sites >= 1
-
     def test_noop_when_absent(self):
         src = "y = 1 + 2\n"
         out, sites = apply_pattern(src, _rewrite_import())
         assert out == src
         assert sites == 0
+
+
+class TestRenameCallSplitsMultiNameImport:
+    """A rename that also MOVES modules must take only its own name with it —
+    co-imported names stay on the original module (as rewrite-import does)."""
+
+    MARKUP = CodemodPattern(
+        old_qualname="flask.Markup", new_qualname="markupsafe.Markup",
+        kind="rename-call", confidence="high",
+    )
+    ESCAPE = CodemodPattern(
+        old_qualname="flask.escape", new_qualname="markupsafe.escape",
+        kind="rename-call", confidence="high",
+    )
+
+    def test_co_imported_name_stays_on_original_module(self):
+        src = 'from flask import Markup, Flask\n\napp = Flask(__name__)\nx = Markup("<b>")\n'
+        out, _ = apply_pattern(src, self.MARKUP)
+        # markupsafe does not define Flask — dragging it along breaks the import
+        assert "from flask import Flask" in out
+        assert "from markupsafe import Markup" in out
+        assert "from markupsafe import Markup, Flask" not in out
+        assert ";" not in out
+
+    def test_split_keeps_every_untouched_name(self):
+        out, _ = apply_pattern("from flask import Markup, Flask, request\n", self.MARKUP)
+        assert "from flask import Flask, request" in out
+        assert "from markupsafe import Markup" in out
+
+    def test_split_preserves_the_alias_on_the_moved_name(self):
+        src = "from flask import Markup as M, Flask\nx = M(1)\n"
+        out, _ = apply_pattern(src, self.MARKUP)
+        assert "from markupsafe import Markup as M" in out
+        assert "from flask import Flask" in out
+        assert "M(1)" in out  # alias call site stays valid
+
+    def test_both_patterns_on_one_import_line_report_sites(self):
+        # The first rewrite must leave the second pattern's name on `flask`,
+        # otherwise the second silently matches nothing.
+        src = 'from flask import Markup, escape\na = Markup("x")\nb = escape("y")\n'
+        out, hits = apply_patterns(src, [self.MARKUP, self.ESCAPE])
+        assert [(p.old_qualname, n) for p, n in hits] == [
+            ("flask.Markup", 2),
+            ("flask.escape", 2),
+        ]
+        assert "from markupsafe import Markup" in out
+        assert "from markupsafe import escape" in out
+        assert "flask" not in out  # nothing left behind on the dead module
+
+    def test_same_module_rename_does_not_split(self):
+        # Only the leaf changes → rewrite in place, no extra import line.
+        p = CodemodPattern(
+            old_qualname="mypkg.old_api", new_qualname="mypkg.new_api",
+            kind="rename-call", confidence="high",
+        )
+        out, _ = apply_pattern("from mypkg import old_api, other\nr = old_api(1)\n", p)
+        assert "from mypkg import new_api, other" in out
+        assert "new_api(1)" in out
+
+    def test_sole_name_moves_the_line_itself(self):
+        out, _ = apply_pattern('from flask import Markup\nx = Markup("<b>")\n', self.MARKUP)
+        assert out.count("import") == 1
+        assert "from markupsafe import Markup" in out
 
 
 class TestRenameIsBindingAware:
@@ -142,9 +188,9 @@ class TestRenameIsBindingAware:
 
     def test_real_import_is_renamed(self):
         src = "from mypkg import old_api\nz = old_api(2)\n"
-        out, _ = apply_pattern(src, self.P)
-        assert "from mypkg import new_api" in out
-        assert "new_api(2)" in out
+        out, sites = apply_pattern(src, self.P)
+        assert out == "from mypkg import new_api\nz = new_api(2)\n"
+        assert sites == 2  # the import and the call
 
     def test_aliased_import_keeps_alias_call(self):
         src = "from mypkg import old_api as foo\nw = foo(3)\n"
@@ -182,14 +228,6 @@ class TestApplyToRepo:
         (venv / "lib.py").write_text("from flask.helpers import safe_join\n")
         return tmp_path
 
-    def test_dry_run_does_not_write(self, tmp_path):
-        repo = self._make_repo(tmp_path)
-        result = apply_to_repo(repo, [_rewrite_import()])
-        assert result.dry_run is True
-        assert result.files_changed == 1
-        # disk unchanged
-        assert "flask.helpers" in (repo / "app.py").read_text()
-
     def test_write_applies(self, tmp_path):
         repo = self._make_repo(tmp_path)
         os.chmod(repo / "app.py", 0o744)
@@ -212,17 +250,20 @@ class TestApplyToRepo:
         # good file still processed despite the broken one
         assert result.files_changed == 1
 
-    def test_dry_run_never_prepares_transaction_files(self, tmp_path, monkeypatch):
+    def test_dry_run_is_the_default_and_never_prepares_transaction_files(
+            self, tmp_path, monkeypatch):
         repo = self._make_repo(tmp_path)
 
         def unexpected_commit(_rewrites):
             raise AssertionError("dry-run must not prepare or commit files")
 
         monkeypatch.setattr(apply_module, "_commit_rewrites", unexpected_commit)
-        result = apply_to_repo(repo, [_rewrite_import()], write=False)
+        result = apply_to_repo(repo, [_rewrite_import()])  # no `write`: a dry run
 
+        assert result.dry_run is True
         assert result.files_changed == 1
         assert "flask.helpers" in (repo / "app.py").read_text()
+        assert not list(repo.glob(".*.pymolt-*.tmp"))
 
     def test_prepare_failure_leaves_every_source_untouched(self, tmp_path, monkeypatch):
         first = tmp_path / "a.py"

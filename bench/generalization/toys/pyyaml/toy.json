@@ -1,0 +1,145 @@
+{
+  "name": "pyyaml",
+  "ecosystem": "serialization",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "PyYAML==5.4.1",
+      "pytest"
+    ],
+    "build_constraints": [
+      "Cython<3"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "PyYAML==6.0.2",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "PyYAML"
+  ],
+  "target_manifest": [
+    "PyYAML==6.0.2"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/settings.py": "\"\"\"Read and write the YAML settings files the app ships with.\"\"\"\nimport warnings\n\nimport yaml\n\ntry:  # the libyaml-backed loader when PyYAML was built with it\n    from yaml import CSafeLoader as FastSafeLoader\nexcept ImportError:\n    from yaml import SafeLoader as FastSafeLoader\n\n\ndef load_settings(text):\n    return yaml.load(text)\n\n\ndef load_settings_quiet(text):\n    \"\"\"Same as load_settings, without the no-Loader warning PyYAML 5 prints.\"\"\"\n    with warnings.catch_warnings():\n        warnings.simplefilter(\"ignore\", yaml.YAMLLoadWarning)\n        return load_settings(text)\n\n\ndef load_documents(text):\n    return list(yaml.load_all(text))\n\n\ndef load_trusted(text):\n    return yaml.load(text, Loader=yaml.FullLoader)\n\n\ndef load_fast(text):\n    return yaml.load(text, Loader=FastSafeLoader)\n\n\ndef dump_settings(data):\n    return yaml.dump(data, default_flow_style=False)\n\n\ndef dump_ordered(data):\n    return yaml.dump(data, sort_keys=False, allow_unicode=True)\n\n\ndef dump_safe(data):\n    return yaml.safe_dump(data, indent=4)\n\n\ndef merge(base, override):\n    merged = dict(base)\n    merged.update(override or {})\n    return merged\n",
+    "tests/__init__.py": "",
+    "tests/test_settings.py": "import datetime\n\nfrom app import settings\n\nTEXT = \"\"\"\\\nname: demo\nretries: 3\nratio: 0.5\nlaunch: 2024-01-02\ntags: [a, b]\ndb: {host: localhost, port: 5432}\n\"\"\"\n\nEXPECTED = {\n    \"name\": \"demo\",\n    \"retries\": 3,\n    \"ratio\": 0.5,\n    \"launch\": datetime.date(2024, 1, 2),\n    \"tags\": [\"a\", \"b\"],\n    \"db\": {\"host\": \"localhost\", \"port\": 5432},\n}\n\n\ndef test_load_variants_agree():\n    assert settings.load_settings(TEXT) == EXPECTED\n    assert settings.load_settings_quiet(TEXT) == EXPECTED\n    assert settings.load_trusted(TEXT) == EXPECTED\n    assert settings.load_fast(TEXT) == EXPECTED\n\n\ndef test_load_documents():\n    docs = settings.load_documents(\"a: 1\\n---\\nb: 2\\n\")\n    assert docs == [{\"a\": 1}, {\"b\": 2}]\n\n\ndef test_dump_default_style():\n    out = settings.dump_settings({\"b\": 1, \"a\": {\"x\": [1, 2]}})\n    assert out == \"a:\\n  x:\\n  - 1\\n  - 2\\nb: 1\\n\"\n\n\ndef test_dump_ordered_keeps_insertion_order():\n    out = settings.dump_ordered({\"zeta\": 1, \"alpha\": \"caf\\u00e9\"})\n    assert out == \"zeta: 1\\nalpha: caf\\u00e9\\n\"\n\n\ndef test_dump_safe_and_roundtrip():\n    out = settings.dump_safe({\"k\": {\"a\": 1}})\n    assert out == \"k:\\n    a: 1\\n\"\n    assert settings.load_fast(out) == {\"k\": {\"a\": 1}}\n\n\ndef test_merge():\n    assert settings.merge({\"a\": 1}, {\"b\": 2}) == {\"a\": 1, \"b\": 2}\n    assert settings.merge({\"a\": 1}, None) == {\"a\": 1}\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/settings.py",
+      "old": "    return yaml.load(text)\n",
+      "new": "    return yaml.safe_load(text)\n"
+    },
+    {
+      "file": "app/settings.py",
+      "old": "        warnings.simplefilter(\"ignore\", yaml.YAMLLoadWarning)",
+      "new": "        warnings.simplefilter(\"ignore\", RuntimeWarning)"
+    },
+    {
+      "file": "app/settings.py",
+      "old": "    return list(yaml.load_all(text))",
+      "new": "    return list(yaml.safe_load_all(text))"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/settings.py",
+          "append": "\n\ndef load_override(raw):\n    \"\"\"Parse an override file; a value that cannot be loaded means \"no override\".\"\"\"\n    try:\n        return yaml.load(raw)\n    except TypeError:\n        return None\n"
+        },
+        {
+          "file": "tests/test_settings.py",
+          "append": "\n\ndef test_load_override_runs():\n    settings.load_override(\"retries: 5\\n\")\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "yaml.load"
+      ]
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "yaml.load",
+      "kind": "SIGNATURE",
+      "param": "Loader",
+      "site": "app/settings.py:13",
+      "breaks": "TypeError: load() missing 1 required positional argument: 'Loader'",
+      "successor": null,
+      "fixable": "manual",
+      "source": "PyYAML 6.0 changelog: Loader is a required argument of load/load_all (deprecated with YAMLLoadWarning since 5.1)",
+      "note": "The right Loader is a judgment call (safe_load vs FullLoader); the app only needs plain data so the manual migration picks safe_load. Control: yaml.load(s, Loader=yaml.FullLoader) at load_trusted and yaml.load(s, Loader=FastSafeLoader) at load_fast are unchanged and must NOT be flagged.",
+      "verified": {
+        "old": "5.4.1 (py3.11): works with the FullLoader-like default, emits YAMLLoadWarning ('calling yaml.load() without Loader=... is deprecated, as the default Loader is unsafe')",
+        "new": "6.0.2 (py3.12): TypeError: load() missing 1 required positional argument: 'Loader'"
+      }
+    },
+    {
+      "symbol": "yaml.load_all",
+      "kind": "SIGNATURE",
+      "param": "Loader",
+      "site": "app/settings.py:24",
+      "breaks": "TypeError: load_all() missing 1 required positional argument: 'Loader'",
+      "successor": null,
+      "fixable": "manual",
+      "source": "PyYAML 6.0 changelog (same change as load)",
+      "verified": {
+        "old": "5.4.1: works, YAMLLoadWarning ('calling yaml.load_all() without Loader=...')",
+        "new": "6.0.2: TypeError as above; yaml.safe_load_all returns the same documents"
+      }
+    },
+    {
+      "symbol": "yaml.YAMLLoadWarning",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/settings.py:19",
+      "breaks": "AttributeError: module 'yaml' has no attribute 'YAMLLoadWarning' (when load_settings_quiet runs)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "PyYAML 6.0 (the warning class went away together with the no-Loader fallback)",
+      "verified": {
+        "old": "5.4.1: yaml.YAMLLoadWarning exists (a RuntimeWarning subclass); filtering it silences the load warning",
+        "new": "6.0.2: attribute missing"
+      }
+    },
+    {
+      "symbol": "yaml.load",
+      "kind": "SIGNATURE",
+      "param": "Loader",
+      "scenario": "change",
+      "site": "app/settings.py:56",
+      "breaks": "TypeError caught by the app's own try/except, so load_override() silently returns None instead of the parsed mapping; the app test only checks that the call does not crash",
+      "successor": null,
+      "fixable": "manual",
+      "source": "PyYAML 6.0 changelog",
+      "verified": {
+        "old": "load_override('retries: 5') -> {'retries': 5} (YAMLLoadWarning)",
+        "new": "load_override('retries: 5') -> None"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "yaml.load",
+      "category": "YAMLLoadWarning",
+      "from_c": false
+    },
+    {
+      "symbol": "yaml.load_all",
+      "category": "YAMLLoadWarning",
+      "from_c": false
+    }
+  ],
+  "notes": "YAMLLoadWarning is raised by yaml/__init__.py::load_warning via Python-level warnings.warn (verified in the 5.4.1 source), so S2 does NOT bite here. libyaml/CLoader is involved only as a behaviour difference, not a warning: PyYAML 5.4.1 has no py3.11 wheel, so the old env is built from sdist and, without libyaml headers on the host, has no CSafeLoader (`yaml.__with_libyaml__` False), while 6.0.2's wheel bundles libyaml (True). app/settings.py's `try: from yaml import CSafeLoader ... except ImportError: SafeLoader` therefore picks SafeLoader on old and CSafeLoader on new; every test input loads to identical data, but the value of FastSafeLoader.__name__ differs. No warning of any kind comes from C in either env. ENV BUILD NOTE: `uv pip install PyYAML==5.4.1` on py3.11 fails to build with the default isolated build (Cython 3: AttributeError: 'build_ext' object has no attribute 'cython_sources'); it installs with a build constraint, `UV_BUILD_CONSTRAINT=<file containing 'Cython<3'>`. Not reproduced / dropped (verified identical on 5.4.1 and 6.0.2 across ~150 dump/load probes): yaml.dump default sort order, default_flow_style (changed in 5.1, both sides are already after that), sort_keys, indent/width/allow_unicode/canonical, safe_dump of tuples/sets/objects, FullLoader python/* tags, implicit resolvers (octal 010 -> 8 in both). The ONLY 5.4 -> 6.0 differences found are the Loader requirement and the removal of YAMLLoadWarning. Controls that must stay clean: load_trusted (Loader=yaml.FullLoader), load_fast, dump_settings(default_flow_style=False), dump_ordered(sort_keys=False), dump_safe. The change scenario adds a yaml.load(raw) with no Loader inside try/except TypeError; the manual migration edits are phrased so they do not touch it, so after migration it behaves differently (dict -> None) while its test stays green. Identical-behaviour check: original on 5.4.1 and migrated app (safe_load / safe_load_all) on 6.0.2 print the same repr for all loaders and dumpers, except FastSafeLoader name."
+}

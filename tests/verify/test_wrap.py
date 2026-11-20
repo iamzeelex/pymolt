@@ -50,7 +50,7 @@ def test_wraps_function_and_captures_args_result_site(dep):
     sink, _ = _run(["wdep.jsonify"], body, source=__name__)
     (rec,) = sink.records.values()
     assert rec["qualname"] == "wdep.jsonify"
-    assert rec["inputs"] == {"bound": {"x": {"__dict__": [["a", 1]]}}}
+    assert rec["inputs"] == {"bound": {"x": {"__dict__": [["a", 1]]}}, "defaulted": []}
     assert rec["result"] == {"__dict__": [["j", {"__dict__": [["a", 1]]}]]}
     assert rec["where"]["file"].endswith("test_wrap.py")
 
@@ -215,3 +215,107 @@ def test_import_hook_wraps_module_imported_after_start(tmp_path):
         sys.modules.pop("lhd", None)
         sys.path.remove(str(tmp_path))
     assert any(r["qualname"] == "lhd.greet" for r in sink.records.values())
+
+
+# ── phase 2: dur / tid / tally, typed raises, aliases ────────────────────────
+
+_P2_SRC = """
+class DepError(Exception):
+    pass
+
+def ok(x, y=1):
+    return x
+
+def fail():
+    raise DepError("no")
+
+def gen(n):
+    yield n
+"""
+
+
+class _P2Sink:
+    def __init__(self, sample=True):
+        self.sample = sample
+        self.events = []
+        self.tallies = []
+
+    def admit(self, force=False):
+        return self.sample or force
+
+    def on_call(self, qualname, inputs, site=None):
+        pass
+
+    def on_return(self, qualname, inputs, result_obj, site=None, admitted=False, sym=None,
+                  symq=None, own=None, dur=None, tid=None):
+        self.events.append(("return", sym, dur, tid))
+
+    def on_raise(self, qualname, inputs, exc_typename, site=None, admitted=False, sym=None,
+                 symq=None, own=None, dur=None, tid=None):
+        self.events.append(("raise", exc_typename, dur, tid))
+
+    def tally(self, qualname, sym, site, kind, raised=None, dur=None):
+        self.tallies.append((sym, kind, raised, dur is not None))
+
+
+@pytest.fixture
+def p2dep():
+    mod = types.ModuleType("wdep2")
+    exec(compile(_P2_SRC, "<wdep2>", "exec"), mod.__dict__)
+    sys.modules["wdep2"] = mod
+    yield mod
+    sys.modules.pop("wdep2", None)
+
+
+def _p2(symbols, body, sink, **kw):
+    be = WrapBackend(symbols, sink, source=__name__, **kw)
+    be.start()
+    try:
+        body()
+    finally:
+        be.stop()
+    return be
+
+
+def test_wrap_reports_dur_tid_and_the_typed_raise(p2dep):
+    import threading
+
+    sink = _P2Sink()
+
+    def body():
+        p2dep.ok(1)
+        with pytest.raises(p2dep.DepError):
+            p2dep.fail()
+        list(p2dep.gen(2))
+
+    _p2(["wdep2.ok", "wdep2.fail", "wdep2.gen"], body, sink)
+    (ok, fail, gen) = sink.events
+    assert ok[0] == "return" and isinstance(ok[2], float) and ok[3] == threading.get_ident()
+    assert fail[:2] == ("raise", "wdep2.DepError")     # module.Qualname, as monitoring labels it
+    assert gen[1] == "wdep2.gen" and gen[2] is None    # a generator's creation is not its work
+
+
+def test_wrap_tallies_unsampled_calls(p2dep):
+    sink = _P2Sink(sample=False)
+    _p2(["wdep2.ok"], lambda: [p2dep.ok(i) for i in range(3)], sink)
+    assert sink.events == []
+    assert sink.tallies == [("wdep2.ok", "return", None, True)] * 3
+
+
+def test_wrap_patches_module_global_aliases_when_asked(p2dep):
+    user = types.ModuleType("wdep2_user")
+    exec(compile("from wdep2 import ok as aliased\n", "<wdep2_user>", "exec"), user.__dict__)
+    sys.modules["wdep2_user"] = user
+    original = p2dep.ok
+    try:
+        sink = _P2Sink()
+        be = _p2(["wdep2.ok"], lambda: (user.aliased(1), p2dep.ok(2)), sink,
+                 patch_aliases=True)
+        assert [e[1] for e in sink.events] == ["wdep2.ok", "wdep2.ok"]
+        assert user.aliased is original and p2dep.ok is original   # restored on stop
+        sink = _P2Sink()
+        _p2(["wdep2.ok"], lambda: user.aliased(1), sink)          # default: alias untouched
+        assert sink.events == []
+        assert be.skipped == []
+    finally:
+        sys.modules.pop("wdep2_user", None)

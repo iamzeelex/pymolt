@@ -1,11 +1,11 @@
 from pymolt.core.graph import DependencyGraph
-from pymolt.core.serialize import serialize_graph, deserialize_graph
+from pymolt.core.serialize import deserialize_graph, serialize_graph
 
 
 def test_graph_serialization(sample_graph: DependencyGraph):
-    json_str = serialize_graph(sample_graph)
-    loaded_graph = deserialize_graph(json_str)
-    
-    assert loaded_graph.roots == sample_graph.roots
-    assert "requests" in loaded_graph.nodes
-    assert loaded_graph.nodes["requests"].version == "2.31.0"
+    loaded_graph = deserialize_graph(serialize_graph(sample_graph))
+
+    # every field survives the round trip: nodes (mode, provenance, mapping, direct, declared
+    # requirement), edges, roots, resolution quality and fixation
+    assert loaded_graph == sample_graph
+    assert loaded_graph.edges[0].target == "idna"

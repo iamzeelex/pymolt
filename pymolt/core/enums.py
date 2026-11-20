@@ -46,33 +46,3 @@ class Confidence(str, Enum):
     FLOATING = "floating"    # moving (python:3, latest, no tag)
     INFERRED = "inferred"    # derived, e.g. an ARG default — overridable
     UNKNOWN = "unknown"      # could not be determined (digest, private base, dynamic)
-
-
-# ── verify/ (Component 6) ────────────────────────────────────────────────────
-class Verdict(str, Enum):
-    """Per-node behavioral verdict. The component decides nothing about migration;
-    it states whether behavior is empirically stable, changed, or undecidable."""
-    BEHAVIOR_STABLE = "behavior-stable"
-    BEHAVIOR_CHANGED = "behavior-changed"
-    NEEDS_ACTION = "needs-action"
-
-
-class EvidenceLevel(str, Enum):
-    """Where the cascade reached its verdict — the artifact's own trust label."""
-    TESTS = "tests"
-    GOLDEN = "golden"
-    TRACE = "trace"
-
-
-class TraceScope(str, Enum):
-    """Run-level breadth of boundary tracing. An explicit input, never inferred."""
-    BLIND_SPOTS = "blind-spots"  # trace only what tests/golden left unexercised (default)
-    FULL = "full"                # trace everything, even covered+settled nodes (audit)
-
-
-class TestStatus(str, Enum):
-    """Outcome of the L1 test level for a node, comparing the suite under both versions."""
-    __test__ = False  # not a pytest test class (dunder is excluded from Enum members)
-    PASS = "pass"                # suite touching the node passes under both versions
-    FAIL = "fail"                # suite differs / fails under the new version
-    INCONCLUSIVE = "inconclusive"  # suite does not exercise the node confidently

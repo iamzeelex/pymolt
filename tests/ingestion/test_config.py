@@ -89,7 +89,6 @@ def test_audit_uses_saved_config(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
     
     # Mock orchestrate_ingestion to avoid running the real heavy resolver
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     
     mock_orchestrate = MagicMock()
@@ -146,7 +145,6 @@ def test_audit_fallback_warning(tmp_path, monkeypatch):
     # No config file is present in tmp_path
     (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
     
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph
     from pymolt.core.layers import IngestionReport
@@ -185,7 +183,6 @@ def test_audit_with_constraints(tmp_path, monkeypatch):
     constraint_file = tmp_path / "constraints.txt"
     constraint_file.write_text("pandas<2.0\n", encoding="utf-8")
     
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph
     from pymolt.core.layers import IngestionReport
@@ -204,13 +201,14 @@ def test_audit_with_constraints(tmp_path, monkeypatch):
         warnings=[]
     )
     
-    captured_constraints_content = None
+    # The constraint content each call saw, in call order (the file may be a temporary one).
+    seen_constraints: list[str | None] = []
 
     def mock_orchestrate_impl(*args, **kwargs):
-        nonlocal captured_constraints_content
         constraint_file = kwargs.get("constraint_file")
-        if constraint_file and Path(constraint_file).exists():
-            captured_constraints_content = Path(constraint_file).read_text(encoding="utf-8")
+        seen_constraints.append(
+            Path(constraint_file).read_text(encoding="utf-8")
+            if constraint_file and Path(constraint_file).exists() else None)
         return dummy_graph, dummy_report
 
     mock_orchestrate = MagicMock(side_effect=mock_orchestrate_impl)
@@ -226,17 +224,19 @@ def test_audit_with_constraints(tmp_path, monkeypatch):
     ])
     assert result.exit_code == 0
     
-    # Verify the target resolution call passed constraint_file Path object
+    # The constraints shape the target resolution only: the baseline is today's environment.
     assert mock_orchestrate.call_count == 2
-    assert captured_constraints_content is not None
-    assert "pandas<2.0" in captured_constraints_content
+    baseline_seen, target_seen = seen_constraints
+    assert baseline_seen is None
+    target_call = mock_orchestrate.call_args_list[1].kwargs
+    assert target_call["base_python"] == target_py and target_call["force_recompile"] is True
+    assert target_seen is not None and "pandas<2.0" in target_seen
 
 
 def test_audit_json_output_is_pure_json(tmp_path, monkeypatch):
     # No config present: --json must still emit pure JSON (warning suppressed).
     (tmp_path / "requirements.txt").write_text("anyio==4.3.0\n", encoding="utf-8")
 
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph, Node
     from pymolt.core.layers import IngestionReport
@@ -334,7 +334,6 @@ def test_audit_risk_in_json(tmp_path, monkeypatch):
     (tmp_path / "requirements.txt").write_text("vulnlib==1.0\n", encoding="utf-8")
 
     import pymolt.adapters.pypi_metadata as pypi_mod
-    import pymolt.interfaces.cli.commands as commands
     import pymolt.risk.osv as osv_mod
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph, Node
@@ -373,19 +372,23 @@ def test_audit_risk_in_json(tmp_path, monkeypatch):
 
 
 def test_get_eol_versions():
-    from pymolt.interfaces.cli.commands import get_eol_versions, format_eol_status
+    from pymolt.interfaces.cli.commands import get_eol_versions
     eol_map = get_eol_versions()
     assert isinstance(eol_map, dict)
-    assert "3.6" in eol_map
     assert eol_map["3.6"] == "2021-12-23"
-    
-    # Test format_eol_status for EOL
-    eol_status_3_6 = format_eol_status("3.6", eol_map)
-    assert "EOL since" in eol_status_3_6
-    
-    # Test format_eol_status for supported
-    eol_status_3_13 = format_eol_status("3.13", eol_map)
-    assert "Supported until" in eol_status_3_13 or "EOL soon" in eol_status_3_13 or "EOL since" in eol_status_3_13
+
+
+def test_format_eol_status_names_each_state():
+    from datetime import date, timedelta
+
+    from pymolt.interfaces.cli.commands import format_eol_status
+    soon = (date.today() + timedelta(days=90)).isoformat()
+    later = (date.today() + timedelta(days=730)).isoformat()
+    eol_map = {"3.6": "2021-12-23", "3.12": soon, "3.13": later}
+    assert format_eol_status("3.6", eol_map) == " [red](EOL since 2021-12-23)[/red]"
+    assert format_eol_status("3.12.4", eol_map) == f" [yellow](EOL soon: {soon})[/yellow]"
+    assert format_eol_status("3.13", eol_map) == f" [green](Supported until {later})[/green]"
+    assert format_eol_status("3.99", eol_map) == ""          # not in the table: no claim
 
 
 def test_audit_interactive_overrides(tmp_path, monkeypatch):
@@ -407,7 +410,6 @@ def test_audit_interactive_overrides(tmp_path, monkeypatch):
         
     (tmp_path / "requirements.txt").write_text("requests==2.31.0\n", encoding="utf-8")
     
-    import pymolt.interfaces.cli.commands as commands
     from unittest.mock import MagicMock
     from pymolt.core.graph import DependencyGraph, Node
     from pymolt.core.layers import IngestionReport

@@ -12,9 +12,9 @@
     {
       "command": "status",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "status",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json"
       ],
       "repeats": 5,
@@ -34,9 +34,9 @@
     {
       "command": "scan",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "scan",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json"
       ],
       "repeats": 5,
@@ -56,10 +56,10 @@
     {
       "command": "contract map",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "contract",
         "map",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/pyfolio",
+        "tests/artifacts/pyfolio",
         "--json"
       ],
       "repeats": 5,
@@ -79,9 +79,9 @@
     {
       "command": "status",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "status",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json"
       ],
       "repeats": 5,
@@ -101,9 +101,9 @@
     {
       "command": "scan",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "scan",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json"
       ],
       "repeats": 5,
@@ -123,10 +123,10 @@
     {
       "command": "contract map",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "contract",
         "map",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/flasgger",
+        "tests/artifacts/flasgger",
         "--json"
       ],
       "repeats": 5,
@@ -146,9 +146,9 @@
     {
       "command": "status",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "status",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json"
       ],
       "repeats": 5,
@@ -168,9 +168,9 @@
     {
       "command": "scan",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "scan",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json"
       ],
       "repeats": 5,
@@ -190,10 +190,10 @@
     {
       "command": "contract map",
       "argv": [
-        "/Users/zeelex/Documents/projects/python_migrator/.venv/bin/pymolt",
+        ".venv/bin/pymolt",
         "contract",
         "map",
-        "/Users/zeelex/Documents/projects/python_migrator/tests/artifacts/blaze",
+        "tests/artifacts/blaze",
         "--json"
       ],
       "repeats": 5,

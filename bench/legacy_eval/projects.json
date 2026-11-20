@@ -1,0 +1,367 @@
+{
+ "_doc": "Per-project inputs for bench/legacy_eval/run.py. {out} expands to the absolute <out>/<project> dir. Steps are shell strings, or {sh, optional} or {filter_requirements}. Derived from the manual runs in bench/legacy_eval/<project>.md.",
+ "defaults": {
+  "image": "python:3.6",
+  "platform": "linux/amd64",
+  "base_python": "3.6",
+  "target_python": "3.12",
+  "phase_timeout_min": 20,
+  "install_timeout_min": 60
+ },
+ "projects": {
+  "hyper": {
+   "manifests": {
+    "requirements-pymolt-eval.txt": "h2>=2.4,<3.0,!=2.5.0\nhyperframe>=3.2,<4.0\nrfc3986>=1.1.0,<2.0\nbrotlipy>=0.7.0,<1.0\n"
+   },
+   "container_install": [
+    "pip install -r requirements-pymolt-eval.txt pytest \"requests<2.28\" mock pyOpenSSL service_identity"
+   ],
+   "ready_probe": "python -c 'import pytest, h2'",
+   "setup": {
+    "manifest": "requirements-pymolt-eval.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider",
+    "--deselect",
+    "test/test_http20.py::TestHTTP20Connection::test_useful_error_with_no_protocol",
+    "--deselect",
+    "test/test_hyper.py::TestHTTP20Adapter::test_adapter_accept_client_certificate",
+    "--deselect",
+    "test/test_hyper.py::TestHTTP20Adapter::test_adapter_respects_disabled_ca_verification"
+   ],
+   "test_args": [
+    "test/test_http20.py",
+    "test/test_http11.py",
+    "test/test_headers.py",
+    "test/test_abstraction.py",
+    "test/test_hyper.py",
+    "test/test_import.py",
+    "test/test_windowmanager.py",
+    "test/test_cli.py"
+   ],
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    "uv pip install --python .venv-target/bin/python -r requirements-target.txt",
+    "uv pip install --python .venv-target/bin/python pytest mock requests pyOpenSSL service_identity setuptools"
+   ],
+   "artifact": "tests/artifacts/hyper",
+   "host_prep": [],
+   "env": {},
+   "post_env": {},
+   "target_pytest_flags": [
+    "--confcutdir=."
+   ],
+   "import_module": "hyper"
+  },
+  "vibora": {
+   "manifests": {},
+   "container_install": [
+    "pip install -r requirements.txt pytest ujson==1.35 uvloop==0.10.2 aiohttp requests jinja2 cryptography && python build.py"
+   ],
+   "ready_probe": "python -c 'import vibora.utils'",
+   "setup": {
+    "manifest": "requirements.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider"
+   ],
+   "test_args": [
+    "tests/headers.py",
+    "tests/router",
+    "tests/schemas",
+    "tests/forms.py",
+    "tests/cache.py",
+    "tests/hooks.py",
+    "tests/limits.py",
+    "tests/responses.py",
+    "tests/blueprints.py",
+    "tests/components.py",
+    "tests/exceptions.py",
+    "tests/streaming.py",
+    "tests/subdomains.py",
+    "tests/timeouts.py",
+    "tests/templates",
+    "tests/client/interface.py",
+    "tests/client/streaming.py"
+   ],
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    {
+     "sh": "uv pip install --python .venv-target/bin/python -r requirements-target.txt",
+     "optional": true
+    },
+    "uv pip install --python .venv-target/bin/python cython==0.29.37 setuptools wheel pytest",
+    ".venv-target/bin/python build.py"
+   ],
+   "artifact": "tests/artifacts/vibora",
+   "host_prep": [],
+   "env": {},
+   "post_env": {},
+   "target_pytest_flags": [
+    "--confcutdir=."
+   ],
+   "import_module": "vibora"
+  },
+  "theano": {
+   "manifests": {},
+   "container_install": [
+    "pip install numpy scipy six sympy nose parameterized pytest cython requests && pip install -e ."
+   ],
+   "ready_probe": "python -c 'import theano'",
+   "setup": {
+    "manifest": "requirements.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider"
+   ],
+   "test_args": [
+    "theano/scalar/tests"
+   ],
+   "post_env": {
+    "GIT_DIR": "/nonexistent"
+   },
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    "uv pip install --python .venv-target/bin/python -r requirements-target.txt",
+    "uv pip install --python .venv-target/bin/python pytest"
+   ],
+   "artifact": "tests/artifacts/theano",
+   "host_prep": [],
+   "env": {},
+   "target_pytest_flags": [
+    "--confcutdir=."
+   ],
+   "import_module": "theano"
+  },
+  "lasagne": {
+   "manifests": {
+    "requirements-pymolt-eval.txt": "numpy\nscipy\nsix\n"
+   },
+   "container_install": [
+    "pip install numpy scipy mock pytest pytest-cov Theano pep8 pytest-pep8"
+   ],
+   "ready_probe": "python -c 'import theano, pytest'",
+   "setup": {
+    "manifest": "requirements-pymolt-eval.txt"
+   },
+   "pytest_flags": [
+    "-o",
+    "addopts=",
+    "-p",
+    "no:pep8",
+    "-p",
+    "no:cacheprovider"
+   ],
+   "test_args": [
+    "lasagne/tests/test_init.py",
+    "lasagne/tests/test_utils.py",
+    "lasagne/tests/test_nonlinearities.py",
+    "lasagne/tests/layers/test_dense.py"
+   ],
+   "post_env": {
+    "GIT_DIR": "/nonexistent"
+   },
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    "uv pip install --python .venv-target/bin/python -r requirements-target.txt",
+    "uv pip install --python .venv-target/bin/python pytest mock"
+   ],
+   "artifact": "tests/artifacts/lasagne",
+   "host_prep": [],
+   "env": {},
+   "target_pytest_flags": [
+    "--confcutdir=."
+   ],
+   "import_module": "lasagne"
+  },
+  "alphalens": {
+   "manifests": {
+    "requirements-pymolt-eval.txt": "matplotlib>=1.4.0\nnumpy>=1.9.1\npandas>=0.18.0\nscipy>=0.14.0\nseaborn>=0.6.0\nstatsmodels>=0.6.1\nIPython>=3.2.3\nempyrical>=0.5.0\nnose>=1.3.7\nparameterized>=0.5.0\npytest\n"
+   },
+   "host_prep": [
+    "uv venv --clear {out}/wheelenv --python 3.11",
+    "uv pip install --python {out}/wheelenv/bin/python pip setuptools wheel",
+    "{out}/wheelenv/bin/python -m pip wheel --no-deps --no-build-isolation empyrical==0.5.5 trading-calendars==2.1.1 -w {out}/wheels"
+   ],
+   "env": {
+    "UV_FIND_LINKS": "{out}/wheels"
+   },
+   "container_install": [
+    "pip install -r requirements-pymolt-eval.txt && pip install -e .",
+    "pip install pandas==0.25.3 numpy==1.16.6 \"statsmodels<0.12\" \"scipy<1.6\" \"matplotlib<3.3\""
+   ],
+   "ready_probe": "python -c 'import alphalens, pandas'",
+   "setup": {
+    "manifest": "requirements-pymolt-eval.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider",
+    "--deselect",
+    "alphalens/tests/test_performance.py::PerformanceTestCase::test_factor_returns_1",
+    "--deselect",
+    "alphalens/tests/test_performance.py::PerformanceTestCase::test_factor_returns_4",
+    "--deselect",
+    "alphalens/tests/test_performance.py::PerformanceTestCase::test_information_coefficient_2",
+    "--deselect",
+    "alphalens/tests/test_performance.py::PerformanceTestCase::test_information_coefficient_3",
+    "--deselect",
+    "alphalens/tests/test_performance.py::PerformanceTestCase::test_mean_information_coefficient_2",
+    "--deselect",
+    "alphalens/tests/test_performance.py::PerformanceTestCase::test_mean_information_coefficient_3"
+   ],
+   "test_args": [
+    "alphalens/tests/test_performance.py",
+    "alphalens/tests/test_utils.py"
+   ],
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    {
+     "filter_requirements": {
+      "src": "requirements-target.txt",
+      "dst": ".pymolt-bench-target.txt",
+      "drop": [],
+      "strip_hashes": true
+     }
+    },
+    "uv pip install --python .venv-target/bin/python -r .pymolt-bench-target.txt",
+    "uv pip install --python .venv-target/bin/python six pytest parameterized"
+   ],
+   "artifact": "tests/artifacts/alphalens",
+   "post_env": {},
+   "target_pytest_flags": [
+    "--confcutdir=."
+   ],
+   "import_module": "alphalens"
+  },
+  "zipline": {
+   "manifests": {
+    "requirements-pymolt-eval.txt": "# Incompatible with earlier PIP versions\npip>=7.1.0\n# bcolz fails to install if this is not in the build_requires.\nsetuptools>18.0\n\nLogbook>=0.12.5\n\n# Command line interface helper\nclick>=4.0.0\n\n# Language utilities\nsix>=1.10.0\ncontextlib2>=0.4.0; python_version < \"3.0\"\npython-interface>=1.5.3\nmultipledispatch>=0.6.0\n# FUNctional programming utilities\ntoolz>=0.8.2\n\n# Scientific Libraries\nnumpy>=1.11.3\npandas>=0.18.1\npandas-datareader>=0.2.1\nscipy>=0.17.1\n# Needed for parts of pandas.stats\npatsy>=0.4.0\nstatsmodels>=0.6.1\n\n# For financial risk calculations\nempyrical>=0.5.0\n\n# Dates/times/calendars\npytz>=2018.5\n# Country Codes\niso3166>=0.9\ntrading-calendars>=1.6.1\npython-dateutil>=2.4.2\n\n# For fetching remote data\nrequests>=2.9.1\n\n# Asset writer and finder\nsqlalchemy>=1.0.8\n# For asset db management\nalembic>=0.7.7\n\n# On disk storage format for pipeline data.\n# On disk storage format for pricing data.\nh5py>=2.7.1\ntables>=3.4.3\n\n# Performance\nlru-dict>=1.1.4\nintervaltree>=2.1.0\n# faster array ops.\nbottleneck>=1.0.0\n\n# Graph algorithms used by zipline.pipeline\nnetworkx>=1.9.1\n# NumericalExpression pipeline terms.\nnumexpr>=2.6.1\n\n# Currency Codes\niso4217>=1.6.20180829\nCython>=0.25.2\nnumpy>=1.11.3\nsetuptools-scm  # for bcolz\n",
+    "lock-slim-pymolt-eval.txt": "alembic==1.4.2\nbcolz==1.2.1\nbottleneck==1.3.2\ncertifi==2020.6.20\nchardet==3.0.4\nclick==7.1.2\ncycler==0.10.0\ncython==0.29.21\ncytoolz==0.10.1\ndask[dataframe]==2.10.1\ndecorator==4.4.2\nempyrical==0.5.3\nflask-cors==3.0.8\nflask==1.1.2\nfsspec==0.8.0\nh5py==2.10.0\nidna==2.10\nimportlib-metadata==1.7.0\nintervaltree==3.1.0\niso3166==1.0.1\niso4217==1.6.20180829\nitsdangerous==1.1.0\njinja2==2.11.2\nkiwisolver==1.2.0\nlocket==0.2.0\nlogbook==1.5.3\nlru-dict==1.1.6\nlxml==4.5.2\nmako==1.1.3\nmarkupsafe==1.1.1\nmatplotlib==3.3.0\nmock==4.0.2\nmultipledispatch==0.6.0\nnetworkx==1.11\nnumexpr==2.7.1\nnumpy==1.19.1\npackaging==20.4\npandas-datareader==0.8.1\npandas==0.22.0\npartd==1.1.0\npatsy==0.5.1\npillow==7.2.0\nport_for==0.3.1\npsutil==5.7.2\npygments==2.6.1\npyparsing==2.4.7\npython-dateutil==2.8.1\npython-editor==1.0.4\npython-interface==1.6.0\npytz==2020.1\npyyaml==5.3.1\nrequests==2.24.0\nresponses==0.10.15\nscipy==1.5.2\nsetuptools-scm==4.1.2\nsix==1.15.0\nsortedcontainers==2.2.2\nsqlalchemy==1.3.18\nstatsmodels==0.11.1\ntables==3.6.1\ntestfixtures==6.14.1\ntoolz==0.10.0\ntrading-calendars==1.11.8\nurllib3==1.25.10\nwerkzeug==1.0.1\nzipp==3.1.0\ncoverage==5.2.1\nflake8==3.8.3\nnose-ignore-docstring==0.2\nnose-parameterized==0.6.0\nnose-timer==1.0.0\nnose==1.3.7\n",
+    "inst-pymolt-eval.sh": "cd /work\nexport DISABLE_BCOLZ_AVX2=1 MAKEFLAGS=-j1\npip install -q --only-binary :all: -r lock-slim-pymolt-eval.txt pytest 2>&1 | tail -3\n# per-package fallback: build sdists one at a time\nwhile read l; do [ -z \"$l\" ] && continue; pip install -q --no-deps \"$l\" 2>&1 | tail -1; done < lock-slim-pymolt-eval.txt\npip install -q pytest\npip list | wc -l\n"
+   },
+   "host_prep": [
+    "uv venv --clear {out}/wheelenv --python 3.11",
+    "uv pip install --python {out}/wheelenv/bin/python pip setuptools wheel",
+    "{out}/wheelenv/bin/python -m pip wheel --no-deps --no-build-isolation empyrical==0.5.5 trading-calendars==2.1.1 -w {out}/wheels"
+   ],
+   "env": {
+    "UV_FIND_LINKS": "{out}/wheels"
+   },
+   "container_install": [
+    "sh /work/inst-pymolt-eval.sh",
+    "python setup.py build_ext --inplace -j2 && pip install --no-deps -e ."
+   ],
+   "ready_probe": "python -c 'import zipline, pandas'",
+   "setup": {
+    "manifest": "requirements-pymolt-eval.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider"
+   ],
+   "test_args": [
+    "tests/test_memoize.py",
+    "tests/test_execution_styles.py",
+    "tests/test_restrictions.py",
+    "tests/test_ordering.py"
+   ],
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    {
+     "filter_requirements": {
+      "src": "requirements-target.txt",
+      "dst": ".pymolt-bench-target.txt",
+      "drop": [
+       "bcolz"
+      ],
+      "strip_hashes": true
+     }
+    },
+    "uv pip install --python .venv-target/bin/python -r .pymolt-bench-target.txt",
+    "uv pip install --python .venv-target/bin/python pytest"
+   ],
+   "artifact": "tests/artifacts/zipline",
+   "post_env": {},
+   "target_pytest_flags": [
+    "--confcutdir=."
+   ],
+   "import_module": "zipline"
+  },
+  "locust": {
+   "default": false,
+   "_note": "Noisy pilot #1 (gevent/greenlets, ZeroMQ). Base = locust a7832cb5, the commit before PR #2411 (explicit 3.12 support, CI/config only). Both sides pin dependencies as of 2023-10-04, the migration date: the container install and the target manifest use --exclude-newer, which also keeps old gevent buildable (today's Cython cannot compile it). Step 0 (no pymolt): 4 runs, identical per-test outcomes, 349 passed, test_cpu_warning fails everywhere (host CPU) and is deselected. test_stop_timeout_with_interrupt_no_reschedule is timing-sensitive: it failed once in 5 uncaptured runs (passed in all 4 step-0 runs), so it is deselected too. test_distribute_users (a hard 7.0 s budget) and test_distributed_shape_with_fixed_users pass uncaptured but go over their wall-clock budgets under a capture that traces the stdlib (about 1.3x), so they are deselected: the pilot measures what pymolt reports, not whether a timing budget survives a tracer. test_command_line_arguments_override_config_file fails on 3.8 without pymolt when it runs after the other files (ReferenceError on a weakref, order-dependent), so it is deselected. Both sides take --confcutdir=. --rootdir=. (verify compares the two commands, so they must match): locust's pyproject has no pytest section, so pytest takes the outer repository as rootdir and the --deselect node ids silently match nothing. The target side runs in a python:3.12 linux/arm64 container (target_container), so both captures share an OS: the first pilot ran the target on the macOS host and two of its three findings (resource.setrlimit, psutil memory_info) came from that. baseline_runs 2 records a baseline replicate, so verify measures run-to-run noise. That ReferenceError is not one test's: TestLoadLocustfile's tearDown (clear_all_functools_lru_cache: isinstance over gc.get_objects()) meets a dead weakref proxy left by the files that ran before it, so whichever of its tests runs late fails (test_create_environment and test_is_user_class in two runs of 2026-11-16). The file passes alone, so it runs first.",
+   "image": "python:3.8",
+   "platform": "linux/arm64",
+   "base_python": "3.8",
+   "manifests": {
+    "requirements-pymolt-eval.txt": "gevent>=20.12.1\nflask>=2.0.0\nWerkzeug>=2.0.0\nrequests>=2.23.0\nmsgpack>=0.6.2\npyzmq>=22.2.1,!=23.0.0\ngeventhttpclient>=2.0.2\nConfigArgParse>=1.0\npsutil>=5.6.7\nFlask-BasicAuth>=0.2.0\nFlask-Cors>=3.0.10\nroundrobin>=0.0.2\ntyping-extensions>=3.7.4.3\n",
+    "requirements-target-2023.txt": "blinker==1.6.2\nbrotli==1.1.0\ncertifi==2023.7.22\ncharset-normalizer==3.3.0\nclick==8.1.7\nconfigargparse==1.5.3\nflask==3.0.0\nflask-basicauth==0.2.0\nflask-cors==4.0.0\ngevent==23.9.1\ngeventhttpclient==2.0.11\ngreenlet==3.0.0\nidna==3.4\nitsdangerous==2.1.2\njinja2==3.1.2\nmarkupsafe==2.1.3\nmsgpack==1.0.7\npsutil==5.9.5\npyzmq==25.1.1\nrequests==2.31.0\nroundrobin==0.0.4\nsetuptools==68.2.2\nsix==1.16.0\ntyping-extensions==4.8.0\nurllib3==2.0.6\nwerkzeug==3.0.0\nzope-event==5.0\nzope-interface==6.0\n"
+   },
+   "container_install": [
+    "pip install -q uv",
+    "uv pip install --system --exclude-newer 2023-10-04 -r requirements-pymolt-eval.txt pytest mock retry pyquery cryptography",
+    "SETUPTOOLS_SCM_PRETEND_VERSION=2.17.0 uv pip install --system --no-deps -e ."
+   ],
+   "ready_probe": "python -c 'import locust, gevent, zmq, pytest'",
+   "setup": {
+    "manifest": "requirements-pymolt-eval.txt"
+   },
+   "pytest_flags": [
+    "-p",
+    "no:cacheprovider",
+    "-o",
+    "addopts=",
+    "--confcutdir=.",
+    "--rootdir=.",
+    "--deselect",
+    "locust/test/test_runners.py::TestLocustRunner::test_cpu_warning",
+    "--deselect",
+    "locust/test/test_runners.py::TestStopTimeout::test_stop_timeout_with_interrupt_no_reschedule",
+    "--deselect",
+    "locust/test/test_dispatch.py::TestLargeScale::test_distribute_users",
+    "--deselect",
+    "locust/test/test_runners.py::TestMasterWorkerRunners::test_distributed_shape_with_fixed_users",
+    "--deselect",
+    "locust/test/test_load_locustfile.py::TestLoadLocustfile::test_command_line_arguments_override_config_file"
+   ],
+   "test_args": [
+    "locust/test/test_load_locustfile.py",
+    "locust/test/test_runners.py",
+    "locust/test/test_zmqrpc.py",
+    "locust/test/test_stats.py",
+    "locust/test/test_fasthttp.py",
+    "locust/test/test_http.py",
+    "locust/test/test_web.py",
+    "locust/test/test_dispatch.py"
+   ],
+   "target_env": [
+    "uv venv .venv-target --python 3.12",
+    "uv pip install --python .venv-target/bin/python --exclude-newer 2023-10-04 -r requirements-target-2023.txt pytest mock retry pyquery cryptography",
+    "SETUPTOOLS_SCM_PRETEND_VERSION=2.17.0 uv pip install --python .venv-target/bin/python --no-deps -e ."
+   ],
+   "artifact": "tests/artifacts/locust",
+   "host_prep": [],
+   "env": {},
+   "post_env": {},
+   "target_pytest_flags": [],
+   "import_module": "locust",
+   "target_manifest": "requirements-target-2023.txt",
+   "phase_timeout_min": 60,
+   "target_container": {
+    "image": "python:3.12",
+    "platform": "linux/arm64",
+    "install": [
+     "pip install -q uv",
+     "uv pip install --system --exclude-newer 2023-10-04 -r requirements-target-2023.txt pytest mock retry pyquery cryptography",
+     "SETUPTOOLS_SCM_PRETEND_VERSION=2.17.0 uv pip install --system --no-deps -e ."
+    ],
+    "ready_probe": "python -c 'import locust, gevent, zmq, pytest'"
+   },
+   "baseline_runs": 2
+  }
+ }
+}

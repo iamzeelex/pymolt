@@ -50,7 +50,9 @@ def _trace(target_mod, body):
 def test_records_call_with_bound_args_and_normalized_return(target):
     sink, _ = _trace(target, lambda m: m.greet("ann", times=2))
     (rec,) = [r for r in sink.records.values() if r["qualname"] == PREFIX + ".greet"]
-    assert rec["inputs"] == {"bound": {"name": "ann", "times": 2}}
+    # v2: `defaulted` is present (empty) whenever the parameter defaults are known — it
+    # tells the host `bound` is in the caller-passed form.
+    assert rec["inputs"] == {"bound": {"name": "ann", "times": 2}, "defaulted": []}
     assert rec["result"] == "hi annhi ann"
 
 
@@ -101,9 +103,9 @@ def test_hook_never_swallows_target_exceptions_and_clears_pending(target):
     finally:
         be.stop()
     assert be._pending == {}        # stop() drains pending frames
-    # Under setprofile a Python raise is delivered as 'return' (documented limitation):
-    # boom() is recorded as a contact, just not as a raise.
-    assert any(r["qualname"] == PREFIX + ".boom" for r in sink.records.values())
+    # Recorded as a raise, typed: pytest.raises' __exit__ (a call) handles it.
+    (rec,) = [r for r in sink.records.values() if r["qualname"] == PREFIX + ".boom"]
+    assert rec["raised"] == "ValueError" and rec["result"] is None
 
 
 def test_records_capture_the_call_site_in_our_code(target):
@@ -115,13 +117,23 @@ def test_records_capture_the_call_site_in_our_code(target):
     where = rec["where"]
     assert where["func"] == "caller"
     assert where["file"].endswith("test_backend.py")
-    assert isinstance(where["line"], int)
+    assert where["line"] == caller.__code__.co_firstlineno + 1     # the ``return`` line
 
 
-def test_select_backend_defaults_to_setprofile():
+def test_select_backend_auto_is_monitoring_on_312_and_setprofile_below():
     be = select_backend("x", MemorySink())
-    assert be.name == "setprofile"
-    assert select_backend("x", MemorySink(), prefer="monitoring").name == "monitoring"
+    expected = "monitoring" if sys.version_info >= (3, 12) else "setprofile"
+    assert be.name == expected
+    assert select_backend("x", MemorySink(), prefer="setprofile").name == "setprofile"
+
+
+def test_select_backend_monitoring_never_raises_below_312(monkeypatch):
+    from pymolt.verify import _backend
+
+    monkeypatch.setattr(_backend, "HAS_MONITORING", False)
+    be = select_backend("x", MemorySink(), prefer="monitoring")
+    assert be.name == "setprofile" and be.note == "monitoring-unavailable"
+    assert select_backend("x", MemorySink()).note is None
 
 
 def test_build_matcher_dispatch():
@@ -322,5 +334,38 @@ def test_injected_runtime_is_pure_stdlib():
         " or m.startswith('pymolt.core.')];"
         "assert not bad, bad"
     )
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    # stdout=/stderr=PIPE and universal_newlines: 3.6 has no capture_output= or text=
+    r = subprocess.run([sys.executable, "-c", code], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, universal_newlines=True)
     assert r.returncode == 0, r.stderr
+
+
+class _Code:
+    def __init__(self, filename):
+        self.co_filename = filename
+
+
+class _Frame:
+    def __init__(self, filename):
+        self.f_code = _Code(filename)
+
+
+def test_generated_code_does_not_reclassify_a_dependency_module(monkeypatch):
+    """Dependency membership is decided per module from the module's own file. A
+    dataclass/namedtuple method is exec'd in the module's globals with ``co_filename``
+    ``"<string>"``; when such a frame was the first one seen, whole dependency modules
+    (pydantic.fields, sqlalchemy.orm.attributes) were cached as "not a dependency"."""
+    from pymolt.verify import _backend
+
+    root = _backend._site_roots()[0]
+    mod = types.ModuleType("vfakegen.fields")
+    mod.__file__ = root + "vfakegen/fields.py"
+    monkeypatch.setitem(sys.modules, "vfakegen.fields", mod)
+
+    far = _backend.SitePackagesMatcher()
+    assert far.matches("vfakegen.fields", _Frame("<string>")) is True
+    assert far.matches("vfakegen.fields", _Frame(root + "vfakegen/fields.py")) is True
+
+    near = _backend.AppMatcher()
+    assert near.matches("vfakegen.fields", _Frame("<string>")) is False
+    assert near.matches("vfakegen.fields", _Frame("<frozen importlib._bootstrap>")) is False

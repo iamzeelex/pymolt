@@ -2,18 +2,68 @@
 	path = tests/artifacts/flasgger
 	url = https://github.com/flasgger/flasgger.git
 	branch = master
+	shallow = true
+	ignore = dirty
 
 [submodule "tests/artifacts/pyfolio"]
 	path = tests/artifacts/pyfolio
-	url = git@github.com:quantopian/pyfolio.git
+	url = https://github.com/quantopian/pyfolio.git
 	branch = master
+	shallow = true
+	ignore = dirty
 
 [submodule "tests/artifacts/blaze"]
 	path = tests/artifacts/blaze
-	url = git@github.com:blaze/blaze.git
-	branch = master 
+	url = https://github.com/blaze/blaze.git
+	branch = master
+	shallow = true
+	ignore = dirty
 
 [submodule "tests/artifacts/odo"]
 	path = tests/artifacts/odo
-	url = git@github.com:blaze/odo.git
+	url = https://github.com/blaze/odo.git
 	branch = master
+	shallow = true
+	ignore = dirty
+
+[submodule "tests/artifacts/zipline"]
+	path = tests/artifacts/zipline
+	url = https://github.com/quantopian/zipline.git
+	branch = master
+	shallow = true
+	ignore = dirty
+
+[submodule "tests/artifacts/alphalens"]
+	path = tests/artifacts/alphalens
+	url = https://github.com/quantopian/alphalens.git
+	branch = master
+	shallow = true
+	ignore = dirty
+
+[submodule "tests/artifacts/vibora"]
+	path = tests/artifacts/vibora
+	url = https://github.com/vibora-io/vibora.git
+	branch = master
+	shallow = true
+	ignore = dirty
+
+[submodule "tests/artifacts/hyper"]
+	path = tests/artifacts/hyper
+	url = https://github.com/python-hyper/hyper.git
+	branch = development
+	shallow = true
+	ignore = dirty
+
+[submodule "tests/artifacts/theano"]
+	path = tests/artifacts/theano
+	url = https://github.com/Theano/Theano.git
+	branch = master
+	shallow = true
+	ignore = dirty
+
+[submodule "tests/artifacts/lasagne"]
+	path = tests/artifacts/lasagne
+	url = https://github.com/Lasagne/Lasagne.git
+	branch = master
+	shallow = true
+	ignore = dirty

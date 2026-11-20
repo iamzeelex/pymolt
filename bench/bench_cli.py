@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from _paths import scrub
+
 REPO = Path(__file__).resolve().parent.parent
 PYMOLT = str(REPO / ".venv" / "bin" / "pymolt")
 RESULTS = REPO / "bench" / "results"
@@ -107,8 +109,8 @@ def main() -> int:
 
         offline = [
             ("status", [PYMOLT, "status", str(fdir), "--json"]),
+            # scan includes the static contact map (`contract map` before 0.2).
             ("scan", [PYMOLT, "scan", str(fdir), "--json"]),
-            ("contract map", [PYMOLT, "contract", "map", str(fdir), "--json"]),
         ]
         for name, argv in offline:
             r = measure(name, argv, REPO, args.repeats)
@@ -162,6 +164,7 @@ def main() -> int:
         },
         "runs": runs,
     }
+    payload = scrub(payload)
     RESULTS.mkdir(parents=True, exist_ok=True)
     out = RESULTS / f"cli_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
     out.write_text(json.dumps(payload, indent=2))

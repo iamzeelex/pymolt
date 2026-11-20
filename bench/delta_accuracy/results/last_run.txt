@@ -1,0 +1,39 @@
+
+=== flask  {'old': {'flask': '2.0.3', 'werkzeug': '2.0.0'}, 'new': {'flask': '3.0.0', 'werkzeug': '3.0.0'}, 'python': ['3.9.23', '3.12.11']}  symbols=55 units=47
+  local                  api  TP= 8 FP= 0 FN= 1  P=1.00 R=0.89
+  local                  use  TP= 3 FP= 0 FN= 1  P=1.00 R=0.75
+  local_any_static_warn  api  TP= 8 FP= 0 FN= 1  P=1.00 R=0.89
+  local_any_static_warn  use  TP= 3 FP= 0 FN= 1  P=1.00 R=0.75
+  hints: {"flask.Markup": {"expected": ["markupsafe.Markup"], "local": ["markupsafe.Markup", "intermediate 2.3.3 (range-fetched)", true]}, "flask.json.JSONEncoder": {"expected": ["DefaultJSONProvider", "Flask.json", "app.json"], "local": ["Flask.json", "intermediate 2.2.5 (range-fetched)", true]}}
+  timing: {'contact_map_s': 2.3, 'probe_old_wall_s': 0.184, 'probe_old_in_process_s': 0.103, 'use_calls_old_wall_s': 0.082, 'probe_new_wall_s': 0.127, 'probe_new_in_process_s': 0.046, 'use_calls_new_wall_s': 0.076, 'diff_s': 0.002, 'intermediate_total_s': 1.19, 'intermediate_bytes': 291797, 'local_total_excl_env_build_s': 1.58}
+  unit                                                ground truth                      local
+  flask.Blueprint                                     BASES                             BASES
+  flask.Flask                                         BASES                             BASES
+  flask.Markup                                        REMOVED                           REMOVED
+  flask.__version__                                   DEPRECATED                        DEPRECATED
+  flask.abort                                         SIGNATURE                         SIGNATURE
+  flask.json.JSONEncoder                              REMOVED                           REMOVED
+  flask.request.headers.get                           SIGNATURE                         SIGNATURE
+  flask.request.json                                  BEHAVIOR                          -
+  flask.views.MethodView.dispatch_request             SIGNATURE                         SIGNATURE
+
+=== pandas  {'old': {'pandas': '1.5.3'}, 'new': {'pandas': '2.2.3'}, 'python': ['3.11.13', '3.12.11']}  symbols=14 units=19
+  local                  api  TP=13 FP= 0 FN= 0  P=1.00 R=1.00
+  local                  use  TP= 2 FP= 0 FN= 0  P=1.00 R=1.00
+  local_any_static_warn  api  TP=13 FP= 5 FN= 0  P=0.72 R=1.00
+  local_any_static_warn  use  TP= 2 FP= 5 FN= 0  P=0.29 R=1.00
+  hints: {"pandas.core.series.Series.append": {"expected": ["pandas.concat", "concat"], "local": ["pandas.concat", "old env (static/baseline run)", true]}}
+  timing: {'contact_map_s': 0.0, 'probe_old_wall_s': 0.899, 'probe_old_in_process_s': 0.849, 'use_calls_old_wall_s': 0.308, 'probe_new_wall_s': 0.655, 'probe_new_in_process_s': 0.607, 'use_calls_new_wall_s': 0.17, 'diff_s': 0.001, 'intermediate_total_s': 0, 'intermediate_bytes': 0, 'local_total_excl_env_build_s': 1.86}
+  unit                                                ground truth                      local
+  pandas.Series                                       SIGNATURE                         SIGNATURE
+  pandas.concat                                       SIGNATURE                         SIGNATURE
+  pandas.core.frame.DataFrame.groupby                 SIGNATURE                         SIGNATURE
+  pandas.core.frame.DataFrame.mean                    BEHAVIOR,SIGNATURE                BEHAVIOR,SIGNATURE
+  pandas.core.groupby.generic.DataFrameGroupBy        SIGNATURE                         SIGNATURE
+  pandas.core.groupby.groupby.GroupBy                 SIGNATURE                         SIGNATURE
+  pandas.core.groupby.groupby.GroupBy.sum             SIGNATURE                         SIGNATURE
+  pandas.core.reshape.concat.concat                   SIGNATURE                         SIGNATURE
+  pandas.core.series.Series                           SIGNATURE                         SIGNATURE
+  pandas.core.series.Series.__init__                  SIGNATURE                         SIGNATURE
+  pandas.core.series.Series.append                    REMOVED                           REMOVED
+  pandas.core.series.Series.to_dict                   SIGNATURE                         SIGNATURE

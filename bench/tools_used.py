@@ -52,7 +52,10 @@ def main(paths: list[str]) -> int:
                 continue
             agg.setdefault((r["task"], r["arm"]), collections.Counter()).update(r["tools_called"])
         for (task, arm), c in sorted(agg.items()):
+            # MCP tool calls; CLI use is counted from the commands by transcript_metrics
             pym = sum(v for k, v in c.items() if k.startswith("mcp__pymolt"))
+            pym += sum(r.get("pymolt_cli_calls") or 0 for r in d["runs"]
+                       if r["task"] == task and r["arm"] == arm)
             tot = sum(c.values())
             print(f"  {task:<12}{arm:<10} {tot:>3} calls, {pym:>2} pymolt   {dict(c)}")
     return 0

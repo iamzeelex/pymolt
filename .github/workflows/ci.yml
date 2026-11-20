@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "release/**"]
+  workflow_call:  # release.yml runs the same checks on the tagged commit before publishing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The job names are the required status checks on main and release/*.
+  # Renaming a job means updating the branch ruleset too.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0  # the commit e-mail check reads the pull request's commits
+      - name: Commit e-mail addresses are public
+        if: github.event_name == 'pull_request'
+        run: >-
+          .github/scripts/check_commit_emails.sh
+          "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          # The suite assumes the interpreter it runs on is the lowest Python a project may
+          # declare (3.12); on 3.13, 14 tests fail for known reasons (docs/limits.md).
+          python-version: "3.12"
+          enable-cache: true
+      - name: Old interpreters for the 3.8 and 3.11 runtime tests
+        run: uv python install 3.8 3.11
+      # Every test runs here: the MCP extra, and the optional packages some tests need
+      # (they are skipped where missing, which would hide them in CI). -rs lists any skip.
+      - name: pytest
+        run: >-
+          uv run --locked --extra dev --extra mcp
+          --with gevent --with greenlet --with coverage --with flask --with numpy --with pandas
+          pytest -q -rs
+      # Pyflakes and syntax errors only: the style rules have pre-existing findings.
+      - name: ruff (errors)
+        run: uv run --locked --extra dev ruff check pymolt tests --select F,E9
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check the distributions
+        run: .github/scripts/check_dist.sh
+      - name: The installed wheel serves MCP
+        env:
+          PYMOLT_SMOKE_INSTALL: "1"
+        run: uv run --locked --extra dev pytest -q -rs tests/interfaces/test_fresh_install_smoke.py
+
+  # The injected runtime runs inside the project's own interpreter, as old as 3.6 (README).
+  # Its tests run here on 3.6 and 3.7, which no runner image ships: pure stdlib plus pytest,
+  # without the host conftest (it imports pydantic). 3.8 and 3.11 are covered by `test`.
+  runtime-old:
+    name: runtime (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    container: python:${{ matrix.python }}-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.6", "3.7"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: pytest (runtime only)
+        run: |
+          python -m pip install --quiet pytest
+          PYTHONPATH=. python -m pytest -q -rs --noconftest -p no:cacheprovider \
+            $(tr '\n' ' ' < tests/runtime_old_pythons.txt)

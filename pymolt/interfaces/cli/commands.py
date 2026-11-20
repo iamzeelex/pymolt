@@ -3,15 +3,18 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
+from typer.core import TyperGroup
 
 from pymolt.assess.service import (
     _resolve_baseline_graph,
     baseline_tests_passed,
     classify_baseline_tier,
     compatibility_verdict,
+    failure_evidence,
 )
 from pymolt.assess.service import build_comparison_rows as _build_comparison_rows
 from pymolt.assess.service import resolve_chosen_source as _service_resolve_chosen_source
@@ -19,33 +22,80 @@ from pymolt.assess.service import resolve_target_graph as _resolve_target_graph
 from pymolt.assess.service import write_target_manifest as _write_target_manifest
 from pymolt.interfaces.cli.output import (
     EXIT_ENVIRONMENT,
+    EXIT_FINDING,
     EXIT_INCONCLUSIVE,
     EXIT_USAGE,
     console,
     err,
     fail,
+    fail_state_file,
     next_step,
     require_project_dir,
+    wants_machine_output,
     warn,
 )
-from pymolt.interfaces.cli.verify_cmd import app as verify_app
+from pymolt.interfaces.cli.verify_cmd import capture_cmd
 from pymolt.setup.pythons import (
     classify_eol,
     get_available_python_versions,
     get_eol_versions,
     version_floor,
 )
+from pymolt.state_io import atomic_write_text
+
 
 # Typer renders sub-app panels after command panels, so "Behavioural proof" lands at
 # the bottom of --help no matter where it is registered. The help text carries the
 # lead instead: the baseline capture is the one step that cannot be redone later.
+class _FlowOrderGroup(TyperGroup):
+    """List commands in the order a migration runs them, not the order they are defined.
+
+    Also the one place a damaged or newer state file (``StateFileError``) becomes a failure:
+    whichever command reads it exits 2 with the file, what is wrong and the remedy, as JSON
+    under ``--json``/``--agent``; and a state lock another pymolt held too long
+    (``StateLockTimeout``) exits 3."""
+
+    def list_commands(self, ctx):
+        names = super().list_commands(ctx)
+        return sorted(names, key=lambda n: (
+            _FLOW_ORDER.index(n) if n in _FLOW_ORDER else len(_FLOW_ORDER), names.index(n),
+        ))
+
+    def resolve_command(self, ctx, args):
+        name, command, rest = super().resolve_command(ctx, args)
+        ctx.meta["pymolt.machine_output"] = wants_machine_output(list(rest))
+        return name, command, rest
+
+    def invoke(self, ctx):
+        from pymolt.state_io import StateFileError, StateLockTimeout
+
+        try:
+            return super().invoke(ctx)
+        except StateFileError as exc:
+            fail_state_file(exc, json_output=self._machine(ctx))
+        except StateLockTimeout as exc:     # another pymolt held the state lock too long
+            fail(str(exc), hint=exc.hint, code=EXIT_ENVIRONMENT, json_output=self._machine(ctx))
+
+    @staticmethod
+    def _machine(ctx) -> bool:
+        """``--json`` or ``--agent`` on the command line (``resolve_command`` noted it)."""
+        return ctx.meta.get("pymolt.machine_output", False)
+
+
+_FLOW_ORDER = [
+    "status", "scan", "setup", "assess", "capture", "plan", "apply", "verify", "rollback",
+]
+
+
 app = typer.Typer(
+    cls=_FlowOrderGroup,
     help=(
-        "pymolt: prove a Python migration didn't change what your code does.\n\n"
-        "Record the contract BEFORE you edit anything — it cannot be recreated afterwards:\n"
-        "  pymolt contract capture --when baseline --mode tests -- pytest tests/\n"
-        "Plan/apply, then capture --when post-migration and run 'pymolt verify'.\n"
-        "See the 'Behavioural proof' panel below; the other panels prepare the migration."
+        "pymolt: prove a Python migration did not change what your code does.\n\n"
+        "Order: setup → assess → capture baseline → plan → apply → "
+        "capture post-migration → verify.\n"
+        "`pymolt status` shows where you are and the next command.\n\n"
+        "Capture the baseline before any code change; it cannot be recreated later:\n"
+        "  pymolt capture baseline --mode tests -- pytest tests/"
     ),
     invoke_without_command=True,
 )
@@ -168,26 +218,14 @@ def _select_target_python_interactive(
         f"Enter a number 1-{len(versions)} or a version like 3.12.",
     )
 
-# The behavioral contract — static contact map + dynamic capture + diff, all outside the
-# target. Its own help panel: this is the evidence the rest of the funnel exists to produce.
-app.add_typer(verify_app, name="contract", rich_help_panel="Behavioural proof")
+# The behavioural proof — capture both sides, then verify. Its own help panel: this is the
+# evidence the rest of the funnel exists to produce.
+app.command("capture", rich_help_panel="Behavioural proof")(capture_cmd)
 
-# Target-env provisioner: turns an assess result into a runnable migration environment.
-env_app = typer.Typer(
-    help="Suggest a runnable target-Python environment (uv venv or Dockerfile) — builds nothing."
-)
-app.add_typer(env_app, name="env", rich_help_panel="Tools & account")
 
-config_app = typer.Typer(
-    help="Manage pymolt configuration and local offline delta cache."
-)
-app.add_typer(config_app, name="config", rich_help_panel="Tools & account")
-
-auth_app = typer.Typer(
-    help="Manage Axiom Cloud Hub authentication and API tokens."
-)
-app.add_typer(auth_app, name="auth", rich_help_panel="Tools & account")
-
+#: Every command's --agent: the compact payload in pymolt.interfaces.views, the same
+#: object the MCP tool of that name returns. --json stays the full payload.
+_AGENT_HELP = "Print the compact agent view as JSON (what the MCP tool returns)"
 
 _STATE_MARK = {
     "done": ("✓", "green"),
@@ -198,35 +236,59 @@ _STATE_MARK = {
     "blocked": ("·", "yellow"),
 }
 
+_CHECK_MARK = {
+    "ok": ("✓", "green"),
+    "warning": ("!", "yellow"),
+    "error": ("✗", "red"),
+}
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
+
+@app.command(rich_help_panel="Migration")
 def status(
-    project_dir: str = typer.Argument(".", help="The project directory to report on"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the funnel status as JSON"),
+    project_dir: str = typer.Argument(".", help="Project directory"),
+    json_output: bool = typer.Option(False, "--json", help="Print the status as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Where this migration stands, and the one command to run next.
+    """Show where the migration stands and the next command.
 
-    Reads only what is already on disk (config, captures, target manifest) —
-    runs nothing, writes nothing. The funnel is projected, never enforced: every
-    command stays runnable in any order.
+    Reads .pymolt/ and the target manifest, and checks that the configured
+    environments exist. Writes nothing. The order is advice: every command can
+    run at any time.
     """
     import json as json_lib
 
     from pymolt.status import build_status
 
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    report = build_status(project_path)
+    project_path = require_project_dir(project_dir, json_output=json_output or agent)
+    if agent:
+        project_path = project_path.resolve()
+    report = build_status(project_path, check_environments=True)
 
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.status_view(report)))
+        return
     if json_output:
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
         return
 
     console.print(f"[bold]pymolt[/bold] [dim]{report.project_dir}[/dim]\n")
     for phase in report.phases:
-        glyph, colour = _STATE_MARK.get(phase.state, ("○", "dim"))
+        # A damaged or newer state file: the one thing on the screen to fix first.
+        glyph, colour = ("✗", "red") if phase.problem else _STATE_MARK.get(
+            phase.state, ("○", "dim"))
         line = f"  [{colour}]{glyph}[/{colour}] [bold]{phase.phase:<15}[/bold]"
-        detail = phase.blocker or phase.detail
+        detail = escape(phase.blocker or phase.detail)
         console.print(f"{line} [{'dim' if phase.state == 'todo' else colour}]{detail}[/]")
+
+    for check in report.checks:
+        glyph, colour = _CHECK_MARK.get(check.state, ("!", "yellow"))
+        detail = check.detail + (f" — {check.hint}" if check.hint else "")
+        console.print(
+            f"  [{colour}]{glyph}[/{colour}] [bold]{check.name:<15}[/bold] "
+            f"[{'dim' if check.state == 'ok' else colour}]{detail}[/]"
+        )
 
     for note in report.notes:
         console.print(f"  [dim]note: {note}[/dim]")
@@ -241,91 +303,86 @@ def status(
         console.print(f"[yellow]{report.next_reason}[/yellow]")
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
-def doctor(
-    project_dir: str = typer.Argument(".", help="Project directory to inspect"),
-    json_output: bool = typer.Option(False, "--json", help="Emit preflight as JSON"),
-):
-    """Read-only preflight: environments, workload, evidence, and migration receipt."""
-    import json as json_lib
-
-    from pymolt.doctor import run_doctor
-
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    report = run_doctor(project_path)
-    if json_output:
-        typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
-        if not report.ready:
-            raise typer.Exit(code=EXIT_INCONCLUSIVE)
-        return
-
-    table = Table(show_header=True)
-    table.add_column("Check", style="bold")
-    table.add_column("State")
-    table.add_column("Detail")
-    marks = {
-        "ok": "[green]✓ ok[/green]",
-        "warning": "[yellow]! warning[/yellow]",
-        "error": "[red]✗ error[/red]",
-    }
-    for check in report.checks:
-        detail = check.detail
-        if check.hint:
-            detail += f"\n[dim]{check.hint}[/dim]"
-        table.add_row(check.name, marks[check.state], detail)
-    console.print(table)
-    if report.workload_command:
-        console.print(
-            "\n[dim]detected workload →[/dim] "
-            f"[white]{' '.join(report.workload_command)}[/white]"
-        )
-    next_step(project_path)
-    if not report.ready:
-        raise typer.Exit(code=EXIT_INCONCLUSIVE)
-
-
 @app.command("verify", rich_help_panel="Behavioural proof")
 def verify_migration(
-    project_dir: str = typer.Argument(".", help="Project whose migration to verify"),
+    project_dir: str = typer.Argument(".", help="Project directory"),
     profile: str = typer.Option(
-        "exact", "--profile", help="Comparator: exact | shape | custom"
+        "exact", "--profile", help="How values are compared: exact | shape | custom"
     ),
     comparator: str | None = typer.Option(
-        None, "--comparator", help="Custom comparator as module:callable"
+        None, "--comparator", help="module:callable for --profile custom"
     ),
     probe_python: str | None = typer.Option(
-        None, "--probe-python", help="Target interpreter for differential replay"
+        None, "--probe-python", help="Target interpreter to replay the recorded calls in"
+    ),
+    baseline_file: str | None = typer.Option(
+        None, "--baseline",
+        help="Use this recording as the baseline instead of the captured one (the verdict "
+             "is then not saved)",
+    ),
+    post_file: str | None = typer.Option(
+        None, "--post-migration",
+        help="Use this recording as the post-migration side instead of the captured one "
+             "(saved; status counts only a verdict on the captured one)",
     ),
     golden_before: str | None = typer.Option(
-        None, "--golden-before", help="Old golden snapshot JSON"
+        None, "--golden-before", help="Golden snapshot JSON from before the migration",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     golden_after: str | None = typer.Option(
-        None, "--golden-after", help="New golden snapshot JSON"
-    ),
-    cascade_file: str | None = typer.Option(
-        None, "--cascade", help="Persisted node-level cascade report JSON"
+        None, "--golden-after", help="Golden snapshot JSON from after the migration",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     policy_file: str | None = typer.Option(
-        None, "--policy", help="Canary policy JSON"
+        None, "--policy", help="Canary policy JSON",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     metrics_file: str | None = typer.Option(
-        None, "--metrics", help="Observed canary metrics JSON"
+        None, "--metrics", help="Canary metrics JSON (needs --policy)",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     shadow_file: str | None = typer.Option(
-        None, "--shadow", help="Shadow operations/policy JSON to classify safely"
+        None, "--shadow", help="Shadow operations JSON; unsafe writes are left out",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     auto_rollback: bool = typer.Option(
         False,
         "--auto-rollback",
-        help="Rollback the applied plan when a mandatory canary gate fails",
+        help="Run rollback when a required canary gate fails",
+        hidden=True,  # until 0.3, with --policy
     ),
-    json_output: bool = typer.Option(False, "--json", help="Emit the unified verdict as JSON"),
+    accept: str | None = typer.Option(
+        None, "--accept",
+        help="Accept a failing or review finding (its id) as an intended change: a person on "
+             "a terminal types the nonce printed"),
+    strict: bool = typer.Option(
+        False, "--strict", help="Review every accepted change instead of counting it equal"),
+    step: str | None = typer.Option(
+        None, "--step",
+        help="Also print this step's judgement and exit by it (0 verified, 1 failed, 4 needs "
+             "review or evidence, or not in the capture)"),
+    json_output: bool = typer.Option(False, "--json", help="Print the verdict as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Also show what was explained away (mechanism, count, example, rule)"),
 ):
-    """Fold tests/traces, golden snapshots, replay and canary gates into one verdict."""
+    """Compare the baseline and post-migration captures. Prints PASS, FAIL or INCONCLUSIVE.
+
+    The verdict is saved to .pymolt/ for `pymolt status`. Golden snapshots and
+    canary metrics, when given, are folded into the same
+    verdict. --baseline/--post-migration compare other recordings instead of the
+    captures. A verdict against another --baseline is not saved; one on another
+    --post-migration recording is saved, with what it compared, but `status` does
+    not count it as the migration's verdict.
+    """
     import json
 
+    from pymolt.interfaces.cli.output import require_file
     from pymolt.interfaces.cli.verify_cmd import (
+        _inconclusive_note,
         _render_contract_report,
+        _step_lines,
         _verification_exit,
     )
     from pymolt.migration_plan import MigrationPlanError, rollback_migration
@@ -337,7 +394,7 @@ def verify_migration(
         load_custom_comparator,
     )
     from pymolt.verify.golden_master import diff_snapshots
-    from pymolt.verify.models import VerificationVerdict, VerifyReport
+    from pymolt.verify.models import VerificationVerdict
     from pymolt.verify.policy import (
         AutoRollbackPolicy,
         CanaryMetrics,
@@ -352,7 +409,31 @@ def verify_migration(
     )
     from pymolt.verify.unified import build_unified_verification
 
+    json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
+    if accept and json_output:
+        fail("--accept is a person's attested act: it is refused under --agent and --json",
+             hint="A person runs `pymolt verify . --accept ID` on a terminal.",
+             json_output=json_output)
+    if auto_rollback and agent:
+        # The same rule as `rollback --agent`: an agent rolls back one step, a person a run.
+        fail("--auto-rollback is refused under --agent: it rolls back the whole run, which is "
+             "a person's decision",
+             hint="Roll back one step with `pymolt rollback . --step ID --agent`, or ask a "
+                  "person to run `pymolt verify . --auto-rollback ...`.",
+             json_output=json_output)
+    for path_value, what in ((baseline_file, "--baseline recording"),
+                             (post_file, "--post-migration recording")):
+        if path_value:
+            require_file(path_value, what=what, json_output=json_output)
+    if post_file and not baseline_file:
+        # The other side still comes from the captures.
+        slot = service.load_contract_state(project_path).baseline
+        if slot is not None and slot.trace_path:
+            captured = Path(slot.trace_path)
+            baseline_file = str(captured if captured.is_absolute() else project_path / captured)
 
     def load_json(path_value: str, label: str):
         path = Path(path_value)
@@ -369,12 +450,21 @@ def verify_migration(
             if comparator is None:
                 raise ComparatorError("--profile custom requires --comparator module:callable")
             load_custom_comparator(comparator)
-        contract_report = service.build_contract_report_from_state(
-            project_path,
-            probe_python=probe_python,
-            comparator_profile=selected.value,
-            custom_comparator=comparator,
-        )
+        def build_report():
+            return service.build_contract_report_from_state(
+                project_path,
+                trace_override=post_file,
+                against_override=baseline_file,
+                probe_python=probe_python,
+                comparator_profile=selected.value,
+                custom_comparator=comparator,
+                strict=strict,
+            )
+
+        contract_report = build_report()
+        if accept:
+            _accept_finding(project_path, contract_report, accept)
+            contract_report = build_report()
 
         if bool(golden_before) != bool(golden_after):
             raise ValueError("--golden-before and --golden-after must be supplied together")
@@ -384,10 +474,6 @@ def verify_migration(
                 load_json(golden_before, "old golden snapshot"),
                 load_json(golden_after, "new golden snapshot"),
             )
-        cascade = (
-            VerifyReport.model_validate(load_json(cascade_file, "cascade report"))
-            if cascade_file else None
-        )
 
         if metrics_file and not policy_file:
             raise ValueError("--metrics requires --policy")
@@ -431,16 +517,21 @@ def verify_migration(
             contract_report,
             run_id=run_id,
             comparator_profile=selected.value,
-            cascade=cascade,
             golden=golden,
             canary=canary,
             shadow=shadow,
             rollback=rollback_decision,
         )
         if rollback_decision is not None and rollback_decision.should_rollback:
-            rollback_migration(project_path, run_id=rollback_decision.run_id)
+            rollback_migration(project_path, run_id=rollback_decision.run_id, agent=agent)
             unified.rollback_executed = True
-        saved_path = unified.save(project_path)
+        # Saved with what it compared (``contract.compared``), unless the baseline side is
+        # another recording: a verdict against another baseline is not this project's.
+        # ``status`` counts only a verdict on the post-migration capture.
+        compared = contract_report.compared
+        foreign_baseline = (compared is not None and compared.before is not None
+                            and compared.before_capture != "baseline")
+        saved_path = None if foreign_baseline else unified.save(project_path)
     except (ComparatorError, ValueError) as exc:
         fail(
             f"verification input is invalid: {exc}",
@@ -454,11 +545,27 @@ def verify_migration(
             json_output=json_output,
         )
 
-    if json_output:
-        typer.echo(json.dumps(unified.model_dump(mode="json"), indent=2))
-        raise typer.Exit(code=_verification_exit(unified.verdict))
+    exit_code = _verification_exit(unified.verdict)
+    judged = None
+    if step:
+        judged, exit_code = _step_judgement(project_path, unified, step, json_output)
+    if agent:
+        from pymolt.interfaces import views
 
-    _render_contract_report(contract_report)
+        view = views.verify_view(unified, project_path, saved_path=saved_path)
+        if judged is not None:
+            view["data"]["step"] = judged
+            view["summary"] = f"step {step}: {judged['status']}; " + view["summary"]
+        typer.echo(views.dumps(view))
+        raise typer.Exit(code=exit_code)
+    if json_output:
+        payload = unified.model_dump(mode="json")
+        if judged is not None:
+            payload["step"] = judged
+        typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(code=exit_code)
+
+    _render_contract_report(contract_report, verbose=verbose)
     if canary is not None:
         table = Table(title="Canary policy", show_header=True)
         table.add_column("Metric")
@@ -483,106 +590,115 @@ def verify_migration(
         VerificationVerdict.FAIL: "red",
         VerificationVerdict.INCONCLUSIVE: "yellow",
     }[unified.verdict]
+    from pymolt.interfaces import views
+
     rollback_note = (
         "\n[bold red]Automatic rollback executed.[/bold red]"
         if unified.rollback_executed else ""
     )
+    saved_lines = [f"saved: {saved_path}"] if saved_path else []
+    if note := views.saved_verdict_note(contract_report.compared, saved_path):
+        saved_lines.append(note)
     console.print(Panel(
         f"[bold {border}]{unified.verdict.value.upper()}[/bold {border}]"
-        f"{rollback_note}\n[dim]saved: {saved_path}[/dim]",
-        title="Unified verification", border_style=border, expand=False,
+        f"{_inconclusive_note(unified)}"
+        f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
+        title="Verdict", border_style=border, expand=False,
     ))
-    raise typer.Exit(code=_verification_exit(unified.verdict))
+    if judged is not None:
+        lines = _step_lines(judged)
+        for r in judged.get("risks") or ():
+            lines.append(f"risk {escape(r['id'])}: {escape(r['result'])}"
+                         + (f" ({escape(r['fix'])})" if r.get("fix") else ""))
+        if judged.get("note"):
+            lines.append(escape(judged["note"]))
+        console.print(Panel("\n".join(lines), title=f"Step {escape(step)}", expand=False,
+                            border_style={0: "green", 1: "red"}.get(exit_code, "yellow")))
+    raise typer.Exit(code=exit_code)
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
+def _step_judgement(project_path: Path, unified, step: str, json_output: bool
+                    ) -> tuple[dict, int]:
+    """``verify --step``: the step's judgement from this verify (a filter over the one
+    post-migration capture, design 5.3) and its exit code."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.workorder.judge import EXIT
+    from pymolt.workorder.state import project_steps
+
+    plan = MigrationPlan.load(project_path)
+    if plan is None or plan.step(step) is None:
+        fail(f"unknown step {step}: the plan has "
+             + (", ".join(s.id for s in plan.steps) if plan is not None else "no plan"),
+             json_output=json_output)
+    judged = unified.steps.get(step)
+    if judged is not None:
+        return {"id": step, **judged}, EXIT.get(judged.get("status"), 4)
+    state = project_steps(project_path, plan).step(step)
+    status = state.status if state is not None else "planned"
+    note = (f"step {step} is {status}: not in effect, so this verify does not judge it"
+            if state is None or state.epoch is None else
+            f"step {step} has no site this verify could judge")
+    if unified.contract.compared is None or unified.contract.compared.after_capture != \
+            "post-migration":
+        note = "this verify did not compare the post-migration capture: no step is judged"
+    return {"id": step, "status": status, "note": note}, 4
+
+
+@app.command(rich_help_panel="Migration")
 def plan(
-    project_dir: str = typer.Argument(".", help="Project whose migration to freeze"),
+    project_dir: str = typer.Argument(".", help="Project directory"),
     target_file: str | None = typer.Option(
-        None, "--target-file", help="Pinned target manifest from assess"
+        None, "--target-manifest",
+        help="Target manifest to plan for (default: the one assess wrote)",
     ),
-    endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom Cloud Hub / On-Prem endpoint URL"
+    target_file_old: str | None = typer.Option(None, "--target-file", hidden=True),
+    online: bool = typer.Option(
+        False, "--online",
+        help="Let the local engine read intermediate releases from PyPI for successor hints "
+             "(package names and versions only)",
     ),
     output: str | None = typer.Option(
-        None, "--output", "-o", help="Plan JSON path (default: .pymolt/migration_plan.json)"
+        None, "--output", "-o", help="Where to save the plan (default: .pymolt/migration_plan.json)"
     ),
     patch_file: str | None = typer.Option(
-        None, "--patch", help="Also write the exact unified diff to this file"
+        None, "--patch", help="Also write the diff to this file"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Emit plan metadata as JSON"),
+    plan_md: str | None = typer.Option(
+        None, "--plan-md",
+        help="Where to write the plan for a person (default: .pymolt/PLAN.md)",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print the plan summary as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Freeze locally verified transforms into an exact, hash-bound apply plan."""
+    """Save the codemods for the target manifest as a plan and show the diff.
+
+    Writes no source file. The plan's steps are also written as PLAN.md. `pymolt apply`
+    applies the plan and refuses it if a planned file changed since.
+    """
     import json
 
-    from pymolt.codemods.client import AxiomGraphError
-    from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations
-    from pymolt.config import load_endpoint
-    from pymolt.ingestion.config import EnvConfig
-    from pymolt.migration_plan import create_migration_plan
+    from pymolt.codemods.service import PlanInputError, build_migration_plan
 
+    json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
-    config_model = EnvConfig.load(project_path / ".pymolt" / "env_config.json")
-    if config_model is None:
-        fail(
-            "pymolt is not configured for this project",
-            hint="Run `pymolt setup .` and `pymolt assess .` first.",
-            json_output=json_output,
-        )
-    config = config_model.model_dump(mode="json")
-    if not target_file:
-        target_file = next((
-            candidate for candidate in ("requirements-target.txt", "environment-target.yml")
-            if (project_path / candidate).is_file()
-        ), None)
-    if not target_file:
-        fail(
-            "no pinned target manifest is available",
-            hint="Run `pymolt assess .` before creating an apply plan.",
-            json_output=json_output,
-        )
-    target_path = Path(target_file)
-    if not target_path.is_absolute():
-        target_path = project_path / target_path
-    if not target_path.is_file():
-        fail(
-            f"target manifest does not exist: {target_path}",
-            json_output=json_output,
-        )
-
+    if agent:
+        project_path = project_path.resolve()
+    target_file = target_file or target_file_old
     try:
-        migrations, source_desc = resolve_codemod_migrations(
-            project_path,
-            target_dependency_file=target_path,
-            config=config,
-        )
-        scanned: set[str] = set()
-        impacts = {}
-        if migrations:
-            with err.status("Building exact migration plan…", spinner="dots") as status:
-                _by_pkg, previews = preview_codemods(
-                    project_path,
-                    migrations,
-                    base_url=load_endpoint(endpoint),
-                    progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
-                    on_impacts=impacts.update,
-                    on_file=lambda item: scanned.add(item.path),
-                    auto_apply_only=True,
-                )
-        else:
-            previews = []
-        migration_plan = create_migration_plan(
-            project_path,
-            previews,
-            migrations,
-            target_python=config_model.target_python or "unknown",
-            source_manifest=config_model.selected_manifest or "unknown",
-            target_manifest_path=target_path,
-            files_scanned=len(scanned),
-            impacts=impacts,
-        )
-        saved_path = migration_plan.save(project_path, output)
-    except (AxiomGraphError, OSError, RuntimeError, ValueError) as exc:
+        with err.status("Building the migration plan…", spinner="dots") as status:
+            migration_plan, previews, source_desc, by_pkg = build_migration_plan(
+                project_path,
+                target_file=target_file,
+                progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
+                online=online,
+            )
+        saved_path = migration_plan.save_planned(project_path, output)
+        from pymolt.workorder.render import write_plan_md
+
+        plan_md_path = write_plan_md(migration_plan, project_path, plan_md)
+    except PlanInputError as exc:
+        fail(str(exc), hint=exc.hint or None, json_output=json_output)
+    except (OSError, RuntimeError, ValueError) as exc:
         fail(
             f"could not create migration plan: {exc}",
             hint="No source files were changed.",
@@ -595,8 +711,7 @@ def plan(
         patch_path = Path(patch_file)
         if not patch_path.is_absolute():
             patch_path = project_path / patch_path
-        patch_path.parent.mkdir(parents=True, exist_ok=True)
-        patch_path.write_text("\n".join(patches), encoding="utf-8")
+        atomic_write_text(patch_path, "\n".join(patches))
     else:
         patch_path = None
 
@@ -609,54 +724,300 @@ def plan(
         "files_to_change": len(migration_plan.changes),
         "rewrite_sites": sum(item.sites for item in migration_plan.changes),
         "advisories": len(migration_plan.advisories),
+        "manual": [item.model_dump(mode="json") for item in migration_plan.manual],
         "api_impacts": len(migration_plan.impacts),
         "patch_path": str(patch_path) if patch_path else None,
+        "risks": _risks_payload(migration_plan.risks),
+        "python": migration_plan.python,
+        "compile_findings": migration_plan.compile_findings,
+        "plan_md": str(plan_md_path),
+        "steps": [_step_payload(step) for step in migration_plan.steps],
     }
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.plan_view(
+            migration_plan, by_pkg, source_desc, plan_path=saved_path,
+            plan_md=plan_md_path, project_dir=project_path)))
+        return
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
 
     console.print(Panel(
-        f"Plan [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan] is frozen at\n"
+        f"Plan [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan] saved to\n"
         f"[green]{saved_path}[/green]\n\n"
         f"Dependencies: [bold]{payload['dependencies']}[/bold]   "
         f"files: [bold]{payload['files_to_change']}[/bold]   "
         f"rewrite sites: [bold]{payload['rewrite_sites']}[/bold]   "
         f"API impacts: [bold]{payload['api_impacts']}[/bold]   "
-        f"advisories: [yellow]{payload['advisories']}[/yellow]",
+        f"advisories: [yellow]{payload['advisories']}[/yellow]   "
+        f"manual: [yellow]{len(migration_plan.manual)}[/yellow]",
         title="Migration plan", border_style="cyan", expand=False,
     ))
+    _render_recipes(by_pkg, previews, migration_plan.files_scanned, migration_plan.risks,
+                    manual=migration_plan.manual)
+    from pymolt.interfaces.views import dependency_risks
+
+    deps = dependency_risks(migration_plan.risks)
+    _render_risks(deps if deps is not None and (
+        migration_plan.baseline_trace_path or deps.risks or deps.deltas) else None)
+    _render_python(migration_plan)
     _render_or_write_patches(previews, project_path, None)
+    _render_steps(migration_plan, plan_md_path)
     console.print(
         f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
     )
 
 
-@app.command("apply", rich_help_panel="Migration workflow (preparation)")
+def _step_payload(step) -> dict:
+    """A step in the plan's --json summary (the plan file has the whole step)."""
+    return {"id": step.id, "type": step.type, "executor": step.executor,
+            "claim": step.claim, "expect": step.verify.expect, "title": step.title,
+            "effort": step.effort.size,
+            "sites": len(step.verify.sites), "depends_on": step.depends_on,
+            "risk_ids": step.why.risk_ids}
+
+
+def _render_steps(plan, plan_md_path) -> None:
+    """The plan summary by step, and where PLAN.md is."""
+    from pymolt.interfaces.views import steps_summary
+    from pymolt.workorder.render import claim_label, clean
+
+    if plan.steps:
+        table = Table(title="Steps", title_justify="left", border_style="cyan")
+        for column in ("step", "what", "who", "claim", "effort", "depends on"):
+            table.add_column(column)
+        for step in plan.steps:
+            table.add_row(step.id, escape(clean(" ".join(step.title.split()), 100)),
+                          step.executor, claim_label(step), step.effort.size,
+                          ", ".join(step.depends_on) or "")
+        console.print(table)
+        console.print(f"{steps_summary(plan)}.")
+    console.print(f"[dim]The plan for a person: {plan_md_path}[/dim]")
+
+
+def _render_python(plan) -> None:
+    """The python move's risks: one summary line, the sites, and what is listed unrated."""
+    from pymolt.interfaces.views import _manual_hint, python_summary_line
+
+    line = python_summary_line(plan)
+    if line is None:
+        return
+    risks = [r for r in plan.risks.risks if r.scope == "python"] if plan.risks else []
+    if risks:
+        table = Table(title="Python risks", title_justify="left", border_style="yellow")
+        for column in ("risk", "site", "symbol", "why"):
+            table.add_column(column)
+        for risk in risks:
+            style = _TIER_STYLE.get(risk.tier.value, "")
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
+                          risk.symbol, risk.reason + (
+                              " (fixed by the plan)" if risk.fixed_by_plan
+                              else f" (manual: {_manual_hint(risk)})" if risk.fix == "advisory"
+                              and _manual_hint(risk) else " (manual)" if risk.fix == "advisory"
+                              else ""))
+        console.print(table)
+    console.print(f"\n[bold]{line}[/bold]")
+    for listed in (plan.risks.guarded if plan.risks else []):
+        console.print(f"[dim]  listed, not rated: {listed.site.label()} {listed.symbol} "
+                      f"({listed.kind})[/dim]")
+    if plan.compile_findings:
+        console.print(f"[dim]  compile check: {len(plan.compile_findings)} finding(s) on "
+                      f"Python {plan.python.get('to')} (see the saved plan)[/dim]")
+
+
+def _risks_payload(risks) -> dict | None:
+    """The plan's predicted risks for --json: counts, then both groups in full."""
+    if risks is None:
+        return None
+    dump = risks.model_dump(mode="json")
+    return {
+        "status": risks.status,
+        "counts": risks.counts(),
+        "fixed_by_plan": [r for r in dump["risks"] if r["fixed_by_plan"]],
+        "needs_attention": [r for r in dump["risks"] if not r["fixed_by_plan"]],
+        "deltas": dump["deltas"],
+        "notes": dump["notes"],
+    }
+
+
+_TIER_STYLE = {"certain": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
+
+
+def _render_risks(risks) -> None:
+    """Predicted risks per call site, split into what the plan fixes and what it does not."""
+    if risks is None:
+        console.print("\n[dim]No predicted risks: there is no baseline capture to predict "
+                      "from (`pymolt capture baseline`).[/dim]")
+        return
+    for title, group, border in (
+        ("Needs attention", risks.needs_attention, "yellow"),
+        ("Fixed by the plan", risks.fixed, "green"),
+    ):
+        if not group:
+            continue
+        table = Table(title=f"Predicted risks — {title.lower()}", title_justify="left",
+                      border_style=border)
+        table.add_column("risk")
+        table.add_column("site")
+        table.add_column("symbol")
+        table.add_column("why")
+        for risk in group:
+            style = _TIER_STYLE.get(risk.tier.value, "")
+            why = risk.reason + ("" if risk.basis == "trace" else " (static only)")
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
+                          risk.symbol, why)
+        console.print(table)
+    if not risks.risks:
+        from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
+
+        unknown, total = inconclusive_deltas(risks)
+        if unknown:
+            console.print(f"\n[yellow]Predicted risks: none rated[/yellow] — "
+                          f"{unknown_api_phrase(unknown, total)} (inconclusive).")
+        else:
+            console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
+                          "exercised.")
+    else:
+        from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
+
+        unknown, total = inconclusive_deltas(risks)
+        if unknown:
+            console.print(f"\n[yellow]Predicted risks[/yellow]: {len(risks.needs_attention)} "
+                          f"need attention, {len(risks.fixed)} fixed by the plan; "
+                          f"{unknown_api_phrase(unknown, total)} (inconclusive).")
+    for note in risks.notes:
+        console.print(f"[dim]  note: {note}[/dim]")
+
+
+def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=()) -> None:
+    """What the service returned per package, what needs a person, and whether it matched.
+    ``manual``: the plan's manual items (rules that matched but are not applied)."""
+    from pymolt.codemods.models import CodemodPattern
+
+    for pkg, items in by_pkg.items():
+        if not items:
+            continue
+        table = Table(title=f"Codemods — {pkg}")
+        table.add_column("kind")
+        table.add_column("change")
+        table.add_column("conf")
+        for item in items:
+            if isinstance(item, CodemodPattern):
+                change = f"{item.old_qualname} → {item.new_qualname}"
+            elif item.old_qualname and item.new_qualname:
+                change = f"{item.old_qualname} → {item.new_qualname}"
+            else:
+                change = f"{item.match} → {item.rewrite[0]}"
+            table.add_row(item.kind or "template", change, item.confidence)
+        console.print(table)
+
+    advised = [p for p in previews if p.advisories]
+    if advised or manual:
+        console.print("\n[bold yellow]Manual review needed:[/bold yellow]")
+        for preview in advised:
+            for adv in preview.advisories:
+                tag = "caveat" if adv.severity == "precondition" else "not applied"
+                console.print(
+                    f"  [yellow]{escape(preview.path)}:{adv.line}[/yellow] — \\[{tag}] "
+                    f"{escape(adv.reason)}"
+                )
+        for item in manual:
+            where = (f"{item.path}:{','.join(map(str, item.lines))}" if item.path and item.lines
+                     else item.path or "no site")
+            console.print(f"  [yellow]{escape(where)}[/yellow] — \\[blocked rule] "
+                          f"{escape(item.rule)}: {escape(item.reason)}")
+    if by_pkg and not any(p.old_source != p.new_source for p in previews):
+        from pymolt.interfaces.views import inconclusive_deltas
+
+        unknown, total = inconclusive_deltas(risks)
+        unknown_tail = (f", but API changes are unknown for {unknown} of {total} package(s)"
+                        if unknown else "")
+        console.print(Panel(
+            f"[bold]No call sites matched.[/bold]\n"
+            f"Scanned {files_scanned} file(s); none of the returned recipes apply to "
+            f"this codebase. The plan changes no file{unknown_tail}.",
+            border_style="yellow", padding=(0, 1), expand=False,
+        ))
+
+
+@app.command("apply", rich_help_panel="Migration")
 def apply_plan_cmd(
-    project_dir: str = typer.Argument(".", help="Project whose reviewed plan to apply"),
+    project_dir: str = typer.Argument(".", help="Project directory"),
     plan_file: str | None = typer.Option(
-        None, "--plan", help="Plan JSON (default: .pymolt/migration_plan.json)"
+        None, "--plan", help="Plan file (default: .pymolt/migration_plan.json)"
     ),
+    step: str | None = typer.Option(
+        None, "--step", help="Apply this step only (its dependencies must be in effect)"),
+    through: str | None = typer.Option(
+        None, "--through",
+        help="Apply every pymolt step up to this one that is not in effect"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Check and show the diff that would be written; write nothing"),
+    skip: bool = typer.Option(
+        False, "--skip", help="With --step and --reason: mark the step skipped"),
+    reason: str | None = typer.Option(None, "--reason", help="Why the step is skipped"),
+    brief: bool = typer.Option(
+        False, "--brief", help="With --step: print the step's brief; write nothing"),
+    record: bool = typer.Option(
+        False, "--record",
+        help="With --step: record an agent's or a person's edit (snapshot the files now)"),
+    done: bool = typer.Option(
+        False, "--done", help="With --record: record what changed since, as the step"),
+    abort: bool = typer.Option(
+        False, "--abort", help="With --record: drop the open record; files are untouched"),
+    by: str | None = typer.Option(
+        None, "--by", help="With --record: who made the edit, agent or person"),
+    actor: str | None = typer.Option(
+        None, "--actor", help="With --record: the name recorded for who made the edit"),
+    claim: str | None = typer.Option(
+        None, "--claim",
+        help="With --record --done: preserve or intended (it may only tighten the step's)"),
+    expect: str | None = typer.Option(
+        None, "--expect",
+        help="With --record --done and --claim intended: any or representation; a person on "
+             "a terminal may give raise:<Type> or return:<Type>"),
+    pair: list[str] = typer.Option(
+        [], "--pair", help="With --record --done: OLD=NEW, a pairing anchor (repeatable)"),
+    approve_agent: bool = typer.Option(
+        False, "--approve-agent",
+        help="A person approves this plan for agents: `apply --agent` may then write its "
+             "pymolt steps, and `rollback --agent --step` roll one back"),
     allow_no_baseline: bool = typer.Option(
         False,
         "--allow-no-baseline",
-        help="Apply without behavioral baseline (verification will be inconclusive)",
+        help="Apply without a baseline capture; verify will be INCONCLUSIVE",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Emit receipt as JSON"),
+    smoke: bool = typer.Option(
+        True, "--smoke/--no-smoke",
+        help="Import the changed modules in the target environment, before and after the "
+             "write, and undo the write if it breaks an import. On by default; with "
+             "--no-smoke the receipt says it was not checked",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print the receipt as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Apply exactly the reviewed plan; reject stale files and retain rollback data."""
+    """Apply the saved plan's pymolt steps. Keeps the original files for `pymolt rollback`.
+
+    With no option, every pymolt step whose dependencies are in effect, in one transaction.
+    A step already in effect is a no-op. Refuses a stale step (its statements are gone), a
+    baseline that does not match the project, or new source that does not compile on the
+    target Python; nothing is written then.
+    """
     import json
 
     from pymolt.migration_plan import (
+        MigrationCheckError,
         MigrationConflictError,
         MigrationEvidenceError,
         MigrationPlan,
         MigrationPlanError,
-        apply_migration_plan,
         plan_path,
     )
+    from pymolt.workorder.apply import StepRefusal, apply_steps, skip_step
 
+    json_output = json_output or agent
     project_path = require_project_dir(project_dir, json_output=json_output)
     migration_plan = MigrationPlan.load(project_path, plan_file)
     if migration_plan is None:
@@ -665,72 +1026,328 @@ def apply_plan_cmd(
             hint="Create a fresh plan with `pymolt plan .`.",
             json_output=json_output,
         )
+    if (brief or skip or record) and not step:
+        flag = "brief" if brief else "skip" if skip else "record"
+        fail(f"--{flag} needs --step ID", json_output=json_output)
+    if reason and not skip:
+        fail("--reason goes with --skip", json_output=json_output)
+    if (done or abort) and not record:
+        fail(f"--{'done' if done else 'abort'} goes with --record", json_output=json_output)
+    if (by or actor or claim or expect or pair) and not record:
+        fail("--by, --actor, --claim, --expect and --pair go with --record",
+             json_output=json_output)
+    if record and (skip or dry_run or through or brief):
+        fail("--record does not go with --skip, --dry-run, --through or --brief",
+             json_output=json_output)
+    if approve_agent:
+        _approve_agent(project_path, migration_plan, json_output=json_output,
+                       others=bool(step or through or dry_run or skip or record or brief))
+        return
+    if brief:
+        _print_brief(migration_plan, step, project_path, agent=agent)
+        return
     try:
-        receipt = apply_migration_plan(
-            project_path, migration_plan, allow_no_baseline=allow_no_baseline
+        if record:
+            from pymolt.workorder.record import record_step
+
+            result = record_step(project_path, migration_plan, step, done=done, abort=abort,
+                                 agent=agent, by=by, actor=actor, claim=claim, expect=expect,
+                                 pairs=pair, attestation=_attester(agent, json_output))
+        elif skip:
+            result = skip_step(project_path, migration_plan, step, reason or "", agent=agent)
+        else:
+            result = apply_steps(project_path, migration_plan, step=step, through=through,
+                                 dry_run=dry_run, allow_no_baseline=allow_no_baseline,
+                                 smoke=smoke, agent=agent,
+                                 smoke_reason=None if smoke else "--no-smoke")
+    except MigrationCheckError as exc:
+        if not json_output:
+            console.print(f"[dim]Self-check: {escape(exc.check.summary())}[/dim]")
+        fail(
+            f"migration plan was not applied: {exc}",
+            hint=exc.hint, code=EXIT_FINDING, json_output=json_output,
+            extra={"self_check": exc.check.model_dump(mode="json")},
         )
     except MigrationEvidenceError as exc:
         fail(
             f"migration plan needs evidence: {exc}",
-            hint="Capture a valid baseline and regenerate the plan.",
+            hint=exc.hint or "Capture a valid baseline and regenerate the plan.",
             code=EXIT_INCONCLUSIVE,
             json_output=json_output,
         )
     except MigrationConflictError as exc:
+        refused = getattr(exc, "refused", None) if isinstance(exc, StepRefusal) else None
         fail(
             f"migration plan conflicts with current state: {exc}",
-            hint="Review current files/run state and regenerate the plan if needed.",
+            hint=exc.hint or "Review current files/run state and regenerate the plan if needed.",
             code=EXIT_USAGE,
             json_output=json_output,
+            extra={"refused": refused} if refused else None,
         )
     except (MigrationPlanError, OSError, RuntimeError) as exc:
         fail(
             f"migration plan was not applied: {exc}",
-            hint="Regenerate stale plans; no partial source batch is kept on failure.",
+            hint=getattr(exc, "hint", None)
+            or "Nothing was written. Run `pymolt plan .` again if files changed.",
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
 
+    advisories = [item.model_dump(mode="json") for item in migration_plan.advisories]
+    manual = [item.model_dump(mode="json") for item in migration_plan.manual]
+    receipt = result.receipt
+    code = EXIT_FINDING if result.check_failed else 0
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.apply_view(result, migration_plan, project_path)))
+        raise typer.Exit(code=code)
     if json_output:
-        typer.echo(json.dumps(receipt.model_dump(mode="json"), indent=2))
-        return
-    console.print(Panel(
-        f"Applied plan [bold cyan]{receipt.run_id[:8]}[/bold cyan]\n"
-        f"Files changed: [bold]{len(receipt.files_changed)}[/bold]   "
-        f"rewrite sites: [bold]{receipt.patterns_applied}[/bold]\n"
-        f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
-        title="Migration applied", border_style="green", expand=False,
-    ))
+        payload = {**(receipt.model_dump(mode="json") if receipt is not None else {}),
+                   "outcome": result.outcome,
+                   **result.model_dump(mode="json", exclude={"receipt", "outcome"}),
+                   "advisories": advisories, "manual": manual}
+        typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(code=code)
+    _render_apply(result, migration_plan, project_path)
+    if not record:
+        _render_left_to_you(migration_plan)
     next_step(project_path)
+    raise typer.Exit(code=code)
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
+def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool) -> None:
+    """``apply --approve-agent``: a person approves the plan for agents (design 3.6)."""
+    from pymolt.migration_plan import MigrationConflictError
+    from pymolt.workorder.approval import approve
+
+    if json_output:
+        fail("--approve-agent is a person's attested act: it is refused under --agent and "
+             "--json", hint="A person runs `pymolt apply . --approve-agent` on a terminal.",
+             json_output=json_output)
+    if others:
+        fail("--approve-agent goes alone: it approves the whole plan and applies nothing")
+    try:
+        done = approve(project_path, plan, attester=_attester(False, False))
+    except MigrationConflictError as exc:
+        fail(f"the plan was not approved: {exc}", hint=exc.hint, code=EXIT_USAGE)
+    console.print(Panel(
+        f"Approved plan [bold cyan]{plan.plan_id[:8]}[/bold cyan] for agents "
+        f"(attestation {escape(done['attestation'])}): `pymolt apply --agent` may write its "
+        "pymolt steps, and `pymolt rollback --step ID --agent` roll one back. A re-plan or any "
+        "change to the plan voids it. [bold]Nothing was written to your code.[/bold]",
+        title="Approved for agents", border_style="green", expand=False))
+
+
+def _accept_finding(project_path: Path, report, finding: str) -> None:
+    """``verify --accept``: a person accepts one finding (design 5.2), or the command fails."""
+    from pymolt.verify.accepts import AcceptRefusal, accept_finding
+
+    if report._fact_diff is None or report._accepts is None:
+        fail("--accept needs a behaviour diff of the two captures, and there is none",
+             code=EXIT_USAGE)
+    try:
+        done = accept_finding(project_path, report._fact_diff, finding,
+                              attester=_attester(False, False), ctx=report._accepts)
+    except AcceptRefusal as exc:
+        fail(f"finding {finding} was not accepted: {exc}", hint=exc.hint, code=EXIT_USAGE)
+    console.print(f"[green]Accepted[/green] finding {escape(done.finding)} ({escape(done.symbol)})"
+                  f" as {'ad-hoc ' if done.adhoc else ''}step {escape(done.step)}, attestation "
+                  f"{escape(done.attestation)}. It expires when the outcome or a capture changes.")
+
+
+def _attester(agent: bool, json_output: bool):
+    """The terminal a person attests on (design 5.6): never under --agent or --json, and only
+    when stdin and stdout are terminals (the adapter checks)."""
+    from pymolt.adapters.attest_tty import TtyPrompter
+    from pymolt.attest import Attester
+
+    return Attester(prompter=TtyPrompter(agent=agent, json_output=json_output))
+
+
+def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None:
+    from pymolt.workorder.render import brief_data, brief_markdown
+
+    target = plan.step(step_id)
+    if target is None:
+        fail(f"unknown step {step_id}: the plan has "
+             + (", ".join(s.id for s in plan.steps) or "no step"), json_output=agent)
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(brief_data(plan, target, project_path)))
+        return
+    typer.echo(brief_markdown(plan, target, project_path), nl=False)
+
+
+def _render_apply(result, plan, project_path: Path) -> None:
+    """The apply summary: what was applied (re-based steps marked), each step's checks, and
+    the steps that remain, by status."""
+    receipt = result.receipt
+    plan_label = f"[bold cyan]{plan.plan_id[:8]}[/bold cyan]"
+    if result.run_id and result.run_id != plan.plan_id:
+        plan_label += f" as run [bold cyan]{result.run_id[:8]}[/bold cyan]"
+    titles = {s.id: s.title for s in plan.steps}
+    if result.outcome == "dry_run":
+        console.print(Panel(
+            f"Dry run of plan {plan_label}: [bold]nothing was written[/bold].\n"
+            f"Would apply: {escape(', '.join(_marked(result)) or 'nothing')}\n"
+            f"Files: {len(result.files)}",
+            title="Dry run", border_style="cyan", expand=False))
+        for item in result.diff:
+            # markup is off, so the diff prints as is: escaping it too left `\[` in the output
+            console.print(item["diff"], end="", markup=False, highlight=False)
+    elif result.outcome == "in_progress":
+        sid = ", ".join(result.in_progress)
+        console.print(Panel(
+            f"Recording step [bold]{escape(sid)}[/bold] of plan {plan_label}: the files are "
+            "snapshotted. Make the change, then "
+            f"[bold]pymolt apply --step {escape(sid)} --record --done[/bold] "
+            f"(or [bold]--record --abort[/bold]). [bold]Nothing was written.[/bold]",
+            title="Record open", border_style="cyan", expand=False))
+    elif result.outcome == "recorded":
+        sid = ", ".join(result.recorded)
+        checks = (result.checks.get(result.recorded[0]) or {}) if result.recorded else {}
+        console.print(Panel(
+            f"Recorded step [bold]{escape(sid)}[/bold] of plan {plan_label}: "
+            f"{len(result.files)} file(s)"
+            + (f", attested ({escape(result.attestation)})" if result.attestation else "")
+            + ".\n" + escape(", ".join(f"{k} {v}" for k, v in checks.items())),
+            title="Step recorded",
+            border_style="red" if result.check_failed else "green", expand=False))
+        for item in result.unrecorded:
+            where = item.get("file") or "?"
+            if item.get("lines"):
+                where += ":" + "-".join(str(n) for n in item["lines"])
+            console.print(f"[yellow]unrecorded[/yellow] {escape(where)}: "
+                          f"{escape(str(item.get('why')))}")
+    elif result.outcome == "aborted":
+        console.print(Panel(
+            f"Record aborted, plan {plan_label}. [bold]No file was touched.[/bold]",
+            title="Record aborted", border_style="yellow", expand=False))
+    elif result.outcome == "skipped":
+        console.print(Panel(
+            f"Skipped step [bold]{escape(', '.join(result.skipped))}[/bold] of plan "
+            f"{plan_label}. Its dependents stay blocked. [bold]Nothing was written.[/bold]",
+            title="Step skipped", border_style="yellow", expand=False))
+    elif result.outcome == "already_applied":
+        files = len(receipt.files_changed) if receipt is not None else 0
+        console.print(Panel(
+            f"Plan {plan_label} is already applied"
+            + (f" (at {receipt.applied_at})" if receipt is not None else "")
+            + f": its {files} file(s) still hold the plan's changes. "
+            "[bold]Nothing was written.[/bold]",
+            title="Already applied", border_style="green", expand=False,
+        ))
+    elif result.outcome in ("present", "nothing"):
+        what = (f"the effect of {', '.join(result.present)} is already in the files, made by "
+                "hand: verify judges those lines as hand edits" if result.present
+                else "no step could be applied")
+        console.print(Panel(
+            f"Plan {plan_label}: {escape(what)}. [bold]Nothing was written.[/bold]",
+            title="Nothing applied", border_style="yellow", expand=False))
+    elif receipt is not None and not plan.changes:
+        pins = [f"{sid} pinned the target versions in {', '.join(by.files)}"
+                for sid in result.applied if (by := plan.step(sid)) is not None
+                and by.type == "manifest-pin"]
+        console.print(Panel(
+            f"Applied plan {plan_label}: "
+            "[bold]it changed no source file[/bold] (0 files, 0 rewrite sites).\n"
+            + "".join(f"{escape(p)}.\n" for p in pins)
+            + "No call site needed a rewrite; the dependency moves still need testing: "
+            "capture and verify decide.",
+            title="Nothing to change", border_style="yellow", expand=False,
+        ))
+    else:
+        files = len(receipt.files_changed) if receipt is not None else len(result.files)
+        sites = receipt.patterns_applied if receipt is not None else 0
+        console.print(Panel(
+            f"Applied plan {plan_label}: "
+            f"[bold]{escape(', '.join(_marked(result)))}[/bold]\n"
+            f"Files changed: [bold]{files}[/bold]   rewrite sites: [bold]{sites}[/bold]\n"
+            f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
+            title="Migration applied", border_style="green", expand=False,
+        ))
+        for sid in result.applied:
+            checks = result.checks.get(sid) or {}
+            console.print(f"  {escape(sid)} {escape(titles.get(sid, ''))}: "
+                          + escape(", ".join(f"{k} {v}" for k, v in checks.items())))
+    if result.self_check is not None and result.outcome in ("applied", "dry_run"):
+        console.print(f"Self-check: {escape(result.self_check.summary())}")
+    for sid, why in result.blocked.items():
+        console.print(f"[yellow]blocked[/yellow] {escape(sid)}: {escape('; '.join(why))}")
+    for note in result.notes:
+        console.print(f"[dim]note: {escape(note)}[/dim]")
+    if result.remaining:
+        by_id = {s.id: s for s in plan.steps}
+        console.print("\n[bold]Steps remaining:[/bold]")
+        for status, ids in result.remaining.items():
+            shown = ", ".join(f"{i} ({by_id[i].executor})" if i in by_id else i for i in ids)
+            console.print(f"  {escape(status)}: {escape(shown)}")
+
+
+def _marked(result) -> list[str]:
+    rebased, unwritten = set(result.rebased), set(result.unwritten)
+    return [sid + (" (re-based)" if sid in rebased else
+                   " (already at the reviewed text)" if sid in unwritten else "")
+            for sid in result.applied]
+
+
+def _render_left_to_you(plan) -> None:
+    """The plan's advisories (sites not rewritten, rewrites with a caveat) and manual items:
+    what apply did not do, or did with a condition a person must check."""
+    if not (plan.advisories or plan.manual):
+        return
+    console.print("\n[bold yellow]Left to you:[/bold yellow]")
+    for adv in plan.advisories:
+        tag = "caveat" if adv.severity == "precondition" else "not applied"
+        console.print(f"  [yellow]{escape(adv.path)}:{adv.line}[/yellow] — \\[{tag}] "
+                      f"{escape(adv.reason)}")
+    for item in plan.manual:
+        where = (f"{item.path}:{','.join(map(str, item.lines))}" if item.path and item.lines
+                 else item.path or "no site")
+        console.print(f"  [yellow]{escape(where)}[/yellow] — \\[blocked rule] "
+                      f"{escape(item.rule)}: {escape(item.reason)}")
+
+
+@app.command(rich_help_panel="Migration")
 def rollback(
-    project_dir: str = typer.Argument(".", help="Project whose migration to restore"),
-    run_id: str | None = typer.Option(None, "--run-id", help="Applied run id; latest by default"),
-    force: bool = typer.Option(
-        False, "--force", help="Discard source edits made after apply"
+    project_dir: str = typer.Argument(".", help="Project directory"),
+    run_id: str | None = typer.Option(
+        None, "--run-id", help="Apply run to undo (default: the open one)"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Emit rollback metadata as JSON"),
+    step: str | None = typer.Option(
+        None, "--step", help="Roll back this step only. A file later changes moved on gets "
+                             "only the step's own change undone, or the step is refused"),
+    cascade: bool = typer.Option(
+        False, "--cascade", help="With --step: roll back the steps that depend on it first"),
+    force: bool = typer.Option(
+        False, "--force", help="Also discard edits made after apply"
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Print the result as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Atomically restore the exact sources retained by an applied migration."""
+    """Undo the open run's apply: restore the files its steps changed.
+
+    Refuses if a file was edited after apply, unless --force. --step rolls back one step: in a
+    file that later steps or edits moved on, only that step's own change is undone.
+    """
     import json
 
-    from pymolt.migration_plan import (
-        MigrationConflictError,
-        MigrationPlanError,
-        rollback_migration,
-    )
+    from pymolt.migration_plan import MigrationConflictError, MigrationPlanError
+    from pymolt.workorder.rollback import rollback_steps
 
+    json_output = json_output or agent
     project_path = require_project_dir(project_dir, json_output=json_output)
     try:
-        migration_plan, rolled_back_at = rollback_migration(
-            project_path, run_id=run_id, force=force
-        )
+        result = rollback_steps(project_path, run_id=run_id, step=step, force=force,
+                                cascade=cascade, agent=agent)
+        migration_plan, rolled_back_at, rolled_run = (result.plan, result.rolled_back_at,
+                                                      result.run_id)
     except MigrationConflictError as exc:
         fail(
             f"migration rollback conflicts with current state: {exc}",
-            hint="Post-apply edits are preserved unless you explicitly pass --force.",
+            hint=exc.hint or "Post-apply edits are preserved unless you explicitly pass --force.",
             code=EXIT_USAGE,
             json_output=json_output,
         )
@@ -741,32 +1358,64 @@ def rollback(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.rollback_view(result)))
+        return
+    post, post_trace = result.post, result.post_trace
     payload = {
-        "run_id": migration_plan.plan_id,
+        "run_id": rolled_run,
+        "plan_id": migration_plan.plan_id,
         "rolled_back_at": rolled_back_at,
-        "files_restored": len(migration_plan.changes),
+        "files_restored": len(result.files_restored),
+        "steps": result.steps,
+        "kept": result.kept,
+        "inverse": result.inverse,
+        "notes": result.notes,
+        "post_migration_capture": post,
+        "post_migration_trace": post_trace,
     }
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
+    post_line = {
+        "kept": "\nPost-migration capture: kept (it did not record the code rolled back)",
+        "set_aside": f"\nPost-migration capture: set aside, kept at {post_trace}",
+    }.get(post or "", "")
+    kept = (f" (kept in effect: {', '.join(result.kept)}, it changed no file)"
+            if result.kept else "")
+    if result.inverse:
+        kept += (f"\nUndone alone, later changes kept: "
+                 f"{', '.join(result.inverse)}")
+    kept += "".join(f"\n{note}" for note in result.notes)
     console.print(Panel(
-        f"Rolled back run [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan]\n"
-        f"Files restored: [bold]{len(migration_plan.changes)}[/bold]",
+        f"Rolled back run [bold cyan]{rolled_run[:8]}[/bold cyan]\n"
+        f"Steps: {escape(', '.join(result.steps + result.kept) or 'none')}{escape(kept)}\n"
+        f"Files restored: [bold]{len(result.files_restored)}[/bold]{escape(post_line)}",
         title="Migration rolled back", border_style="yellow", expand=False,
     ))
     next_step(project_path)
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
+@app.command(rich_help_panel="Migration")
 def scan(
-    project_dir: str = typer.Argument(".", help="The repo/project directory to scan"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the full scan as JSON on stdout"),
+    project_dir: str = typer.Argument(".", help="Project or repository directory"),
+    json_output: bool = typer.Option(False, "--json", help="Print the scan as JSON"),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Primary as-is scan: surfaces, version divergence, and dependency edges (offline, no resolution)."""
+    """Find manifests, Python versions, dependencies, and where the code calls them. Offline."""
     from pymolt.scan import run_scan
 
-    project_path = require_project_dir(project_dir, json_output=json_output)
+    project_path = require_project_dir(project_dir, json_output=json_output or agent)
+    if agent:
+        project_path = project_path.resolve()
     report = run_scan(project_path)
+    if agent:
+        from pymolt.interfaces import views
+
+        typer.echo(views.dumps(views.scan_view(report, project_path)))
+        return
     if json_output:
         import json as json_lib
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
@@ -785,7 +1434,59 @@ def scan(
         console.print(f"\n[bold]Dependency edges — [cyan]{root_path}[/cyan][/bold]")
         _render_inventory(inv)
 
+    if report.contact_map is not None:
+        _render_contact_map(report.contact_map)
+    if report.python_exposure is not None:
+        _render_python_exposure(report.python_exposure, report.contact_map)
+
     next_step(project_path)
+
+
+_CONTACT_ROWS = 15
+
+
+def _render_python_exposure(exposure: dict, cmap) -> None:
+    """Stdlib names the data says are gone, and how far up the code runs unchanged."""
+    from pymolt.interfaces import views
+
+    summary = views.exposure_summary(exposure)
+    if summary:
+        console.print(f"\n[bold]Python exposure[/bold] — {summary}")
+        for row in exposure["unguarded_sites"][:_CONTACT_ROWS]:
+            console.print(f"  [dim]{row}[/dim]")
+        extra = len(exposure["unguarded_sites"]) - _CONTACT_ROWS
+        if extra > 0:
+            console.print(f"  [dim]… {extra} more (pymolt scan --json)[/dim]")
+    if cmap is not None and cmap.unparsed_cython:
+        console.print(
+            f"[dim]{len(cmap.unparsed_cython)} .pyx/.pxd/.pxi file(s) are not parsed; names "
+            "used only inside them are not counted.[/dim]"
+        )
+
+
+def _render_contact_map(cmap) -> None:
+    """Where the code calls into each dependency: the static side of every report."""
+    total = len(cmap.contacts)
+    symbols = sum(len(targets) for targets in cmap.by_dep.values())
+    console.print(
+        f"\n[bold]Calls into dependencies[/bold] — {total} call site(s), {symbols} symbol(s), "
+        f"{len(cmap.by_dep)} dependencies, {cmap.files_scanned} file(s) scanned"
+    )
+    for dep, targets in cmap.by_dep.items():
+        rows = [c for c in cmap.contacts if c.dep == dep]
+        table = Table(
+            title=f"{dep} — {len(targets)} symbol(s)", title_justify="left", show_header=True,
+        )
+        table.add_column("Dependency symbol", style="cyan", overflow="fold")
+        table.add_column("Called from (your code)", overflow="fold")
+        table.add_column("File", style="dim", overflow="fold")
+        for c in rows[:_CONTACT_ROWS]:
+            table.add_row(c.target, c.caller, c.file or "—")
+        if len(rows) > _CONTACT_ROWS:
+            table.caption = f"… {len(rows) - _CONTACT_ROWS} more (pymolt scan --json)"
+        console.print(table)
+    for note in cmap.notes:
+        console.print(f"[dim]Note: {note}[/dim]")
 
 
 def _eol_hint(status: str, eol_date: str | None) -> str:
@@ -831,22 +1532,87 @@ def fetch_pypi_versions(package_name: str) -> list[str]:
         return []
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
+@app.command(rich_help_panel="Migration")
 def setup(
-    project_dir: str = typer.Argument(".", help="The target project directory"),
+    project_dir: str = typer.Argument(".", help="Project directory"),
+    manifest: str | None = typer.Option(
+        None, "--manifest", help="Manifest to migrate, e.g. requirements.txt"
+    ),
+    tool: str | None = typer.Option(
+        None, "--tool", help="Resolution tool: uv | conda | poetry | container | system"
+    ),
+    base_python: str | None = typer.Option(
+        None, "--base-python", help="The project's current Python, e.g. 3.8"
+    ),
+    target_python: str | None = typer.Option(
+        None, "--target-python", help="The Python to migrate to, e.g. 3.12"
+    ),
+    container: str | None = typer.Option(
+        None, "--container", help="Running container to resolve in (with --tool container)"
+    ),
+    target_env: str | None = typer.Option(
+        None, "--target-env", help="Existing target environment, e.g. .venv-target"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the options, or the saved config, as JSON (asks nothing)"
+    ),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Configure the migration: pick manifest, toolset, and base/target Python (writes .pymolt/env_config.json)."""
+    """Choose the manifest, tool and Python versions. Writes .pymolt/env_config.json.
+
+    In a terminal it asks for what the options do not give; with --manifest,
+    --tool, --base-python and --target-python it asks nothing. Without a
+    terminal, missing values take the detected defaults and the output names them.
+    With --json or --agent it never asks or defaults: no choice lists the valid
+    ones and saves nothing, all four save, anything in between is an error.
+    """
     import sys
 
-    from pymolt.ingestion.config import ToolChoice
+    from pymolt.ingestion.config import EnvConfig, ToolChoice
     from pymolt.ingestion.detect import detect_local_environments
-    from pymolt.setup import SetupChoices, apply_setup, gather_setup_options
+    from pymolt.setup import (
+        SetupChoices,
+        SetupError,
+        apply_setup,
+        check_setup_values,
+        gather_setup_options,
+    )
 
-    project_path = require_project_dir(project_dir)
+    machine = json_output or agent
+    project_path = require_project_dir(project_dir, json_output=machine)
+    if agent:
+        project_path = project_path.resolve()
+    # Before any question: a damaged config (or a newer pymolt's) is not replaced.
+    EnvConfig.load(project_path / ".pymolt" / "env_config.json")
     try:
         options = gather_setup_options(project_path)
     except Exception as e:
-        fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT)
+        fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT, json_output=machine)
+
+    if machine:
+        import json
+
+        from pymolt.interfaces import views
+
+        try:
+            choices = views.setup_choices(
+                options, manifest=manifest, tool=tool, base_python=base_python,
+                target_python=target_python, container_id=container, target_env=target_env,
+            )
+        except views.AgentInputError as exc:
+            fail(exc.error, hint=exc.hint, json_output=True)
+        side_effects: list[str] = []
+        config = (apply_setup(project_path, choices, notes=side_effects)
+                  if choices is not None else None)
+        if agent:  # the agent view carries the side effects as warnings
+            typer.echo(views.dumps(views.setup_view(options, project_path, config=config,
+                                                    side_effects=side_effects)))
+        else:
+            for note in side_effects:  # stderr: stdout stays pure JSON
+                warn(note)
+            typer.echo(json.dumps(
+                views.setup_payload(options, project_path, config=config), indent=2))
+        return
 
     if not options.manifests:
         fail(
@@ -854,9 +1620,16 @@ def setup(
             hint="pymolt needs a manifest (requirements*.txt, pyproject.toml, "
                  "Pipfile, environment.yml, …) to configure a migration.",
         )
+    try:
+        check_setup_values(
+            options, manifest=manifest, tool=tool, base_python=base_python,
+            target_python=target_python, container_id=container,
+        )
+    except SetupError as exc:
+        fail(str(exc), hint=exc.hint)
 
     # ── Display findings (CLI owns its rendering; the data is the shared model) ──
-    console.print("[bold blue]pymolt setup - Initializing local configuration[/bold blue]")
+    console.print("[bold]pymolt setup[/bold]")
     console.print(f"Scanning directory: {options.project_dir}\n")
 
     console.print("[bold cyan]Discovered Dependency Manifests:[/bold cyan]")
@@ -883,31 +1656,40 @@ def setup(
         for c in options.containers:
             console.print(f"  Container {c.id} ({c.name}) - Python {c.python}")
         console.print()
+    else:
+        console.print("[bold cyan]Running Docker Containers:[/bold cyan]")
+        console.print("  None mounts this project.\n")
 
     tool_names = [t.name for t in options.tools]
-    container_id = None
+    container_id = container
+    defaulted: list[str] = []
+    given_base, given_target = base_python, target_python
 
-    if sys.stdout.isatty():
+    # Every required value given: nothing to ask, even in a terminal.
+    if sys.stdout.isatty() and not (manifest and tool and base_python and target_python):
         # 1. Manifest selection
         manifest_names = [m.name for m in options.manifests]
         default_manifest = options.default_manifest or manifest_names[0]
-        selected_manifest = _ask_from_list(
+        selected_manifest = manifest or _ask_from_list(
             "Select manifest number or name as source of truth",
             manifest_names, str(manifest_names.index(default_manifest) + 1),
         )
 
         # 2. Tool selection
-        console.print("\n[bold yellow]Available resolution tools/environments:[/bold yellow]")
-        for i, t in enumerate(options.tools, 1):
-            default_marker = " [green][default][/green]" if t.is_default else ""
-            console.print(f"  {i}. {t.name} ({t.detail}){default_marker}")
-        selected_tool = _ask_from_list(
-            "Select resolution tool", tool_names,
-            str(tool_names.index(options.default_tool) + 1),
-        )
+        if tool:
+            selected_tool = tool
+        else:
+            console.print("\n[bold yellow]Available resolution tools/environments:[/bold yellow]")
+            for i, t in enumerate(options.tools, 1):
+                default_marker = " [green][default][/green]" if t.is_default else ""
+                console.print(f"  {i}. {t.name} ({t.detail}){default_marker}")
+            selected_tool = _ask_from_list(
+                "Select resolution tool", tool_names,
+                str(tool_names.index(options.default_tool) + 1),
+            )
 
         # Container selection if "container" chosen
-        if selected_tool == "container":
+        if selected_tool == "container" and not container_id:
             if options.containers:
                 console.print("\n[bold yellow]Select a running Docker container:[/bold yellow]")
                 for idx, c in enumerate(options.containers, 1):
@@ -922,22 +1704,22 @@ def setup(
                 container_id = typer.prompt("Enter Docker container ID or name")
 
         # 3. Base Python version
-        base_python = _ask_python_version(
+        base_python = base_python or _ask_python_version(
             "Confirm or enter base Python version (e.g. 3.6)",
             options.base_python_default,
         )
 
         # 4. Target Python version — recompute the list against the chosen base.
-        target_python = _select_target_python_interactive(
+        target_python = target_python or _select_target_python_interactive(
             version_floor(base_python), base_python, get_eol_versions()
         )
 
         # 5. Target environment status
-        target_env_created = typer.confirm(
+        target_env_path = target_env
+        target_env_created = bool(target_env) or typer.confirm(
             "\nHave you already created the new target environment?", default=False
         )
-        target_env_path = None
-        if target_env_created:
+        if target_env_created and not target_env_path:
             scanned_envs = detect_local_environments(project_path)
             if scanned_envs:
                 console.print("\n[bold yellow]Select your target environment folder:[/bold yellow]")
@@ -954,15 +1736,32 @@ def setup(
                     "Enter the path/name of your target environment (e.g. .venv_target)"
                 )
     else:
-        # Non-interactive fallback: take the service's defaults.
-        selected_manifest = options.default_manifest
-        selected_tool = options.default_tool
-        if selected_tool == "container" and options.containers:
+        # No terminal: what was not given takes the detected default, and is named.
+        def pick(given, label, default):
+            if given:
+                return given
+            defaulted.append(label)
+            return default
+
+        selected_manifest = pick(manifest, "manifest", options.default_manifest)
+        selected_tool = pick(tool, "tool", options.default_tool)
+        if selected_tool == "container" and not container_id and options.containers:
             container_id = options.containers[0].id
-        base_python = options.base_python_default
-        target_python = f"{sys.version_info.major}.{sys.version_info.minor}"
-        target_env_created = False
-        target_env_path = None
+        base_python = pick(base_python, "base Python", options.base_python_default)
+        target_python = pick(
+            target_python, "target Python",
+            options.default_target or f"{sys.version_info.major}.{sys.version_info.minor}",
+        )
+        target_env_path = target_env
+        target_env_created = bool(target_env)
+
+    if selected_tool == "container" and not container_id:
+        fail("a container is required with the container tool",
+             hint="Start one, or pass --container.")
+    offered = [v.version for v in options.target_versions]
+    if given_target and offered and target_python not in offered:
+        warn(f"Python {target_python} is not in the available list — "
+             "assess will fail if it cannot be provisioned.")
 
     choices = SetupChoices(
         selected_manifest=selected_manifest,
@@ -971,7 +1770,8 @@ def setup(
         # Only a value the user left at the detected default keeps its provenance;
         # anything they typed is a stated fact about the project.
         base_python_source=(
-            options.base_python_source if base_python == options.base_python_default
+            options.base_python_source
+            if base_python == options.base_python_default and not given_base
             else "declared"
         ),
         target_python=target_python,
@@ -979,10 +1779,13 @@ def setup(
         target_env_created=target_env_created,
         target_env_path=target_env_path,
     )
-    apply_setup(project_path, choices)
+    side_effects: list[str] = []
+    apply_setup(project_path, choices, notes=side_effects)
 
     config_file = project_path / ".pymolt" / "env_config.json"
     console.print(f"\n[bold green]✓ Configuration saved to {config_file}[/bold green]")
+    for note in side_effects:
+        console.print(f"[yellow]{note}[/yellow]")
     console.print(Panel(
         f"Selected Manifest  : {selected_manifest}\n"
         f"Resolution Tool    : {selected_tool}\n"
@@ -994,6 +1797,9 @@ def setup(
         title="Saved Configuration",
         expand=False
     ))
+    if defaulted:
+        console.print(f"[dim]Detected defaults used for: {', '.join(defaulted)}. "
+                      "Pass them as options to choose.[/dim]")
     next_step(project_path)
 
 
@@ -1008,9 +1814,9 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
 
     Returns the config as a plain dict (the validated :class:`EnvConfig` dumped to
     JSON-safe values) so existing key-based access keeps working. Degrades rather
-    than aborting when the file is missing or invalid. ``quiet`` suppresses the
-    warnings entirely — for callers with no stderr to speak of, like the MCP
-    server, which returns the same facts as structured data instead.
+    than aborting when the file is missing; a damaged one raises ``StateFileError``.
+    ``quiet`` suppresses the warnings entirely — for callers with no stderr to speak
+    of, like the MCP server, which returns the same facts as structured data instead.
     """
     from pymolt.ingestion.config import EnvConfig, ToolChoice
     from pymolt.ingestion.detect import (
@@ -1020,13 +1826,11 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
     )
 
     config_file = project_path / ".pymolt" / "env_config.json"
-    if config_file.is_file():
-        config = EnvConfig.load(config_file)
-        if config is not None:
-            return config.model_dump(mode="json")
-        if not quiet:
-            warn(f"failed to parse configuration file {config_file}; using defaults.")
-        return EnvConfig().model_dump(mode="json")
+    # A damaged config (or a newer pymolt's) raises StateFileError: defaults would steer the
+    # whole assessment silently.
+    config = EnvConfig.load(config_file)
+    if config is not None:
+        return config.model_dump(mode="json")
 
     if not quiet:
         warn(
@@ -1063,7 +1867,7 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
 def _resolve_chosen_source(sources, manifest_name_to_use, project_dir, json_output=False):
     """CLI wrapper: pick the manifest via the shared service, failing cleanly on error."""
     try:
-        return _service_resolve_chosen_source(sources, manifest_name_to_use)
+        return _service_resolve_chosen_source(sources, manifest_name_to_use, project_dir)
     except ValueError as e:
         fail(str(e), hint=f"(searched in '{project_dir}')", json_output=json_output)
 
@@ -1075,7 +1879,8 @@ def _resolve_target_python(
 ):
     """Resolve (prompting if needed), validate against downgrades, and warn on EOL."""
     if target_python_to_use is None:
-        if not sys.stdout.isatty():
+        # Machine output never prompts: a prompt on stdout would corrupt the JSON.
+        if json_output or not sys.stdout.isatty():
             fail(
                 "no target Python: pass --target-python, or run 'pymolt setup' to "
                 "configure one (this is required outside an interactive terminal).",
@@ -1119,7 +1924,7 @@ def _render_assess_header(
         f"Source manifest:    [magenta]{chosen_source.path.name}[/magenta] "
         f"[dim](as declared: {chosen_source.fixation.value})[/dim]\n"
         "\n"
-        "[bold cyan]Baseline (the project as it is today)[/bold cyan]\n"
+        "[bold cyan]Base (the project as it is today)[/bold cyan]\n"
         f"  Python:           [green]{python_display}[/green]\n"
         f"  Interpreter:      [dim]{legacy_interpreter_display}[/dim]\n"
         "\n"
@@ -1149,6 +1954,7 @@ _STATUS_MARK = {
     "upgrade": ("▲ upgrade", "bold blue"),
     "added": ("✚ added", "cyan"),
     "conflict": ("⚠ conflict", "bold red"),
+    "unresolved": ("? unresolved", "yellow"),
     "removed": ("⚠ removed", "red"),
     "unchanged": ("✔ same", "green"),
 }
@@ -1162,10 +1968,10 @@ def _render_comparison_table(rows, verbose):
     restated the two versions already shown beside it. The move is one column now,
     and ecosystem origin — almost always plain PyPI — is shown only when it is not.
     """
-    table = Table(title="Resolved Comparative Baseline")
+    table = Table(title="Base vs target")
     table.add_column("Package", style="bold cyan", no_wrap=True)
     table.add_column("Declared", style="green")
-    table.add_column("Baseline → Target", style="blue", no_wrap=True)
+    table.add_column("Base → Target", style="blue", no_wrap=True)
     table.add_column("Role")
     table.add_column("Status")
 
@@ -1187,6 +1993,8 @@ def _render_comparison_table(rows, verbose):
 
         if status == "conflict":
             move = f"{b_ver} → [red]conflict[/red]"
+        elif status == "unresolved":
+            move = f"{b_ver} → [yellow]unresolved[/yellow]"
         elif status == "removed":
             move = f"{b_ver} → [red]—[/red]"
         elif status == "unchanged":
@@ -1266,7 +2074,7 @@ def _render_manual_zone(report):
         # twins *from*. Printing the all-clear here contradicted the panel at
         # the top of the same run and was the last thing the reader saw.
         console.print(
-            "[yellow]No manual zone to resolve — there is no baseline to compare "
+            "[yellow]No manual zone to resolve — there is no base to compare "
             "against (see above).[/yellow]"
         )
     else:
@@ -1290,7 +2098,7 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             override = config.get("target_overrides", {}).get(pkg_name, "")
             override_str = f" [cyan](override: {override})[/cyan]" if override else ""
             console.print(
-                f"  {idx}. {pkg_name} (baseline: {b_ver}, resolved target: {t_ver}){override_str}"
+                f"  {idx}. {pkg_name} (base: {b_ver}, target: {t_ver}){override_str}"
             )
 
         choice_str = typer.prompt(
@@ -1321,29 +2129,63 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             else:
                 config["target_overrides"].pop(pkg_to_override, None)
 
-            # Persist through the schema so the file stays valid and versioned.
-            EnvConfig.model_validate(config).save(config_file)
+            # Persist through the schema so the file stays valid and versioned. The config
+            # was read long before (a person answers prompts): re-read it under the state
+            # lock and change only the overrides, so a setup run meanwhile is kept.
+            from pymolt.state_io import state_lock
+
+            with state_lock(config_file.parent.parent, operation="assess: overrides"):
+                saved = EnvConfig.load(config_file)
+                fresh = saved if saved is not None else EnvConfig.model_validate(config)
+                fresh.target_overrides = dict(config["target_overrides"])
+                fresh.save(config_file)
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
+@app.command(rich_help_panel="Migration")
 def assess(
-    project_dir: str = typer.Argument(".", help="The target project directory"),
-    target_python: str | None = typer.Option(None, help="Target Python version (e.g. 3.13)"),
-    source_manifest: str | None = typer.Option(None, help="Explicit target source manifest to parse (e.g. requirements.txt)"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show all transitive dependencies"),
-    container: str | None = typer.Option(None, "--container", help="Specify Docker container ID or name to run compilation inside"),
+    project_dir: str = typer.Argument(".", help="Project directory"),
+    target_python: str | None = typer.Option(
+        None, "--target-python", help="The Python to migrate to, e.g. 3.13 (default: setup's)"
+    ),
+    manifest: str | None = typer.Option(
+        None, "--manifest", help="Manifest to resolve, e.g. requirements.txt (default: setup's)"
+    ),
+    source_manifest: str | None = typer.Option(None, "--source-manifest", hidden=True),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Also show transitive dependencies"
+    ),
+    container: str | None = typer.Option(
+        None, "--container", help="Running container to resolve the base dependencies in"
+    ),
     base_python: str | None = typer.Option(
-        None, "--base-python", "--current-python",
-        help="The project's own Python, for baseline resolution "
-             "(--current-python is the old name for this)"),
-    upgrade_constraint: str | None = typer.Option(None, "--upgrade-constraint", "-c", help="Path to a constraint file containing custom upgrade targets (e.g. pandas<2.1)"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the assessment as machine-readable JSON on stdout (suppresses tables/prompts)"),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the resolved-graph cache and re-resolve from scratch"),
-    no_hashes: bool = typer.Option(False, "--no-hashes", help="Do not fetch PyPI hashes when writing the target requirements file"),
-    no_write: bool = typer.Option(False, "--no-write", help="Answer only: do not write the pinned target manifest into the project"),
-    risk: bool = typer.Option(False, "--risk", help="Assess migration risk per package (CVEs, wheels, abandonment) — opt-in, network"),
+        None, "--base-python", help="The project's current Python, e.g. 3.8 (default: setup's)"
+    ),
+    current_python_old: str | None = typer.Option(None, "--current-python", hidden=True),
+    upgrade_constraint: str | None = typer.Option(
+        None, "--upgrade-constraint",
+        help="Constraint file with the target versions you want, e.g. pandas<2.1",
+    ),
+    upgrade_constraint_old: str | None = typer.Option(None, "-c", hidden=True),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the assessment as JSON (no tables, no prompts)"
+    ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Resolve again instead of using the cache"
+    ),
+    no_hashes: bool = typer.Option(
+        False, "--no-hashes", help="Write the target manifest without PyPI hashes"
+    ),
+    no_write: bool = typer.Option(False, "--no-write", help="Do not write the target manifest"),
+    risk: bool = typer.Option(
+        False, "--risk", help="Also rate each package: CVEs, wheels, abandonment (network)"
+    ),
+    agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
-    """Assess feasibility against a target Python: resolve lock-first, compare baseline vs target, rank risk."""
+    """Resolve the dependencies for the target Python and write requirements-target.txt.
+
+    Compares base and target versions per package and prints how to build the
+    target environment. A resolve that succeeds does not show the code still works.
+    """
     import sys
 
     from pymolt.ingestion.config import EnvConfig
@@ -1351,7 +2193,11 @@ def assess(
     from pymolt.ingestion.fallback_compiler import find_python_interpreter
 
     current_python = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    json_output = json_output or agent  # --agent is machine output too: no tables, no prompts
     project_path = require_project_dir(project_dir, json_output=json_output)
+    if agent:
+        project_path = project_path.resolve()
+        project_dir = str(project_path)
 
     # 1. Load (or auto-detect) the environment configuration.
     config_file = project_path / ".pymolt" / "env_config.json"
@@ -1360,6 +2206,10 @@ def assess(
     config = _load_or_autodetect_assess_config(project_path)
 
     # Override config defaults with CLI overrides if provided
+    # Older option names, kept hidden for one release.
+    source_manifest = manifest or source_manifest
+    base_python = base_python or current_python_old
+    upgrade_constraint = upgrade_constraint or upgrade_constraint_old
     manifest_name_to_use = source_manifest or config.get("selected_manifest")
     detected_python = base_python or config.get("base_python")
     container_id = container or config.get("container_id")
@@ -1367,7 +2217,7 @@ def assess(
 
     # Detect all available manifests
     try:
-        sources = detect_sources(project_path)
+        sources = detect_sources(project_path, include_subroots=True)
     except Exception as e:
         fail(f"source detection failed: {e}", code=EXIT_ENVIRONMENT, json_output=json_output)
 
@@ -1402,8 +2252,8 @@ def assess(
         detected_python = current_python
     if base_python_assumed:
         warn(
-            f"no Python version is declared in this project — resolving the legacy "
-            f"baseline against {detected_python or current_python}, the interpreter "
+            f"no Python version is declared in this project — resolving the base "
+            f"dependencies against {detected_python or current_python}, the interpreter "
             "pymolt runs on.",
             hint="Pass --base-python (or run 'pymolt setup') if the project targets another.",
         )
@@ -1510,6 +2360,7 @@ def assess(
         )
         target_resolved = target_error is None and target_graph is not None
         target_manifest_path = None
+        warnings = list(report.warnings)
         if target_python_to_use and target_resolved and not no_write:
             try:
                 written = _write_target_manifest(
@@ -1518,31 +2369,49 @@ def assess(
                 )
                 if written is not None:
                     target_manifest_path = str(written)
-            except OSError:
+            except OSError as exc:
                 target_manifest_path = None
-        payload = {
-            "project_dir": str(project_dir),
-            "source_manifest": chosen_source.path.name,
-            "source_fixation": report.source_fixation,
-            "resolution_quality": report.resolution_quality,
-            "detected_python": report.detected_python,
-            "target_python": target_python_to_use,
-            "target_resolved": target_resolved,
-            "target_error": target_error,
-            "baseline_unresolved": baseline_unresolved,
-            "baseline_tier": baseline_tier.value,
-            "target_manifest_path": target_manifest_path,
-            "warnings": report.warnings,
-            "manual_zone": report.manual_zone,
-            "packages": rows,
-        }
-        if baseline_hint is not None:
-            payload["baseline_hint"] = baseline_hint.model_dump(mode="json")
+                warnings.append(f"the pinned target manifest was not written: {exc}")
+        risk_report = None
         if risk and baseline_graph is not None:
             from pymolt.risk.assess import assess_risk
             risk_report = assess_risk(baseline_graph, target_graph, target_python_to_use, project_path)
-            payload["risk"] = risk_report.model_dump(mode="json")
-        typer.echo(json_lib.dumps(payload, indent=2))
+
+        from pymolt.assess.service import AssessResult
+        from pymolt.interfaces import views
+
+        # One result, two renderings: --json is the full payload, --agent the view.
+        result = AssessResult(
+            project_dir=str(project_dir),
+            source_manifest=chosen_source.path.name,
+            source_fixation=chosen_source.fixation.value,
+            resolution_quality=report.resolution_quality,
+            detected_python=report.detected_python,
+            target_python=target_python_to_use,
+            target_resolved=target_resolved,
+            target_error=None if target_error is None else str(target_error),
+            target_error_detail=failure_evidence(target_error)[0],
+            target_culprits=failure_evidence(target_error)[1],
+            baseline_unresolved=baseline_unresolved,
+            baseline_tier=baseline_tier.value,
+            target_manifest_path=target_manifest_path,
+            warnings=warnings,
+            manual_zone=report.manual_zone,
+            rows=rows,
+            risk=risk_report,
+        )
+        target_hint = _target_hint(
+            project_path, target_python_to_use, target_resolved, target_manifest_path,
+        )
+        if agent:
+            typer.echo(views.dumps(views.assess_view(
+                result, project_path, risk_requested=risk,
+                baseline_hint=baseline_hint, target_hint=target_hint,
+            )))
+            return
+        typer.echo(json_lib.dumps(views.assess_payload(
+            result, baseline_hint=baseline_hint, target_hint=target_hint,
+        ), indent=2))
         return
 
     # Interactive customize loop
@@ -1578,6 +2447,14 @@ def assess(
                 f"[bold {style}]{title}[/bold {style}]\n{body}",
                 title="Compatibility Report", border_style=style,
             ))
+            culprits = failure_evidence(target_error)[1]
+            if culprits:
+                console.print(f"[bold]Culprit(s):[/bold] {', '.join(culprits)}")
+            if target_error:
+                detail = failure_evidence(target_error)[0]
+                if detail:
+                    console.print(Panel(escape(detail), title="Resolver output (tail)",
+                                        border_style="dim"))
             console.print()
 
         if not verbose:
@@ -1586,7 +2463,7 @@ def assess(
             details_msg = "Showing all direct and transitive dependencies."
 
         console.print(
-            f"[bold]Comparative Dependency Map (Baseline vs Target Python {target_python_to_use or ''}):[/bold]\n"
+            f"[bold]Base vs target dependencies (Python {target_python_to_use or ''}):[/bold]\n"
             f"This side-by-side view compares the resolved versions in your legacy environment against target resolution.\n"
             f"[dim]{details_msg}[/dim]"
         )
@@ -1643,7 +2520,7 @@ def assess(
                 if getattr(report, "resolution_quality", None) == "unresolved":
                     console.print(
                         f"[yellow]✓ Target manifest written: {written.name}  "
-                        "— target-only snapshot; no baseline was resolved, so "
+                        "— target-only snapshot; no base was resolved, so "
                         "this is not a comparison.[/yellow]"
                     )
                 else:
@@ -1653,11 +2530,50 @@ def assess(
         except OSError as e:
             err.print(f"[bold red]Failed to write target manifest:[/bold red] {e}")
 
+    target_manifest = next((
+        name for name in ("requirements-target.txt", "environment-target.yml")
+        if (project_path / name).is_file()
+    ), None)
+    target_hint = _target_hint(
+        project_path, target_python_to_use,
+        target_graph is not None and not target_error, target_manifest,
+    )
+    if target_hint is not None:
+        _render_target_hint(target_hint)
+
     next_step(project_path)
 
 
+def _target_hint(project_path: Path, target_python, resolved: bool, manifest):
+    """How to build the target environment, once the target side resolved."""
+    if not target_python or not resolved:
+        return None
+    from pymolt.setup.target_hint import build_target_hint
+
+    return build_target_hint(project_path, target_python, manifest=manifest)
+
+
+def _render_target_hint(hint) -> None:
+    """The target environment the post-migration capture runs in. pymolt does not build it."""
+    console.print(
+        f"\n[bold]Target environment[/bold] (Python {hint.target_python}; "
+        "pymolt does not build it)"
+    )
+    if hint.suggested_dockerfile:
+        console.print("[bold]Dockerfile.pymolt-target:[/bold]")
+        console.print(hint.suggested_dockerfile)
+    for cmd in hint.suggested_uv_commands:
+        console.print(f"  [white]{cmd}[/white]")
+    for note in hint.notes:
+        console.print(f"  [dim]note: {note}[/dim]")
+    console.print(
+        "  [dim]Once it exists: pymolt setup . --target-env PATH "
+        "(or --container on the post-migration capture).[/dim]"
+    )
+
+
 def _render_baseline_hint(hint) -> None:
-    """Show how to establish the legacy baseline env pymolt could not resolve.
+    """Show how to build the base environment pymolt could not resolve.
 
     Two audiences: a copy-paste Docker recipe for a human, and a self-contained
     brief an LLM agent can execute to stand up the interpreter and hand control back.
@@ -1665,12 +2581,12 @@ def _render_baseline_hint(hint) -> None:
     console.print(Panel(
         f"[yellow]{hint.reason}[/yellow]\n\n"
         "pymolt will not fabricate the legacy graph (resolving your unpinned constraints to "
-        "their latest releases would be a fiction). Establish the real baseline, then re-run.\n\n"
+        "their latest releases would be a fiction). Build the base environment, then re-run.\n\n"
         "[bold]1) Save this as Dockerfile.pymolt-legacy:[/bold]\n"
         f"[dim]{hint.suggested_dockerfile}[/dim]"
         "[bold]2) Build, run, and re-point assess:[/bold]\n"
         + "\n".join(f"  [white]{c}[/white]" for c in hint.suggested_commands),
-        title=f"Baseline environment needed — Python {hint.base_python}",
+        title=f"Base environment needed — Python {hint.base_python}",
         border_style="yellow", expand=False,
     ))
     console.print(Panel(
@@ -1799,67 +2715,6 @@ def _render_surface_map(smap) -> None:
     for note in smap.notes:
         console.print(f"[dim]Note: {note}[/dim]")
 
-def _render_codemod_auth_prompt():
-    from rich.panel import Panel
-
-    from pymolt.config import load_endpoint
-
-    endpoint = load_endpoint()
-    msg = (
-        "[bold cyan]✨ What are PyMolt Codemods?[/bold cyan]\n"
-        "Codemods are automatic AST transformations (using LibCST) applied during library upgrades.\n"
-        "They rewrite deprecated syntax, API calls, imports, and methods ([dim]pandas 1.x → 2.x, pydantic v1 → v2, etc.[/dim]).\n\n"
-        "[bold cyan]🔑 Axiom Cloud Hub Authentication[/bold cyan]\n"
-        "Codemod rules and recipes are fetched on-demand from the **Axiom Cloud Hub** service.\n"
-        "• [bold green]Privacy-first:[/bold green] Your source code [bold]never leaves your machine[/bold]. Only package names and version jumps are sent.\n"
-        "• [bold green]Free & Open Source ecosystem:[/bold green] All public PyPI migrations are free.\n\n"
-        "[bold yellow]Getting Started:[/bold yellow]\n"
-        "1. Authorize your CLI device session:\n"
-        "   [bold green]pymolt auth login[/bold green]\n"
-        f"   [dim](or visit: {endpoint}/cli/auth)[/dim]\n"
-        "2. Re-run your command:\n"
-        "   [bold green]pymolt codemods .[/bold green]"
-    )
-    console.print(
-        Panel(
-            msg,
-            title="[bold]PyMolt Codemods & Axiom Cloud Hub[/bold]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
-    )
-
-
-def _codemod_result_from_previews(project_path: Path, previews, files_scanned: int):
-    """Adapt review previews to the summary model shared with write mode."""
-    from pymolt.codemods.models import CodemodRunResult, FileChange, recipe_key
-
-    changed = [preview for preview in previews if preview.old_source != preview.new_source]
-    return CodemodRunResult(
-        root=str(project_path),
-        dry_run=True,
-        files_scanned=files_scanned,
-        changes=[
-            FileChange(
-                path=preview.path,
-                sites=preview.sites,
-                patterns=[
-                    recipe_key(item)
-                    for item in [*preview.rules, *preview.patterns]
-                ],
-                advisories=preview.advisories,
-            )
-            for preview in changed
-        ],
-        patterns_applied=sum(preview.sites for preview in changed),
-        advisories_by_file={
-            preview.path: preview.advisories
-            for preview in previews
-            if preview.advisories
-        },
-    )
-
-
 def _unified_patches(previews, project_path: Path) -> list[str]:
     """Build portable patches whose paths are relative to the project root."""
     import difflib
@@ -1894,533 +2749,33 @@ def _render_or_write_patches(
         output = Path(patch_file)
         if not output.is_absolute():
             output = project_path / output
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("\n".join(patches), encoding="utf-8")
+        atomic_write_text(output, "\n".join(patches))
         err.print(f"[dim]patch written → {output}[/dim]")
 
 
-@app.command(rich_help_panel="Migration workflow (preparation)")
-def migrate(
-    project_dir: str = typer.Argument(".", help="The target project directory to migrate"),
-    target_python: str | None = typer.Option(
-        None, "--target-python", "-t", help="Target Python version (e.g. 3.12 or 3.13)"
-    ),
-    manifest: str | None = typer.Option(
-        None, "--manifest", "-m", help="Manifest path (e.g. requirements.txt or pyproject.toml)"
-    ),
-    write: bool = typer.Option(
-        False, "--write", "-w", help="Apply code transformations directly to disk (default: dry-run preview)"
-    ),
-    allow_no_baseline: bool = typer.Option(
-        False,
-        "--allow-no-baseline",
-        help="Apply without behavioral baseline (irreversible; verification will be inconclusive)",
-    ),
-    endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom Cloud Hub / On-Prem endpoint URL"
-    ),
-    patch_file: str | None = typer.Option(
-        None, "--patch", help="Write the dry-run unified diff to this file"
-    ),
-):
-    """Run the complete end-to-end Python migration workflow in one command.
-
-    Steps:
-      1. Setup / Auto-configure target Python & manifest
-      2. Assess dependencies & generate requirements-target.txt
-      3. Fetch verified LibCST codemods from Axiom Cloud Hub & apply rewrites
-      4. Display executive summary & contract verification next steps
-    """
-    from pymolt.assess.service import run_assess
-    from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations
-    from pymolt.config import load_endpoint
-    from pymolt.ingestion.config import EnvConfig
-    from pymolt.migration_plan import apply_migration_plan, create_migration_plan
-    from pymolt.status import build_status
-    from pymolt.verify.service import load_contract_state
-
-    project_path = require_project_dir(project_dir)
-    if write and patch_file:
-        fail(
-            "--patch is a dry-run output and cannot be combined with --write.",
-            hint="Run without --write to review/export the patch, then apply it separately.",
-        )
-    console.print(f"\n[bold cyan]🚀 Starting PyMolt End-to-End Migration for [white]{project_path.resolve()}[/white][/bold cyan]\n")
-
-    # A baseline is the only migration input that cannot be reconstructed after
-    # source files change. Gate before assess, since assess may itself persist a
-    # target manifest in write mode.
-    contract_state = load_contract_state(project_path)
-    baseline_slot = contract_state.baseline
-    if write and not allow_no_baseline:
-        baseline_phase = build_status(project_path).phase("baseline")
-        if baseline_phase is None or baseline_phase.state != "done" or baseline_slot is None:
-            detail = baseline_phase.detail if baseline_phase is not None else "not captured"
-            fail(
-                f"cannot apply migration without a valid baseline: {detail}",
-                hint=(
-                    "Capture the original behavior first with "
-                    "'pymolt contract capture --when baseline --mode tests -- <test command>'. "
-                    "Use --allow-no-baseline only when you accept an inconclusive migration."
-                ),
-            )
-
-    # 1. Config & Target Python
-    try:
-        from pymolt.ingestion.detect import detect_sources
-        sources = detect_sources(project_path)
-    except Exception as e:
-        fail(f"Source detection failed: {e}", hint="Check directory permissions")
-
-    if not sources:
-        fail(
-            f"No Python dependency sources detected in {project_path}",
-            hint="pymolt resolves from a manifest (requirements*.txt, pyproject.toml, Pipfile, environment.yml, setup.cfg, setup.py); none was found.",
-        )
-
-    config_file = project_path / ".pymolt" / "env_config.json"
-    cfg = EnvConfig.load(config_file) if config_file.is_file() else None
-    config = cfg.model_dump(mode="json") if cfg else {}
-
-    target_py = target_python or config.get("target_python")
-    if not target_py:
-        target_py = "3.12"
-        console.print(f"[dim]No target Python configured; defaulting to Python {target_py}[/dim]")
-
-    selected_manifest = manifest or config.get("selected_manifest")
-    if not selected_manifest:
-        lock_sources = [s for s in sources if s.is_lock]
-        selected_manifest = lock_sources[0].path.name if lock_sources else sources[0].path.name
-
-    tool = config.get("selected_tool", "uv")
-    if hasattr(tool, "value"):
-        tool = tool.value
-
-    # 2. Run Assess
-    try:
-        with err.status(f"[bold cyan]Phase 1/2: Assessing dependencies against Python {target_py}…[/bold cyan]", spinner="dots"):
-            result = run_assess(
-                str(project_path),
-                target_python=target_py,
-                source_manifest=selected_manifest,
-                config=config,
-                tool=tool,
-                base_python=config.get("base_python"),
-                container_id=config.get("container_id"),
-                # A preview must be genuinely read-only. In write mode the
-                # pinned target manifest is part of the migration artifact.
-                write_manifest=write,
-            )
-    except Exception as exc:
-        fail(f"Assessment failed: {exc}", hint="Ensure resolution tool (uv or system pip) is available.")
-
-    if not result.target_resolved:
-        fail(
-            f"Target dependency resolution failed: {result.target_error or 'Dependency conflict'}",
-            hint="Check that packages have compatible wheels for the target Python version.",
-        )
-
-    if write and not result.target_manifest_path:
-        fail(
-            "target dependencies resolved, but the target manifest could not be written",
-            hint="Check project permissions; no codemods were applied.",
-            code=EXIT_ENVIRONMENT,
-        )
-    target_manifest = result.target_manifest_path or "preview only — target manifest not written"
-    console.print(
-        f"[green]✓ Assessed {len(result.rows)} package(s)[/green] → "
-        f"[cyan]{target_manifest}[/cyan]"
-    )
-
-    # 3. Derive and Run Codemods
-    degrade_warnings: list[str] = []
-    try:
-        migrations, source_desc = resolve_codemod_migrations(
-            str(project_path),
-            assess_result=result,
-            config=config,
-            warnings=degrade_warnings,
-        )
-    except Exception as exc:
-        warn(f"Could not derive migrations from target manifest: {exc}")
-        migrations = []
-        source_desc = "target manifest"
-
-    if not migrations:
-        console.print("[yellow]No dependency version jumps requiring codemods.[/yellow]\n")
-        if write:
-            migration_plan = create_migration_plan(
-                project_path,
-                [],
-                [],
-                target_python=target_py,
-                source_manifest=selected_manifest,
-                target_manifest_path=result.target_manifest_path,
-                files_scanned=0,
-            )
-            migration_plan.save(project_path)
-            apply_migration_plan(
-                project_path, migration_plan,
-                allow_no_baseline=allow_no_baseline,
-            )
-        elif patch_file:
-            _render_or_write_patches([], project_path, patch_file)
-        next_step(project_path)
-        return
-
-    effective_endpoint = load_endpoint(endpoint)
-    console.print(f"[bold]Phase 2/2: Fetching LibCST codemods[/bold] for [cyan]{source_desc}[/cyan] from {effective_endpoint}…")
-
-    try:
-        with err.status("[bold cyan]Preparing AST transformations…[/bold cyan]", spinner="dots") as st:
-            scanned: set[str] = set()
-            impacts = {}
-            by_pkg, previews = preview_codemods(
-                str(project_path),
-                migrations,
-                base_url=effective_endpoint,
-                progress=lambda msg: st.update(f"[cyan]{msg}[/cyan]"),
-                on_impacts=impacts.update,
-                on_file=lambda item: scanned.add(item.path),
-                auto_apply_only=True,
-            )
-            codemod_result = _codemod_result_from_previews(
-                project_path, previews, len(scanned)
-            )
-            if write:
-                migration_plan = create_migration_plan(
-                    project_path,
-                    previews,
-                    migrations,
-                    target_python=target_py,
-                    source_manifest=selected_manifest,
-                    target_manifest_path=result.target_manifest_path,
-                    files_scanned=len(scanned),
-                    impacts=impacts,
-                )
-                migration_plan.save(project_path)
-                apply_migration_plan(
-                    project_path, migration_plan,
-                    allow_no_baseline=allow_no_baseline,
-                )
-    except Exception as exc:
-        fail(
-            f"codemods step could not complete: {exc}",
-            hint="No successful migration receipt was written; fix the service/environment and retry.",
-            code=EXIT_ENVIRONMENT,
-        )
-
-    total_patterns = sum(len(items) for items in by_pkg.values())
-    mode_badge = "[bold red]WRITTEN TO DISK[/bold red]" if write else "[yellow]DRY-RUN PREVIEW[/yellow]"
-    console.print(f"\n[bold green]✓ Migration pipeline finished![/bold green] ({mode_badge})")
-    console.print(f"  • Target Python: [cyan]{target_py}[/cyan]")
-    console.print(f"  • Upgraded packages: [cyan]{len(migrations)}[/cyan]")
-    console.print(f"  • Codemod recipes: [cyan]{total_patterns}[/cyan]")
-    console.print(f"  • Matched rewrite sites: [cyan]{codemod_result.patterns_applied}[/cyan]")
-    console.print(f"  • Files {'changed' if write else 'that would change'}: [cyan]{codemod_result.files_changed}[/cyan]")
-    if not write:
-        _render_or_write_patches(previews, project_path, patch_file)
-        console.print(
-            "\n[dim]To write changes to disk, re-run with:[/dim] "
-            "[bold]pymolt migrate --write[/bold]"
-        )
-    next_step(project_path)
-
-
-@app.command(rich_help_panel="Migration workflow (preparation)")
-def codemods(
-    project_dir: str = typer.Argument(".", help="The repo/project directory to rewrite"),
-    package: str = typer.Option(None, "--package", "-p", help="Dependency name (e.g. flask)"),
-    from_version: str = typer.Option(None, "--from", help="Current version"),
-    to_version: str = typer.Option(None, "--to", help="Target version"),
-    target_file: str = typer.Option(
-        None,
-        "--target-file",
-        help="Target dependency file to compare against the current config",
-    ),
-    endpoint: str | None = typer.Option(
-        None, "--endpoint", help="Axiom Cloud Hub / On-Prem endpoint URL (e.g. http://localhost:8000)"
-    ),
-    axiom_url: str | None = typer.Option(
-        None, "--axiom-url", hidden=True, help="[Deprecated alias for --endpoint]"
-    ),
-    write: bool = typer.Option(
-        False, "--write", help="Apply changes to disk (default: dry-run preview)"
-    ),
-    allow_no_baseline: bool = typer.Option(
-        False,
-        "--allow-no-baseline",
-        help="Apply without behavioral baseline (verification will be inconclusive)",
-    ),
-    patch_file: str | None = typer.Option(
-        None, "--patch", help="Write the dry-run unified diff to this file"
-    ),
-):
-    """Fetch codemod patterns from Axiom Graph and apply them locally (dry-run by default).
-
-    Preferred flow: point at a target dependency file (requirements-target.txt or
-    environment-target.yml) and let pymolt derive migrations from the cached
-    comparison data. Legacy per-package --package/--from/--to remains available
-    as a fallback.
-    """
-    from pymolt.codemods.client import AxiomGraphError, DependencyMigration
-    from pymolt.codemods.models import CodemodPattern
-    from pymolt.codemods.service import preview_codemods, resolve_codemod_migrations
-    from pymolt.config import load_endpoint, load_token
-    from pymolt.ingestion.config import EnvConfig
-    from pymolt.migration_plan import (
-        MigrationPlanError,
-        apply_migration_plan,
-        create_migration_plan,
-    )
-    from pymolt.status import build_status
-    from pymolt.verify.service import load_contract_state
-
-    effective_endpoint = load_endpoint(endpoint or axiom_url)
-    token = load_token()
-    project_path = require_project_dir(project_dir)
-    if write and patch_file:
-        fail(
-            "--patch is a dry-run output and cannot be combined with --write.",
-            hint="Run without --write to review/export the patch, then apply it separately.",
-        )
-    cfg = EnvConfig.load(project_path / ".pymolt" / "env_config.json")
-    config = cfg.model_dump(mode="json") if cfg else None
-    contract_state = load_contract_state(project_path)
-    baseline_slot = contract_state.baseline
-    if write and not allow_no_baseline:
-        baseline_phase = build_status(project_path).phase("baseline")
-        if baseline_phase is None or baseline_phase.state != "done" or baseline_slot is None:
-            detail = baseline_phase.detail if baseline_phase is not None else "not captured"
-            fail(
-                f"cannot apply codemods without a valid baseline: {detail}",
-                hint=(
-                    "Capture the original behavior first, or pass --allow-no-baseline "
-                    "to accept an inconclusive migration."
-                ),
-            )
-
-    # No flags at all: fall back to the manifest assess already wrote.
-    # `pymolt codemods .` is the documented flow, and it used to exit 2.
-    if not target_file and not (package or from_version or to_version):
-        for candidate in ("requirements-target.txt", "environment-target.yml"):
-            if (Path(project_dir) / candidate).is_file():
-                target_file = candidate
-                err.print(f"[dim]using the target manifest from assess: {candidate}[/dim]")
-                break
-    if target_file:
-        degrade_warnings: list[str] = []
-        try:
-            migrations, source_desc = resolve_codemod_migrations(
-                project_dir,
-                target_dependency_file=target_file,
-                config=config,
-                warnings=degrade_warnings,
-            )
-        except ValueError as exc:
-            fail(str(exc), hint="cannot resolve this migration")
-        for warning in dict.fromkeys(degrade_warnings):  # the service also logs it
-            warn(warning)
-    else:
-        if not (package and from_version and to_version):
-            fail(
-                "nothing to migrate from: no target manifest, and no explicit package.",
-                hint="Run 'pymolt assess . --target-python X.Y' first — codemods then "
-                     "picks up requirements-target.txt on its own.\n"
-                     "Or name one: pymolt codemods DIR -p flask --from 2.0.3 --to 3.0.0",
-            )
-        migrations = [DependencyMigration(package, from_version, to_version)]
-        source_desc = f"{package} {from_version} → {to_version}"
-
-    console.print(
-        f"[bold]Requesting codemods[/bold] for [cyan]{source_desc}[/cyan] via {effective_endpoint}"
-    )
-    if not migrations:
-        console.print("[yellow]No dependency migrations to request (nothing changed).[/yellow]")
-        if write:
-            try:
-                migration_plan = create_migration_plan(
-                    project_path,
-                    [],
-                    [],
-                    target_python=(config or {}).get("target_python") or "unknown",
-                    source_manifest=(config or {}).get("selected_manifest") or "explicit migration",
-                    target_manifest_path=(project_path / target_file) if target_file else None,
-                    files_scanned=0,
-                )
-                migration_plan.save(project_path)
-                apply_migration_plan(
-                    project_path, migration_plan,
-                    allow_no_baseline=allow_no_baseline,
-                )
-            except (MigrationPlanError, OSError, RuntimeError) as exc:
-                fail(
-                    f"could not record the no-op migration plan: {exc}",
-                    code=EXIT_ENVIRONMENT,
-                )
-        next_step(project_path)
-        return
-
-    try:
-        with err.status("Connecting to Axiom Cloud Hub…", spinner="dots") as status:
-            scanned: set[str] = set()
-            impacts = {}
-            by_pkg, previews = preview_codemods(
-                project_dir,
-                migrations,
-                base_url=effective_endpoint,
-                progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
-                on_impacts=impacts.update,
-                on_file=lambda item: scanned.add(item.path),
-                auto_apply_only=True,
-            )
-            result = _codemod_result_from_previews(
-                project_path, previews, len(scanned)
-            )
-    except AxiomGraphError as exc:
-        exc_str = str(exc)
-        if not token:
-            _render_codemod_auth_prompt()
-            fail(
-                f"Axiom Cloud Hub unavailable: {exc}",
-                hint="Run 'pymolt auth login' to authenticate.",
-                code=EXIT_ENVIRONMENT,
-            )
-        elif any(k in exc_str for k in ("401", "403", "Unauthorized", "Forbidden")):
-            fail(
-                "Axiom Cloud Hub authentication error: invalid or expired API token.",
-                hint="Re-authenticate with 'pymolt auth login'.",
-                code=EXIT_ENVIRONMENT,
-            )
-        elif "localhost" in effective_endpoint or "127.0.0.1" in effective_endpoint:
-            fail(
-                f"Axiom service unavailable: {exc}",
-                hint="Is the container running?  docker run -p 8000:8000 axiom-graph",
-                code=EXIT_ENVIRONMENT,
-            )
-        else:
-            fail(
-                f"Failed to connect to Axiom Cloud Hub service ({effective_endpoint}).",
-                hint="Check your network connection or verify your API token with 'pymolt auth status'.",
-                code=EXIT_ENVIRONMENT,
-            )
-
-    if write:
-        try:
-            plan_target = (project_path / target_file) if target_file else None
-            migration_plan = create_migration_plan(
-                project_path,
-                previews,
-                migrations,
-                target_python=(config or {}).get("target_python") or "unknown",
-                source_manifest=(config or {}).get("selected_manifest") or "explicit migration",
-                target_manifest_path=plan_target,
-                files_scanned=len(scanned),
-                impacts=impacts,
-            )
-            migration_plan.save(project_path)
-            apply_migration_plan(
-                project_path, migration_plan,
-                allow_no_baseline=allow_no_baseline,
-            )
-        except (MigrationPlanError, OSError, RuntimeError) as exc:
-            fail(
-                f"reviewed codemod plan was not applied: {exc}",
-                hint="No partial source batch is kept; regenerate the plan if files changed.",
-                code=EXIT_ENVIRONMENT,
-            )
-
-    total_patterns = sum(len(items) for items in by_pkg.values())
-    if total_patterns == 0:
-        console.print("[yellow]No codemod patterns returned for this migration.[/yellow]")
-        if not write and patch_file:
-            _render_or_write_patches([], project_path, patch_file)
-        next_step(project_path)
-        return
-
-    action = "applying to" if write else "previewing against"
-    console.print(
-        f"[bold]{total_patterns}[/bold] recipe(s) returned for "
-        f"[cyan]{source_desc}[/cyan] — {action} {project_dir}…"
-    )
-    for pkg, items in by_pkg.items():
-        if not items:
-            continue
-        table = Table(title=f"Codemods — {pkg}")
-        table.add_column("kind")
-        table.add_column("change")
-        table.add_column("conf")
-        for item in items:
-            if isinstance(item, CodemodPattern):
-                table.add_row(item.kind, f"{item.old_qualname} → {item.new_qualname}", item.confidence)
-            elif item.old_qualname and item.new_qualname:
-                table.add_row(
-                    item.kind or "legacy", f"{item.old_qualname} → {item.new_qualname}", item.confidence
-                )
-            else:
-                table.add_row(
-                    item.kind or "template", f"{item.match} → {item.rewrite[0]}", item.confidence
-                )
-        console.print(table)
-
-    if result.downgraded:
-        console.print(
-            "\n[bold yellow]Downgraded to heuristic[/bold yellow] "
-            "(server claimed verified, local re-verification failed):"
-        )
-        for label in result.downgraded:
-            console.print(f"  [yellow]{label}[/yellow]")
-
-    if result.advisories_by_file:
-        console.print("\n[bold yellow]Manual review needed:[/bold yellow]")
-        for path, advisories in result.advisories_by_file.items():
-            for adv in advisories:
-                tag = "caveat" if adv.severity == "precondition" else "not applied"
-                console.print(f"  [yellow]{path}:{adv.line}[/yellow] — [{tag}] {adv.reason}")
-
-    if not result.changes:
-        # This is the answer, not a footnote. Printing it under a 15-row recipe
-        # table taught the reader to study a table that turned out to be
-        # irrelevant to their code.
-        console.print()
-        console.print(Panel(
-            f"[bold]No call sites matched.[/bold]\n"
-            f"Scanned {result.files_scanned} file(s); none of the "
-            f"{total_patterns} returned recipe(s) apply to this codebase.\n"
-            "[dim]The table above lists what the service knows about this "
-            "upgrade — it is reference, not work you owe.[/dim]",
-            border_style="yellow", padding=(0, 1), expand=False,
-        ))
-        if not write and patch_file:
-            _render_or_write_patches(previews, project_path, patch_file)
-        next_step(project_path)
-        return
-
-    if not write:
-        _render_or_write_patches(previews, project_path, patch_file)
-
-    verb = "Rewrote" if write else "Would rewrite"
-    console.print(f"\n[bold]{verb} {result.files_changed} file(s):[/bold]")
-    for change in result.changes:
-        console.print(f"  [green]{change.path}[/green]  ({change.sites} site(s))")
-    if not write:
-        console.print("\n[dim]Dry run — re-run with [bold]--write[/bold] to apply.[/dim]")
-    next_step(project_path)
-
-
-@app.command(rich_help_panel="Tools & account")
+@app.command(rich_help_panel="Tools")
 def mcp(
+    root: str | None = typer.Option(
+        None, "--root",
+        help="The directory the agent may work in (default: where the server starts)",
+    ),
+    allow_run: bool = typer.Option(
+        False, "--allow-run",
+        help="Let the agent run programs: the capture tool and apply's import check",
+    ),
     serve: bool = typer.Option(
-        False, "--serve", help="Run the stdio server even in a terminal (for manual testing)."
+        False, "--serve", help="Run even in a terminal (for testing)"
     ),
 ):
-    """Run the stdio MCP server — expose the migration funnel as agent tools.
+    """Run the MCP server on stdio, for AI agents.
 
-    This is a JSON-RPC-over-stdio server meant to be launched BY an agent client,
-    not run by hand. Register it once, then the client spawns it per session:
+    An agent client starts it; you register it once, with what you allow:
 
-      Claude Code:  claude mcp add pymolt -- pymolt mcp
+      Claude Code:  claude mcp add pymolt -- pymolt mcp --allow-run
       Codex:        add an [mcp_servers.pymolt] entry to ~/.codex/config.toml
+
+    Without --allow-run the agent runs no program. apply and rollback change source only
+    on a plan you approved for agents (`pymolt apply . --approve-agent`).
     """
     # All human-facing output goes to STDERR: stdout is the JSON-RPC channel and a
     # single stray byte there corrupts the protocol.
@@ -2449,39 +2804,50 @@ def mcp(
         )
         err.print('  Other         command [cyan]pymolt[/cyan], args [cyan]["mcp"][/cyan]')
         err.print(
+            "\nAdd [cyan]--allow-run[/cyan] to let the agent run its capture command, and "
+            "[cyan]--root DIR[/cyan] to change the directory it may work in."
+        )
+        err.print(
             "\nTo run it here anyway (e.g. to test), use [bold]pymolt mcp --serve[/bold]."
         )
         raise typer.Exit(code=0)
 
     # Spawned by a client (stdin piped) or --serve: run. A one-line lifecycle note to
     # STDERR so it never looks dead; stdout stays clean for the protocol.
-    err.print("[dim]pymolt mcp: stdio server ready (JSON-RPC on stdin/stdout; Ctrl-C).[/dim]")
-    run_mcp()
+    granted = "runs programs" if allow_run else "runs no program (no --allow-run)"
+    err.print(f"[dim]pymolt mcp: stdio server ready; it {granted} (JSON-RPC on "
+              "stdin/stdout; Ctrl-C).[/dim]")
+    run_mcp(root=root, allow_run=allow_run)
 
 
-@app.command(rich_help_panel="Experimental Features")
+@app.command(rich_help_panel="Experimental")
 def succession(
-    project_dir: str = typer.Argument(".", help="The project directory to migrate"),
-    axiom_url: str = typer.Option(
-        "http://localhost:8000", "--axiom-url", help="Axiom Graph service base URL"
+    project_dir: str = typer.Argument(".", help="Project directory"),
+    save_plan: bool = typer.Option(
+        False, "--plan", help="Save the in-place codemods as the plan for `pymolt apply`"
     ),
-    write: bool = typer.Option(
-        False, "--write", help="Apply in-place shims to disk (default: dry-run preview)"
-    ),
-    json_output: bool = typer.Option(False, "--json", help="Emit the result as JSON on stdout"),
+    write: bool = typer.Option(False, "--write", hidden=True),
+    json_output: bool = typer.Option(False, "--json", help="Print the result as JSON"),
 ):
-    """[Experimental] Find framework-succession paths for deprecated framework projects (e.g. TF1/Keras).
+    """Find where a deprecated framework's code should go (e.g. TF1/Keras).
 
-    Detects the project's frameworks, asks Axiom Graph where they should go, and for
-    IN_PLACE paths (e.g. keras → tensorflow.keras) applies the shims via LibCST —
-    dry-run by default. TRANSPLANT paths (e.g. keras → torch) are shown as a plan to
-    follow, never auto-applied.
+    Detects the frameworks and looks up where they went in pymolt's curated
+    knowledge. In-place paths (e.g.
+    keras → tensorflow.keras) are shown as file changes; --plan saves them as the
+    plan for `pymolt apply`. Transplant paths (e.g. keras → torch) are shown as
+    steps to follow, never applied. Writes no source file.
     """
-    from pymolt.strategic.succession.client import SuccessionError
-    from pymolt.strategic.succession.detect import detect_frameworks
+    from pymolt.strategic.succession.detect import (
+        detect_frameworks,
+        knowledge_coverage,
+        plausible_frameworks,
+    )
     from pymolt.strategic.succession.service import run_succession
 
     require_project_dir(project_dir, json_output=json_output)
+    if write:
+        fail("`pymolt succession --write` was removed",
+             hint="Use --plan, then `pymolt apply`.", json_output=json_output)
     frameworks = detect_frameworks(project_dir)
     if not frameworks:
         # A real answer, not a failure: nothing declared, so nothing to succeed.
@@ -2496,42 +2862,63 @@ def succession(
         else:
             err.print("[yellow]No dependency manifest found — nothing to detect.[/yellow]")
         raise typer.Exit(code=0)
+    declared = frameworks
+    frameworks = plausible_frameworks(declared)
+    covered = knowledge_coverage()
     if not json_output:
-        console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+        if frameworks:
+            console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+        else:
+            console.print(f"[bold]No framework among the {len(declared)} declared "
+                          "dependencies[/bold] (all were checked).")
 
-    try:
-        with err.status("Querying Axiom Graph for succession…", spinner="dots") as status:
-            edges, result = run_succession(
-                project_dir, base_url=axiom_url, write=write,
-                progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
-            )
-    except SuccessionError as exc:
-        fail(
-            f"Axiom Graph unavailable: {exc}",
-            hint="Is the service running?  docker compose up --build",
-            code=EXIT_ENVIRONMENT,
-            json_output=json_output,
+    with err.status("Looking up framework succession…", spinner="dots") as status:
+        edges, result = run_succession(
+            project_dir, progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
         )
 
     from pymolt.strategic.succession.transplant import build_transplant_plan
+
+    saved_plan = None
+    if save_plan:
+        saved_plan = _save_succession_plan(
+            project_dir, edges, result.files_scanned if result else 0, json_output,
+        )
 
     if json_output:
         import json as _json
         payload = {
             "frameworks": frameworks,
+            "checked_dependencies": len(declared),
+            "knowledge_covers": covered,
             "edges": [e.model_dump(mode="json") for e in edges],
             "transplant_plans": [
                 build_transplant_plan(e, project_dir).model_dump(mode="json")
                 for e in edges if e.is_transplant
             ],
             "in_place_files_changed": result.files_changed if result else 0,
-            "dry_run": result.dry_run if result else True,
+            "dry_run": True,
         }
+        if save_plan:
+            payload["plan_path"] = str(saved_plan) if saved_plan else None
         typer.echo(_json.dumps(payload, indent=2))
         return
 
     if not edges:
-        console.print("[yellow]No known succession path for these frameworks.[/yellow]")
+        named = ", ".join(frameworks) if frameworks else None
+        source = "pymolt's succession knowledge"
+        if named:
+            console.print(
+                f"[yellow]{named}: not in {source}, which covers {', '.join(covered)}.[/yellow]\n"
+                "[dim]That is a gap in what pymolt knows, not a finding that no successor "
+                "exists.[/dim]"
+            )
+        else:
+            console.print(
+                f"[yellow]Checked all {len(declared)} declared dependencies: none is a "
+                f"framework {source} has a succession path for (it covers "
+                f"{', '.join(covered)}).[/yellow]"
+            )
         return
 
     for e in edges:
@@ -2546,21 +2933,58 @@ def succession(
             _render_transplant_plan(build_transplant_plan(e, project_dir))
 
     if result is not None:
-        verb = "Rewrote" if write else "Would rewrite"
-        console.print(f"\n[bold]In-place shims — {verb} {result.files_changed} file(s):[/bold]")
+        console.print(
+            f"\n[bold]In-place shims — would change {result.files_changed} file(s):[/bold]"
+        )
         for change in result.changes:
             console.print(f"  [green]{change.path}[/green]  ({change.sites} site(s))")
-        if not write:
-            console.print("\n[dim]Dry run — re-run with [bold]--write[/bold] to apply.[/dim]")
+        if saved_plan:
+            console.print(f"\nPlan saved to [green]{saved_plan}[/green].")
+            console.print(f"[bold]Next:[/bold] pymolt apply {project_dir}")
+        elif save_plan:
+            console.print("\n[yellow]No in-place shim changes a file: nothing to plan.[/yellow]")
+        else:
+            console.print("\n[dim]Nothing was written. Save these as a plan with "
+                          "[bold]--plan[/bold], then run `pymolt apply`.[/dim]")
+
+
+def _save_succession_plan(project_dir: str, edges, files_scanned: int, json_output: bool):
+    """Freeze the in-place shims as the migration plan. None when no shim changes a file."""
+    from pymolt.codemods.service import PlanInputError, plan_inputs
+    from pymolt.migration_plan import MigrationPlanError, create_migration_plan
+    from pymolt.strategic.succession.service import in_place_previews
+    from pymolt.workorder.builder import StepRecorder
+
+    try:
+        config, target_path = plan_inputs(project_dir)
+    except PlanInputError as exc:
+        fail(str(exc), hint=exc.hint or None, json_output=json_output)
+    recorder = StepRecorder()
+    previews = in_place_previews(project_dir, edges, on_step=recorder.record)
+    if not any(p.old_source != p.new_source for p in previews):
+        return None
+    try:
+        migration_plan = create_migration_plan(
+            project_dir, previews, [],
+            target_python=config.target_python or "unknown",
+            source_manifest=config.selected_manifest or "unknown",
+            target_manifest_path=target_path,
+            files_scanned=files_scanned,
+            recorder=recorder,
+        )
+        return migration_plan.save(project_dir)
+    except (MigrationPlanError, OSError) as exc:
+        fail(f"could not save the plan: {exc}", hint="No source files were changed.",
+             code=EXIT_ENVIRONMENT, json_output=json_output)
 
 
 def _render_transplant_plan(plan) -> None:
     """Render an organ-transplant plan: scaffold → map → port weights → contract-verify.
 
     A transplant is guidance, never auto-applied — the last step is the honest gate
-    (`pymolt contract` proving the ported model matches the original). Edge-supplied
-    text (scaffold code, mappings, notes) is markup-escaped: it may contain brackets
-    (e.g. `x[0]`) that would otherwise be parsed as Rich markup."""
+    (`pymolt capture` + `pymolt verify` proving the ported model matches the original).
+    Edge-supplied text (scaffold code, mappings, notes) is markup-escaped: it may contain
+    brackets (e.g. `x[0]`) that would otherwise be parsed as Rich markup."""
     from rich.markup import escape
 
     console.print(Panel(
@@ -2581,240 +3005,33 @@ def _render_transplant_plan(plan) -> None:
         console.print(f"[dim]note: {escape(note)}[/dim]")
 
 
-# ---------------------------------------------------------------------------
-# Config Commands (`pymolt config ...`)
-# ---------------------------------------------------------------------------
-
-@config_app.command("show")
-def config_show_cmd(
-    json_output: bool = typer.Option(False, "--json", help="Emit config status as JSON"),
-):
-    """Display active Axiom Cloud Hub configuration and local cache metrics."""
-    from pymolt.config import config_show
-
-    info = config_show()
-    if json_output:
-        import json
-        print(json.dumps(info, indent=2))
-        return
-
-    console.print("\n[bold cyan]⚙  PyMolt Configuration & Cache[/bold cyan]")
-    endpoint_badge = "[dim](default)[/dim]" if info["is_default_endpoint"] else "[yellow](custom on-prem/vpc)[/yellow]"
-    console.print(f"  • [bold]Axiom Cloud Hub Endpoint:[/bold] [cyan]{info['endpoint']}[/cyan] {endpoint_badge}")
-    auth_badge = "[green](configured)[/green]" if info["token_configured"] else "[dim](anonymous / community)[/dim]"
-    console.print(f"  • [bold]Authentication Token:[/bold] {info['token_preview']} {auth_badge}")
-    console.print(f"  • [bold]Config File:[/bold] [dim]{info['config_file']}[/dim]")
-
-    c = info["cache"]
-    size_kb = round(c["total_size_bytes"] / 1024, 1)
-    console.print(f"  • [bold]Local Delta Cache:[/bold] {c['packages']} packages, {c['total_files']} files ({size_kb} KB)")
-    console.print(f"    [dim]{c['path']}[/dim]\n")
-
-
-@config_app.command("set-endpoint")
-def config_set_endpoint_cmd(
-    url: str = typer.Argument(
-        ..., help="Custom Axiom Cloud Hub or on-prem endpoint URL (e.g. https://hub.internal.corp or http://localhost:8000)"
-    ),
-):
-    """Set custom Axiom Cloud Hub / On-Premise Docker endpoint URL."""
-    from pymolt.config import save_endpoint
-
-    clean_url = url.strip().rstrip("/")
-    if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-        fail("Invalid endpoint URL format.", hint="URL must start with http:// or https://")
-    path = save_endpoint(clean_url)
-    console.print(f"[green]✓ Set[/green] Axiom endpoint to [cyan]{clean_url}[/cyan] (saved to [dim]{path}[/dim])")
-
-
-@config_app.command("reset-endpoint")
-def config_reset_endpoint_cmd():
-    """Reset Axiom Cloud Hub endpoint to the default public service."""
-    from pymolt.config import DEFAULT_ENDPOINT, clear_endpoint
-
-    clear_endpoint()
-    console.print(f"[green]✓ Reset[/green] Axiom endpoint to default public Hub: [cyan]{DEFAULT_ENDPOINT}[/cyan]")
-
-
-@config_app.command("clear-cache")
-def config_clear_cache_cmd():
-    """Purge all locally cached delta bundles."""
-    from pymolt.config import clear_delta_cache
-
-    count = clear_delta_cache()
-    console.print(f"[green]✓ Cleared[/green] local delta cache ({count} package cache folder(s) removed).")
-
-
-# ---------------------------------------------------------------------------
-# Auth Commands (`pymolt auth ...` and top-level `login`/`logout`)
-# ---------------------------------------------------------------------------
-
-@auth_app.command("login")
-@app.command(rich_help_panel="Tools & account")
-def login(
-    token: str | None = typer.Option(
-        None, "--token", help="API token (pmk_…); omit to open browser verification link"),
-):
-    """Authenticate PyMolt CLI with Axiom Cloud Hub.
-
-    Generates a secure, anti-bot verification link to authorize this CLI
-    device session and persists the API token to your user config (0600).
-    """
-    import secrets
-
-    from pymolt.config import load_endpoint, save_token
-
-    endpoint = load_endpoint()
-    session_id = f"pm_sess_{secrets.token_hex(8)}"
-    auth_url = f"{endpoint}/cli/auth?session={session_id}"
-
-    if not token:
-        console.print("\n[bold cyan]🔐 Axiom Cloud Hub CLI Authorization[/bold cyan]")
-        console.print("To authenticate and verify against automated bot access, visit:")
-        console.print(f"  [bold underline yellow]{auth_url}[/bold underline yellow]\n")
-
-        tok = typer.prompt("Paste your API token (pmk_…)", hide_input=True).strip()
-    else:
-        tok = token.strip()
-
-    if not tok:
-        fail("no token provided.", hint=f"Obtain an API token at {auth_url}")
-
-    path = save_token(tok)
-    console.print(f"[green]✓ Successfully authenticated![/green] Token saved to [cyan]{path}[/cyan]\n")
-
-
-@auth_app.command("status")
-def auth_status_cmd():
-    """Check authentication and connection status to Axiom Cloud Hub."""
-    from pymolt.codemods.client import AxiomGraphClient
-    from pymolt.config import load_endpoint, load_token
-
-    tok = load_token()
-    endpoint = load_endpoint()
-    client = AxiomGraphClient(base_url=endpoint)
-    is_healthy = client.health()
-
-    console.print("\n[bold cyan]🔐 Axiom Cloud Hub Status[/bold cyan]")
-    status_badge = "[green]● Online[/green]" if is_healthy else "[yellow]○ Unreachable[/yellow]"
-    console.print(f"  • Endpoint: [cyan]{endpoint}[/cyan] {status_badge}")
-    if tok:
-        masked = f"{tok[:6]}...{tok[-4:]}" if len(tok) > 10 else "Set"
-        console.print(f"  • Authentication: [green]Logged in[/green] ({masked})")
-    else:
-        console.print("  • Authentication: [dim]Anonymous / Community mode[/dim]")
-    console.print()
-
-
-@auth_app.command("logout")
-@app.command(rich_help_panel="Tools & account")
-def logout():
-    """Remove stored Axiom Cloud Hub API token."""
-    from pymolt.config import clear_token
-
-    if clear_token():
-        console.print("[green]✓ Logged out.[/green] Removed stored API token.")
-    else:
-        console.print("[dim]No stored API token to remove.[/dim]")
-
-
-
-@env_app.command("hint")
-def env_hint(
-    project_dir: str = typer.Argument(".", help="The target project directory"),
-    target_python: str | None = typer.Option(
-        None, "--target-python",
-        help="Target Python version (e.g. 3.13); falls back to setup config"),
-    manifest: str | None = typer.Option(
-        None, "--manifest", help="Target manifest path; defaults to requirements-target.txt"),
-    json_output: bool = typer.Option(False, "--json", help="Emit the result as JSON on stdout"),
-):
-    """Suggest how to build a runnable target-Python environment — pymolt does not build it.
-
-    Prints a derived ``Dockerfile`` (base-image version swap, target manifest) when the
-    project has one, plus the ``uv venv`` / ``uv pip install`` commands that would create
-    an equivalent venv, and the ready-to-copy post-migration capture command. Nothing is
-    written or run — build the environment yourself, then point pymolt at it (the target
-    environment prompt in `pymolt setup`, or `--container` on `pymolt contract capture`).
-
-    Run `pymolt assess` first so a target manifest exists.
-    """
-    from pymolt.ingestion.config import EnvConfig
-    from pymolt.setup.target_hint import build_target_hint
-
-    project_path = require_project_dir(project_dir, json_output=json_output)
-    config = EnvConfig.load(project_path / ".pymolt" / "env_config.json")
-
-    effective_target_python = target_python or (config.target_python if config else None)
-    if not effective_target_python:
-        fail(
-            "no target Python to build an environment for.",
-            hint="Pass --target-python, or run 'pymolt setup' / 'pymolt assess' first "
-                 "so one is configured.",
-            json_output=json_output,
-        )
-
-    effective_manifest = manifest
-    if effective_manifest is None:
-        default_target_manifest = project_path / "requirements-target.txt"
-        if default_target_manifest.is_file():
-            effective_manifest = default_target_manifest.name
-        elif config is not None and config.selected_manifest:
-            effective_manifest = config.selected_manifest
-
-    hint = build_target_hint(project_path, effective_target_python, manifest=effective_manifest)
-
-    if json_output:
-        typer.echo(hint.model_dump_json(indent=2))
-        return
-
-    console.print(
-        f"[bold blue]pymolt env hint[/bold blue] — target Python [cyan]{hint.target_python}[/cyan]"
-    )
-    if hint.suggested_dockerfile:
-        console.print("\n[bold]Suggested Dockerfile.pymolt-target:[/bold]")
-        console.print(hint.suggested_dockerfile)
-    console.print("\n[bold]Suggested uv commands:[/bold]")
-    for cmd in hint.suggested_uv_commands:
-        console.print(f"  [white]{cmd}[/white]")
-    for note in hint.notes:
-        console.print(f"  [dim]note: {note}[/dim]")
-
-    console.print(Panel(
-        f"[bold]Next step[/bold] — build the environment above yourself, then capture the "
-        f"post-migration contract:\n\n"
-        f"  [white]{hint.capture_hint}[/white]",
-        title="next step", expand=False, border_style="green",
-    ))
-
-
 _PORTED_STYLE = {"confirmed": "green", "likely": "yellow", "unknown": "dim"}
 
 
-@app.command(rich_help_panel="Experimental Features")
+@app.command(rich_help_panel="Experimental")
 def forks(
-    repo: str = typer.Argument(..., help="Base repo to triage, as owner/name"),
+    repo: str = typer.Argument(..., help="Repository, as owner/name"),
     project_dir: str = typer.Option(
         ".", "--project-dir",
         help="Where to keep the fork cache (default: the current directory)"),
     online: bool = typer.Option(
-        False, "--online", help="Hit the GitHub API (cached); default reads the cache only"
+        False, "--online", help="Query the GitHub API (cached); default: cache only"
     ),
     cutoff_months: int = typer.Option(
         18, "--cutoff-months", help="Ignore forks not pushed to within this many months"
     ),
     top: int = typer.Option(
-        25, "--top", help="How many top survivors get the expensive compare/manifest passes"
+        25, "--top", help="How many top forks get the slower compare and manifest checks"
     ),
     json_output: bool = typer.Option(
-        False, "--json", help="Emit the full report as JSON on stdout"
+        False, "--json", help="Print the report as JSON"
     ),
 ):
-    """Strategic fork-network triage — rank the live/ported successor forks of a dead repo.
+    """Rank the active forks of an abandoned repository.
 
-    Offline by default (reads a previously cached ``--online`` run). Ranks by recency,
-    star gravity, divergence from base, and a declared-dependency "already ported?"
-    signal — never a claim that a fork *works*.
+    Reads a cached --online run by default. Ranks by recent pushes, stars,
+    divergence from the original, and whether the fork's declared dependencies
+    look ported. A high rank does not mean the fork works.
     """
     from pymolt.strategic.forknet.service import run_forknet
 
@@ -2865,3 +3082,53 @@ def forks(
 
     for note in report.notes:
         console.print(f"[dim]note: {note}[/dim]")
+
+
+
+# ── removed commands ──────────────────────────────────────────────────────────
+# Kept for one release so an old script or habit gets the replacement instead
+# of "No such command". Hidden from --help; any arguments are accepted.
+
+
+def _removed(name: str, replacement: str | dict[str, str]) -> None:
+    """Register ``pymolt NAME`` as removed: print what replaces it and exit 2.
+
+    ``replacement`` is the new command, or, for a removed group, a map from each
+    old subcommand to its replacement.
+    """
+
+    def stub(ctx: typer.Context) -> None:
+        sub = ctx.args[0] if ctx.args and isinstance(replacement, dict) else ""
+        if isinstance(replacement, dict):
+            use = replacement.get(sub) or "; ".join(
+                f"{old} → {new}" for old, new in replacement.items()
+            )
+            if sub not in replacement:
+                sub = ""
+        else:
+            use = replacement
+        old = f"pymolt {name}{' ' + sub if sub else ''}"
+        fail(f"`{old}` was removed", hint=f"Use {use}.")
+
+    app.command(
+        name,
+        hidden=True,
+        add_help_option=False,
+        context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    )(stub)
+
+
+_removed("doctor", "`pymolt status`")
+_removed("contract", {
+    "capture": "`pymolt capture baseline|post-migration`",
+    "trace": "`pymolt capture baseline|post-migration`",
+    "export-watcher": "`pymolt capture … --mode attach` (it writes the watcher bundle)",
+    "boundary": "`pymolt capture baseline`, `pymolt capture post-migration`, then "
+                "`pymolt verify`",
+    "map": "`pymolt scan`",
+    "report": "`pymolt verify`",
+    "diff": "`pymolt verify --baseline OLD --post-migration NEW`",
+})
+_removed("env", {"hint": "`pymolt assess` (it prints how to build the target environment)"})
+_removed("migrate", "`pymolt plan`, then `pymolt apply` (status shows the steps before them)")
+_removed("codemods", "`pymolt plan` to see the changes, then `pymolt apply`")

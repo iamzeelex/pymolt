@@ -1,0 +1,248 @@
+{
+ "name": "pydantic",
+ "ecosystem": "validation / web",
+ "old": {
+  "python": "3.11",
+  "requirements": [
+   "pydantic==1.10.27",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "pydantic==2.14.3",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "pydantic"
+ ],
+ "target_manifest": [
+  "pydantic==2.14.3"
+ ],
+ "files": {
+  "app/__init__.py": "",
+  "app/core.py": "from typing import List, Optional\n\nfrom pydantic import BaseModel, Field, ValidationError, validator\n\n\nclass Address(BaseModel):\n    city: str\n    zip: str = Field(\"00000\", regex=r\"^\\d{5}$\")\n\n\nclass User(BaseModel):\n    name: str\n    email: str = Field(..., regex=r\"^[^@\\s]+@[^@\\s]+$\")\n    age: int = 0\n    nickname: Optional[str]\n    address: Optional[Address] = None\n    tags: List[str] = []\n\n    @validator(\"name\")\n    def name_not_blank(cls, v):\n        if not v.strip():\n            raise ValueError(\"name must not be blank\")\n        return v.title()\n\n    @validator(\"tags\", each_item=True)\n    def tag_lower(cls, v):\n        return v.lower()\n\n    class Config:\n        anystr_strip_whitespace = True\n\n\ndef load_user(data):\n    return User.parse_obj(data)\n\n\ndef load_user_json(raw):\n    return User.parse_raw(raw)\n\n\ndef dump_user(user):\n    return user.dict(exclude_none=True)\n\n\ndef user_json(user):\n    return user.json()\n\n\ndef birthday(user):\n    return user.copy(update={\"age\": user.age + 1})\n\n\ndef field_names():\n    return list(User.__fields__)\n\n\ndef try_load(data):\n    try:\n        return User.parse_obj(data)\n    except ValidationError:\n        return None\n",
+  "tests/test_core.py": "import json\n\nfrom app.core import (\n    birthday, dump_user, field_names, load_user, load_user_json, try_load,\n    user_json,\n)\n\nDATA = {\"name\": \"  ada lovelace \", \"email\": \"ada@example.org\", \"age\": 36,\n        \"tags\": [\"Math\", \"ENGINE\"], \"address\": {\"city\": \"London\", \"zip\": \"12345\"}}\n\n\ndef test_load_user():\n    u = load_user(DATA)\n    assert u.name == \"Ada Lovelace\"\n    assert u.tags == [\"math\", \"engine\"]\n    assert u.address.city == \"London\"\n\n\ndef test_load_user_json():\n    u = load_user_json('{\"name\": \"bob\", \"email\": \"b@example.com\"}')\n    assert u.name == \"Bob\"\n    assert u.age == 0\n\n\ndef test_dump_user():\n    d = dump_user(load_user(DATA))\n    assert d[\"name\"] == \"Ada Lovelace\"\n    assert \"nickname\" not in d\n    assert d[\"address\"] == {\"city\": \"London\", \"zip\": \"12345\"}\n\n\ndef test_user_json_roundtrip():\n    u = load_user(DATA)\n    assert json.loads(user_json(u))[\"age\"] == 36\n    assert load_user_json(user_json(u)) == u\n\n\ndef test_birthday():\n    assert birthday(load_user(DATA)).age == 37\n\n\ndef test_fields():\n    assert field_names() == [\"name\", \"email\", \"age\", \"nickname\", \"address\", \"tags\"]\n\n\ndef test_try_load_rejects_bad_email():\n    assert try_load({\"name\": \"x\", \"email\": \"nope\"}) is None\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/core.py",
+   "old": "regex=",
+   "new": "pattern=",
+   "replace_all": true,
+   "if_present": true
+  },
+  {
+   "file": "app/core.py",
+   "old": "from typing import List, Optional",
+   "new": "import json\nfrom typing import List, Optional"
+  },
+  {
+   "file": "app/core.py",
+   "old": "from pydantic import BaseModel, Field, ValidationError, validator",
+   "new": "from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    nickname: Optional[str]\n",
+   "new": "    nickname: Optional[str] = None\n"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    @validator(\"name\")\n    def",
+   "new": "    @field_validator(\"name\")\n    @classmethod\n    def"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    @validator(\"tags\", each_item=True)\n    def tag_lower(cls, v):\n        return v.lower()",
+   "new": "    @field_validator(\"tags\")\n    @classmethod\n    def tag_lower(cls, v):\n        return [t.lower() for t in v]"
+  },
+  {
+   "file": "app/core.py",
+   "old": "    class Config:\n        anystr_strip_whitespace = True",
+   "new": "    model_config = ConfigDict(str_strip_whitespace=True)"
+  },
+  {
+   "file": "app/core.py",
+   "old": "return user.json()",
+   "new": "return json.dumps(user.model_dump(mode=\"json\"))",
+   "if_present": true
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "app/core.py",
+     "append": "\n\nclass Item(BaseModel):\n    sku: str\n    qty: int\n\n\ndef parse_item(data):\n    try:\n        return Item.parse_obj(data)\n    except ValidationError:\n        return None\n\n\ndef user_schema():\n    return User.schema()\n"
+    },
+    {
+     "file": "tests/test_core.py",
+     "append": "\n\ndef test_parse_item():\n    from app.core import parse_item\n    assert parse_item({\"sku\": \"A1\", \"qty\": 2}).qty == 2\n    # the documented change: v1 coerces an int sku to str, v2 rejects it (parse_item -> None)\n    coerced = parse_item({\"sku\": 1001, \"qty\": 2})\n    assert coerced is None or coerced.sku == \"1001\"\n\n\ndef test_schema_title():\n    from app.core import user_schema\n    assert user_schema()[\"title\"] == \"User\"\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "pydantic.main.BaseModel.parse_obj",
+    "pydantic.main.BaseModel.schema"
+   ],
+   "expected_changed_note": "Guess at the traced symbol: the call is Item.parse_obj in the baseline; after pymolt rewrites it, post-migration it is BaseModel.model_validate. Either may be what the diff reports. The value that changes is the returned Item (sku '1001' vs None) so only a structural renderer sees it. The test passes an int sku (1001) so the coercion change is exercised: verified 2026-11-15, pydantic 1.10.27 returns sku '1001', 2.14.3 raises pydantic_core ValidationError (parse_item then returns None)."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "pydantic.Field",
+   "kind": "SIGNATURE",
+   "param": "regex",
+   "site": "app/core.py:8",
+   "breaks": "PydanticUserError: `regex` is removed. use `pattern` instead (raised at class-definition time, so importing the app fails)",
+   "successor": "pattern= (same kwarg, renamed)",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.Field' (regex -> pattern)",
+   "verified": "old: Field('00000', regex=r'^\\d{5}$') builds, A()=A(z='00000'), no warning. new: PydanticUserError at class definition. Second site at app/core.py:13"
+  },
+  {
+   "symbol": "pydantic.validator",
+   "kind": "DEPRECATED",
+   "param": "each_item",
+   "site": "app/core.py:19",
+   "breaks": "PydanticDeprecatedSince20 warning only; the V1-style validator still runs (also with each_item=True). Removal is scheduled for V3.",
+   "successor": "pydantic.field_validator",
+   "successor_note": "+ @classmethod; each_item has no equivalent, validate the list instead",
+   "fixable": "manual",
+   "source": "Pydantic V2 migration guide, 'Validators' (@validator -> @field_validator)",
+   "verified": "old: no warning, validators run (name 'a b' -> 'A B', tags ['A'] -> ['a']). new: same results, one PydanticDeprecatedSince20 'Pydantic V1 style @validator validators are deprecated' per class definition; each_item=True still works."
+  },
+  {
+   "symbol": "pydantic.BaseModel.dict",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:42",
+   "breaks": "PydanticDeprecatedSince20 warning only; same dict returned",
+   "successor": "pydantic.BaseModel.model_dump",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (.dict() -> .model_dump())",
+   "verified": "old: {'n':'a','x':0,'tags':[]}, no warning. new: identical dict, warning 'The `dict` method is deprecated; use `model_dump` instead'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.json",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:46",
+   "breaks": "PydanticDeprecatedSince20 warning only",
+   "successor": "pydantic.BaseModel.model_dump_json",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (.json() -> .model_dump_json())",
+   "verified": "old: no warning. new: warning 'The `json` method is deprecated; use `model_dump_json` instead'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.json",
+   "kind": "BEHAVIOR",
+   "param": "separators",
+   "site": "app/core.py:46",
+   "breaks": "Output string differs: v1 '{\"n\": \"a\", \"x\": 0, \"tags\": []}' (json.dumps defaults) vs v2 '{\"n\":\"a\",\"x\":0,\"tags\":[]}' (compact). A silent change for any consumer comparing strings; also true of the model_dump_json successor.",
+   "successor": "json.dumps(user.model_dump(mode='json')) to keep the v1 bytes",
+   "fixable": "manual",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' / model_dump_json output is compact",
+   "verified": "old: '{\"n\": \"a\", \"x\": 0, \"tags\": []}'. new: '{\"n\":\"a\",\"x\":0,\"tags\":[]}'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.parse_obj",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:34",
+   "breaks": "PydanticDeprecatedSince20 warning only",
+   "successor": "pydantic.BaseModel.model_validate",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (parse_obj -> model_validate)",
+   "verified": "old: no warning. new: same model, warning 'The `parse_obj` method is deprecated; use `model_validate` instead'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.parse_raw",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:38",
+   "breaks": "PydanticDeprecatedSince20 warnings only (parse_raw plus an internal load_str_bytes warning)",
+   "successor": "pydantic.BaseModel.model_validate_json",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (parse_raw -> model_validate_json)",
+   "verified": "old: no warning. new: same model, two PydanticDeprecatedSince20 warnings."
+  },
+  {
+   "symbol": "pydantic.BaseModel.copy",
+   "kind": "DEPRECATED",
+   "param": "update",
+   "site": "app/core.py:50",
+   "breaks": "PydanticDeprecatedSince20 warning only",
+   "successor": "pydantic.BaseModel.model_copy",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (copy -> model_copy)",
+   "verified": "old: copy(update={'x':2}) -> x=2, no warning. new: same, warning 'The `copy` method is deprecated; use `model_copy` instead'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.schema",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:77",
+   "scenario": "change",
+   "breaks": "PydanticDeprecatedSince20 warning only; the JSON schema content differs in detail ('required' key is always present in v2)",
+   "successor": "pydantic.BaseModel.model_json_schema",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (schema -> model_json_schema)",
+   "verified": "old (1.10.27) User.schema(): top-level 'definitions' with '$ref': '#/definitions/Address', Optional fields as a bare type. new (2.14.3): the same call returns '$defs' with '$ref': '#/$defs/Address' and Optional fields as anyOf [..., null], plus the deprecation warning. Found by an unedited call in the equivalent scenario (audit round 3), so the call moved to the change scenario."
+  },
+  {
+   "symbol": "pydantic.BaseModel.__fields__",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/core.py:54",
+   "breaks": "PydanticDeprecatedSince20 warning only; same names in the same order",
+   "successor": "pydantic.BaseModel.model_fields",
+   "fixable": "codemod",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' (__fields__ -> model_fields)",
+   "verified": "old: ['n','x','tags'], no warning. new: same list, warning 'The `__fields__` attribute is deprecated'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.Config",
+   "kind": "BEHAVIOR",
+   "param": "anystr_strip_whitespace",
+   "site": "app/core.py:29",
+   "breaks": "Class-based Config is deprecated and the renamed key is only warned about, NOT honoured: strings are no longer stripped (UserWarning 'anystr_strip_whitespace has been renamed to str_strip_whitespace'). User.name stays '  Ada Lovelace ' and the app tests fail.",
+   "successor": "model_config = ConfigDict(str_strip_whitespace=True)",
+   "fixable": "manual",
+   "source": "Pydantic V2 migration guide, 'Changes to config' (anystr_strip_whitespace -> str_strip_whitespace)",
+   "verified": "old: A(n='  a ').n == 'a'. new: '  a ' (not stripped), plus PydanticDeprecatedSince20 'Support for class-based config is deprecated' and the UserWarning (emitted twice)."
+  },
+  {
+   "symbol": "pydantic.BaseModel",
+   "kind": "BEHAVIOR",
+   "param": "Optional[...] without default",
+   "site": "app/core.py:15",
+   "breaks": "v1 treats `Optional[str]` with no default as optional (default None); v2 makes the field required, so load_user without 'nickname' raises ValidationError. Silent at definition time.",
+   "successor": "nickname: Optional[str] = None",
+   "fixable": "manual",
+   "source": "Pydantic V2 migration guide, 'Required, optional, and nullable fields'",
+   "verified": "old: A() -> A(n=None, ...). new: ValidationError 'Field required'."
+  },
+  {
+   "symbol": "pydantic.BaseModel.parse_obj",
+   "kind": "BEHAVIOR",
+   "param": "int->str coercion",
+   "site": "app/core.py:71",
+   "breaks": "Only exercised by the change scenario. v1 coerces int to str for a str field (sku=1001 -> '1001'); v2 strict-ish str rejects int and raises ValidationError, which parse_item swallows and turns into None.",
+   "successor": null,
+   "fixable": "manual",
+   "source": "Pydantic V2 migration guide, 'Changes to pydantic.BaseModel' / conversion table (int is not coerced to str)",
+   "scenario": "change",
+   "verified": "old: Item.parse_obj({'sku':1001,'qty':2}) -> sku='1001'; parse_item returns Item. new: ValidationError; parse_item returns None. Also float 1.5 -> int: v1 gives 1, v2 raises."
+  }
+ ],
+ "expected_warnings": [],
+ "notes": "Old side emits NO warnings at all (v1 never warns), so the baseline capture has zero recorded warnings; the new side emits many PydanticDeprecatedSince20 (Python-level warnings.warn, not C) plus a UserWarning for the renamed Config key (also Python-level). S1: app functions return User / Item model instances (load_user, load_user_json, birthday, parse_item); repr is identical in v1 and v2 (e.g. A(n='a', x=0, tags=[])) and == works, so a structural renderer would call them equal, a type-only renderer ('app.core.User') cannot see the Config-driven change (name not stripped) or the int->str coercion change (Item vs None for parse_item). dump_user returns a plain dict (structural for sure). Two silent behaviours (Config key ignored, Optional[str] now required) break the app's own tests rather than raising at import; Field(regex=) raises at import. S4: v1 has no deprecation channel, so FutureWarning-style noise calibration has nothing to learn from on the old side. S5: .dict/.json/parse_obj/parse_raw/copy/schema/__fields__ are the well-known renames with a shim; @validator and Config need manual work. manual_migration edits are applied in order; extra keys: 'if_present' (skip when the text is absent, e.g. pymolt already rewrote that site) and 'replace_all'. Ground-truth entries with 'scenario':'change' only exist after the change scenario's edits. 'expected_changed' is a guess at the traced symbol name."
+}
