@@ -68,7 +68,7 @@ _IGNORE_DEPS = {"pymolt", "pymolt_trace"}
 
 # Bump when the per-file records (or the way they are derived) change: it is part of the
 # per-file cache key, so a bump retires every cached file.
-CONTACT_MAP_VERSION = "3"
+CONTACT_MAP_VERSION = "4"
 
 ContactKind = Literal[
     "call",
@@ -107,6 +107,13 @@ class Contact(BaseModel):
     # counts by its span; for a decorator, a default or a base the span is the ``def`` /
     # ``class`` header from its first decorator. Empty in maps saved before spans existed.
     spans: list[tuple[int, int, int]] = Field(default_factory=list)
+    # A binary operator's or comparison's method on one operand: the targets of the same
+    # operator's method on the other operand (``a > b``: ``A.__gt__`` <-> ``B.__lt__``). Python
+    # calls the reflected one only when the forward one returns NotImplemented (or the right
+    # operand's type is a subclass of the left's), so at one statement the two are
+    # alternatives: either recorded there confirms both (``report._judge_contacts``). ``==`` and
+    # ``!=`` name the same method on both sides. Empty: a contact of its own.
+    alternatives: list[str] = Field(default_factory=list)
 
 
 class StdlibSite(BaseModel):
@@ -353,6 +360,7 @@ class _ContactVisitor(cst.CSTVisitor):
         target: str,
         ckind: str | None,
         skind: str | None,
+        alternatives: list[str] | None = None,
     ) -> None:
         self.records.append({
             "caller": self._caller(),
@@ -364,6 +372,7 @@ class _ContactVisitor(cst.CSTVisitor):
             "span": list(self._span(node)) if ckind else None,
             "reached_at": "call" if self._fn_depth else "import",
             "guard": self._guard(node) if skind else None,
+            "alt": sorted(set(alternatives)) if alternatives else None,
         })
 
     def _emit(
@@ -371,6 +380,7 @@ class _ContactVisitor(cst.CSTVisitor):
         node: cst.CSTNode,
         kind: ContactKind,
         protocol: str | None = None,
+        alternatives: list[str] | None = None,
     ) -> None:
         # Only an attribute path (``imp.reload``, ``collections.Iterable``) is a site here: a bare
         # name was bound by an import statement, and that statement is the site.
@@ -379,7 +389,7 @@ class _ContactVisitor(cst.CSTVisitor):
             site_kind = {"call": "call", "class-base": "class-base"}.get(kind, "attr")
         for name in self._imported_names(node):
             target = f"{name}.{protocol}" if protocol else name
-            self._record(node, target, kind, site_kind)
+            self._record(node, target, kind, site_kind, alternatives)
 
     # ── import statements are stdlib sites, not contacts ────────────────────
 
@@ -484,13 +494,24 @@ class _ContactVisitor(cst.CSTVisitor):
         test.visit(Finder())
         return found[0] if found else None
 
-    def _emit_protocol(self, node: cst.BaseExpression, method: str) -> None:
+    def _emit_protocol(self, node: cst.BaseExpression, method: str,
+                       alternatives: list[str] | None = None) -> None:
         # Decorator/base/context-manager are stronger descriptions of the same
         # syntax than the implicit protocol they may trigger.
         if self._structural_kind(node) is not None:
             return
-        self._emit(node, "protocol", method)
+        self._emit(node, "protocol", method, alternatives)
         self._consumed.add(node)
+
+    def _emit_operator(self, left: cst.BaseExpression, forward: str,
+                       right: cst.BaseExpression, reflected: str) -> None:
+        """A binary operator or comparison: ``forward`` on the left operand, ``reflected`` on
+        the right one, each naming the other's targets as its alternatives
+        (``Contact.alternatives``)."""
+        lefts = [f"{name}.{forward}" for name in self._imported_names(left)]
+        rights = [f"{name}.{reflected}" for name in self._imported_names(right)]
+        self._emit_protocol(left, forward, rights)
+        self._emit_protocol(right, reflected, lefts)
 
     def visit_Call(self, node: cst.Call) -> None:
         structural_kind = self._structural_kind(node)
@@ -515,8 +536,7 @@ class _ContactVisitor(cst.CSTVisitor):
 
     def visit_BinaryOperation(self, node: cst.BinaryOperation) -> None:
         left_method, right_method = _BINARY_PROTOCOLS[type(node.operator)]
-        self._emit_protocol(node.left, left_method)
-        self._emit_protocol(node.right, right_method)
+        self._emit_operator(node.left, left_method, node.right, right_method)
 
     def visit_UnaryOperation(self, node: cst.UnaryOperation) -> None:
         self._emit_protocol(node.expression, _UNARY_PROTOCOLS[type(node.operator)])
@@ -530,8 +550,7 @@ class _ContactVisitor(cst.CSTVisitor):
             else:
                 methods = _COMPARISON_PROTOCOLS[type(operator)]
                 if methods is not None:
-                    self._emit_protocol(left, methods[0])
-                    self._emit_protocol(comparison.comparator, methods[1])
+                    self._emit_operator(left, methods[0], comparison.comparator, methods[1])
             left = comparison.comparator
 
     def visit_For(self, node: cst.For) -> None:
@@ -831,17 +850,20 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
                 Contact(
                     caller=caller, target=rec["target"], dep=dep_top,
                     file=_file_for_qualname(caller, file_by_module), kind=rec["ckind"],
-                    line=line, spans=[(line, first, last)],
+                    line=line, spans=[(line, first, last)], alternatives=rec.get("alt") or [],
                 )
             )
             by_dep.setdefault(dep_top, set()).add(rec["target"])
 
     # The same symbol can legitimately appear under multiple contact kinds, but
     # repeated syntax of one kind does not add evidence: one contact per (caller, target,
-    # kind), the first place it occurs, with every place in ``spans``.
-    unique: dict[tuple[str, str, ContactKind], Contact] = {}
-    for c in sorted(cmap.contacts, key=lambda c: (c.dep, c.target, c.caller, c.kind, c.line or 0)):
-        key = (c.caller, c.target, c.kind)
+    # kind, alternatives), the first place it occurs, with every place in ``spans``. An
+    # operator's method with alternatives stays apart from one of its own: only the first
+    # may be confirmed by another method at its statement.
+    unique: dict[tuple[str, str, ContactKind, tuple[str, ...]], Contact] = {}
+    for c in sorted(cmap.contacts, key=lambda c: (c.dep, c.target, c.caller, c.kind,
+                                                  c.alternatives, c.line or 0)):
+        key = (c.caller, c.target, c.kind, tuple(c.alternatives))
         kept = unique.get(key)
         if kept is None:
             unique[key] = c

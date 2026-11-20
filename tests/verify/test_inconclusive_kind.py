@@ -70,6 +70,19 @@ def test_an_uncomparable_fact_alone_needs_evidence(tmp_path):
     assert cause.settle.startswith("capturing again does not settle it")
 
 
+def test_an_attested_expectation_unseen_needs_evidence_and_says_values_settle_it(tmp_path):
+    unseen = {"category": "rewritten", "comparison": "uncomparable", "symbol": "lib.h",
+              "provenance": "intended",
+              "notes": ["content unseen: the attested expectation representation cannot be "
+                        "checked; verify sees the outcomes' types but not their values"]}
+    unified = _verdict(tmp_path, unseen)
+    assert unified.verdict is VerificationVerdict.INCONCLUSIVE
+    assert _kind(unified) == "needs_evidence"
+    (cause,) = [c for c in unified.inconclusive_causes if "attested expectation" in c.reason]
+    assert cause.cause == "uncomparable" and "--privacy values" in cause.settle
+    assert not any("could not be paired" in c.reason for c in unified.inconclusive_causes)
+
+
 def test_a_review_item_and_missing_evidence_need_a_person_and_keep_both_reasons(tmp_path):
     unified = _verdict(tmp_path, REVIEW, CAPPED, blind=1)
     assert _kind(unified) == "needs_review"

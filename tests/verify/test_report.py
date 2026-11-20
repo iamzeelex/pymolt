@@ -447,7 +447,10 @@ def test_v2_sym_confirms_constructor_reexport_and_unresolvable_exact(tmp_path, m
         "fakedep.Base": "unobservable", "fakedep.CONSTANT": "unobservable",
         "fakedep.Client.__or__": "unobservable", "fakedep.Other.__ror__": "unobservable",
     }
-    assert rep.unobservable_by_reason == {"existence": 2, "interpreter": 2}
+    # the two methods of the one ``|`` operator are alternatives: one counted contact
+    assert rep.unobservable_by_reason == {"existence": 2, "interpreter": 1}
+    assert sorted(c.counted_with or "" for c in rep.contacts if c.why == "interpreter") \
+        == ["", "fakedep.Other.__ror__"]
     assert (rep.coverage, rep.recall, rep.coverage_granularity) == (0.75, 1.0, "file")
     assert by["fakedep.helper"].blind_reason == "not-run"
     assert by["fakedep.Base"].blind_reason == "unobservable"

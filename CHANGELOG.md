@@ -324,6 +324,11 @@ All notable changes to pymolt. The format follows
   (`/work/...`) map back to the project.
 - Capture paths and the target environment are resolved against the project, not the working
   directory, and the target venv's `python` is not resolved through its symlink.
+- `capture --mode tests` runs the test suite once. When the `coverage` package was importable,
+  it ran the suite a second time as `coverage run -m pytest` with the command's first word
+  dropped, on the host even for a container capture, and wrote `.coverage` and `coverage.json`
+  into the project. The second coverage figure it gave (`coverage_pct` in `status` and the
+  capture view) is gone: coverage is `verify`'s, the contacts that ran.
 
 #### Verify
 
@@ -333,6 +338,15 @@ All notable changes to pymolt. The format follows
   nested checkouts.
 - `verify` names the side that is missing, and a refused `capture` returns `ok: false` with a
   hint that matches the cause.
+- An operator between two dependency objects (`Version(a) > Version(b)`) no longer leaves the
+  reflected method (`__lt__`) BLIND as ran but not recorded, which made a capture pair with no
+  code change INCONCLUSIVE with recall below 100%. Python calls one of the two methods: either
+  recorded at the statement confirms both, and the pair counts once in coverage and recall.
+- A person-attested `representation` expectation whose values `verify` cannot see (compared by
+  type only, or recorded as opaque) makes the change not comparable, needing evidence (capture
+  both sides with `--privacy values`). It failed, while the same change without the
+  attestation was a review item: attesting made the verdict worse with nothing against the
+  claim. A visible violation still fails.
 
 #### Plan and apply
 

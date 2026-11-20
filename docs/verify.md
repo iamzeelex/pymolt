@@ -165,7 +165,7 @@ can only tighten it; loosening it needs a person's attestation.
 | equal | equal | equal | equal | equal |
 | representation only | DRIFT | FAIL | DRIFT | ACCEPTED if it expects `representation`; else FAIL |
 | different value | review | FAIL | review; FAIL if it expects `representation` | ACCEPTED if it expects `return:<Type>` and gets one; else FAIL |
-| type changed, values not visible | review | FAIL | review | ACCEPTED if it expects `return:<Type>` and gets one; else FAIL |
+| type changed, values not visible | review | FAIL | review | ACCEPTED if it expects `return:<Type>` and gets one; not comparable if it expects `representation`; else FAIL |
 | new raise | FAIL | FAIL | FAIL | ACCEPTED if it expects `raise:<Type>` and gets one; else FAIL |
 | no partner | unverified | unverified | unverified | unverified |
 
@@ -173,7 +173,9 @@ Values are not visible when the call was compared by type only, or when a value 
 was recorded as opaque, truncated or cyclic. Then an `intended` claim expecting `representation`
 cannot be checked, so the change is a review item, as for a hand edit. It names what settles it:
 a capture with `--privacy values` where the values can be recorded, a baseline replicate, or a
-person's `pymolt verify . --accept ID`.
+person's `pymolt verify . --accept ID`. When a person attested that expectation, the change is
+not comparable instead: nothing visible contradicts the claim or bears it out, so it neither
+fails nor is accepted. It needs evidence: capture both sides with `--privacy values`.
 
 For every outcome, `preserve` is at least as strict as `intended`, and `intended` at least as
 strict as a hand edit, so recording an edit never judges it more leniently than leaving it
@@ -271,6 +273,10 @@ the only one):
 | ran, not recorded | The statement ran and the trace has nothing there: a tracer gap |
 | not run | The statement never ran: a test or run gap |
 | unobservable | No trace can record it (see below) |
+
+An operator names two methods: `a > b` names the left operand's `__gt__` and the right
+operand's `__lt__`, which Python calls only when the first returns NotImplemented. At one
+statement the two count as one contact, recorded when either was.
 
 - **Coverage** = (recorded + ran, not recorded) / the contacts that are not unobservable: how much
   of the dependency surface the run reached, the analogue of pytest's line coverage.

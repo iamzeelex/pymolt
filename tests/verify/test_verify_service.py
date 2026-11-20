@@ -315,83 +315,64 @@ class TestCaptureNamedTrace:
             raise AssertionError("expected ValueError")
 
 
-class TestCoverageGapSummary:
-    """capture_named_trace's TEST_SUITE-only coverage-based gap summary. All real
-    `coverage run` invocations are avoided — `_build_coverage_data` is monkeypatched to
-    inject a fake report, mirroring how coverage.py's run_coverage_json takes an
-    injectable `runner`."""
+class TestTestSuiteCaptureRunsOnce:
+    """A test-suite capture runs the suite once: no second run under ``coverage``, and nothing
+    written into the project (docs/verify.md: nothing is added to your project)."""
 
-    def _write_dependency_usage(self, tmp_path):
-        pkg = tmp_path / "pkgx"
-        pkg.mkdir()
-        (pkg / "__init__.py").write_text("import flask\n", encoding="utf-8")
+    def test_runs_the_command_once_and_adds_nothing_with_coverage_importable(
+            self, tmp_path, monkeypatch):
+        import importlib.util
+        import os
 
-    def test_test_suite_capture_populates_coverage_summary(self, tmp_path, monkeypatch):
-        self._write_dependency_usage(tmp_path)
-        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
-        monkeypatch.setattr(service, "_coverage_available", lambda: True)
-        monkeypatch.setattr(
-            service, "_build_coverage_data",
-            lambda project_dir, pytest_args: {"files": {"pkgx/__init__.py": {
-                "executed_lines": [1],
-            }}},
-        )
-
-        slot = service.capture_named_trace(
-            tmp_path, "baseline", CaptureMode.TEST_SUITE,
-            command=[sys.executable, str(script)], target="json",
-        )
-
-        assert slot.coverage_pct == 100.0
-        assert slot.covered_sites == 1
-        assert slot.blind_sites == 0
-
-    def test_live_command_capture_never_computes_coverage(self, tmp_path, monkeypatch):
-        """Coverage summarization is TEST_SUITE-only — LIVE_COMMAND must not even attempt it."""
-        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
-
-        def _boom(*a, **kw):
-            raise AssertionError("_coverage_gap_summary should not be called for LIVE_COMMAND")
-
-        monkeypatch.setattr(service, "_coverage_gap_summary", _boom)
+        if importlib.util.find_spec("coverage") is None:     # a stand-in when not installed
+            site = tmp_path / "site"
+            (site / "coverage").mkdir(parents=True)
+            (site / "coverage" / "__init__.py").write_text("")
+            monkeypatch.syspath_prepend(str(site))
+        assert importlib.util.find_spec("coverage") is not None
+        runs = tmp_path / "runs.log"
+        # A ``coverage`` on PATH that logs each call and writes what coverage.py would.
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "coverage"
+        shim.write_text(f"#!/bin/sh\necho \"coverage $*\" >> '{runs}'\n: > .coverage\n"
+                        "echo '{\"files\": {}}' > coverage.json\n")
+        shim.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        project = tmp_path / "proj"
+        (project / "pkgx").mkdir(parents=True)
+        (project / "pkgx" / "__init__.py").write_text("import json\n")
+        suite = _write_script(tmp_path, (
+            "import json\n"
+            "json.loads('{}')\n"
+            f"open({str(runs)!r}, 'a').write('suite\\n')\n"), name="suite.py")
 
         slot = service.capture_named_trace(
-            tmp_path, "baseline", CaptureMode.LIVE_COMMAND,
-            command=[sys.executable, str(script)], target="json",
-        )
-        assert slot.coverage_pct is None
-        assert slot.covered_sites == 0
-        assert slot.blind_sites == 0
-
-    def test_missing_coverage_package_degrades_without_raising(self, tmp_path, monkeypatch):
-        script = _write_script(tmp_path, "import json\njson.loads('{}')\n")
-        monkeypatch.setattr(service, "_coverage_available", lambda: False)
-
-        slot = service.capture_named_trace(
-            tmp_path, "baseline", CaptureMode.TEST_SUITE,
-            command=[sys.executable, str(script)], target="json",
+            project, "baseline", CaptureMode.TEST_SUITE,
+            command=[sys.executable, str(suite)], target="json",
         )
 
-        assert slot.coverage_pct is None
-        assert slot.covered_sites == 0
-        assert slot.blind_sites == 0
+        assert slot.validity is CaptureValidity.VALID
+        assert runs.read_text().splitlines() == ["suite"]
+        assert not (project / ".coverage").exists()
+        assert not (project / "coverage.json").exists()
 
-    def test_gap_summary_helper_degrades_on_unexpected_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(service, "_coverage_available", lambda: True)
+    def test_a_state_file_with_the_old_coverage_fields_still_loads(self, tmp_path):
+        """``coverage_pct``/``covered_sites``/``blind_sites`` were slot fields of schema 2."""
+        state_file = tmp_path / ".pymolt" / "contract_state.json"
+        state_file.parent.mkdir()
+        trace = tmp_path / ".pymolt" / "contract_traces" / "baseline.jsonl"
+        state_file.write_text(json.dumps({"schema_version": 2, "baseline": {
+            "trace_path": str(trace), "captured_at": "2026-11-18T10:00:00+00:00",
+            "mode": "test_suite", "command": ["pytest"], "events": 3,
+            "coverage_pct": 87.5, "covered_sites": 7, "blind_sites": 1}}))
 
-        def _raise(*a, **kw):
-            raise RuntimeError("boom")
+        state = service.load_contract_state(tmp_path)
 
-        monkeypatch.setattr(service, "_build_coverage_data", _raise)
-
-        pct, covered, blind, notes = service._coverage_gap_summary(
-            tmp_path, [sys.executable, "-m", "pytest"],
-        )
-
-        assert pct is None
-        assert covered == 0
-        assert blind == 0
-        assert notes and "boom" in notes[0]
+        assert state.baseline is not None and state.baseline.events == 3
+        assert "coverage_pct" not in state.baseline.model_dump()
+        state.save(state_file)
+        assert "coverage_pct" not in state_file.read_text()
 
 
 class TestAttachedCapture:

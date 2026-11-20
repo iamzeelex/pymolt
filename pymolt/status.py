@@ -191,8 +191,6 @@ def _capture_phase(
         bits.append(age)
     if slot.command:
         bits.append(" ".join(slot.command))
-    if slot.coverage_pct is not None:
-        bits.append(f"coverage {slot.coverage_pct:.0f}%")
     red = getattr(slot, "red", None)
     if red:
         failed = red.get("failed")

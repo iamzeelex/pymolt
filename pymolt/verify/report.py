@@ -103,7 +103,9 @@ class SymbolStatus(BaseModel):
     # builtins/stdlib code, e.g. ``type.__or__`` for ``A | B`` — not dependency code) |
     # returned-value (a chain through a call result) | absent-dependency (not installed)
     contact_class: str | None = None
-    matched_by: str | None = None  # exact (v1 string join) | canonical
+    # exact (v1 string join) | canonical | alternative (never observed: at each of its
+    # statements the other method of its operator was recorded, ``ContactStatus``)
+    matched_by: str | None = None
     observed_as: list[str] = Field(default_factory=list)  # runtime names that confirmed it
     # Its contacts by status (``ContactStatus.status``), and for a BLIND symbol why: not-run
     # (none of its contacts ran), ran-not-recorded (one ran, the trace has nothing there) or
@@ -123,10 +125,16 @@ class ContactStatus(BaseModel):
     caller: str = ""
     status: str  # recorded | ran-not-recorded | not-run | unobservable
     granularity: str | None = None  # how "ran" was known (``GRANULARITIES``); None: unobservable
-    # recorded: ``site`` (a call of its symbol at its statement) or ``symbol`` (an existence
-    # contact whose line ran, of a symbol the trace observed elsewhere)
+    # recorded: ``site`` (a call of its symbol at its statement), ``symbol`` (an existence
+    # contact whose line ran, of a symbol the trace observed elsewhere) or ``alternative``
+    # (one of an operator's two methods: the other was recorded at its statement)
     matched_by: str | None = None
     why: str | None = None  # unobservable: existence or one of ``UNOBSERVABLE_CLASSES``
+    # An operator's method: its alternatives at this statement (``Contact.alternatives``).
+    alternatives: list[str] = Field(default_factory=list)
+    # The contact of the other method this one is counted with (one operator at one statement
+    # counts once in coverage and recall); None: counted on its own.
+    counted_with: str | None = None
 
 
 class IdentityTier(BaseModel):
@@ -172,7 +180,9 @@ class ContractReport(BaseModel):
     # These headline fields are the whole recorded surface, the one the verdict judges, with
     # or without an impact filter: an applied plan's paths focus the report (``impacted_*``),
     # they do not shrink what PASS must cover.
-    # Headline: coverage and recall over static contacts (``contacts``), the whole surface.
+    # Headline: coverage and recall over static contacts (``contacts``), the whole surface;
+    # an operator's two methods at one statement count once (``ContactStatus.counted_with``),
+    # in these counts too.
     # coverage = (recorded + ran-not-recorded) / observable contacts: how much of the
     # dependency surface the run reached. recall = recorded / (recorded + ran-not-recorded):
     # how much of what ran the tracer caught. None when the denominator is empty.
@@ -834,6 +844,20 @@ def build_contract_report(
             )
         )
 
+    # Every static contact's status. A symbol never observed whose every contact is an
+    # operator method answered by the operator's other method at its statement is confirmed by
+    # it: Python called that one instead.
+    contacts, outside = _judge_contacts(
+        cmap.contacts, symbols, matched, file_map, executed, executed_files,
+        traced=bool(trace), sited=bool(executed_scope), events=view.events)
+    answered = _confirm_by_alternatives(symbols, contacts)
+    if answered:
+        sample = ", ".join(answered[:3]) + (", …" if len(answered) > 3 else "")
+        report.notes.append(
+            f"{len(answered)} operator method(s) never ran: at each of their statements the "
+            "operator's other method (forward or reflected, e.g. __gt__ for __lt__) was "
+            f"recorded instead, which confirms them ({sample})")
+
     symbols.sort(
         key=lambda x: (x.dep, {"blind": 0, "dynamic-only": 1, "confirmed": 2}[x.status], x.target)
     )
@@ -877,16 +901,14 @@ def build_contract_report(
     report.by_dep = report.all_by_dep
 
     # ── coverage and recall over the whole surface ───────────────────────────
-    contacts, outside = _judge_contacts(
-        cmap.contacts, symbols, matched, file_map, executed, executed_files,
-        traced=bool(trace), sited=bool(executed_scope), events=view.events)
     _stamp_coverage(report, contacts, executed, traced=bool(trace),
                     sited=bool(executed_scope), events=view.events)
     if outside:
         report.notes.append(
             f"{outside} recorded contact(s) lie on lines the executed record does not list "
             "there: the record is incomplete for them")
-    scope = [s for s in symbols if s.status != "dynamic-only"]
+    # identity joins only: a symbol confirmed by its operator's other method was not joined
+    scope = [s for s in symbols if s.status != "dynamic-only" and s.matched_by != "alternative"]
 
     def tier(name: str, basis: str, confirmed: int) -> IdentityTier:
         return IdentityTier(name=name, basis=basis, confirmed=confirmed, static=len(scope),
@@ -995,7 +1017,10 @@ def _judge_contacts(
       when its line ran, ``not-run`` when it did not; of one never observed, ``unobservable``;
     * otherwise ``ran-not-recorded`` when its statement ran, else ``not-run``. "Ran": a line
       of the statement in the executed record (granularity line), a line of a code object
-      that started (function), else a file the trace recorded a call site in (file).
+      that started (function), else a file the trace recorded a call site in (file);
+    * an operator's method and its alternatives at the same statement (``_fold_alternatives``)
+      count once: either recorded there makes the other ``recorded`` (matched by
+      ``alternative``).
     """
     by_target = {s.target: s for s in symbols if s.status != "dynamic-only"}
     recorded_at: dict[str, dict[str, set[int]]] = {}
@@ -1046,10 +1071,16 @@ def _judge_contacts(
         for line, first, last in spans:
             key = (c.file, line, c.target, c.kind)
             if key in out:
+                # One place, two contacts of one symbol (``x + y`` and ``x + 1`` on a line): a
+                # contact of its own needs its own record, so it wins over an alternative.
+                kept = out[key]
+                kept.alternatives = (sorted({*kept.alternatives, *c.alternatives})
+                                     if kept.alternatives and c.alternatives else [])
                 continue
             status = ContactStatus(file=c.file, line=line, target=c.target, kind=c.kind,
                                    caller=c.caller, status=NOT_RUN,
-                                   span=(first, last) if first is not None else None)
+                                   span=(first, last) if first is not None else None,
+                                   alternatives=list(c.alternatives))
             out[key] = status
             klass = sym.contact_class
             if klass in UNOBSERVABLE_CLASSES:
@@ -1081,11 +1112,68 @@ def _judge_contacts(
                     status.status, status.matched_by = RECORDED, "symbol"
             elif has_run:
                 status.status = RAN_NOT_RECORDED
+    _fold_alternatives(list(out.values()))
     return list(out.values()), outside
 
 
+#: Contact statuses, best evidence first: one operator at one statement takes its best method's.
+_RANK = {RECORDED: 3, RAN_NOT_RECORDED: 2, NOT_RUN: 1, UNOBSERVABLE: 0}
+
+
+def _fold_alternatives(contacts: list[ContactStatus]) -> None:
+    """One operator at one statement counts once: its forward method on one operand and the
+    reflected one on the other (``Contact.alternatives``) are alternatives, since Python calls
+    the reflected one only when the forward one returns NotImplemented.
+
+    A contact with alternatives present at its statement (same file and span) is counted with
+    the best of them when that one ranks higher (``_RANK``, then a contact of its own, then a
+    fixed order), and is ``recorded`` (matched by ``alternative``) when that one was recorded by
+    its own evidence. A contact without alternatives keeps its own status and count. Decided
+    from the statuses before any change, so the order of the contacts does not matter."""
+    at: dict[tuple, list[ContactStatus]] = {}
+    for c in contacts:
+        if c.kind == "protocol":
+            at.setdefault((c.file, c.span, c.target), []).append(c)
+
+    def order(c: ContactStatus) -> tuple:
+        return _RANK[c.status], not c.alternatives, c.target, c.line or 0
+
+    decided: list[tuple[ContactStatus, ContactStatus]] = []
+    for c in contacts:
+        if not c.alternatives:
+            continue
+        partners = [p for target in c.alternatives for p in at.get((c.file, c.span, target), ())
+                    if p is not c]
+        if partners:
+            best = max(partners, key=order)
+            if order(best) > order(c):
+                decided.append((c, best))
+    recorded = {id(best) for _c, best in decided if best.status == RECORDED}
+    for c, best in decided:
+        c.counted_with = best.target
+        if id(best) in recorded and c.status != RECORDED:
+            c.status, c.matched_by, c.granularity, c.why = RECORDED, "alternative", None, None
+
+
+def _confirm_by_alternatives(symbols: Iterable[SymbolStatus],
+                             contacts: Iterable[ContactStatus]) -> list[str]:
+    """Confirm each BLIND symbol whose every contact was recorded by its operator's other
+    method (``_fold_alternatives``): it never ran because that one did. Returns their targets."""
+    by_target: dict[str, list[ContactStatus]] = {}
+    for c in contacts:
+        by_target.setdefault(c.target, []).append(c)
+    answered = []
+    for sym in symbols:
+        mine = by_target.get(sym.target)
+        if sym.status == "blind" and mine and all(
+                c.status == RECORDED and c.matched_by == "alternative" for c in mine):
+            sym.status, sym.matched_by = "confirmed", "alternative"
+            answered.append(sym.target)
+    return sorted(answered)
+
+
 def _coverage_ratios(contacts: Iterable[ContactStatus]) -> tuple[float | None, float | None]:
-    counts = Counter(c.status for c in contacts)
+    counts = Counter(c.status for c in contacts if c.counted_with is None)
     reached = counts[RECORDED] + counts[RAN_NOT_RECORDED]
     observable = reached + counts[NOT_RUN]
     return (reached / observable if observable else None,
@@ -1095,18 +1183,21 @@ def _coverage_ratios(contacts: Iterable[ContactStatus]) -> tuple[float | None, f
 def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
                     executed: _Executed | None, *, traced: bool, sited: bool,
                     events: int) -> None:
-    """Coverage, recall, their granularity, the BLIND split and the notes, from the contacts."""
+    """Coverage, recall, their granularity, the BLIND split and the notes, from the contacts.
+    The counts are of contacts counted on their own: an operator's alternative counted with the
+    other method at its statement is listed (``contacts``) but not counted again."""
     report.contacts = contacts
-    counts = Counter(c.status for c in contacts)
-    report.contacts_total = len(contacts)
+    counted = [c for c in contacts if c.counted_with is None]
+    counts = Counter(c.status for c in counted)
+    report.contacts_total = len(counted)
     report.contacts_recorded = counts[RECORDED]
     report.contacts_ran_not_recorded = counts[RAN_NOT_RECORDED]
     report.contacts_not_run = counts[NOT_RUN]
     report.contacts_unobservable = counts[UNOBSERVABLE]
     report.unobservable_by_reason = dict(sorted(Counter(
-        c.why for c in contacts if c.status == UNOBSERVABLE and c.why).items()))
+        c.why for c in counted if c.status == UNOBSERVABLE and c.why).items()))
     report.coverage, report.recall = _coverage_ratios(contacts)
-    decided = Counter(c.granularity for c in contacts if c.granularity)
+    decided = Counter(c.granularity for c in counted if c.granularity)
     report.granularity_counts = {g: decided[g] for g in GRANULARITIES if decided[g]}
     if decided:
         report.coverage_granularity = max(decided, key=GRANULARITIES.index)
@@ -1134,13 +1225,17 @@ def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
     report.blind_unobservable = blind[UNOBSERVABLE]
     impacted = {s.target for s in report.impacted_symbols}
     if impacted:
+        # an impacted contact counted with another method at its statement counts by that one
+        stands_for = {(c.file, c.span, c.counted_with) for c in contacts
+                      if c.target in impacted and c.counted_with}
         report.impacted_coverage, report.impacted_recall = _coverage_ratios(
-            c for c in contacts if c.target in impacted)
+            c for c in contacts
+            if c.target in impacted or (c.file, c.span, c.target) in stands_for)
 
     for why, text in _UNOBSERVABLE_NOTES.items():
-        members = sorted({c.target for c in contacts if c.why == why})
+        members = sorted({c.target for c in counted if c.why == why})
         if members:
-            n = sum(1 for c in contacts if c.why == why)
+            n = sum(1 for c in counted if c.why == why)
             sample = ", ".join(members[:3]) + (", …" if len(members) > 3 else "")
             report.notes.append(f"{n} contact(s) {text} ({sample}): unobservable, left out of "
                                 "coverage and recall")

@@ -106,17 +106,19 @@ EXPECTED = {
               "attested any": "fail", "attested representation": "fail",
               "attested raise:TypeError": "accepted", "attested return:int": "fail"},
     # An unattested representation expectation cannot be checked against unseen values: a
-    # review, as under the hand rule (never more lenient than it); preserve still fails.
+    # review, as under the hand rule (never more lenient than it); preserve still fails. An
+    # attested one cannot be checked either: uncomparable (needs evidence), neither FAIL with
+    # nothing against the claim nor ACCEPTED with nothing for it.
     "opaque": {"hand": "review", "preserve": "fail", "intended": "review",
                "intended+representation": "review", "intended+raise (unattested)": "review",
-               "attested any": "review", "attested representation": "fail",
+               "attested any": "review", "attested representation": "uncomparable",
                "attested raise:TypeError": "fail", "attested return:int": "fail"},
     "opaque raise": {"hand": "fail", "preserve": "fail", "intended": "fail",
                      "intended+representation": "fail", "intended+raise (unattested)": "fail",
                      "attested any": "fail", "attested representation": "fail",
                      "attested raise:TypeError": "accepted", "attested return:int": "fail"},
 }
-SEVERITY = {"accepted": 0, "pass": 1, "drift": 1, "review": 2, "fail": 3}
+SEVERITY = {"accepted": 0, "pass": 1, "drift": 1, "review": 2, "uncomparable": 2, "fail": 3}
 
 
 def _judgement(diff) -> str:
@@ -127,6 +129,8 @@ def _judgement(diff) -> str:
         return "fail"
     if entry.review:
         return "review"
+    if entry.comparison is Comparison.UNCOMPARABLE:
+        return "uncomparable"
     if entry.category is FactCategory.DRIFT:
         return "drift"
     assert entry.comparison is Comparison.EQUAL, entry
@@ -176,6 +180,43 @@ def test_an_unseen_change_under_a_representation_claim_is_a_review_naming_what_s
     # Visible content, more than a representation change: still a failure.
     assert _diff(tmp_path, "value", CLAIMS["intended+representation"]).verdict \
         is VerificationVerdict.FAIL
+
+
+def test_an_attested_expectation_that_cannot_be_checked_needs_evidence(tmp_path):
+    """Attesting ``representation`` never makes an unseen change worse than leaving it
+    unattested: with only the types visible there is no evidence against the claim (no FAIL)
+    and none for it (not ACCEPTED). The entry is uncomparable, and values settle it."""
+    from pymolt.verify.inconclusive import (
+        NEEDS_EVIDENCE,
+        entry_cause,
+        settle_uncomparable,
+        uncomparable_mechanism,
+    )
+    from pymolt.verify.service import _fact_diff_causes
+
+    diff = _diff(tmp_path, "opaque", CLAIMS["attested representation"])
+    entry = next(e for e in diff.entries if e.symbol in ("lib.g", "lib.h"))
+    assert not entry.fails and not entry.accepted and not entry.review
+    assert entry.comparison is Comparison.UNCOMPARABLE and entry.inconclusive
+    assert entry.provenance == "intended" and entry.step_id == "beh-1"
+    assert diff.verdict is VerificationVerdict.INCONCLUSIVE
+    assert entry_cause(entry, noise_measured=False) == (NEEDS_EVIDENCE, "uncomparable")
+    assert uncomparable_mechanism(entry) == "content-unseen"
+    assert "--privacy values" in settle_uncomparable([entry])
+
+    as_json = diff.to_json_dict()
+    (found,) = [c for c in _fact_diff_causes(as_json) if c.cause == "uncomparable"]
+    assert found.kind is NEEDS_EVIDENCE and "--privacy values" in found.settle
+    assert "attested expectation" in found.reason and "paired" not in found.reason
+
+    # Visible values, more than a representation change: the attested claim is violated.
+    assert _diff(tmp_path, "value", CLAIMS["attested representation"]).verdict \
+        is VerificationVerdict.FAIL
+    assert _diff(tmp_path, "opaque raise", CLAIMS["attested representation"]).verdict \
+        is VerificationVerdict.FAIL
+    # Met: accepted.
+    assert _diff(tmp_path, "representation", CLAIMS["attested representation"]).verdict \
+        is VerificationVerdict.PASS
 
 
 @pytest.mark.parametrize(("level", "old", "new", "unseen"), [
