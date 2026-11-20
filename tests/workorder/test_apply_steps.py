@@ -421,6 +421,14 @@ def test_skip_needs_a_reason_and_refuses_a_step_in_effect(tmp_path):
 # ── the CLI: options, exit codes, --agent ─────────────────────────────────────────────────
 
 
+def test_the_dry_run_prints_the_diff_as_is(tmp_path):
+    # markup is off for the diff: brackets print plainly, with no escaping backslash
+    plan_for(tmp_path, {M: (APP.replace("z = 1", "z = [1]"), RECIPES)})
+    dry = runner.invoke(app, ["apply", str(tmp_path), "--through", "mech-1", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "    z = [1]" in dry.output and "\\[" not in dry.output
+
+
 def test_the_cli_exit_codes(tmp_path):
     plan_for(tmp_path, {M: (APP, RECIPES)})
     d = str(tmp_path)

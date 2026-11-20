@@ -1195,7 +1195,8 @@ def _render_apply(result, plan, project_path: Path) -> None:
             f"Files: {len(result.files)}",
             title="Dry run", border_style="cyan", expand=False))
         for item in result.diff:
-            console.print(escape(item["diff"]), end="", markup=False, highlight=False)
+            # markup is off, so the diff prints as is: escaping it too left `\[` in the output
+            console.print(item["diff"], end="", markup=False, highlight=False)
     elif result.outcome == "in_progress":
         sid = ", ".join(result.in_progress)
         console.print(Panel(

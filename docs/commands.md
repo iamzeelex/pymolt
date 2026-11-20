@@ -21,9 +21,11 @@ dependency not in effect), `stale` (a statement it rewrites is gone, or the plan
 `not_in_capture` (applied or recorded again after the post-migration capture, which holds the code from before it or an earlier version of the step). `--json` and `--agent` list them
 under `steps`; `--agent` adds the brief of the step the next command is about. The next command
 follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply --step ID --dry-run`
-for a stale one, then the post-migration capture, with a note naming the first step left to a
-person or an agent. The post-migration capture is stale when a file it recorded no longer has the
-recorded text, whatever changed it.
+for a stale one, then `pymolt apply --step ID --record` for each agent or person step in plan
+order (or `--skip` it), then the post-migration capture. A rolled-back step is not applied again by
+itself: after `rollback --step`, the next command is the post-migration capture (re-apply the step
+with `pymolt apply --step ID` if you want it back). The post-migration capture is stale when a
+file it recorded no longer has the recorded text, whatever changed it.
 
 ### `pymolt scan [dir]`
 Lists the manifests, the Python-version divergence, the dependency edges, and every place your code

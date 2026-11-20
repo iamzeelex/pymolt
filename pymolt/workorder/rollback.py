@@ -760,6 +760,13 @@ def _capture_recorded(post, plan: MigrationPlan, events, restored: list[str], *,
             continue
         if snapshot is None:
             return True
+        # A recorded edit (an agent or person step) has no plan edits: its event names the
+        # text each file had after it.
+        for ef in event.files:
+            if ef.after and ef.file in restored:
+                text = snapshot.get(ef.file)
+                if text is not None and _sha256(text) == ef.after:
+                    return True
         step = plan.step(event.step_id)
         for edit in (step.edits if step is not None else []):
             text = snapshot.get(edit.file)

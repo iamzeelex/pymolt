@@ -69,6 +69,19 @@ ACTIONS = {
     "no longer a dependency call here": "check what the name refers to on that line now",
 }
 _DEFAULT_ACTION = "review the entry"
+# The reasons a baseline replicate settles. Once one was measured and the entry still stands,
+# the replicate did not explain it: a person settles it (decision 7).
+_REPLICATE_SETTLES = frozenset({"unmeasured noise", "masked input", "input changed",
+                                "unpaired site", "order changed", "input order changed"})
+AFTER_REPLICATE = ("a measured baseline replicate did not explain it: review it (fix the code, "
+                   "or accept an intended change with `pymolt verify . --accept ID`)")
+
+
+def review_action(reason: str, noise_measured: bool) -> str:
+    """The one action that settles a review reason, given whether a replicate was measured."""
+    if noise_measured and reason in _REPLICATE_SETTLES:
+        return AFTER_REPLICATE
+    return ACTIONS.get(reason, _DEFAULT_ACTION)
 
 
 # ── value capping ─────────────────────────────────────────────────────────────────────────
@@ -332,7 +345,7 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                           key=lambda f: (-f["entries"], f["symbol"], f["site"]))
         review.append({
             "reason": reason, "entries": len(group), "findings_total": len(findings),
-            "action": ACTIONS.get(reason, _DEFAULT_ACTION),
+            "action": review_action(reason, bool(diff.noise_measured)),
             "findings": findings[:FINDINGS_CAP],
         })
 

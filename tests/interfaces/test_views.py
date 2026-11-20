@@ -502,6 +502,18 @@ def test_verify_after_apply_counts_the_whole_surface_and_shows_the_plan_focus(tm
             "0 dynamic-only; coverage 100% (data.impact_focus).") in view["summary"]
 
 
+def test_the_verify_summary_says_how_many_failures_it_did_not_list(tmp_path):
+    from pymolt.verify.models import VerificationVerdict
+
+    failing = [{"symbol": f"lib.f{i}", "site": f"app.py:{i}", "entries": 1, "change": "value",
+                "why": "same input"} for i in range(5)]
+    unified = _unified(verdict=VerificationVerdict.FAIL, verdict_reasons=["5 changed"],
+                       fact_diff={"summary": {"failing": failing, "failing_total": 5}})
+    lines = views.verify_view(unified, tmp_path, saved_path=None)["summary"].splitlines()
+    assert sum(line.startswith("FAIL lib.") for line in lines) == 3
+    assert "FAIL ... and 2 more (5 in all; data.findings.failing lists up to 5)." in lines
+
+
 def test_verify_stale_evidence_and_unsaved_verdict_are_stated(tmp_path):
     from pymolt.verify.models import VerificationVerdict
 

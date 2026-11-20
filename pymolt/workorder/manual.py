@@ -263,8 +263,14 @@ def _summary(step_type: str, risk: Any, hint: str = "") -> str:
     kind, param, successor = fact.get("kind"), fact.get("param"), fact.get("successor")
     if step_type == "behaviour-change":
         if kind == "DEFAULT":
-            return (f"Decide at each site: pass {param}={fact.get('old')} to keep the old "
-                    "outcome, or keep the new default (a person attests the new outcome).")
+            # Passing the old default explicitly keeps the old outcome only if the new version
+            # still gives that value its old meaning (pandas 2 reads numeric_only=None as False),
+            # which the delta does not know: say so instead of promising it.
+            new = f" to {fact.get('new')}" if fact.get("new") is not None else ""
+            return (f"Decide at each site: the default of {param} changed from "
+                    f"{fact.get('old')}{new}. Passing {param}={fact.get('old')} keeps the old "
+                    "outcome only if the new version still reads that value the old way: check "
+                    "it, or keep the new default (a person attests the new outcome).")
         if kind == "BEHAVIOR":
             return "Check the code at these sites against the new behaviour."
         return ("The baseline warned at these sites; find what the warning announces and act "

@@ -229,8 +229,9 @@ class TestRendering:
         argv = ["assess", str(project), "--base-python", "3.11", "--target-python", "3.12"]
         result = runner.invoke(app, argv)
         assert result.exit_code == EXIT_OK, result.output
-        assert "Target environment" in result.stdout
-        assert "uv venv .venv-target --python 3.12" in result.stdout
+        text = _ANSI.sub("", result.stdout)   # FORCE_COLOR/CI colour the console
+        assert "Target environment" in text
+        assert "uv venv .venv-target --python 3.12" in text
 
         payload = json.loads(runner.invoke(app, [*argv, "--json", "--no-write"]).stdout)
         assert payload["target_hint"]["target_python"] == "3.12"

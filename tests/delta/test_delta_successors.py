@@ -123,6 +123,8 @@ def test_engine_never_prefers_an_internal_reexport_when_a_public_one_is_live():
     (".. deprecated:: 8.2 Will be removed in Click 9.0. Use Group instead.", "Group"),
     ("Will be removed in 3.1. Use :func:`~jinja2.pass_context` instead.", "jinja2.pass_context"),
     ("Import 'markupsafe.Markup' instead.", "markupsafe.Markup"),
+    ("pandas.util.testing is deprecated. Instead access pandas.testing directly",
+     "pandas.testing"),
     ("if your data is JSON, use `model_validate_json`, otherwise use `model_validate` instead.",
      "model_validate_json"),
     ("Pydantic V1 style `@validator` validators are deprecated. You should migrate to "
