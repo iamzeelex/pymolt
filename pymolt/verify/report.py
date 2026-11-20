@@ -59,7 +59,7 @@ from pymolt.verify.facts import (
     load_facts,
 )
 from pymolt.verify.identity_resolver import ResolvedIdentity
-from pymolt.verify.models import BoundaryDiff, VerificationVerdict
+from pymolt.verify.models import BoundaryDiff, InconclusiveCause, VerificationVerdict
 from pymolt.verify.predict import Calibration, calibrate, predict_risks
 
 logger = logging.getLogger(__name__)
@@ -221,6 +221,9 @@ class ContractReport(BaseModel):
     baseline_stale: bool | None = None
     verdict: VerificationVerdict = VerificationVerdict.INCONCLUSIVE
     verdict_reasons: list[str] = Field(default_factory=list)
+    # An INCONCLUSIVE verdict's reasons, each with its kind (needs_review / needs_evidence) and
+    # what settles it, in ``verdict_reasons``' order (design decision 7). Empty otherwise.
+    inconclusive_causes: list[InconclusiveCause] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     # What was compared (``build_contract_report_from_state``). None on a report built
     # without the captures' state, or saved before this existed.

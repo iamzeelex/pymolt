@@ -356,6 +356,41 @@ class TestManualMigration:
         assert failed.next_command is None             # no apply run to roll back
         assert "nothing to roll back" in failed.next_reason
 
+    def test_an_inconclusive_verdict_says_who_settles_it(self, tmp_path):
+        """Decision 7: the next reason, the report phase and the agent view say whether the
+        INCONCLUSIVE verdict needs a person or evidence, and what settles it."""
+        from pymolt.interfaces import views
+        from pymolt.verify.inconclusive import NEEDS_EVIDENCE, NEEDS_REVIEW, cause
+
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+        _capture(tmp_path, "post_migration")
+        blind = cause("2 static dependency symbol(s) were not exercised", NEEDS_EVIDENCE,
+                      "not-exercised", "add a test that reaches those sites, then capture "
+                      "post-migration again")
+        review = cause("1 edited call(s) need review: json.dumps", NEEDS_REVIEW, "review",
+                       "a person reviews each finding")
+
+        def verdict(*causes):
+            build_unified_verification(ContractReport(
+                root=str(tmp_path), verdict=VerificationVerdict.INCONCLUSIVE,
+                verdict_reasons=[c.reason for c in causes], inconclusive_causes=list(causes),
+            ), run_id=None).save(tmp_path)
+            return build_status(tmp_path)
+
+        evidence = verdict(blind)
+        assert evidence.next_command is None and evidence.inconclusive_kind == "needs_evidence"
+        assert evidence.next_reason == ("The verdict is INCONCLUSIVE and needs evidence: add a "
+                                        "test that reaches those sites, then capture "
+                                        "post-migration again.")
+        assert evidence.phase("report").detail.startswith("verdict: inconclusive (needs "
+                                                          "evidence)")
+        person = verdict(blind, review)
+        assert person.inconclusive_kind == "needs_review"
+        assert person.next_reason.startswith("The verdict is INCONCLUSIVE and needs a person: "
+                                             "a person reviews each finding")
+        assert views.status_view(person)["data"]["inconclusive_kind"] == "needs_review"
+
     def test_a_post_capture_older_than_the_baseline_is_stale(self, tmp_path):
         from pymolt.verify.models import ContractState
 

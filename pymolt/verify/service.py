@@ -81,11 +81,24 @@ from pymolt.verify.facts import (
     snapshot_path,
 )
 from pymolt.verify.gaps import classify_gaps, scan_usage_sites
+from pymolt.verify.inconclusive import (
+    NEEDS_EVIDENCE,
+    NEEDS_REVIEW,
+    SETTLE_ENVIRONMENT,
+    SETTLE_NOISE,
+    SETTLE_NOT_EXERCISED,
+    SETTLE_REVIEW,
+    SETTLE_UNCOMPARABLE,
+    cause,
+    entry_cause,
+    settle_uncomparable,
+)
 from pymolt.verify.models import (
     CaptureMode,
     CaptureValidity,
     ContractSlot,
     ContractState,
+    InconclusiveCause,
     TraceArtifactQuality,
     VerificationVerdict,
 )
@@ -3035,6 +3048,16 @@ def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]
     return "no baseline trace is available for a version diff"
 
 
+def _missing_side_settle(used_slots: list[tuple[str, object]]) -> str:
+    """What settles ``_missing_side_reason``: capturing the side that is missing."""
+    names = {name for name, _ in used_slots}
+    if names == {"baseline"}:
+        return "capture post-migration"
+    if names == {"post-migration"}:
+        return "capture baseline (it records the code before the migration)"
+    return "capture baseline, then post-migration"
+
+
 def _stamp_verdict(
     report: ContractReport,
     trace: str | None,
@@ -3044,6 +3067,10 @@ def _stamp_verdict(
     set_aside: ContractSlot | None = None,
 ) -> None:
     """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty.
+
+    Every INCONCLUSIVE reason carries its kind (``report.inconclusive_causes``, design decision
+    7): a capture missing, invalid or unlike the other, BLIND symbols, uncomparable facts and
+    unmeasured noise need evidence; review items need a person.
 
     ``set_aside``: the post-migration capture a rollback set aside (see
     ``_missing_side_reason``)."""
@@ -3062,29 +3089,33 @@ def _stamp_verdict(
                                     "volatile-sites:")):
             if warning not in report.notes:
                 report.notes.append(str(warning))
-    comparability: list[str] = []
+    # A comparability reason is settled by capturing again (needs evidence), never by a person.
+    comparability: dict[str, InconclusiveCause] = {}
+
+    def unlike(reason: str, settle: str) -> None:
+        comparability.setdefault(reason, cause(reason, NEEDS_EVIDENCE, "capture", settle))
+
     if trace is None:
-        comparability.append("no current trace is available")
+        unlike("no current trace is available", "capture post-migration")
     else:
         quality = inspect_trace_artifact(trace)
         if quality.validity is not CaptureValidity.VALID:
-            comparability.append(
-                quality.reason or f"current trace is {quality.validity.value}"
-            )
+            unlike(quality.reason or f"current trace is {quality.validity.value}",
+                   "capture that side again")
     if against is None:
-        comparability.append(_missing_side_reason(trace, used_slots, set_aside))
+        unlike(_missing_side_reason(trace, used_slots, set_aside),
+               _missing_side_settle(used_slots))
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
-            comparability.append(
-                quality.reason or f"baseline trace is {quality.validity.value}"
-            )
+            unlike(quality.reason or f"baseline trace is {quality.validity.value}",
+                   "capture the baseline again")
 
     slots = {name: slot for name, slot in used_slots}
     for name, slot in used_slots:
         validity = getattr(slot, "validity", CaptureValidity.UNKNOWN)
         if validity is not CaptureValidity.VALID:
-            comparability.append(f"{name} capture validity is {validity.value}")
+            unlike(f"{name} capture validity is {validity.value}", f"capture {name} again")
         red = getattr(slot, "red", None)
         if red:
             failed = red.get("failed")
@@ -3095,20 +3126,20 @@ def _stamp_verdict(
                 "as usual")
         dropped = getattr(slot, "dropped_events", None)
         if dropped is None:
-            comparability.append(f"{name} capture has no event-loss counters")
+            unlike(f"{name} capture has no event-loss counters",
+                   f"capture {name} again with this pymolt")
         elif dropped:
-            comparability.append(f"{name} capture dropped {dropped} event(s)")
+            unlike(f"{name} capture dropped {dropped} event(s)", f"capture {name} again")
         skipped = getattr(slot, "instrumentation_skipped", [])
         if skipped:
-            comparability.append(
-                f"{name} capture skipped {len(skipped)} instrumentation target(s)"
-            )
+            unlike(f"{name} capture skipped {len(skipped)} instrumentation target(s)",
+                   f"capture {name} again once those targets can be instrumented (the "
+                   "capture lists them)")
         failed = getattr(slot, "activation_failures", [])
         if failed:
-            comparability.append(
-                f"{name} capture: the watcher failed to activate in {len(failed)} "
-                "process(es), which ran untraced"
-            )
+            unlike(f"{name} capture: the watcher failed to activate in {len(failed)} "
+                   "process(es), which ran untraced",
+                   f"capture {name} again with the watcher active in every process")
     baseline = slots.get("baseline")
     post = slots.get("post-migration")
     if baseline is not None and post is not None:
@@ -3120,33 +3151,38 @@ def _stamp_verdict(
                 return command[2:]
             return [executable, *command[1:]]
 
-        if _workload(baseline.command) != _workload(post.command):
-            comparability.append("baseline and post-migration used different commands")
-        if baseline.target != post.target:
-            comparability.append("baseline and post-migration traced different targets")
-        if baseline.mode != post.mode:
-            comparability.append("baseline and post-migration used different capture modes")
-        if baseline.privacy_profile != post.privacy_profile:
-            comparability.append("baseline and post-migration used different privacy profiles")
-        if baseline.sample_rate != post.sample_rate:
-            comparability.append("baseline and post-migration used different sample rates")
+        for differs, reason, what in (
+                (_workload(baseline.command) != _workload(post.command),
+                 "baseline and post-migration used different commands", "command"),
+                (baseline.target != post.target,
+                 "baseline and post-migration traced different targets", "target"),
+                (baseline.mode != post.mode,
+                 "baseline and post-migration used different capture modes", "capture mode"),
+                (baseline.privacy_profile != post.privacy_profile,
+                 "baseline and post-migration used different privacy profiles",
+                 "privacy profile"),
+                (baseline.sample_rate != post.sample_rate,
+                 "baseline and post-migration used different sample rates", "sample rate")):
+            if differs:
+                unlike(reason, f"capture post-migration again with the baseline's {what}")
         if (baseline.sample_rate < 1 or post.sample_rate < 1) and not _tallies_complete(
                 whole_diff):
-            comparability.append(
-                "sampled captures cannot prove that unmatched interactions disappeared"
-            )
+            unlike("sampled captures cannot prove that unmatched interactions disappeared",
+                   "capture both sides again without `--sample-rate`")
 
     if report.baseline_stale is True:
-        comparability.append("capture evidence is stale")
+        unlike("capture evidence is stale", "capture the stale side again (the notes name it)")
     elif used_slots and report.baseline_stale is None:
-        comparability.append("capture freshness could not be established")
+        unlike("capture freshness could not be established",
+               "capture again: the capture records no environment to check it against")
 
     # A negative oracle is authoritative only over a valid, comparable pair.
     # Changed output from stale or mismatched workloads is evidence to inspect,
     # but it cannot honestly describe the current migration.
     if comparability:
         report.verdict = VerificationVerdict.INCONCLUSIVE
-        report.verdict_reasons = list(dict.fromkeys(comparability))
+        report.verdict_reasons = list(comparability)
+        report.inconclusive_causes = list(comparability.values())
         return
     if whole_clean is False or report.probe_changed:
         report.verdict = VerificationVerdict.FAIL
@@ -3162,20 +3198,25 @@ def _stamp_verdict(
             report.verdict_reasons.append("sandbox replay changed behavior")
         return
 
-    reasons: list[str] = []
+    causes: list[InconclusiveCause] = []
     if whole_counts is None:
-        reasons.append("no before/after diff was produced")
+        causes.append(cause("no before/after diff was produced", NEEDS_EVIDENCE, "capture",
+                            "the version diff failed (a note says why): capture the side it "
+                            "could not read again, then verify"))
     elif whole_counts.get("skipped_opaque", 0):
-        reasons.append("some boundary interactions were opaque or nondeterministic")
-    reasons.extend(_fact_diff_reasons(whole_diff))
-    reasons.extend(_blind_reasons(report))
+        causes.append(_opaque_cause(whole_diff))
+    causes.extend(_fact_diff_causes(whole_diff))
+    causes.extend(_blind_causes(report))
     if report.dynamic_only:
         unverified = _unverified_dynamic_only(report)
         if unverified:
-            reasons.append(
+            causes.append(cause(
                 f"{len(unverified)} observed symbol(s) are missing from the static map"
-                + (" and were not compared equal on both sides" if report.fact_diff else "")
-            )
+                + (" and were not compared equal on both sides" if report.fact_diff else ""),
+                NEEDS_EVIDENCE, "uncomparable",
+                "once every call fact of theirs compares equal on both sides they stop "
+                "blocking (settle those facts' own reasons)" if report.fact_diff else
+                "only a fact diff compares them (`--profile exact`)"))
         else:
             report.notes.append(
                 f"{report.dynamic_only} observed symbol(s) are missing from the static map but "
@@ -3183,10 +3224,16 @@ def _stamp_verdict(
                 "under-approximation, not an unverified contact"
             )
     if report.static_targets == 0:
-        reasons.append("the static contract surface is empty")
+        causes.append(cause("the static contract surface is empty", NEEDS_EVIDENCE,
+                            "static-map", "verify the project's root: the static contact map "
+                            "found no dependency call to judge"))
 
     # Keep output stable and readable when two checks identify the same cause.
-    report.verdict_reasons = list(dict.fromkeys(reasons))
+    unique: dict[str, InconclusiveCause] = {}
+    for c in causes:
+        unique.setdefault(c.reason, c)
+    report.inconclusive_causes = list(unique.values())
+    report.verdict_reasons = list(unique)
     report.verdict = (
         VerificationVerdict.INCONCLUSIVE if report.verdict_reasons
         else VerificationVerdict.PASS
@@ -3223,28 +3270,44 @@ def _blind_split(symbols: list, report: ContractReport) -> str:
     return "; ".join(parts)
 
 
+def _blind_settle(symbols: list) -> str:
+    """What settles these BLIND symbols: a test reaches those the workload did not run; those
+    that ran but were not recorded, or that no trace can observe, are a watcher limit."""
+    if not symbols or any(s.blind_reason in ("not-run", None) for s in symbols):
+        return SETTLE_NOT_EXERCISED
+    return ("no new test settles them: they ran but the watcher did not record them, or no "
+            "trace can observe them")
+
+
 def _blind_reasons(report: ContractReport) -> list[str]:
+    """The BLIND reasons' texts (``_blind_causes``)."""
+    return [c.reason for c in _blind_causes(report)]
+
+
+def _blind_causes(report: ContractReport) -> list[InconclusiveCause]:
     """Why BLIND symbols block PASS, split by why each is BLIND. After ``apply`` the reasons
     name those inside the plan's predicted impacts apart from those outside them; both block.
-    An unobservable symbol blocks too (the owner's open decision)."""
+    An unobservable symbol blocks too (the owner's open decision). BLIND needs evidence."""
     if not report.blind:
         return []
     blind = [s for s in report.symbols if s.status == "blind"]
     if not report.impact_filter_active or not blind:
         split = _blind_split(blind, report)
-        return [f"{report.blind} static dependency symbol(s) were not exercised"
-                + (f" ({split})" if split else "")]
-    reasons = []
+        return [cause(f"{report.blind} static dependency symbol(s) were not exercised"
+                      + (f" ({split})" if split else ""),
+                      NEEDS_EVIDENCE, "not-exercised", _blind_settle(blind))]
+    causes = []
     for where, members in (("inside", [s for s in blind if s.impacted]),
                            ("outside", [s for s in blind if not s.impacted])):
         if members:
             targets = sorted(s.target for s in members)
             names = ", ".join(targets[:5]) + (", …" if len(targets) > 5 else "")
-            reasons.append(f"{len(members)} static dependency symbol(s) {where} the plan's "
-                           f"predicted impacts were not exercised "
-                           f"({_blind_split(members, report)}): "
-                           f"{names}")
-    return reasons
+            causes.append(cause(f"{len(members)} static dependency symbol(s) {where} the "
+                                f"plan's predicted impacts were not exercised "
+                                f"({_blind_split(members, report)}): "
+                                f"{names}",
+                                NEEDS_EVIDENCE, "not-exercised", _blind_settle(members)))
+    return causes
 
 
 def _unverified_dynamic_only(report: ContractReport) -> list[str]:
@@ -3263,26 +3326,45 @@ def _unverified_dynamic_only(report: ContractReport) -> list[str]:
 
 
 def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
-    """Why a clean fact diff still cannot prove equivalence (empty when it can)."""
+    """The fact diff's INCONCLUSIVE reasons' texts (``_fact_diff_causes``)."""
+    return [c.reason for c in _fact_diff_causes(fact_diff)]
+
+
+def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
+    """Why a clean fact diff still cannot prove equivalence (empty when it can), each reason
+    with its kind: a review item a person must look at needs review; unmeasured noise, an
+    environment difference and a fact that could not be compared need evidence."""
     if not fact_diff or fact_diff.get("verdict") != VerificationVerdict.INCONCLUSIVE.value:
         return []
     entries = fact_diff.get("entries") or []
     counts = fact_diff.get("counts") or {}
-    reasons: list[str] = []
+    measured = bool(fact_diff.get("noise_measured"))
+    causes: list[InconclusiveCause] = []
     for side, label in (("old", "baseline"), ("new", "post-migration")):
         summary = fact_diff.get(side) or {}
         evicted = summary.get("evicted") if isinstance(summary, dict) else None
         if isinstance(evicted, int) and evicted > 0:
-            reasons.append(
+            causes.append(cause(
                 f"the {label} facts snapshot reached its fact cap and evicted {evicted} "
-                "call(s): the evidence is incomplete"
-            )
+                "call(s): the evidence is incomplete",
+                NEEDS_EVIDENCE, "uncomparable", SETTLE_UNCOMPARABLE["evicted"]))
     if not any(counts.values()):
-        reasons.append("no comparable call facts were recorded on both sides")
+        causes.append(cause("no comparable call facts were recorded on both sides",
+                            NEEDS_EVIDENCE, "not-exercised",
+                            "add a test that reaches the project's dependency calls, then "
+                            "capture both sides"))
     # An unverified edited site is counted in the summary but never blocks PASS; a review
     # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
     entries = [e for e in entries if not e.get("unverified")]
     reviews = [e for e in entries if e.get("review")]
+
+    def review_cause(reason: str, settle: str) -> InconclusiveCause:
+        # A replicate settles unmeasured noise; once one was measured, what it did not settle
+        # is a person's (``inconclusive.entry_cause``).
+        if measured:
+            return cause(reason, NEEDS_REVIEW, "review", SETTLE_REVIEW)
+        return cause(reason, NEEDS_EVIDENCE, "noise", settle)
+
     classes = (
         (UNMEASURED_NOISE, "value difference(s) may be run-to-run noise: their input is not "
                            "fully observed and the workload varies between runs"),
@@ -3303,7 +3385,7 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
         if hit:
             names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
-            reasons.append(f"{len(hit)} {text} ({names}); {settle}")
+            causes.append(review_cause(f"{len(hit)} {text} ({names}); {settle}", SETTLE_NOISE))
     for prefix, text in (
             (ORDER_CHANGED, "returned dict(s) whose key order changed (same keys and values)"),
             (INPUT_ORDER_CHANGED, "call(s) whose output changed as the dict key order of "
@@ -3312,28 +3394,38 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
         if hit:
             names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
-            reasons.append(f"{len(hit)} {text} ({names}); {order_settle}")
+            causes.append(review_cause(
+                f"{len(hit)} {text} ({names}); {order_settle}",
+                "capture a baseline replicate with random hash seeds (`pymolt capture "
+                "baseline --replicate`), then verify again"))
     hit = [e for e in reviews if str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     reviews = [e for e in reviews if not str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     if hit:
         env = ((fact_diff.get("summary") or {}).get("quality") or {}).get("environment")
         aspects = ", ".join((env.get("differs") or ())[:6]) if isinstance(env, dict) else "?"
         names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
-        reasons.append(f"the captures ran in different environments ({aspects}): {len(hit)} "
-                       f"difference(s) at calls that read them are reviews ({names}); capture "
-                       "both sides in the same environment to settle")
+        causes.append(cause(
+            f"the captures ran in different environments ({aspects}): {len(hit)} "
+            f"difference(s) at calls that read them are reviews ({names}); capture "
+            "both sides in the same environment to settle",
+            NEEDS_EVIDENCE, "environment", SETTLE_ENVIRONMENT))
     if reviews:
         names = ", ".join(sorted({str(e.get("symbol")) for e in reviews})[:5])
-        reasons.append(f"{len(reviews)} edited call(s) need review: {names}")
+        causes.append(cause(f"{len(reviews)} edited call(s) need review: {names}",
+                            NEEDS_REVIEW, "review", SETTLE_REVIEW))
     entries = [e for e in entries if not e.get("review")]
+
+    def uncomparable(reason: str, mechanism: str) -> InconclusiveCause:
+        return cause(reason, NEEDS_EVIDENCE, "uncomparable", SETTLE_UNCOMPARABLE[mechanism])
+
     unpaired = sum(
         1 for e in entries
         if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
     )
     if unpaired:
-        reasons.append(
-            f"{unpaired} rewritten call site(s) could not be paired with a post-migration call"
-        )
+        causes.append(uncomparable(
+            f"{unpaired} rewritten call site(s) could not be paired with a post-migration call",
+            "unpaired"))
     evicted_entries = sum(
         1 for e in entries
         if any(str(n).startswith("possibly-evicted") for n in e.get("notes") or ())
@@ -3352,39 +3444,58 @@ def _fact_diff_reasons(fact_diff: dict | None) -> list[str]:
         if any(str(n).startswith(CALL_SHAPE) for n in e.get("notes") or ())
         and not any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
     )
-    uncomparable = sum(1 for e in entries if e.get("category") == "uncomparable") \
+    lost = sum(1 for e in entries if e.get("category") == "uncomparable") \
         - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries
     if unobservable:
-        reasons.append(
+        causes.append(uncomparable(
             f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "
-            "the other side's backend could not record them, so they cannot be compared"
-        )
+            "the other side's backend could not record them, so they cannot be compared",
+            "backend-unobservable"))
     if dropped_entries:
-        reasons.append(
+        causes.append(uncomparable(
             f"{dropped_entries} call fact(s) are missing on a side that dropped events and "
-            "cannot be compared"
-        )
+            "cannot be compared", "dropped"))
     if capped_entries:
-        reasons.append(
+        causes.append(uncomparable(
             f"{capped_entries} call fact(s) are missing at compiled-call sites where the other "
-            "capture recorded only the first calls and counted the rest; they cannot be compared"
-        )
+            "capture recorded only the first calls and counted the rest; they cannot be compared",
+            "c-site-capped"))
     if shape_entries:
-        reasons.append(
+        causes.append(uncomparable(
             f"{shape_entries} call fact(s) were recorded as compiled calls (no inputs) on one "
-            "side and with their inputs on the other, so they cannot be paired by input"
-        )
+            "side and with their inputs on the other, so they cannot be paired by input",
+            "call-shape"))
     if evicted_entries:
-        reasons.append(
+        causes.append(uncomparable(
             f"{evicted_entries} call fact(s) are missing on a side that evicted facts and "
-            "cannot be compared"
-        )
-    if uncomparable:
-        reasons.append(
-            f"{uncomparable} call fact(s) lost their outcome distribution and cannot be compared"
-        )
-    return reasons or ["the fact diff could not establish equivalence"]
+            "cannot be compared", "evicted"))
+    if lost:
+        causes.append(uncomparable(
+            f"{lost} call fact(s) lost their outcome distribution and cannot be compared",
+            "distribution-lost"))
+    # Not reached by any entry the diff makes (every inconclusive entry is named above); kept
+    # so the verdict never stays unexplained.
+    return causes or [cause("the fact diff could not establish equivalence", NEEDS_EVIDENCE,
+                            "uncomparable", "read the fact diff (`pymolt verify . --json`)")]
 
+
+def _opaque_cause(fact_diff: dict | None) -> InconclusiveCause:
+    """The boundary diff's "opaque or nondeterministic" interactions: the fact diff's
+    inconclusive entries that are not a change of presence. They need evidence when one of
+    them is uncomparable, else (all review items) a person."""
+    measured = bool((fact_diff or {}).get("noise_measured"))
+    found = [(e, entry_cause(e, noise_measured=measured))
+             for e in (fact_diff or {}).get("entries") or ()
+             if e.get("category") not in ("appeared", "disappeared")
+             and e.get("comparison") != "changed"]
+    evidence = [e for e, f in found if f is not None and f[0] is NEEDS_EVIDENCE]
+    reason = "some boundary interactions were opaque or nondeterministic"
+    if evidence or not any(f is not None for _e, f in found):
+        uncomparable = [e for e, f in found if f is not None and f[1] == "uncomparable"]
+        return cause(reason, NEEDS_EVIDENCE, "uncomparable",
+                     settle_uncomparable(uncomparable) if uncomparable else
+                     SETTLE_UNCOMPARABLE["distribution-lost"])
+    return cause(reason, NEEDS_REVIEW, "review", SETTLE_REVIEW)
 
 
 def baseline_setup_unchanged(slot, current_setup: str | None) -> bool:

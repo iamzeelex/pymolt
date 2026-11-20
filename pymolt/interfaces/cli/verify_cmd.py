@@ -519,6 +519,28 @@ def _render_calibration(cal) -> None:
 
 
 
+def _inconclusive_note(unified) -> str:
+    """The Verdict panel's line for an INCONCLUSIVE verdict: whether it needs a person or
+    evidence, and what settles it (empty for PASS and FAIL)."""
+    from pymolt.interfaces.views import inconclusive_line
+
+    line = inconclusive_line(unified)
+    return f"\n{escape(line)}" if line else ""
+
+
+def _step_lines(judged: dict) -> list[str]:
+    """``verify --step``'s panel: the judgement, its entries by why, and what settles its
+    evidence."""
+    lines = [f"[bold]{escape(judged['status'])}[/bold]"
+             + (f" (epoch {judged['epoch']})" if judged.get("epoch") else "")]
+    for key in ("failing", "review", "unexercised", "uncomparable", "noise"):
+        for item in judged.get(key) or ():
+            lines.append(f"{key}: {escape(str(item))}")
+    if judged.get("settle"):
+        lines.append(f"needs evidence: {escape(judged['settle'])}")
+    return lines
+
+
 def _render_contract_report(rep, *, verbose: bool = False) -> None:
     from pymolt.interfaces.views import coverage_lines, impact_focus
 

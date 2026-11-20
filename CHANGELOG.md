@@ -135,6 +135,12 @@ All notable changes to pymolt. The format follows
   exercised, per risk and per step, and lists the failing changes no prediction covered.
 - An "Impact focus" line in the `verify` report: the plan's changed API paths and the static
   symbols on them.
+- An INCONCLUSIVE verdict says whether it needs a person (`needs_review`: a review item) or
+  evidence (`needs_evidence`: BLIND symbols, a fact that could not be compared, a capture
+  missing or unlike the other, noise no baseline replicate measured). `verification.json`
+  (schema 2) keeps `inconclusive_kind` and every reason with its kind and what settles it
+  (`inconclusive_causes`); `verify` prints what settles it, and `status` names it. A schema-1
+  file reads with no kind. Both kinds exit 4.
 
 #### Plan and apply
 
@@ -243,6 +249,10 @@ All notable changes to pymolt. The format follows
 - A rollback that restored files sets the post-migration capture aside, and `verify` names it; a
   rollback that restored no file keeps it.
 - The test runner is never traced, and its contacts are left out of coverage.
+- A step whose entries could not be compared, or may be run-to-run noise no baseline replicate
+  measured, is `needs_evidence` (it was `needs_review`), and its judgement lists them
+  (`uncomparable`, `noise`) with what settles them. `status` then names the baseline replicate
+  for noise, and for the rest the test or capture that settles it.
 
 #### Plan and apply
 

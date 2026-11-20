@@ -326,6 +326,22 @@ when facts changed. Sampled captures must also have complete call counts.
   items land here: differences pymolt cannot judge on its own, such as a hand edit's new value, a
   value that varies between runs, or an environment difference. Each names what settles it.
 
+An INCONCLUSIVE verdict also says who settles it. Each reason is one of two kinds:
+- **needs a person** (`needs_review`): a review item. A person fixes the code, or accepts an
+  intended change with `pymolt verify . --accept ID`. A difference a baseline replicate measured
+  and still could not settle is one too.
+- **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols, a fact
+  that could not be compared, a capture that is missing, invalid, stale or unlike the other, a
+  value that may be run-to-run noise while no baseline replicate was measured, an environment
+  difference between the two captures.
+
+`.pymolt/verification.json` keeps `inconclusive_kind`: `needs_review` when any reason needs a
+person, else `needs_evidence`, and null for PASS and FAIL. `inconclusive_causes` lists every
+reason with its kind and what settles it; `verify` prints what settles the first one. Both kinds
+exit 4. Some facts that could not be compared stay so however often you capture (a compiled call
+past the first 2,000 at its call site, compiled calls the two captures' backends record
+differently): what settles them says so.
+
 ### Scope after `apply`
 
 When the post-migration code came from `pymolt apply`, the verdict is the one the same captures get
@@ -363,10 +379,14 @@ given per step.
 Every `verify` judges each step in effect on the same comparison, and saves the judgements in
 `.pymolt/verification.json`, where `status` reads them. A step's entries are the facts on the
 lines its ledger entries cover and at its planned sites. It is `failed` when one fails,
-`needs_review` when one is a review item, `needs_evidence` when a site was not compared or an
-edited site could not be paired, `not_in_capture` when the capture predates it, and `verified`
-otherwise. `pymolt verify . --step ID` prints one step's judgement and exits by it; it takes no
-new capture. Only a verdict on the baseline and post-migration captures judges steps.
+`needs_review` when one is a review item a person must look at, `needs_evidence` when a site was
+not compared, an edited site could not be paired, a fact could not be compared, or a difference
+may be noise no baseline replicate measured yet, `not_in_capture` when the capture predates it,
+and `verified` otherwise. A step that needs evidence says what settles it (`settle`), and
+`status` names it: a baseline replicate for noise, a test that reaches its sites, or why
+capturing again does not help. `pymolt verify . --step ID` prints one step's judgement and exits
+by it; it takes no new capture. Only a verdict on the baseline and post-migration captures judges
+steps.
 
 ### Further oracles
 

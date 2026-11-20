@@ -40,4 +40,5 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **stale step** | A step a statement of which is gone, or whose recipe now makes another change: `apply` refuses it and names why |
 | **predicted risk** | A call site the plan expects to break, rated certain / high / medium / low |
 | **verdict** | `PASS`, `FAIL` or `INCONCLUSIVE`, from `verify` |
+| **needs review** / **needs evidence** | The two kinds of INCONCLUSIVE, for the verdict (`inconclusive_kind`) and for a step: a person must look at a review item / more or better captures settle it (BLIND, a fact that could not be compared, a missing or mismatched capture, noise no baseline replicate measured) |
 | **base tier** | How far the base dependencies can be trusted: gold (pinned, on the declared base Python), silver (pinned on an assumed base Python, or the tests pass), bronze (unvalidated), none (not resolved). JSON key: `baseline_tier` |

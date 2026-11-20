@@ -134,6 +134,88 @@ def test_a_judgement_of_an_older_epoch_does_not_apply(tmp_path):
     assert project_steps(tmp_path, plan).step("beh-1").status in ("recorded", "not_in_capture")
 
 
+# ── who settles a step that is not verified (decision 7) ──────────────────────────────────
+
+
+def _judged(root, change_entries):
+    """``beh-1``'s judgement on the two captures, after ``change_entries(fact_diff, mine)``
+    turned its entries into the situation under test."""
+    from pymolt.verify import service
+    from pymolt.workorder.judge import judge_steps
+
+    report = service.build_contract_report_from_state(root)
+    fdiff = report._fact_diff
+    mine = [e for e in fdiff.entries if e.step_id == "beh-1"]
+    assert mine, "the recorded step has an entry at its site"
+    change_entries(fdiff, mine)
+    return judge_steps(root, report)[1]["beh-1"]
+
+
+def _uncomparable(entry, note):
+    from pymolt.verify.facts import Comparison, FactCategory
+
+    entry.category, entry.comparison, entry.review = (
+        FactCategory.UNCOMPARABLE, Comparison.UNCOMPARABLE, None)
+    entry.notes.append(note)
+    return entry
+
+
+def test_a_step_whose_only_entry_is_uncomparable_needs_evidence(tmp_path):
+    """It used to end needs_review: no person can settle a fact the captures could not compare
+    (there is no finding to accept); what settles it is said."""
+    plan = _plan(tmp_path)
+    _record(tmp_path, plan, SAME)
+    capture(tmp_path, "post_migration")
+
+    judged = _judged(tmp_path, lambda _f, mine: [_uncomparable(e, "c-site-capped:old")
+                                                 for e in mine])
+
+    assert judged["status"] == "needs_evidence"
+    assert judged["review"] == [] and judged["unexercised"] == []
+    assert judged["uncomparable"] and "json.dumps" in judged["uncomparable"][0]
+    assert judged["evidence"] == "uncomparable"
+    assert "capturing again does not settle it" in judged["settle"]
+
+
+def test_a_step_with_a_review_item_and_an_uncomparable_entry_needs_review(tmp_path):
+    plan = _plan(tmp_path, claim="intended")
+    _record(tmp_path, plan, VALUE)
+    capture(tmp_path, "post_migration")
+
+    def add_uncomparable(fdiff, mine):
+        assert all(e.review for e in mine)                   # the changed value is a review
+        fdiff.entries.append(_uncomparable(mine[0].model_copy(deep=True),
+                                           "possibly-dropped:new"))
+
+    judged = _judged(tmp_path, add_uncomparable)
+
+    assert judged["status"] == "needs_review"
+    assert judged["review"] and judged["uncomparable"]
+    assert "evidence" not in judged and "settle" not in judged
+
+
+def test_unmeasured_noise_at_a_step_needs_evidence_until_a_replicate_measured_it(tmp_path):
+    from pymolt.verify.facts import UNMEASURED_NOISE, Comparison, FactCategory
+
+    plan = _plan(tmp_path)
+    _record(tmp_path, plan, SAME)
+    capture(tmp_path, "post_migration")
+
+    def noisy(measured):
+        def change(fdiff, mine):
+            for e in mine:
+                e.category, e.comparison = FactCategory.CHANGED, Comparison.UNCOMPARABLE
+                e.review = f"{UNMEASURED_NOISE}: the value differs; capture a replicate"
+            fdiff.noise_measured = {"replicate": "r"} if measured else None
+        return change
+
+    judged = _judged(tmp_path, noisy(measured=False))
+    assert (judged["status"], judged["evidence"]) == ("needs_evidence", "noise")
+    assert judged["noise"] and "--replicate" in judged["settle"]
+    # Once a replicate was measured, a difference it did not settle is a person's.
+    assert _judged(tmp_path, noisy(measured=True))["status"] == "needs_review"
+
+
 # ── calibration by step ───────────────────────────────────────────────────────────────────
 
 

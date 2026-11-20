@@ -11,12 +11,21 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
-from pymolt.verify.models import GoldenDiff, VerificationVerdict
+from pymolt.verify.inconclusive import NEEDS_EVIDENCE, cause, kind_of
+from pymolt.verify.models import (
+    GoldenDiff,
+    InconclusiveCause,
+    InconclusiveKind,
+    VerificationVerdict,
+)
 from pymolt.verify.policy import AutoRollbackDecision, CanaryPolicyEvaluation
 from pymolt.verify.report import ContractReport
 from pymolt.verify.shadow import ShadowReport
 
 VERIFICATION_PATH = Path(".pymolt/verification.json")
+# 2: ``inconclusive_kind`` and ``inconclusive_causes`` (design decision 7). A schema-1 file
+# reads with neither (null, empty).
+SCHEMA_VERSION = 2
 
 
 class VerificationEvidence(BaseModel):
@@ -24,10 +33,12 @@ class VerificationEvidence(BaseModel):
     verdict: VerificationVerdict
     reasons: list[str] = Field(default_factory=list)
     details: dict[str, Any] = Field(default_factory=dict)
+    # An INCONCLUSIVE component's reasons, each with its kind and what settles it.
+    causes: list[InconclusiveCause] = Field(default_factory=list)
 
 
 class UnifiedVerificationReport(BaseModel):
-    schema_version: int = 1
+    schema_version: int = SCHEMA_VERSION
     created_at: str = Field(
         default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds")
     )
@@ -35,6 +46,11 @@ class UnifiedVerificationReport(BaseModel):
     comparator_profile: str = "exact"
     verdict: VerificationVerdict
     reasons: list[str] = Field(default_factory=list)
+    # Set only when the verdict is INCONCLUSIVE: ``needs_review`` when a reason needs a person,
+    # else ``needs_evidence`` (design decision 7); the causes keep every reason with its kind,
+    # in ``reasons``' order (``<component>: <reason>``). None also for a schema-1 file.
+    inconclusive_kind: InconclusiveKind | None = None
+    inconclusive_causes: list[InconclusiveCause] = Field(default_factory=list)
     evidence: list[VerificationEvidence] = Field(default_factory=list)
     contract: ContractReport
     golden: GoldenDiff | None = None
@@ -43,7 +59,8 @@ class UnifiedVerificationReport(BaseModel):
     rollback: AutoRollbackDecision | None = None
     rollback_executed: bool = False
     # Each step's judgement (``workorder.judge``): step id -> {status, epoch, entries, failing,
-    # review, unexercised, risks}; ``steps_run``: the run they are for.
+    # review, unexercised, uncomparable, noise, risks}, plus {evidence, settle} when it needs
+    # evidence; ``steps_run``: the run they are for.
     steps: dict[str, dict[str, Any]] = Field(default_factory=dict)
     steps_run: str | None = None
 
@@ -91,11 +108,18 @@ def _golden_evidence(diff: GoldenDiff) -> VerificationEvidence:
     else:
         verdict = VerificationVerdict.PASS
         reasons = []
+    # A skipped point's value is opaque or nondeterministic on a side: more evidence (a point
+    # that renders a comparable value) settles it, not a person.
+    causes = [cause(r, NEEDS_EVIDENCE, "uncomparable",
+                    "make those golden points return values that compare (not opaque or "
+                    "nondeterministic)") for r in reasons] \
+        if verdict is VerificationVerdict.INCONCLUSIVE else []
     return VerificationEvidence(
         name="golden",
         verdict=verdict,
         reasons=reasons,
         details=diff.model_dump(mode="json"),
+        causes=causes,
     )
 
 
@@ -113,6 +137,7 @@ def build_unified_verification(
         name="contract",
         verdict=contract.verdict,
         reasons=contract.verdict_reasons,
+        causes=contract.inconclusive_causes,
         details={
             "static_targets": contract.static_targets,
             "confirmed": contract.confirmed,
@@ -127,11 +152,16 @@ def build_unified_verification(
     if golden is not None:
         evidence.append(_golden_evidence(golden))
     if canary is not None:
+        # An INCONCLUSIVE canary lacks a mandatory metric (``evaluate_canary_policy``): the
+        # metric settles it.
         evidence.append(VerificationEvidence(
             name="canary",
             verdict=canary.verdict,
             reasons=canary.reasons,
             details={"evidence": [item.model_dump(mode="json") for item in canary.evidence]},
+            causes=[cause(r, NEEDS_EVIDENCE, "metric", "supply the missing canary metrics "
+                          "(`--metrics`)") for r in canary.reasons]
+            if canary.verdict is VerificationVerdict.INCONCLUSIVE else [],
         ))
 
     if any(item.verdict is VerificationVerdict.FAIL for item in evidence):
@@ -146,12 +176,21 @@ def build_unified_verification(
         if item.verdict is not VerificationVerdict.PASS
         for reason in (item.reasons or [item.verdict.value])
     ]
+    causes: dict[str, InconclusiveCause] = {}
+    if verdict is VerificationVerdict.INCONCLUSIVE:
+        for item in evidence:
+            if item.verdict is VerificationVerdict.INCONCLUSIVE:
+                for c in item.causes:
+                    reason = f"{item.name}: {c.reason}"
+                    causes.setdefault(reason, c.model_copy(update={"reason": reason}))
     steps_run, steps = _judge_steps(contract)
     return UnifiedVerificationReport(
         run_id=run_id,
         comparator_profile=comparator_profile,
         verdict=verdict,
         reasons=list(dict.fromkeys(reasons)),
+        inconclusive_kind=kind_of(causes.values()),
+        inconclusive_causes=list(causes.values()),
         evidence=evidence,
         contract=contract,
         golden=golden,

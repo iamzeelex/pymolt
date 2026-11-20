@@ -36,6 +36,30 @@ class VerificationVerdict(StrEnum):
     INCONCLUSIVE = "inconclusive"
 
 
+class InconclusiveKind(StrEnum):
+    """Who settles an INCONCLUSIVE reason (design decision 7): a person must look
+    (``needs_review``), or more or better captures settle it (``needs_evidence``). When both are
+    present ``needs_review`` wins, as in the step statuses."""
+
+    NEEDS_REVIEW = "needs_review"
+    NEEDS_EVIDENCE = "needs_evidence"
+
+
+class InconclusiveCause(BaseModel):
+    """One reason a verdict is INCONCLUSIVE, with its kind, set where the reason is made.
+
+    ``cause``: ``review`` (a person must look), ``noise`` (a baseline replicate settles it),
+    ``environment`` (the captures ran in different environments), ``not-exercised`` (a site no
+    run reached), ``uncomparable`` (a fact or value that could not be compared), ``capture``
+    (a capture missing, invalid, stale or unlike the other), ``static-map`` (no static
+    contact to judge), ``metric`` (a canary metric missing). ``settle``: what settles it."""
+
+    reason: str
+    kind: InconclusiveKind
+    cause: str
+    settle: str
+
+
 class CaptureValidity(StrEnum):
     """Whether a captured trace is eligible to act as named evidence."""
 

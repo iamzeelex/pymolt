@@ -8,9 +8,13 @@ it. A step's judgement, first match:
 
 1. ``not_in_capture``: its new statements do not resolve in the post-migration capture;
 2. ``failed``: an entry of it fails;
-3. ``needs_review``: an entry of it is a review item (or not comparable);
-4. ``needs_evidence``: one of its sites has no compared fact (not exercised), or an edited site
-   of it could not be paired (unverified);
+3. ``needs_review``: an entry of it is a review item a person must look at (``review``);
+4. ``needs_evidence`` (design decision 7): one of its sites has no compared fact (not
+   exercised), or an edited site of it could not be paired (unverified) (``unexercised``); an
+   entry of it could not be compared (``uncomparable``); or a difference at it may be run-to-run
+   noise no baseline replicate measured yet, or a difference of the two captures' environments
+   (``noise``). ``evidence`` names the first of noise, environment, not exercised, uncomparable
+   it has, and ``settle`` what settles it;
 5. ``verified``: every site compared and judged by its claim (an ACCEPTED entry counts as
    compared equal).
 
@@ -48,6 +52,28 @@ def _label(e) -> str:
     return f"{e.finding or e.category.value} {e.symbol} @ {where}"
 
 
+def _evidence(noise: list, unexercised: list, uncomparable: list) -> tuple[str, str] | None:
+    """``(cause, what settles it)`` for a step that needs evidence: noise a baseline replicate
+    settles first (the cheapest, and it can turn the rest), then an environment difference, a
+    site not exercised, a fact that could not be compared. ``noise``: (entry, cause) pairs."""
+    from pymolt.verify.inconclusive import (
+        SETTLE_ENVIRONMENT,
+        SETTLE_NOISE,
+        settle_uncomparable,
+    )
+
+    if any(why == "noise" for _e, why in noise):
+        return "noise", SETTLE_NOISE
+    if noise:
+        return "environment", SETTLE_ENVIRONMENT
+    if unexercised:
+        return "not-exercised", ("add a test that reaches its sites, then capture "
+                                 "post-migration again")
+    if uncomparable:
+        return "uncomparable", settle_uncomparable(uncomparable)
+    return None
+
+
 def _where_entries(root: Path, step, entries, old_sources, python) -> tuple[list, list[str]]:
     """The entries at the step's ``where`` anchors (resolved on the baseline's source), and the
     anchors no compared fact reached."""
@@ -69,7 +95,10 @@ def _where_entries(root: Path, step, entries, old_sources, python) -> tuple[list
         mine = [e for e in entries if e.old_site is not None
                 and _rel(root, e.old_site.file) == anchor.file and e.old_site.line is not None
                 and st.first <= e.old_site.line <= max(st.last, st.end)]
-        if not any(e.comparison.value in ("equal", "changed") or e.accepted for e in mine):
+        # A fact that reached it but is a review item or could not be compared is judged as
+        # such (``review``, ``uncomparable``), not as a site no run reached.
+        if not any(e.comparison.value in ("equal", "changed") or e.accepted or e.inconclusive
+                   for e in mine):
             missing.append(f"{anchor.file}:{st.first} `{anchor.stmt[:60]}` (no compared fact)")
         found.extend(mine)
     return found, missing
@@ -80,6 +109,7 @@ def judge_steps(project_dir: str | Path, report, calibration=None
     """``(run id, step id -> judgement)`` for the saved plan's steps in effect (module
     docstring); ``(None, {})`` when the report did not compare the two captures."""
     from pymolt.migration_plan import MigrationPlan, _pythons
+    from pymolt.verify.inconclusive import NEEDS_REVIEW, entry_cause
     from pymolt.workorder.state import applicable_steps, project_steps
 
     compared = getattr(report, "compared", None)
@@ -92,6 +122,7 @@ def judge_steps(project_dir: str | Path, report, calibration=None
     if plan is None or not plan.steps:
         return None, {}
     projection = project_steps(root, plan)
+    measured = bool(getattr(fdiff, "noise_measured", None))
     ctx = getattr(report, "_accepts", None)
     old_sources = getattr(ctx, "old_sources", None)
     base, _target = _pythons(root, plan)
@@ -109,7 +140,8 @@ def judge_steps(project_dir: str | Path, report, calibration=None
         base_judgement = {"epoch": state.epoch, "risks": risks.get(step.id, [])}
         if state.status == "not_in_capture":
             out[step.id] = {**base_judgement, "status": "not_in_capture", "entries": 0,
-                            "failing": [], "review": [], "unexercised": []}
+                            "failing": [], "review": [], "unexercised": [],
+                            "uncomparable": [], "noise": []}
             continue
         mine = [e for e in fdiff.entries if e.step_id == step.id
                 and e.step_run in (None, projection.run_id)]
@@ -119,16 +151,35 @@ def judge_steps(project_dir: str | Path, report, calibration=None
         if not mine and not step.where and not step.edits:
             continue                                  # no site: no verify status
         failing = [_label(e) for e in mine if e.fails]
-        review = [_label(e) for e in mine if not e.fails and (e.review or e.inconclusive)]
+        # Each entry that is neither failing nor settled, by who settles it: a person (review),
+        # or more evidence (an uncomparable fact; noise or an environment difference).
+        review, uncomparable, noise = [], [], []
+        for e in mine:
+            found = entry_cause(e, noise_measured=measured)
+            if found is None:
+                continue
+            kind, why = found
+            if kind is NEEDS_REVIEW:
+                review.append(e)
+            elif why == "uncomparable":
+                uncomparable.append(e)
+            else:
+                noise.append((e, why))
         unexercised = list(missing) + [_label(e) for e in mine if e.unverified]
         if not mine and step.edits:
             unexercised.append("none of its statements was exercised by the capture")
         status = ("failed" if failing else "needs_review" if review else
-                  "needs_evidence" if unexercised else "verified")
-        out[step.id] = {**base_judgement, "status": status, "entries": len(mine),
-                        "failing": failing[:20], "review": review[:20],
-                        "unexercised": unexercised[:20],
-                        "accepted": sum(1 for e in mine if e.accepted)}
+                  "needs_evidence" if unexercised or uncomparable or noise else "verified")
+        judgement = {**base_judgement, "status": status, "entries": len(mine),
+                     "failing": failing[:20], "review": [_label(e) for e in review][:20],
+                     "unexercised": unexercised[:20],
+                     "uncomparable": [_label(e) for e in uncomparable][:20],
+                     "noise": [_label(e) for e, _why in noise][:20],
+                     "accepted": sum(1 for e in mine if e.accepted)}
+        if status == "needs_evidence":
+            judgement["evidence"], judgement["settle"] = _evidence(noise, unexercised,
+                                                                   uncomparable)
+        out[step.id] = judgement
     return projection.run_id, out
 
 
