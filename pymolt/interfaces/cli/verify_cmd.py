@@ -589,7 +589,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
                else "")
         )
     if rep.probed:
-        head += (f"\nSandbox-probed: [bold]{rep.probed}[/bold] symbol(s) re-invoked under target — "
+        head += (f"\nProbed: [bold]{rep.probed}[/bold] symbol(s) re-invoked under target — "
                  f"[{'bold red' if rep.probe_changed else 'green'}]{rep.probe_changed} changed[/]")
     if rep.diff is not None:
         if rep.verdict is VerificationVerdict.FAIL:
@@ -633,7 +633,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
 
     probed = [s for s in visible_symbols if s.probed]
     if probed:
-        t = Table(title=f"Sandbox probes (re-invoked under target version) ({_count(probed)})")
+        t = Table(title=f"Probes (re-invoked under the target version) ({_count(probed)})")
         t.add_column("Dependency symbol", style="cyan")
         t.add_column("Probe verdict")
         _pv = {"stable": "[green]stable[/green]", "changed": "[bold red]CHANGED[/bold red]",
@@ -657,7 +657,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         for s in blind:
             t.add_row(s.target, _BLIND_WHY.get(s.blind_reason or "", "—"),
                       ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
-        t.caption = "candidates for the sandbox (probe in isolation under old vs new)"
+        t.caption = "a test that reaches them, or `--probe-python`, would settle them"
         console.print(t)
 
     dyn = [s for s in visible_symbols if s.status == "dynamic-only"]

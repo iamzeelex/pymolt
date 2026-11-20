@@ -326,24 +326,30 @@ def verify_migration(
              "(saved; status counts only a verdict on the captured one)",
     ),
     golden_before: str | None = typer.Option(
-        None, "--golden-before", help="Golden snapshot JSON from before the migration"
+        None, "--golden-before", help="Golden snapshot JSON from before the migration",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     golden_after: str | None = typer.Option(
-        None, "--golden-after", help="Golden snapshot JSON from after the migration"
+        None, "--golden-after", help="Golden snapshot JSON from after the migration",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     policy_file: str | None = typer.Option(
-        None, "--policy", help="Canary policy JSON"
+        None, "--policy", help="Canary policy JSON",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     metrics_file: str | None = typer.Option(
-        None, "--metrics", help="Canary metrics JSON (needs --policy)"
+        None, "--metrics", help="Canary metrics JSON (needs --policy)",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     shadow_file: str | None = typer.Option(
-        None, "--shadow", help="Shadow operations JSON; unsafe writes are left out"
+        None, "--shadow", help="Shadow operations JSON; unsafe writes are left out",
+        hidden=True,  # until 0.3: no command makes this file yet
     ),
     auto_rollback: bool = typer.Option(
         False,
         "--auto-rollback",
         help="Run rollback when a required canary gate fails",
+        hidden=True,  # until 0.3, with --policy
     ),
     accept: str | None = typer.Option(
         None, "--accept",

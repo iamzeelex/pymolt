@@ -182,9 +182,6 @@ the evidence. Details are in [verify.md](verify.md).
 | `--baseline`, `--post-migration` | Compare other recordings. Against another baseline the verdict is not saved. On another post-migration recording it is saved with what it compared, and `status` does not count it |
 | `--profile`, `--comparator` | How values are compared: `exact`, `shape`, or `custom` with `module:callable` |
 | `--probe-python` | A target interpreter to replay the recorded calls in |
-| `--golden-before`, `--golden-after` | Golden snapshots from before and after |
-| `--policy`, `--metrics`, `--auto-rollback` | Canary policy and metrics, and rollback when a required gate fails |
-| `--shadow` | Shadow operations; unsafe writes are left out |
 | `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
 | `--strict` | Review every accepted change instead of counting it equal |
 | `--verbose`, `-v` | Also show what was explained away: masked noise, replicate-explained differences |

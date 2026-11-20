@@ -5,7 +5,7 @@ Merges the two axes we locked:
 * **coverage of the contract** — the static contact map (the denominator: every
   dependency symbol our code *could* call) vs a dynamic trace (the numerator:
   what actually ran). Each symbol is ``confirmed`` (static ∧ observed),
-  ``blind`` (static, never observed → a sandbox candidate), or ``dynamic-only``
+  ``blind`` (static, never observed → a probe candidate), or ``dynamic-only``
   (observed but the static map missed it → static under-approximation, e.g. via
   ``getattr``/monkeypatching).
 * **identity** — static paths are public import paths (``requests.Request``), the
@@ -93,7 +93,7 @@ class SymbolStatus(BaseModel):
     contact_kinds: list[str] = Field(default_factory=list)
     impacted: bool | None = None  # None when no impact set was supplied
     matched_impact_paths: list[str] = Field(default_factory=list)
-    probed: bool = False  # re-invoked in the sandbox under the target version
+    probed: bool = False  # re-invoked under the target version (``--probe-python``)
     probe_status: str | None = None  # stable | changed | error | opaque-inputs
     # Static identity, resolved in the capture's interpreter (static symbols only).
     sym: str | None = None  # canonical "<defining module>.<qualname>"
@@ -645,7 +645,7 @@ def build_contract_report(
     ``trace`` is the observed dynamic recording (current/new version) used for
     coverage. ``against`` is an older recording; when both are given, the version
     diff (``against`` -> ``trace``) is attached. ``probe_python`` (a target venv
-    interpreter) re-invokes each reconstructible captured contact in the sandbox
+    interpreter) re-invokes each reconstructible captured contact in a subprocess of that interpreter
     and records whether it stays stable or changes under that version.
 
     Static paths are resolved to canonical identities (one subprocess, cached
@@ -946,7 +946,7 @@ def build_contract_report(
         )
         report.probed = report.all_probed
         report.probe_changed = report.all_probe_changed
-        report.notes.append(f"sandbox-probed reconstructible contacts under {probe_python}")
+        report.notes.append(f"probed reconstructible contacts under {probe_python}")
 
     if trace and against:
         try:

@@ -57,7 +57,7 @@ Operating principles:
   - `pymolt verify <dir> --step ID --agent` judges one step (exit 0 verified, 1 failed, 4 needs
     review or evidence); `pymolt rollback <dir> --step ID --agent` undoes one.
 - **A person's decisions stay a person's.** A whole-run rollback, `rollback --force` or
-  `--cascade`, `verify --auto-rollback`, `verify --accept`, `apply --skip` and
+  `--cascade`, `verify --accept`, `apply --skip` and
   `apply --allow-no-baseline` are refused under `--agent`. Say what is needed and stop.
 
 Report each phase's `summary` and `hint` concisely. Stop and ask whenever a human decision

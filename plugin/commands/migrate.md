@@ -39,7 +39,7 @@ whenever unsure.
      `--record --done --agent`. Unrecorded edits are judged as hand edits.
    - person steps: relay the brief to the user.
    - `pymolt rollback <dir> --step ID --agent` undoes one step. A whole-run rollback,
-     `--force`, `--cascade`, `verify --auto-rollback`, `verify --accept`, `apply --skip` and
+     `--force`, `--cascade`, `verify --accept`, `apply --skip` and
      `apply --allow-no-baseline` are the person's; `--agent` refuses them.
 6. **capture post-migration** (same command with `post-migration`, plus `--force` on a
    re-run), then **verify** (`pymolt verify <dir> --agent`). Report the numbers:

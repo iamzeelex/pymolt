@@ -320,8 +320,7 @@ or dropped events, skipped instrumentation, or ran partly untraced, or if the tw
 commands, targets, modes, privacy profiles or sampling rates, the verdict is INCONCLUSIVE, even
 when facts changed. Sampled captures must also have complete call counts.
 
-- **FAIL**: a compared fact failed anywhere in the recording, or a sandbox replay, golden snapshot
-  or canary gate failed.
+- **FAIL**: a compared fact failed anywhere in the recording, or a `--probe-python` replay failed.
 - **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
   - no static symbol is BLIND, of any contact kind (attribute reads, constants and unobservable
@@ -399,11 +398,7 @@ steps.
 
 | Option | Adds |
 |---|---|
-| `--golden-before`, `--golden-after` | golden snapshots compared alongside the captures |
-| `--policy`, `--metrics` | canary gates: error rate, p95/p99 latency, output-shape mismatch, dependency-call drift, dropped events |
-| `--auto-rollback` | runs `rollback` when a required canary gate fails (opt-in) |
-| `--shadow` | classifies read/idempotent operations and leaves unsafe or unknown writes out |
-| `--probe-python` | replays the recorded calls in a target interpreter, in a sandbox |
+| `--probe-python` | replays the recorded calls in a target interpreter, each in its own process |
 | `--profile exact\|shape\|custom`, `--comparator module:callable` | how values are compared |
 
 ## Exit codes
