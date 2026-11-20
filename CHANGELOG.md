@@ -369,6 +369,9 @@ All notable changes to pymolt. The format follows
 
 #### Plan and apply
 
+- `apply --dry-run` prints the diff as it is; a `[` in it showed as `\[`.
+- The brief of a step for a changed default no longer promises that passing the old value keeps
+  the old outcome (pandas 2 reads `numeric_only=None` as `False`): it says to check it.
 - Standard-library membership comes from the bundled lifetimes of every Python version, never
   from the interpreter pymolt runs on. On 3.12, `imp`, `distutils` and `asynchat` used to count
   as third-party in the delta's touched symbols, the behaviour checks, the default `--stdlib`
