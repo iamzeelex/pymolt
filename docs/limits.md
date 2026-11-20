@@ -126,7 +126,7 @@ Two cases go the other way. Both still fail, although they may be noise:
 
 | Workload | Measured |
 |---|---|
-| Test suites, Python 3.6 in emulated containers (`setprofile`), six legacy projects | 2.7–11.8× slower ([scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md)) |
+| Test suites, Python 3.6 in emulated containers (`setprofile`), legacy projects | 2.3–10.8× slower on five of the six; lasagne's run was disturbed ([scorecard](../bench/legacy_eval/results/release-0.2/scorecard.md)) |
 | A Flask + SQLAlchemy + pydantic service on Python 3.12 (`sys.monitoring`), saturated | 19–20.5% lower throughput once steady (median 19.3%); 71–72% of normal throughput in the first 30 s; 0 dropped calls |
 | Same service at 200 requests/s | p99 latency ×1.05; output about 1.2 MB per day |
 | Your code calling a Cython function in a hot loop, 3.12 | 13–16 µs per call, every call recorded |
@@ -150,7 +150,7 @@ falls behind makes the program wait rather than drop events.
 - None reaches a compared post-migration capture. The target fails to import on five. alphalens
   imports, but its post-migration test run was refused.
 
-Details: [scorecard](../bench/legacy_eval/results/after-waveG/scorecard.md),
+Details: [scorecard](../bench/legacy_eval/results/release-0.2/scorecard.md) (0.2 release code),
 [issues](../bench/legacy_eval/KEY_ISSUES.md).
 
 **locust** (gevent, 3.8 → 3.12, no code change) is the noisy real-project pilot:
