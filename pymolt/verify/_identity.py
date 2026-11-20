@@ -49,6 +49,7 @@ values (a werkzeug ``LocalProxy`` in a module namespace would otherwise resolve 
 """
 import inspect
 import types
+import weakref
 
 SYMQ_UNWRAPPED = "unwrapped"
 SYMQ_FALLBACK = "fallback"
@@ -80,6 +81,70 @@ _OWNER_CACHE_MAX = 20000
 _OWNERS = {}                # id(type) -> (type, "module.qualname" | None)
 _RECV_CACHE_MAX = 20000
 _TYPE_MRO = type.__dict__["__mro__"]
+
+# ── what a decision cache keeps of the object it decided ─────────────────────
+# A cache keyed by ``id(obj)`` must know ``obj`` again (an id is reused once its object
+# dies), but must not keep it alive: a tracer may not change how long the traced program's
+# objects live. A builtin method bound to a receiver holds the receiver, a closure its
+# cells, a ``functools.partial`` its arguments; holding them ran their finalizers late or
+# never and kept weak references alive.
+_WEAKREF = weakref.ref
+_BUILTIN = types.BuiltinFunctionType
+_MODULE = types.ModuleType
+# Class-level builtin descriptors (``dict.items``, ``object.__init__``, ``dict.fromkeys``):
+# they live as long as their class and take no weak reference.
+_DESCRIPTOR_TYPES = (type(str.join), type(object.__init__), type(dict.__dict__["fromkeys"]))
+
+
+def held(obj):
+    """What a cache keeps of ``obj`` to know it again (``is_held``): ``obj`` itself when its
+    class or module keeps it alive anyway (a class, a builtin descriptor, a builtin function
+    of a module, a function its module's namespace names: ``_named_by_module``), else a weak
+    reference, or None when ``obj`` takes none (never known again: every later object is a
+    different one). Never runs user code."""
+    t = type(obj)
+    if t in _DESCRIPTOR_TYPES or issubclass(t, type):
+        return obj
+    if t is _BUILTIN:
+        owner = obj.__self__
+        if owner is None or type(owner) is _MODULE:
+            return obj
+    elif t is _FUNCTION and _named_by_module(obj):
+        return obj
+    try:
+        return _WEAKREF(obj)
+    except TypeError:
+        return None
+
+
+def _named_by_module(func):
+    """True if ``func`` is what its module's namespace holds under its qualified name: a
+    module function, or a method of a class of the module (also as a static or class
+    method). A closure, a lambda, a function made at run time is not."""
+    try:
+        qual = func.__qualname__
+        if type(qual) is not str or "<" in qual:
+            return False
+        parts = qual.split(".")
+        obj = dict.get(func.__globals__, parts[0])
+        for part in parts[1:]:
+            if not issubclass(type(obj), type):
+                return False
+            obj = _TYPE_DICT.__get__(obj, type).get(part)
+        t = type(obj)
+        if t is staticmethod or t is classmethod:
+            obj = obj.__func__
+        return obj is func
+    except Exception:
+        return False
+
+
+def is_held(ref, obj):
+    """True if ``ref`` (from ``held``) is ``obj``, still alive (a dead reference is no object,
+    not None; a None ``ref`` knows nothing)."""
+    if ref is obj:
+        return ref is not None
+    return type(ref) is _WEAKREF and obj is not None and ref() is obj
 
 
 class CodeIdentity:
@@ -493,7 +558,8 @@ class IdentityResolver:
     def __init__(self, in_target=None):
         self._in_target = in_target
         self._index = {}    # module -> [namespace size, index, rebuilds, globals]
-        self._inner = {}    # id(func) -> (func, InnerIdentity | None)
+        self._inner = {}    # id(func) -> (held(func), InnerIdentity | None)
+        self._inner_m = {}  # id(method.__func__) -> (held(func), InnerIdentity | None)
         self._recv = {}     # (id(code), id(receiver type)) -> (code, type, CodeIdentity | None)
 
     # ── per code object ────────────────────────────────────────────────────────
@@ -600,16 +666,25 @@ class IdentityResolver:
                 found = value
         if found is None:
             return None
-        ent = self._inner.get(id(found))
-        if ent is not None and ent[0] is found:
+        # A bound method is decided by its function (its signature drops the receiver): the
+        # entry never holds the receiver, nor a closure what it captured (``held``).
+        cache = self._inner
+        func = found
+        if type(found) is _METHOD:
+            cache = self._inner_m
+            func = found.__func__
+        ent = cache.get(id(func))
+        if ent is not None and is_held(ent[0], func):
             return ent[1]
         try:
             info = self._inner_identity(found)
         except Exception:
             info = None
-        if len(self._inner) >= _INNER_CACHE_MAX:
-            self._inner.clear()
-        self._inner[id(found)] = (found, info)          # holds `found`: its id can't recycle
+        ref = held(func)
+        if ref is not None:
+            if len(cache) >= _INNER_CACHE_MAX:
+                cache.clear()
+            cache[id(func)] = (ref, info)
         return info
 
     def _inner_identity(self, func):
