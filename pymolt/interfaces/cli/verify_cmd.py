@@ -18,10 +18,12 @@ mechanism) — this file is CLI rendering + interactive prompting only.
 import json
 import os
 import shlex
+import shutil
 import tempfile
 from pathlib import Path
 
 import typer
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -381,6 +383,13 @@ def capture_cmd(
             f"dropped={slot.dropped_events if slot.dropped_events is not None else 'unknown'}  "
             f"backend={slot.backend or backend}[/dim]"
         )
+    for failure in getattr(slot, "activation_failures", []) or []:
+        err.print(
+            "[yellow]warning[/yellow] the watcher failed to activate in pid "
+            f"{failure.get('pid')} (python {failure.get('python')}): "
+            f"{escape(str(failure.get('error')))} — that process ran UNTRACED, "
+            "so this capture cannot support a PASS"
+        )
     if slot.archived_previous:
         err.print(f"[dim]previous {when} recording kept at {slot.archived_previous}[/dim]")
     next_step(project_dir)
@@ -470,10 +479,14 @@ def boundary_cmd(
     source = typer.prompt("Your code (caller) — blank = auto-detect", default="").strip()
     exclude = typer.prompt("Top-levels to exclude (blank = none)", default="").strip()
     work = Path(tempfile.mkdtemp(prefix="pymolt-boundary-"))
-    old = _obtain_recording("old", target, work, backend, exclude, source)
-    new = _obtain_recording("new", target, work, backend, exclude, source)
-    console.print()
-    diff = build_boundary_diff(str(old), str(new))
+    try:
+        old = _obtain_recording("old", target, work, backend, exclude, source)
+        new = _obtain_recording("new", target, work, backend, exclude, source)
+        console.print()
+        diff = build_boundary_diff(str(old), str(new))
+    finally:
+        # The recordings only feed the diff above; nothing durable lives here.
+        shutil.rmtree(work, ignore_errors=True)
     render_boundary_diff(diff, full=full)
     raise typer.Exit(code=_verification_exit(diff.verdict))
 

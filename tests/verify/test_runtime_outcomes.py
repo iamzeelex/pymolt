@@ -1,0 +1,246 @@
+"""Injected-runtime behaviour: raise visibility and the cost of the hot path.
+
+Python-level raises used to be recorded as ``return None`` (setprofile has no exception
+event), and unsampled calls used to pay for a full ``normalize`` of their arguments.
+These pin the fixes.
+"""
+import json
+import sys
+import types
+
+import pytest
+
+import pymolt.verify._normalize as normalize_mod
+from pymolt.verify import _backend
+from pymolt.verify._backend import (
+    OUTCOME_AMBIGUOUS,
+    OUTCOME_RAISE,
+    OUTCOME_RETURN,
+    UNTYPED_RAISE,
+    SetProfileBackend,
+    frame_outcome,
+)
+from pymolt.verify._normalize import AMBIGUOUS_OUTCOME, normalize
+from pymolt.verify._sinks import JsonlSink, MemorySink
+from pymolt.verify._wrap import WrapBackend
+
+PREFIX = "vfakeoutcome"
+
+TARGET_SRC = """
+def ok(x):
+    return x + 1
+
+def returns_none():
+    return None
+
+def boom(x):
+    raise ValueError("kaboom %s" % x)
+
+def caught_then_none():
+    try:
+        raise KeyError("inner")
+    except KeyError:
+        pass
+    return None
+
+def finally_return():
+    try:
+        return None
+    finally:
+        pass
+
+def gen(n):
+    for i in range(n):
+        yield i
+"""
+
+
+@pytest.fixture
+def target():
+    mod = types.ModuleType(PREFIX)
+    exec(compile(TARGET_SRC, f"<{PREFIX}>", "exec"), mod.__dict__)
+    sys.modules[PREFIX] = mod
+    yield mod
+    sys.modules.pop(PREFIX, None)
+
+
+def _trace(target_mod, body, sink=None):
+    sink = sink if sink is not None else MemorySink()
+    be = SetProfileBackend(PREFIX, sink)
+    be.start()
+    try:
+        body(target_mod)
+    finally:
+        be.stop()
+    return sink, be
+
+
+def _by_name(sink):
+    return {r["qualname"].rsplit(".", 1)[1]: r for r in sink.records.values()}
+
+
+def _swallow(fn, *args):
+    try:
+        fn(*args)
+    except Exception:
+        pass
+
+
+# ── raise visibility ─────────────────────────────────────────────────────────
+
+
+def test_python_level_raise_is_recorded_as_raise_not_return_none(target):
+    sink, _ = _trace(target, lambda m: _swallow(m.boom, 1))
+    rec = _by_name(sink)["boom"]
+    assert rec["raised"] == UNTYPED_RAISE
+    assert rec["result"] is None
+
+
+def test_genuine_none_returns_stay_returns(target):
+    def body(m):
+        m.returns_none()
+        m.caught_then_none()  # an exception was raised AND handled inside: still a return
+        m.ok(1)
+
+    recs = _by_name(_trace(target, body)[0])
+    assert recs["returns_none"]["raised"] is None
+    assert recs["caught_then_none"]["raised"] is None
+    assert recs["ok"]["result"] == 2
+
+
+def test_return_none_through_finally_is_not_a_raise(target):
+    rec = _by_name(_trace(target, lambda m: m.finally_return())[0])["finally_return"]
+    # (On <=3.7 this case is reported as AMBIGUOUS_OUTCOME; the host suite runs on 3.12+.)
+    assert rec["raised"] is None and rec["result"] is None
+
+
+def test_generator_suspension_is_not_a_raise(target):
+    sink, _ = _trace(target, lambda m: list(m.gen(3)))
+    rec = _by_name(sink)["gen"]
+    assert rec["raised"] is None
+
+
+def test_frame_outcome_classifies_return_raise_and_value():
+    seen = {}
+
+    def profile(frame, event, arg):
+        if event == "return" and frame.f_code.co_name in ("ret", "rai"):
+            seen[frame.f_code.co_name] = frame_outcome(frame, arg)
+
+    def ret():
+        return None
+
+    def rai():
+        raise RuntimeError
+
+    sys.setprofile(profile)
+    try:
+        ret()
+        _swallow(rai)
+    finally:
+        sys.setprofile(None)
+    assert seen == {"ret": OUTCOME_RETURN, "rai": OUTCOME_RAISE}
+    assert frame_outcome(None, 5) == OUTCOME_RETURN  # a non-None value is always a return
+    assert OUTCOME_AMBIGUOUS not in seen.values()
+
+
+def test_ambiguous_marker_normalizes_to_an_undecidable_opaque():
+    assert normalize(AMBIGUOUS_OUTCOME) == {"__opaque__": "ambiguous:return-or-raise"}
+    assert normalize(AMBIGUOUS_OUTCOME, _privacy="shape") == {
+        "__opaque__": "ambiguous:return-or-raise"
+    }
+
+
+def test_jsonl_trace_carries_the_raise_event(target, tmp_path):
+    out = tmp_path / "t.jsonl"
+    sink = JsonlSink(str(out))
+    _trace(target, lambda m: (_swallow(m.boom, 2), m.ok(2)), sink=sink)
+    sink.close()
+    events = [json.loads(line) for line in out.read_text().splitlines()]
+    kinds = {e["q"].rsplit(".", 1)[1]: e["t"] for e in events}
+    assert kinds == {"boom": "raise", "ok": "return"}
+    assert sink.metrics["events_seen"] == 2 and sink.metrics["events_written"] == 2
+
+
+# ── per-code decision cache ──────────────────────────────────────────────────
+
+
+def test_decisions_are_cached_per_code_object(target):
+    _, be = _trace(target, lambda m: [m.ok(i) for i in range(5)])
+    entries = [e for e in be._callee.values() if e[0] is target.ok.__code__]
+    assert len(entries) == 1 and entries[0][1] is True
+
+
+def test_builtin_module_lookup_is_a_frozenset():
+    assert isinstance(_backend._BUILTIN_MODULES, frozenset)
+    assert set(sys.builtin_module_names) == _backend._BUILTIN_MODULES
+
+
+# ── sampling before normalization ────────────────────────────────────────────
+
+
+def _count_normalize(monkeypatch):
+    calls = []
+    real = normalize_mod.normalize
+
+    def counting(value, *a, **kw):
+        calls.append(value)
+        return real(value, *a, **kw)
+
+    monkeypatch.setattr(normalize_mod, "normalize", counting)
+    return calls
+
+
+def test_unsampled_calls_skip_input_normalization(target, tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0")
+    calls = _count_normalize(monkeypatch)
+    sink = JsonlSink(str(tmp_path / "t.jsonl"))
+    _trace(target, lambda m: [m.ok(i) for i in range(20)], sink=sink)
+    sink.close()
+    m = sink.metrics
+    assert m["events_seen"] == 20 and m["sampling_dropped"] == 20
+    assert m["events_written"] == 0
+    assert calls == []  # no argument was normalized for a call that was never going to be kept
+
+
+def test_sampled_calls_are_counted_once(target, tmp_path):
+    sink = JsonlSink(str(tmp_path / "t.jsonl"))
+    _trace(target, lambda m: [m.ok(i) for i in range(7)], sink=sink)
+    sink.close()
+    m = sink.metrics
+    assert m["events_seen"] == 7 and m["events_written"] == 7 and m["sampling_dropped"] == 0
+
+
+def test_wrap_backend_samples_before_normalizing_but_keeps_raises(target, tmp_path, monkeypatch):
+    monkeypatch.setenv("PYMOLT_TRACE_SAMPLE_RATE", "0")
+    out = tmp_path / "w.jsonl"
+    sink = JsonlSink(str(out))
+    be = WrapBackend([PREFIX + ".ok", PREFIX + ".boom"], sink, include_internal=True)
+    be.start()
+    try:
+        for i in range(10):
+            target.ok(i)
+        _swallow(target.boom, 1)
+    finally:
+        be.stop()
+    sink.close()
+    events = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [(e["t"], e["raised"]) for e in events] == [("raise", "ValueError")]
+    assert sink.metrics["events_seen"] == 11 and sink.metrics["sampling_dropped"] == 10
+
+
+def test_memory_sink_admits_everything():
+    assert MemorySink().admit() is True
+
+
+def test_bytes_normalize_without_bytes_hex():
+    assert normalize(b"\x00\xffA") == {"__bytes__": "00ff41"}
+
+
+def test_default_queue_is_deep_enough_for_cpu_bound_runs(tmp_path, monkeypatch):
+    monkeypatch.delenv("PYMOLT_TRACE_QUEUE_SIZE", raising=False)
+    sink = JsonlSink(str(tmp_path / "q.jsonl"))
+    try:
+        assert sink._queue.maxsize >= 65536
+    finally:
+        sink.close()

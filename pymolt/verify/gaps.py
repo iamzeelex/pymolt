@@ -18,6 +18,8 @@ import sys
 
 from pydantic import BaseModel, Field
 
+from pymolt.verify.contact_map import prune_walk_dirs
+
 
 class UsageSite(BaseModel):
     """One place project code references a dependency symbol (from static analysis)."""
@@ -180,7 +182,7 @@ def scan_usage_sites(project_dir: str, deps=None, exclude_dirs=None, packages=No
     sites: list = []
     for base in scan_dirs:
         for root, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if d not in excludes]
+            dirs[:] = prune_walk_dirs(root, dirs, excludes)
             for fn in files:
                 if not fn.endswith(".py"):
                     continue

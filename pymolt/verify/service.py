@@ -40,6 +40,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -107,6 +108,9 @@ class TraceCaptureResult(BaseModel):
     write_failures: int | None = None
     sink_failures: int | None = None
     instrumentation_skipped: list[dict[str, str]] = Field(default_factory=list)
+    # Interpreters where tracing was requested but the watcher could not load (each wrote
+    # ``<trace>.activation-error.json``): those processes ran UNTRACED.
+    activation_failures: list[dict] = Field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +208,58 @@ def _capture_identity(supplied: str | None, env_name: str) -> str | None:
     return value or None
 
 
+_INTERRUPT_GRACE_SECONDS = 10.0
+
+
+class _SigintShield:
+    """Survive Ctrl+C while a captured child runs.
+
+    A terminal Ctrl+C signals the whole process group, so the child receives SIGINT too.
+    pymolt must not die with it: it keeps waiting for the child, then finalizes the capture.
+    ``count`` is the number of SIGINTs seen. Outside the main thread ``signal.signal`` raises
+    ValueError; the shield is then inert (``active`` False) and the previous behaviour stays.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.active = False
+        self._previous = None
+
+    def _handle(self, signum, frame) -> None:  # noqa: ARG002
+        self.count += 1
+
+    def __enter__(self) -> _SigintShield:
+        try:
+            self._previous = signal.signal(signal.SIGINT, self._handle)
+            self.active = True
+        except (ValueError, OSError):
+            self.active = False
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self.active:
+            try:
+                signal.signal(
+                    signal.SIGINT,
+                    self._previous if self._previous is not None else signal.SIG_DFL,
+                )
+            except (ValueError, OSError):
+                pass
+            self.active = False
+
+
+def _stop_process(proc: subprocess.Popen) -> None:
+    """SIGTERM, then SIGKILL after a short grace period."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def capture_trace_local(
     target: str, command: list[str], backend: str, bundle: Path, work: Path,
     exclude: str, source: str, include_internal: bool,
@@ -216,6 +272,7 @@ def capture_trace_local(
     deployment_id: str | None = None,
     request_id: str | None = None,
     correlation_id: str | None = None,
+    interrupted: threading.Event | None = None,
 ) -> tuple[list[str], int | None]:
     """Inject the watcher into a locally-run command via PYTHONPATH + env.
 
@@ -235,6 +292,11 @@ def capture_trace_local(
     The child's stdout+stderr are ALWAYS redirected (merged) to ``log_path`` —
     never inherited onto the parent tty. Returns
     the produced per-process JSONL paths and the command's exit code.
+
+    Ctrl+C (SIGINT) does not abort pymolt: the first one starts a grace period
+    (``_INTERRUPT_GRACE_SECONDS``) while the child, which got the same signal via the process
+    group, winds down; a second one, or the grace expiring, terminates the child. Either way
+    the capture is finalized and ``interrupted`` (if given) is set.
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(bundle), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
@@ -255,39 +317,42 @@ def capture_trace_local(
         # this call needs both cancellation (cancel_event, polled below) and live merged-log
         # streaming to log_path while the command runs — run_command is a blocking
         # subprocess.run wrapper and exposes neither.
-        proc = subprocess.Popen(
-            command, env=env, cwd=str(cwd) if cwd is not None else None,
-            stdout=log_file, stderr=subprocess.STDOUT,
-        )
-        if cancel_event is None:
-            try:
-                returncode = proc.wait(timeout=_CAPTURE_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                # Whatever the watcher had already flushed to work/trace-*.jsonl before the
-                # kill is left on disk untouched — we just never reach the glob/return below
-                # to hand it back to capture_trace() for merging on this (failed) call.
-                raise ValueError(
-                    f"capture timed out after {_CAPTURE_TIMEOUT}s: {command}"
-                ) from None
-        else:
+        with _SigintShield() as shield:
+            proc = subprocess.Popen(
+                command, env=env, cwd=str(cwd) if cwd is not None else None,
+                stdout=log_file, stderr=subprocess.STDOUT,
+            )
+            deadline = time.monotonic() + _CAPTURE_TIMEOUT if cancel_event is None else None
+            grace_deadline: float | None = None
             try:
                 while proc.poll() is None:
-                    if cancel_event.is_set():
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
+                    now = time.monotonic()
+                    if shield.count:
+                        if interrupted is not None:
+                            interrupted.set()
+                        if grace_deadline is None:
+                            grace_deadline = now + _INTERRUPT_GRACE_SECONDS
+                        if shield.count >= 2 or now >= grace_deadline:
+                            _stop_process(proc)
+                            break
+                    if cancel_event is not None and cancel_event.is_set():
+                        _stop_process(proc)
                         break
-                    time.sleep(0.2)
+                    if deadline is not None and now >= deadline:
+                        _stop_process(proc)
+                        # Whatever the watcher had already flushed to work/trace-*.jsonl before
+                        # the kill is left on disk untouched — we never reach the glob/return
+                        # below to hand it back to capture_trace() for merging on this (failed)
+                        # call.
+                        raise ValueError(
+                            f"capture timed out after {_CAPTURE_TIMEOUT}s: {command}"
+                        ) from None
+                    time.sleep(0.05)
             finally:
                 if proc.poll() is None:
                     proc.kill()
+            if shield.count and interrupted is not None:
+                interrupted.set()
             returncode = proc.poll()
     finally:
         if log_file is not None:
@@ -570,6 +635,34 @@ def _move_trace_metadata(source: str | Path, destination: str | Path) -> str | N
     return str(destination_path)
 
 
+_ACTIVATION_ERROR_SUFFIX = ".activation-error.json"
+
+
+def _collect_activation_failures(work: Path) -> list[dict]:
+    """Read the markers a watcher leaves when it was requested but could not load.
+
+    They live in the ephemeral work dir, so they must be read before it is removed: a
+    process that never traced is otherwise indistinguishable from one that never called
+    a dependency.
+    """
+    failures: list[dict] = []
+    for marker in sorted(glob.glob(str(work / "**" / f"trace-*{_ACTIVATION_ERROR_SUFFIX}"),
+                                   recursive=True)):
+        try:
+            payload = json.loads(Path(marker).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {"error": "unreadable activation-error marker"}
+        if not isinstance(payload, dict):
+            payload = {"error": str(payload)}
+        failures.append({
+            "pid": payload.get("pid"),
+            "python": payload.get("python"),
+            "executable": payload.get("executable"),
+            "error": str(payload.get("error", "unknown")),
+        })
+    return failures
+
+
 def capture_trace(
     target: str, command: list[str], out_path: str | Path, backend: str,
     container: str | None = None, workdir: str | None = None,
@@ -601,80 +694,102 @@ def capture_trace(
     correlation_id = _capture_identity(correlation_id, "PYMOLT_TRACE_CORRELATION_ID")
 
     work = Path(tempfile.mkdtemp(prefix="pymolt-trace-"))
-    bundle = export_watcher(work / "bundle")
+    complete = False
+    try:
+        bundle = export_watcher(work / "bundle")
 
-    command_log: str | None = None
-    returncode: int | None = None
-    if container:
-        produced, returncode = capture_trace_in_container(
-            target, command, backend, bundle, work,
-            container, workdir, exclude, source, include_internal,
-            privacy, sample_rate, impact_targets,
-            deployment_id, request_id, correlation_id,
-        )
-    else:
-        # Keep the log next to the durable trace artifact (out_path), not the
-        # ephemeral work tempdir, so the path stored on the slot stays valid.
-        out_p = Path(out_path)
-        log_path = out_p.parent / f"{out_p.stem}.command.log"
-        produced, returncode = capture_trace_local(
-            target, command, backend, bundle, work,
-            exclude, source, include_internal, cancel_event=cancel_event,
-            cwd=cwd, log_path=log_path, privacy=privacy, sample_rate=sample_rate,
-            impact_targets=impact_targets, deployment_id=deployment_id,
-            request_id=request_id, correlation_id=correlation_id,
-        )
-        command_log = str(log_path) if log_path.exists() else None
+        command_log: str | None = None
+        returncode: int | None = None
+        interrupted = threading.Event()
+        if container:
+            produced, returncode = capture_trace_in_container(
+                target, command, backend, bundle, work,
+                container, workdir, exclude, source, include_internal,
+                privacy, sample_rate, impact_targets,
+                deployment_id, request_id, correlation_id,
+            )
+        else:
+            # Keep the log next to the durable trace artifact (out_path), not the
+            # ephemeral work tempdir, so the path stored on the slot stays valid.
+            out_p = Path(out_path)
+            log_path = out_p.parent / f"{out_p.stem}.command.log"
+            produced, returncode = capture_trace_local(
+                target, command, backend, bundle, work,
+                exclude, source, include_internal, cancel_event=cancel_event,
+                cwd=cwd, log_path=log_path, privacy=privacy, sample_rate=sample_rate,
+                impact_targets=impact_targets, deployment_id=deployment_id,
+                request_id=request_id, correlation_id=correlation_id,
+                interrupted=interrupted,
+            )
+            command_log = str(log_path) if log_path.exists() else None
 
-    events = _merge_traces(produced, Path(out_path))
-    runtime = _aggregate_runtime_metadata(produced)
-    counters = runtime["counters"]
-    runtime_backends = runtime["backends"]
-    effective_backend = ",".join(runtime_backends) if runtime_backends else backend
-    # Sidecars from older/interrupted watcher bundles may be absent. Written
-    # events remain useful, but loss cannot then be claimed to be zero.
-    metadata_complete = runtime["metadata_complete"]
-    events_seen = (
-        max(counters["events_seen"], events + counters["dropped_events"])
-        if metadata_complete else None
-    )
-    dropped_events = counters["dropped_events"] if metadata_complete else None
-    result = TraceCaptureResult(
-        out_path=str(out_path), events=events, processes=len(produced),
-        where=f"container:{container}" if container else "local",
-        command_log=command_log, returncode=returncode,
-        cancelled=bool(cancel_event is not None and cancel_event.is_set()),
-        duration_seconds=round(max(0.0, time.monotonic() - started), 6),
-        deployment_id=deployment_id, request_id=request_id,
-        correlation_id=correlation_id, sample_rate=sample_rate,
-        backend=effective_backend, impact_targets=impact_targets,
-        events_seen=events_seen, dropped_events=dropped_events,
-        sampling_dropped=(counters["sampling_dropped"] if metadata_complete else None),
-        backpressure_dropped=(
-            counters["backpressure_dropped"] if metadata_complete else None
-        ),
-        write_failures=(counters["write_failures"] if metadata_complete else None),
-        sink_failures=(counters["sink_failures"] if metadata_complete else None),
-        instrumentation_skipped=runtime["instrumentation_skipped"],
-    )
-    metadata = {
-        "schema_version": 1,
-        "duration_seconds": result.duration_seconds,
-        "deployment_id": deployment_id,
-        "request_id": request_id,
-        "correlation_id": correlation_id,
-        "sample_rate": sample_rate,
-        "backend": effective_backend,
-        "impact_targets": impact_targets,
-        "events": events,
-        "events_seen": events_seen,
-        "runtime_metadata_complete": metadata_complete,
-        "counters": counters,
-        "instrumentation_skipped": result.instrumentation_skipped,
-        "processes": runtime["process_metadata"],
-    }
-    result.metadata_path = _write_trace_metadata(out_path, metadata)
-    return result
+        events = _merge_traces(produced, Path(out_path))
+        runtime = _aggregate_runtime_metadata(produced)
+        activation_failures = _collect_activation_failures(work)
+        counters = runtime["counters"]
+        runtime_backends = runtime["backends"]
+        effective_backend = ",".join(runtime_backends) if runtime_backends else backend
+        # Sidecars from older/interrupted watcher bundles may be absent. Written
+        # events remain useful, but loss cannot then be claimed to be zero. Likewise
+        # when some interpreter never traced at all.
+        metadata_complete = runtime["metadata_complete"] and not activation_failures
+        events_seen = (
+            max(counters["events_seen"], events + counters["dropped_events"])
+            if metadata_complete else None
+        )
+        dropped_events = counters["dropped_events"] if metadata_complete else None
+        result = TraceCaptureResult(
+            out_path=str(out_path), events=events, processes=len(produced),
+            where=f"container:{container}" if container else "local",
+            command_log=command_log, returncode=returncode,
+            cancelled=bool(
+                (cancel_event is not None and cancel_event.is_set()) or interrupted.is_set()
+            ),
+            duration_seconds=round(max(0.0, time.monotonic() - started), 6),
+            deployment_id=deployment_id, request_id=request_id,
+            correlation_id=correlation_id, sample_rate=sample_rate,
+            backend=effective_backend, impact_targets=impact_targets,
+            events_seen=events_seen, dropped_events=dropped_events,
+            sampling_dropped=(counters["sampling_dropped"] if metadata_complete else None),
+            backpressure_dropped=(
+                counters["backpressure_dropped"] if metadata_complete else None
+            ),
+            write_failures=(counters["write_failures"] if metadata_complete else None),
+            sink_failures=(counters["sink_failures"] if metadata_complete else None),
+            instrumentation_skipped=runtime["instrumentation_skipped"],
+            activation_failures=activation_failures,
+        )
+        metadata = {
+            "schema_version": 1,
+            "duration_seconds": result.duration_seconds,
+            "deployment_id": deployment_id,
+            "request_id": request_id,
+            "correlation_id": correlation_id,
+            "sample_rate": sample_rate,
+            "backend": effective_backend,
+            "impact_targets": impact_targets,
+            "events": events,
+            "events_seen": events_seen,
+            "runtime_metadata_complete": metadata_complete,
+            "counters": counters,
+            "instrumentation_skipped": result.instrumentation_skipped,
+            "activation_failures": activation_failures,
+            "processes": runtime["process_metadata"],
+        }
+        result.metadata_path = _write_trace_metadata(out_path, metadata)
+        complete = True
+        return result
+    finally:
+        # Everything in ``work`` has been merged into ``out_path`` / its metadata sidecar by
+        # now, so it is disposable. On an error path (e.g. timeout) keep it only if the
+        # watcher left raw per-process traces that were never copied anywhere.
+        if complete or not glob.glob(str(work / "**" / "trace-*.jsonl"), recursive=True):
+            shutil.rmtree(work, ignore_errors=True)
+        else:
+            logger.warning(
+                "capture did not finish; raw per-process traces were kept (not merged) in %s",
+                work,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1036,6 +1151,7 @@ def capture_named_trace(
         write_failures=result.write_failures,
         sink_failures=result.sink_failures,
         instrumentation_skipped=result.instrumentation_skipped,
+        activation_failures=getattr(result, "activation_failures", []),
     )
     if validity is CaptureValidity.VALID:
         setattr(state, when, slot)
@@ -1406,6 +1522,12 @@ def _stamp_verdict(
         if skipped:
             comparability.append(
                 f"{name} capture skipped {len(skipped)} instrumentation target(s)"
+            )
+        failed = getattr(slot, "activation_failures", [])
+        if failed:
+            comparability.append(
+                f"{name} capture: the watcher failed to activate in {len(failed)} "
+                "process(es), which ran untraced"
             )
     baseline = slots.get("baseline")
     post = slots.get("post-migration")
