@@ -12,7 +12,8 @@ files. ``status``, the apply summary and the views read it. Precedence, first ma
 2. ``in_progress``: a ``--record`` took its snapshot;
 3. ``rolled_back`` / ``skipped``;
 4. ``not_in_capture``: in effect, but the post-migration capture holds the code from before it
-   (its new statements do not resolve there, ``workorder.coverage``);
+   or an older epoch of it (its current epoch's new statements do not resolve there,
+   ``workorder.coverage``);
 5. a verify judgement made for the step's current epoch (``verified``, ``failed``,
    ``needs_review``, ``needs_evidence``; written by ``verify`` per step);
 6. ``applied`` / ``recorded``;
@@ -305,7 +306,13 @@ def _run_stale(root, plan, receipt, run_id: str) -> list[str]:
 
 
 def _post_not_in(root, receipt, ledger) -> set[tuple[str, str]]:
-    """The steps in effect the post-migration capture does not hold (``ledger_coverage``)."""
+    """The steps in effect the post-migration capture does not hold: none of their current
+    epoch's new statements resolves in its snapshot P (design 1.3, 5.4; ``ledger_coverage``).
+    Coverage calls a step none of whose new or old statements resolves in P ``superseded``:
+    overtaken by a later edit, so in the capture all the same. That does not hold when P has an
+    OLDER epoch of the same step (its new statements resolve there): the capture predates the
+    current epoch (a re-record diffs from the step's first before-text, which P no longer has),
+    so the step is not in it."""
     if receipt is None or ledger is None:
         return set()
     from pymolt.apply_ledger import in_effect_entries
@@ -328,7 +335,29 @@ def _post_not_in(root, receipt, ledger) -> set[tuple[str, str]]:
     # Only P decides here; B gives the old side where the baseline recorded the file.
     coverage = ledger_coverage({**new, **(old or {})}, new, entries, python_old=base,
                                python_new=target)
-    return set(coverage.not_in_capture)
+    return set(coverage.not_in_capture) | {
+        ref for ref in coverage.superseded if _older_epoch_in(new, ledger, ref, target)}
+
+
+def _older_epoch_in(post_sources, ledger, ref: tuple[str, str], python) -> bool:
+    """A new statement of an epoch of step ``ref`` older than its current one resolves in the
+    post-migration snapshot: the capture holds that epoch, not the current one."""
+    from pymolt.workorder.edits import build_index
+
+    current = ledger.current_epochs().get(ref)
+    if current is None:
+        return False
+    indexes: dict[str, object] = {}
+    for entry in ledger.entries:
+        if (entry.run_id, entry.step_id) != ref or entry.epoch >= current \
+                or entry.anchor_new is None or entry.file not in post_sources:
+            continue
+        if entry.file not in indexes:
+            indexes[entry.file] = build_index(post_sources[entry.file], python)
+        index = indexes[entry.file]
+        if index is not None and index.resolve(entry.anchor_new).ok:
+            return True
+    return False
 
 
 def _judgements(root, run_id: str) -> dict[str, dict]:

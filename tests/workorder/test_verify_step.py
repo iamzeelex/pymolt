@@ -130,8 +130,25 @@ def test_a_judgement_of_an_older_epoch_does_not_apply(tmp_path):
     record_step(tmp_path, plan, "beh-1")
     edit(tmp_path, "y = json.dumps(v, indent=None)", "y = json.dumps(v, indent=None) or y")
     record_step(tmp_path, plan, "beh-1", done=True)
-    # A new epoch: the saved judgement is for the old one.
-    assert project_steps(tmp_path, plan).step("beh-1").status in ("recorded", "not_in_capture")
+    # A new epoch, made after the capture: the saved judgement is for the old one, and the
+    # capture holds the first epoch's statement, not the current epoch's (design 1.3, 5.4).
+    # Neither its old nor its new statement is in the capture, which is no sign that a later
+    # edit overtook it: the capture predates the epoch.
+    assert project_steps(tmp_path, plan).step("beh-1").status == "not_in_capture"
+    skip_step(tmp_path, plan, "env-1", "pinned by hand")      # else rule 6 names it first
+    status = build_status(tmp_path)
+    assert status.next_command.startswith("pymolt capture post-migration")
+
+
+def test_a_step_a_later_hand_edit_overtook_before_the_capture_is_in_it(tmp_path):
+    # Neither the step's old nor its new statement is in the capture, but the capture was taken
+    # after its epoch: a later edit overtook it (superseded), and capturing again changes
+    # nothing. It keeps its apply-side status.
+    plan = _plan(tmp_path)
+    _record(tmp_path, plan, SAME)
+    edit(tmp_path, "y = json.dumps(v, indent=None)", "y = json.dumps(v, indent=None) or y")
+    capture(tmp_path, "post_migration")
+    assert project_steps(tmp_path, plan).step("beh-1").status == "recorded"
 
 
 # ── who settles a step that is not verified (decision 7) ──────────────────────────────────

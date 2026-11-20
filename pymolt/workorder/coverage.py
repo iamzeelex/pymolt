@@ -24,7 +24,8 @@ order, or how often a step was re-based.
 statements it replaced (if it replaced any) still do, was applied after the post-migration
 capture: P holds the code from before it. A step none of whose new or old statements resolves
 in P was overtaken by a later edit (``superseded``): it is in the capture, but no line of P is
-its own any more. Files missing from P tell nothing either way.
+its own any more (``workorder.state`` still projects it ``not_in_capture`` when P holds an
+older epoch of the step). Files missing from P tell nothing either way.
 
 Attestation (a person's attested ``intended`` claim, design 5.6) is not read from the ledger:
 ``attested`` is a check the caller supplies, and none means no entry is attested, so a

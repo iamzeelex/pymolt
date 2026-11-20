@@ -379,6 +379,10 @@ All notable changes to pymolt. The format follows
 - A resolver failure in `plan` exits 2, with a JSON error under `--json` and `--agent`, instead
   of a traceback.
 - `apply` says that an empty plan changed no file.
+- A step recorded again after the post-migration capture is `not_in_capture`, and `status`
+  says to capture post-migration again. It showed `recorded`: the new record is diffed from the
+  step's first before-text, which the capture did not have either, so the step looked overtaken
+  by a later edit, as if the capture held it.
 
 #### Assess, scan and setup
 
