@@ -18,7 +18,7 @@ rollback to point at.
 With a saved plan, a `steps` line counts the plan's steps by status: `planned`, `blocked` (a
 dependency not in effect), `stale` (a statement it rewrites is gone, or the plan itself is stale),
 `present` (its change is already there, made by hand), `applied`, `rolled_back`, `skipped`, and
-`not_in_capture` (applied after the post-migration capture). `--json` and `--agent` list them
+`not_in_capture` (applied or recorded again after the post-migration capture, which holds the code from before it or an earlier version of the step). `--json` and `--agent` list them
 under `steps`; `--agent` adds the brief of the step the next command is about. The next command
 follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply --step ID --dry-run`
 for a stale one, then the post-migration capture, with a note naming the first step left to a

@@ -1305,7 +1305,9 @@ def test_module_getattr_is_an_attribute_access_never_a_failure(tmp_path):
     d = diff_sites(tmp_path, [], [ga])
     e = only(d, FactCategory.DRIFT)
     assert e.symbol == "click.Mapping" and "via click.__getattr__" in e.notes
-    assert e.new_warnings and d.verdict is VerificationVerdict.PASS
+    # never a failure; alone (nothing compared equal) it is no evidence either
+    assert e.new_warnings and not d.failures()
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
     d = diff_sites(tmp_path, [ga], [])
     assert only(d, FactCategory.DRIFT).symbol == "click.Mapping"
     # a class's __getattr__ (has a receiver) is an ordinary call
@@ -1473,7 +1475,8 @@ def test_no_positional_pairing_across_unrelated_symbols(tmp_path):
     d = prov_diff(tmp_path, [call("lib.g", 3, 5)], [call("lib.h", 3, 6)],
                   old_src=src_old, new_src=src_new)
     assert d.counts()["rewritten"] == 2 and not d.failures()
-    assert all(e.unverified for e in d.entries) and d.verdict is VerificationVerdict.PASS
+    # counted, never failing; with nothing compared equal the verdict rests on no evidence
+    assert all(e.unverified for e in d.entries) and d.verdict is VerificationVerdict.INCONCLUSIVE
     assert "2 unverified" in d.edited_summary()
 
 

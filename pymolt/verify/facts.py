@@ -527,6 +527,19 @@ class FactEntry(BaseModel):
             self.category in (FactCategory.UNCOMPARABLE, FactCategory.REWRITTEN))
 
     @property
+    def compared_equal(self) -> bool:
+        """Evidence a PASS can rest on: the fact was compared on both sides and found equal
+        (the library's defaults or a representation may have moved), or a person accepted its
+        change. Noise, an implicit call explained away and an unverified edited site neither
+        fail nor show anything unchanged."""
+        if self.accepted:
+            return True
+        if self.noise or self.review or self.unverified:
+            return False
+        return self.comparison is Comparison.EQUAL and self.category in (
+            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN)
+
+    @property
     def site(self) -> SiteRef:
         site = self.old_site or self.new_site
         assert site is not None
@@ -604,15 +617,20 @@ class FactDiff(BaseModel):
         shown equal, so the diff can fail but never pass."""
         return bool(self.old_summary.evicted or self.new_summary.evicted)
 
+    def compared_equal(self) -> int:
+        """Entries a PASS can rest on (``FactEntry.compared_equal``)."""
+        return sum(1 for e in self.entries if e.compared_equal)
+
     @computed_field
     @property
     def verdict(self) -> VerificationVerdict:
         """FAIL on any failing entry; INCONCLUSIVE on undecidable entries, incomplete
-        evidence (an evicting snapshot) or no evidence."""
+        evidence (an evicting snapshot) or no evidence: no fact compared equal (no entry, or
+        only noise, implicit calls explained away and unverified edited sites)."""
         if not self.is_clean():
             return VerificationVerdict.FAIL
-        if (not self.entries or self.incomplete
-                or any(e.inconclusive for e in self.entries)):
+        if (self.incomplete or any(e.inconclusive for e in self.entries)
+                or not any(e.compared_equal for e in self.entries)):
             return VerificationVerdict.INCONCLUSIVE
         return VerificationVerdict.PASS
 
@@ -634,6 +652,7 @@ class FactDiff(BaseModel):
             "clean": self.is_clean(),
             "incomplete": self.incomplete,
             "counts": self.counts(),
+            "compared_equal": self.compared_equal(),
             "unsampled": self.unsampled,
             "edited_sites": self.edited_sites(),
             "edited_summary": self.edited_summary(),
@@ -6171,25 +6190,43 @@ def _c_call_visibility(fs: FactSet) -> str | None:
 BACKEND_UNOBSERVABLE = "backend-unobservable"
 
 
+def _narrow_c_symbols(fs: FactSet) -> set[str]:
+    """The compiled callables a narrow-backend capture recorded as compiled calls
+    (``__c_call__``, not a binding failure): setprofile reports a call only for a callable it can
+    observe, so each of these is one whose calls and raises it sees (a builtin function or a
+    method descriptor, never a Cython function or a type call)."""
+    return {f.symbol for f in fs.facts
+            if isinstance(f.input, dict) and f.input.get("__c_call__") is True and not f.binding}
+
+
 def _soften_backend(entries: list[FactEntry], old: FactSet, new: FactSet) -> int:
     """A compiled call (``__c_call__``) seen on one side only, when that side's backend sees a
     superset of the other's: the other side could not have observed it, so its absence there is
     no evidence and the comparison is impossible, not failed. Returning only: DRIFT
     (``backend``). Raising: UNCOMPARABLE (inconclusive), since a raise the other side could not
-    record is neither a change nor noise. Never FAIL. The reverse direction stays strict (the
-    wider backend would have seen it). Returns how many entries this explained."""
+    record is neither a change nor noise, unless the narrow side recorded that callable as a
+    compiled call elsewhere: setprofile sees it (a builtin function), so its absence here is
+    evidence and the raise stays strict. The facts record no callee kind (builtin, method
+    descriptor, Cython, type), so the narrow side's own recordings are the evidence. The
+    reverse direction stays strict (the wider backend would have seen it). Returns how many
+    entries this explained."""
     o_vis, n_vis = _c_call_visibility(old), _c_call_visibility(new)
     if {o_vis, n_vis} != {"narrow", "wide"}:
         return 0
     wide_side = FactCategory.APPEARED if n_vis == "wide" else FactCategory.DISAPPEARED
     count = 0
     wide = _families(new if n_vis == "wide" else old)
+    seen_narrow = _narrow_c_symbols(old if n_vis == "wide" else new)
     for e in entries:
         if e.category is not wide_side or not isinstance(e.input, dict) \
                 or e.input.get("__c_call__") is not True:
             continue
+        returns = _returns_only(e.new if wide_side is FactCategory.APPEARED else e.old)
+        if not returns and e.symbol in seen_narrow:
+            e.notes.append("strict: the other side's backend records this compiled callable")
+            continue
         e.review, e.unverified = None, False
-        if _returns_only(e.new if wide_side is FactCategory.APPEARED else e.old):
+        if returns:
             e.category = FactCategory.DRIFT
             e.notes.append("noise: compiled call observable by one backend only")
             e.explained = f"backend: only {wide} observes this compiled call"

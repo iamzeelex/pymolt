@@ -2,12 +2,23 @@
 evidence (BLIND, an uncomparable fact, a capture, unmeasured noise). Each reason carries its kind
 from where it is made; ``verification.json`` keeps ``inconclusive_kind`` (``needs_review`` wins)."""
 import json
+import sys
+from pathlib import Path
 
-from pymolt.interfaces import views
-from pymolt.verify.models import VerificationVerdict
-from pymolt.verify.report import ContractReport, SymbolStatus
-from pymolt.verify.service import _stamp_verdict
-from pymolt.verify.unified import UnifiedVerificationReport, build_unified_verification
+sys.path.insert(0, str(Path(__file__).parent))
+
+from test_fact_noise import fact, fs  # noqa: E402
+
+from pymolt.interfaces import views  # noqa: E402
+from pymolt.verify.facts import diff_facts  # noqa: E402
+from pymolt.verify.models import VerificationVerdict  # noqa: E402
+from pymolt.verify.replicate import apply_noise_profile, build_noise_profile  # noqa: E402
+from pymolt.verify.report import ContractReport, SymbolStatus  # noqa: E402
+from pymolt.verify.service import _stamp_verdict  # noqa: E402
+from pymolt.verify.unified import (  # noqa: E402
+    UnifiedVerificationReport,
+    build_unified_verification,
+)
 
 REVIEW = {"category": "rewritten", "comparison": "uncomparable", "symbol": "dep.f",
           "review": "the value differs on a hand-edited line: review"}
@@ -96,6 +107,35 @@ def test_noise_needs_evidence_until_a_replicate_measured_it(tmp_path):
     assert unmeasured.inconclusive_causes[0].cause == "noise"
     measured = _verdict(tmp_path, NOISE, noise_measured={"replicate": "r"})
     assert _kind(measured) == "needs_review"
+
+
+def test_a_diff_of_noise_alone_needs_evidence_with_its_own_cause(tmp_path):
+    # Every entry is noise a replicate measured: the fact diff is INCONCLUSIVE and the verdict
+    # names the missing evidence (no fact compared equal), structured, not the generic fallback.
+    def run(port):
+        return fs(fact("http.connect", {"port": port}, (("return", "ok"),), line=1,
+                       text="c = http.connect(port)"))
+
+    d = diff_facts(run(40001), run(40003))
+    apply_noise_profile(d, build_noise_profile(run(40001), run(40002)), "replicate")
+    fact_diff = d.to_json_dict()
+    assert fact_diff["verdict"] == "inconclusive" and fact_diff["compared_equal"] == 0
+    event = {"v": 2, "t": "return", "q": "dep.f", "sym": "dep.f", "in": {"bound": {}},
+             "result": 1, "where": {"file": str(tmp_path / "app.py"), "line": 1,
+                                    "func": "main"}}
+    old = _write(tmp_path / "old.jsonl", [event])
+    new = _write(tmp_path / "new.jsonl", [event])
+    report = ContractReport(root=str(tmp_path), diff={"skipped_opaque": 0}, diff_clean=True,
+                            static_targets=1, confirmed=1, blind=0, fact_diff=fact_diff)
+    _stamp_verdict(report, str(new), str(old), [])
+    unified = build_unified_verification(report)
+    assert unified.verdict is VerificationVerdict.INCONCLUSIVE
+    assert _kind(unified) == "needs_evidence"
+    (cause,) = unified.inconclusive_causes
+    assert cause.cause == "not-exercised"
+    assert "no call fact compared equal on both sides" in cause.reason
+    assert "1 difference(s) the baseline replicate measured as run-to-run noise" in cause.reason
+    assert "stable values" in cause.settle
 
 
 def test_a_missing_capture_needs_evidence(tmp_path):

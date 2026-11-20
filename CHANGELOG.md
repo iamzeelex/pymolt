@@ -361,6 +361,14 @@ All notable changes to pymolt. The format follows
   both sides with `--privacy values`). It failed, while the same change without the
   attestation was a review item: attesting made the verdict worse with nothing against the
   claim. A visible violation still fails.
+- A diff in which no fact compared equal is INCONCLUSIVE, needing evidence: a test that
+  exercises those calls with stable values. It passed when every difference was noise a
+  replicate measured, a call explained away as implicit, or an unverified edited site, though
+  nothing showed the behaviour unchanged.
+- A compiled call that newly raises after a move from Python 3.6–3.11 to 3.12+ fails when the
+  baseline's tracer recorded that callable as a compiled call elsewhere: that tracer sees builtin
+  C functions, so the baseline's "no raise" is evidence. It was not comparable, as for a Cython
+  function the older tracer cannot see (which stays so).
 
 #### Plan and apply
 
@@ -377,6 +385,10 @@ All notable changes to pymolt. The format follows
 - A resolver failure in `plan` exits 2, with a JSON error under `--json` and `--agent`, instead
   of a traceback.
 - `apply` says that an empty plan changed no file.
+- A step recorded again after the post-migration capture is `not_in_capture`, and `status`
+  says to capture post-migration again. It showed `recorded`: the new record is diffed from the
+  step's first before-text, which the capture did not have either, so the step looked overtaken
+  by a later edit, as if the capture held it.
 
 #### Assess, scan and setup
 

@@ -381,6 +381,8 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                        f"{'it' if n == 1 else 'them'})")
     if diff.incomplete:
         reasons.append("a facts snapshot evicted facts: the evidence is incomplete")
+    if entries and not reasons and not diff.compared_equal():
+        reasons.append("no fact compared equal: every difference is noise or explained away")
     return {
         "verdict": diff.verdict.value,
         "reasons": reasons,
