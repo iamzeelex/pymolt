@@ -323,6 +323,9 @@ when facts changed. Sampled captures must also have complete call counts.
 - **FAIL**: a compared fact failed anywhere in the recording, or a `--probe-python` replay failed.
 - **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
+  - at least one fact compared equal (or was accepted). Noise a replicate measured, a call
+    explained away as implicit and an unverified edited site do not fail, but they show nothing
+    unchanged: a diff made only of them is INCONCLUSIVE;
   - no static symbol is BLIND, of any contact kind (attribute reads, constants and unobservable
     contacts included);
   - every dynamic-only symbol had all its facts compared equal.
@@ -339,7 +342,7 @@ An INCONCLUSIVE verdict also says who settles it. Each reason is one of two kind
 - **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols, a fact
   that could not be compared, a capture that is missing, invalid, stale or unlike the other, a
   value that may be run-to-run noise while no baseline replicate was measured, an environment
-  difference between the two captures.
+  difference between the two captures, a diff in which no fact compared equal.
 
 `.pymolt/verification.json` keeps `inconclusive_kind`: `needs_review` when any reason needs a
 person, else `needs_evidence`, and null for PASS and FAIL. `inconclusive_causes` lists every

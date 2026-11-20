@@ -527,6 +527,19 @@ class FactEntry(BaseModel):
             self.category in (FactCategory.UNCOMPARABLE, FactCategory.REWRITTEN))
 
     @property
+    def compared_equal(self) -> bool:
+        """Evidence a PASS can rest on: the fact was compared on both sides and found equal
+        (the library's defaults or a representation may have moved), or a person accepted its
+        change. Noise, an implicit call explained away and an unverified edited site neither
+        fail nor show anything unchanged."""
+        if self.accepted:
+            return True
+        if self.noise or self.review or self.unverified:
+            return False
+        return self.comparison is Comparison.EQUAL and self.category in (
+            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN)
+
+    @property
     def site(self) -> SiteRef:
         site = self.old_site or self.new_site
         assert site is not None
@@ -604,15 +617,20 @@ class FactDiff(BaseModel):
         shown equal, so the diff can fail but never pass."""
         return bool(self.old_summary.evicted or self.new_summary.evicted)
 
+    def compared_equal(self) -> int:
+        """Entries a PASS can rest on (``FactEntry.compared_equal``)."""
+        return sum(1 for e in self.entries if e.compared_equal)
+
     @computed_field
     @property
     def verdict(self) -> VerificationVerdict:
         """FAIL on any failing entry; INCONCLUSIVE on undecidable entries, incomplete
-        evidence (an evicting snapshot) or no evidence."""
+        evidence (an evicting snapshot) or no evidence: no fact compared equal (no entry, or
+        only noise, implicit calls explained away and unverified edited sites)."""
         if not self.is_clean():
             return VerificationVerdict.FAIL
-        if (not self.entries or self.incomplete
-                or any(e.inconclusive for e in self.entries)):
+        if (self.incomplete or any(e.inconclusive for e in self.entries)
+                or not any(e.compared_equal for e in self.entries)):
             return VerificationVerdict.INCONCLUSIVE
         return VerificationVerdict.PASS
 
@@ -634,6 +652,7 @@ class FactDiff(BaseModel):
             "clean": self.is_clean(),
             "incomplete": self.incomplete,
             "counts": self.counts(),
+            "compared_equal": self.compared_equal(),
             "unsampled": self.unsampled,
             "edited_sites": self.edited_sites(),
             "edited_summary": self.edited_summary(),

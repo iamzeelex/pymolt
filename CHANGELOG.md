@@ -355,6 +355,10 @@ All notable changes to pymolt. The format follows
   both sides with `--privacy values`). It failed, while the same change without the
   attestation was a review item: attesting made the verdict worse with nothing against the
   claim. A visible violation still fails.
+- A diff in which no fact compared equal is INCONCLUSIVE, needing evidence: a test that
+  exercises those calls with stable values. It passed when every difference was noise a
+  replicate measured, a call explained away as implicit, or an unverified edited site, though
+  nothing showed the behaviour unchanged.
 
 #### Plan and apply
 

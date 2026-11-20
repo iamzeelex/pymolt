@@ -84,6 +84,7 @@ from pymolt.verify.inconclusive import (
     NEEDS_EVIDENCE,
     NEEDS_REVIEW,
     SETTLE_ENVIRONMENT,
+    SETTLE_NO_EQUAL,
     SETTLE_NOISE,
     SETTLE_NOT_EXERCISED,
     SETTLE_REVIEW,
@@ -3281,7 +3282,7 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
     environment difference and a fact that could not be compared need evidence."""
     if not fact_diff or fact_diff.get("verdict") != VerificationVerdict.INCONCLUSIVE.value:
         return []
-    entries = fact_diff.get("entries") or []
+    entries = all_entries = fact_diff.get("entries") or []
     counts = fact_diff.get("counts") or {}
     measured = bool(fact_diff.get("noise_measured"))
     causes: list[InconclusiveCause] = []
@@ -3298,9 +3299,10 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
                             NEEDS_EVIDENCE, "not-exercised",
                             "add a test that reaches the project's dependency calls, then "
                             "capture both sides"))
-    # An unverified edited site is counted in the summary but never blocks PASS; a review
-    # item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
-    entries = [e for e in entries if not e.get("unverified")]
+    # An unverified edited site is counted in the summary and measured noise keeps the review
+    # it was explained from: neither blocks with a reason of its own (``is_inconclusive``); a
+    # review item blocks with its own reason (it is INCONCLUSIVE, not FAIL).
+    entries = [e for e in entries if not e.get("unverified") and not e.get("noise")]
     reviews = [e for e in entries if e.get("review")]
 
     def review_cause(reason: str, settle: str) -> InconclusiveCause:
@@ -3424,10 +3426,29 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
         causes.append(uncomparable(
             f"{lost} call fact(s) lost their outcome distribution and cannot be compared",
             "distribution-lost"))
+    if not causes and fact_diff.get("compared_equal") == 0 and any(counts.values()):
+        causes.append(_no_equal_cause(all_entries))
     # Not reached by any entry the diff makes (every inconclusive entry is named above); kept
     # so the verdict never stays unexplained.
     return causes or [cause("the fact diff could not establish equivalence", NEEDS_EVIDENCE,
                             "uncomparable", "read the fact diff (`pymolt verify . --json`)")]
+
+
+def _no_equal_cause(entries: list[dict]) -> InconclusiveCause:
+    """A clean diff in which no fact compared equal: every entry is noise a baseline replicate
+    measured, a call explained away (import machinery, an implicit hook, a compiled call one
+    backend only sees) or an unverified edited site. None of them fails, and none shows the
+    behaviour unchanged, so the verdict rests on nothing (``FactEntry.compared_equal``)."""
+    noise = sum(1 for e in entries if e.get("noise"))
+    unverified = sum(1 for e in entries if e.get("unverified") and not e.get("noise"))
+    explained = len(entries) - noise - unverified
+    parts = [text for n, text in (
+        (noise, f"{noise} difference(s) the baseline replicate measured as run-to-run noise"),
+        (explained, f"{explained} call(s) explained away as implicit or instrumentation noise"),
+        (unverified, f"{unverified} unverified edited site(s)")) if n]
+    return cause("no call fact compared equal on both sides, so nothing shows the behaviour "
+                 "unchanged" + (f": {', '.join(parts)}" if parts else ""),
+                 NEEDS_EVIDENCE, "not-exercised", SETTLE_NO_EQUAL)
 
 
 def _opaque_cause(fact_diff: dict | None) -> InconclusiveCause:

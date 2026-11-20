@@ -10,7 +10,8 @@ kinds (``InconclusiveKind``):
   settles it.
 - ``needs_evidence``: more or better captures settle it. A site no run reached (BLIND), a fact
   that could not be compared, a capture missing, invalid, stale or unlike the other, run-to-run
-  noise a baseline replicate would measure, a difference of the two captures' environments.
+  noise a baseline replicate would measure, a difference of the two captures' environments, a
+  diff in which no fact compared equal (every entry noise or explained away).
 
 Each reason carries its kind with it (``InconclusiveCause``), set where the reason is made and
 never parsed back from its text. The verdict's kind is ``needs_review`` when any reason needs a
@@ -53,6 +54,8 @@ SETTLE_NOISE = ("capture a baseline replicate (`pymolt capture baseline --replic
 SETTLE_ENVIRONMENT = ("capture post-migration again in the baseline's environment (its "
                       "container or host, with the target Python)")
 SETTLE_NOT_EXERCISED = "add a test that reaches those sites, then capture post-migration again"
+SETTLE_NO_EQUAL = ("add a test that exercises these dependency calls with stable values (the same "
+                   "inputs and outcomes on every run), then capture both sides again")
 
 #: Why a fact could not be compared (``uncomparable_mechanism``) -> what settles it. Only the
 #: first four are settled by capturing again; the cap, the backends and a lost distribution are
@@ -170,7 +173,7 @@ def first_settle(causes: Iterable[InconclusiveCause], kind: InconclusiveKind | N
 
 __all__ = [
     "NEEDS_EVIDENCE", "NEEDS_REVIEW", "REPLICATE_REVIEWS", "SETTLE_ENVIRONMENT",
-    "SETTLE_NOISE", "SETTLE_NOT_EXERCISED", "SETTLE_REVIEW", "SETTLE_UNCOMPARABLE", "cause",
-    "entry_cause", "first_settle", "is_inconclusive", "kind_of", "settle_uncomparable",
-    "uncomparable_mechanism",
+    "SETTLE_NO_EQUAL", "SETTLE_NOISE", "SETTLE_NOT_EXERCISED", "SETTLE_REVIEW",
+    "SETTLE_UNCOMPARABLE", "cause", "entry_cause", "first_settle", "is_inconclusive", "kind_of",
+    "settle_uncomparable", "uncomparable_mechanism",
 ]

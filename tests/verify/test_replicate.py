@@ -81,6 +81,28 @@ def test_a_difference_the_baseline_shows_too_is_measured_noise():
     assert not any(w.startswith("run-variation") for w in d.warnings)
 
 
+def test_a_diff_of_measured_noise_alone_is_no_evidence():
+    # Every difference is run-to-run noise and nothing was compared equal: nothing shows the
+    # behaviour unchanged, so the verdict is INCONCLUSIVE, never PASS (honesty rule).
+    def connect_only(port):
+        return fs(fact("http.connect", {"port": port}, (("return", "ok"),), line=1,
+                       text="c = http.connect(port)"))
+
+    d, counts, by = judged(connect_only(40001), connect_only(40002), connect_only(40003))
+    e = by["http.connect"]
+    assert e.noise and not e.fails and not e.inconclusive and not e.compared_equal
+    assert counts["explained"] == 1
+    assert d.verdict.value == "inconclusive"
+    assert d.to_json_dict()["compared_equal"] == 0
+
+
+def test_measured_noise_beside_a_fact_compared_equal_still_passes():
+    d, _, by = judged(side(port=40001, total=10), side(port=40002, total=10),
+                      side(port=40003, total=10))
+    assert by["http.connect"].noise and by["billing.total"].compared_equal
+    assert d.verdict.value == "pass" and d.to_json_dict()["compared_equal"] == 1
+
+
 def test_a_change_at_a_site_the_baseline_repeats_exactly_is_confirmed():
     d, counts, by = judged(side(port=40001, total=10), side(port=40002, total=10),
                            side(port=40003, total=12))

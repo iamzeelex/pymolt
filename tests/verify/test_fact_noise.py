@@ -668,7 +668,8 @@ def test_a_compiled_call_only_the_wider_backend_sees_is_not_an_appearance():
     d = diff_facts(old, new)
     (e,) = d.entries
     assert e.category is FactCategory.DRIFT and e.explained.startswith("backend")
-    assert d.verdict is VerificationVerdict.PASS
+    # Not a failure; with nothing else compared equal it is no evidence either.
+    assert not failing(d) and d.verdict is VerificationVerdict.INCONCLUSIVE
     assert any(w.startswith("backend-only:1:") for w in d.warnings)
 
 
@@ -1790,6 +1791,30 @@ def test_capture_metadata_records_package_versions():
         {"distributions": {"Requests": "2.31.0", "PyYAML": "6.0.1"}},
         {"distributions": {"requests": "2.31.0", "pyyaml": "5.4"}}]})
     assert s.package_versions == {"requests": "2.31.0"}  # pyyaml: two versions, left out
+
+
+# ── noise is no evidence: a verdict needs a fact compared equal ──────────────────────────
+
+
+def test_a_diff_whose_only_entry_is_explained_noise_is_inconclusive():
+    # An import-machinery call vanished: noise, not a failure. Nothing was compared equal, so
+    # nothing shows the behaviour unchanged.
+    old = fs(fact("importlib._bootstrap._find_and_load", {"name": "x"}, line=2,
+                  text="import x"))
+    d = diff_facts(old, fs())
+    (e,) = d.entries
+    assert e.category is FactCategory.DRIFT and not e.fails and not e.inconclusive
+    assert not e.compared_equal
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+
+
+def test_explained_noise_beside_a_fact_compared_equal_passes():
+    keep = fact("lib.f", {"a": 1}, (("return", 2),), line=3, text="y = lib.f(1)")
+    old = fs(fact("importlib._bootstrap._find_and_load", {"name": "x"}, line=2,
+                  text="import x"), keep)
+    d = diff_facts(old, fs(keep.model_copy()))
+    assert sum(e.compared_equal for e in d.entries) == 1
+    assert d.verdict is VerificationVerdict.PASS
 
 
 # ── round 4: bytes, fuzzed renderings ─────────────────────────────────────────────────────
