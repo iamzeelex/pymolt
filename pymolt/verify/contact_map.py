@@ -692,18 +692,6 @@ def _store_records(cache: Path, records: list[dict[str, Any]]) -> None:
         pass
 
 
-def _file_records(root: Path, file: Path, module_name: str) -> list[dict[str, Any]]:
-    """Raw per-file records, from the content-keyed cache when this exact file was scanned."""
-    text = file.read_text(encoding="utf-8")
-    cache = _cache_path(root, module_name, text)
-    records = _cached_records(cache)
-    if records is not None:
-        return records
-    records = _parse_records(module_name, text)
-    _store_records(cache, records)
-    return records
-
-
 _PARALLEL_MIN_MISSES = 20
 _MAX_WORKERS = 8
 

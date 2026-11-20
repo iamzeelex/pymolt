@@ -301,9 +301,6 @@ def verify_migration(
     golden_after: str | None = typer.Option(
         None, "--golden-after", help="Golden snapshot JSON from after the migration"
     ),
-    cascade_file: str | None = typer.Option(
-        None, "--cascade", help="Cascade report JSON to include"
-    ),
     policy_file: str | None = typer.Option(
         None, "--policy", help="Canary policy JSON"
     ),
@@ -336,8 +333,8 @@ def verify_migration(
 ):
     """Compare the baseline and post-migration captures. Prints PASS, FAIL or INCONCLUSIVE.
 
-    The verdict is saved to .pymolt/ for `pymolt status`. Golden snapshots, a
-    cascade report and canary metrics, when given, are folded into the same
+    The verdict is saved to .pymolt/ for `pymolt status`. Golden snapshots and
+    canary metrics, when given, are folded into the same
     verdict. --baseline/--post-migration compare other recordings instead of the
     captures. A verdict against another --baseline is not saved; one on another
     --post-migration recording is saved, with what it compared, but `status` does
@@ -359,7 +356,7 @@ def verify_migration(
         load_custom_comparator,
     )
     from pymolt.verify.golden_master import diff_snapshots
-    from pymolt.verify.models import VerificationVerdict, VerifyReport
+    from pymolt.verify.models import VerificationVerdict
     from pymolt.verify.policy import (
         AutoRollbackPolicy,
         CanaryMetrics,
@@ -439,10 +436,6 @@ def verify_migration(
                 load_json(golden_before, "old golden snapshot"),
                 load_json(golden_after, "new golden snapshot"),
             )
-        cascade = (
-            VerifyReport.model_validate(load_json(cascade_file, "cascade report"))
-            if cascade_file else None
-        )
 
         if metrics_file and not policy_file:
             raise ValueError("--metrics requires --policy")
@@ -486,7 +479,6 @@ def verify_migration(
             contract_report,
             run_id=run_id,
             comparator_profile=selected.value,
-            cascade=cascade,
             golden=golden,
             canary=canary,
             shadow=shadow,

@@ -787,10 +787,6 @@ class StatementIndex:
             return None
         return self.anchor(st, file=file, id=id, symbol=symbol, site_line=line)
 
-    def anchors_in(self, first: int, last: int, *, file: str) -> list[Anchor]:
-        """Anchors for every statement meeting ``first..last`` (a hunk's lines)."""
-        return [self.anchor(st, file=file) for st in self.statements_in(first, last)]
-
     # resolution
 
     def resolve(self, anchor: Anchor) -> Resolution:

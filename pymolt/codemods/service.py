@@ -72,11 +72,6 @@ def migrations_from_rows(rows: list[dict]) -> list[DependencyMigration]:
     return migrations
 
 
-def migrations_from_assess_result(result: AssessResult) -> list[DependencyMigration]:
-    """Convert an AssessResult's comparison rows into codemod migrations."""
-    return migrations_from_rows(list(result.rows))
-
-
 _WITNESSABLE = ("upgrade", "unchanged", "added")
 
 

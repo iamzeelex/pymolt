@@ -5,12 +5,12 @@ import json
 
 import pytest
 
+from _apply import apply_migration_plan
 from pymolt.apply_ledger import build_entries, in_effect_entries, ledger_path, load_ledger
 from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import ApiImpact, CodemodPattern, FilePreview
 from pymolt.migration_plan import (
     MigrationPlan,
-    apply_migration_plan,
     create_migration_plan,
     rollback_migration,
 )

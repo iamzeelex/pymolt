@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from _apply import apply_migration_plan
 from _stepwise import APP, RECIPES, code_steps, events, ledger, plan_for, read, rename
 from typer.testing import CliRunner
 
@@ -15,7 +16,6 @@ from pymolt.migration_plan import (
     MigrationConflictError,
     MigrationEvidenceError,
     MigrationPlan,
-    apply_migration_plan,
     rollback_migration,
 )
 from pymolt.migration_state import MigrationReceipt

@@ -27,7 +27,7 @@ from pymolt.anchors import StatementIndex
 from pymolt.codemods.models import CodemodPattern, MoveGroup, recipe_key
 from pymolt.codemods.rules import CodemodRule
 from pymolt.workorder.depends import assign_depends_on
-from pymolt.workorder.edits import apply_hunks, build_index, make_edit, sha256
+from pymolt.workorder.edits import build_index, make_edit, sha256
 from pymolt.workorder.models import (
     TEXT_CAP,
     PlanStep,
@@ -431,19 +431,3 @@ def _whole_step(changes: list[Any], n: int, recorded: bool, base: Any, target: A
         effort=StepEffort(size="none", sites=sum(c.sites for c in changes),
                           files=len(changes), why="executor pymolt: pymolt applies it"),
     )
-
-
-def replay_changes(changes: list[Any], steps: list[PlanStep]) -> dict[str, str]:
-    """Each changed file's text after every pymolt code step, rebuilt from T0 by the steps'
-    hunks in order: the ``changes`` oracle (it must equal ``new_source``)."""
-    out = {c.path: c.old_source for c in changes}
-    for step in steps:
-        if step.executor != "pymolt" or step.phase != "mechanical":
-            continue
-        for edit in step.edits:
-            if edit.file in out:
-                if sha256(out[edit.file]) != edit.before_sha256:
-                    raise ValueError(f"{step.id} does not start from the text before it in "
-                                     f"{edit.file}")
-                out[edit.file] = apply_hunks(out[edit.file], edit.hunks)
-    return out

@@ -21,7 +21,7 @@ import ast
 import io
 import tokenize
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 
 from pymolt.anchors import MODULE
 from pymolt.workorder.models import PlanStep, StepEdit
@@ -209,18 +209,3 @@ def assign_depends_on(steps: list[PlanStep],
     for step in steps:
         step.depends_on = sorted(dict.fromkeys(deps.get(step.id, ())), key=order.get)
     return why
-
-
-def independent_pairs(steps: Iterable[PlanStep]) -> list[tuple[PlanStep, PlanStep, str]]:
-    """``(i, j, file)`` for every pair of pymolt steps in plan order that change one file and
-    have no dependency: what the re-run oracle checks."""
-    out = []
-    items = [s for s in steps if s.executor == "pymolt" and s.phase != "env"]
-    for j, sj in enumerate(items):
-        for si in items[:j]:
-            if si.id in sj.depends_on:
-                continue
-            for edit in sj.edits:
-                if si.edit_for(edit.file) is not None:
-                    out.append((si, sj, edit.file))
-    return out

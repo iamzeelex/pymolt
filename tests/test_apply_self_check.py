@@ -9,6 +9,7 @@ import sys
 import pytest
 from typer.testing import CliRunner
 
+from _apply import apply_migration_plan
 from pymolt.apply_check import SmokeCheck, module_for, smoke_verdict
 from pymolt.codemods.models import DependencyMigration
 from pymolt.codemods.models import FilePreview
@@ -17,7 +18,6 @@ from pymolt.interfaces.cli.commands import app
 from pymolt.migration_plan import (
     MigrationCheckError,
     MigrationPlan,
-    apply_migration_plan,
     create_migration_plan,
 )
 from pymolt.migration_state import MigrationReceipt

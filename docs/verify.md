@@ -378,7 +378,6 @@ new capture. Only a verdict on the baseline and post-migration captures judges s
 | `--shadow` | classifies read/idempotent operations and leaves unsafe or unknown writes out |
 | `--probe-python` | replays the recorded calls in a target interpreter, in a sandbox |
 | `--profile exact\|shape\|custom`, `--comparator module:callable` | how values are compared |
-| `--cascade` | includes a node-level cascade report |
 
 ## Exit codes
 

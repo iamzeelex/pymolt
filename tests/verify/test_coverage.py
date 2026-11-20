@@ -1,45 +1,9 @@
-"""Coverage map parsing + blind-spot detection (pure logic; no real coverage run)."""
-from pymolt.verify.coverage import (
-    CoverageMap,
-    blind_spots,
-    build_coverage_map,
-    parse_coverage_json,
-)
-from pymolt.verify.models import NodeRef
+"""The coverage run orchestration (no real coverage run)."""
+from pymolt.verify.coverage import run_coverage_json
 
 
-def test_parse_counts_only_files_with_executed_lines():
-    data = {"files": {
-        "/x/site-packages/flask/views.py": {"summary": {"covered_lines": 5}},
-        "/x/site-packages/flask/__init__.py": {"summary": {"covered_lines": 2}},
-        # imported but never run -> not exercised:
-        "/x/site-packages/marshmallow/fields.py": {"summary": {"covered_lines": 0}},
-    }}
-    prefixes = parse_coverage_json(data)
-    assert "flask.views" in prefixes
-    assert "flask" in prefixes                       # __init__.py -> package name
-    assert not any(p.startswith("marshmallow") for p in prefixes)
-
-
-def test_coverage_map_is_exercised_matches_prefix_and_submodules():
-    cov = CoverageMap(exercised_prefixes={"flask.views"})
-    assert cov.is_exercised("flask.views") is True    # the prefix itself
-    assert cov.is_exercised("flask") is True          # a submodule of it ran
-    assert cov.is_exercised("fla") is False           # a name prefix is not a module prefix
-    assert cov.is_exercised("flask.app") is False
-    assert cov.is_exercised("marshmallow") is False
-
-
-def test_blind_spots_are_unexercised_nodes():
-    cov = CoverageMap(exercised_prefixes={"flask"})
-    flask = NodeRef(name="flask", old_version="1", new_version="2", trace_prefix="flask")
-    marsh = NodeRef(name="marshmallow", old_version="1", new_version="2",
-                    trace_prefix="marshmallow")
-    assert blind_spots(cov, [flask, marsh]) == [marsh]
-
-
-def test_build_coverage_map_orchestrates_via_injected_runner(tmp_path):
-    # Fake runner: no real suite; we drop a coverage.json the orchestration then parses.
+def test_run_coverage_json_orchestrates_via_injected_runner(tmp_path):
+    # Fake runner: no real suite; we drop a coverage.json the orchestration then reads.
     import json
 
     cov_json = tmp_path / "coverage.json"
@@ -56,7 +20,7 @@ def test_build_coverage_map_orchestrates_via_injected_runner(tmp_path):
             returncode = 0
         return CP()
 
-    cov = build_coverage_map(str(tmp_path), pytest_args=["-q"],
+    data = run_coverage_json(str(tmp_path), pytest_args=["-q"],
                              json_out="coverage.json", runner=fake_runner)
-    assert cov.is_exercised("flask") is True
+    assert "/x/site-packages/flask/app.py" in data["files"]
     assert ["coverage", "run", "-m", "pytest", "-q"] in calls

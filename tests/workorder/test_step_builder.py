@@ -6,6 +6,8 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+from _oracles import replay_changes
+
 from pymolt.anchors import StatementIndex
 from pymolt.codemods.apply import apply_patterns, preview_mixed_repo, preview_repo
 from pymolt.codemods.models import (
@@ -18,7 +20,7 @@ from pymolt.codemods.rules import CodemodRule
 from pymolt.delta.models import DeltaFact, DeltaReport
 from pymolt.migration_plan import create_migration_plan
 from pymolt.pyversion.fixes import apply_python_fixes, python_patterns
-from pymolt.workorder.builder import StepRecorder, replay_changes
+from pymolt.workorder.builder import StepRecorder
 from pymolt.workorder.edits import apply_hunks, sha256
 
 APPEND = CodemodRule(

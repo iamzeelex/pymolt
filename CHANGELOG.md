@@ -272,6 +272,14 @@ All notable changes to pymolt. The format follows
 - The Claude Code plugin drives the CLI with `--agent` and starts no MCP server.
 - The `mcp` extra is pinned to `mcp>=1.2,<2`.
 
+### Removed
+
+- `verify --cascade FILE`: it read a per-node cascade report that nothing produces. The
+  `pymolt.verify` re-exports `run_cascade`, `verify_node`, `CascadeDeps`, `build_coverage_map`,
+  `blind_spots`, `CoverageMap`, `NodeRef`, `NodeVerifyResult`, `TestOutcome`, `VerifyReport`,
+  `Verdict`, `EvidenceLevel`, `TraceScope` and `TestStatus` go with it. `rollback --cascade` is
+  unchanged.
+
 ### Fixed
 
 #### Capture and tracer

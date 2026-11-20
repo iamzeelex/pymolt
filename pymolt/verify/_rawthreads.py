@@ -165,9 +165,6 @@ class RawQueue:
                 raise Empty()
             self._ready.wait(wait)
 
-    def task_done(self):
-        pass
-
 
 class RawThread:
     """A started raw OS thread; ``join`` waits on a raw event, never on ``threading``."""

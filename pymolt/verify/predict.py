@@ -1528,16 +1528,3 @@ def calibrate(
     cal.not_exercised = cal.predicted - cal.hit - cal.prevented - cal.miss - cal.accepted
     cal.unpredicted = [_observed(e) for e in entries if e.fails and id(e) not in covered]
     return cal
-
-
-def baseline_predictions(baseline_trace: str | Path, root: str | Path,
-                         changes: Iterable[Any] = ()) -> PredictionReport:
-    """Predictions from the baseline capture alone (its runtime warnings; no delta facts):
-    what ``verify`` checks when no plan stored predictions. ``changes``: an applied plan's
-    file changes, for ``fixed_by_plan``."""
-    try:
-        baseline = load_facts(baseline_trace, root=root)
-    except OSError as exc:
-        return PredictionReport(status="unavailable",
-                                notes=[f"cannot read the baseline capture: {exc}"])
-    return predict_risks(baseline, (), changes=changes, root=root)

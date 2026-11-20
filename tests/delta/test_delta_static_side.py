@@ -21,7 +21,6 @@ from pymolt.delta.acquire import (
     UnsafeArchive,
     acquire,
     extract_archive,
-    read_capped,
 )
 from pymolt.delta.engine import ProbeRun, param_changes
 from pymolt.delta.models import Interpreter
@@ -198,11 +197,6 @@ def test_extraction_keeps_python_and_placeholders_for_compiled_members(tmp_path)
     assert (out / "pkg" / "__init__.py").read_text() == "x = 1\n"
     assert (out / "pkg" / "_speed.cpython-312-darwin.so").stat().st_size == 0
     assert not (out / "pkg" / "data.bin").exists()
-
-
-def test_read_capped_refuses_an_oversized_body():
-    with pytest.raises(UnsafeArchive):
-        read_capped(io.BytesIO(b"x" * 100), max_bytes=10)
 
 
 def _uv_cache(tmp_path, monkeypatch, name="pkg", version="1.0"):

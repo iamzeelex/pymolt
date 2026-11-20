@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from _apply import apply_migration_plan
 
 from pymolt.apply_ledger import (
     LEDGER_SCHEMA,
@@ -22,7 +23,6 @@ from pymolt.codemods.models import CodemodPattern, DependencyMigration, FilePrev
 from pymolt.migration_plan import (
     MigrationPlan,
     _ledger_steps,
-    apply_migration_plan,
     create_migration_plan,
     rollback_migration,
 )

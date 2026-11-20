@@ -12,9 +12,7 @@ Inputs come from either JSON (for reconstructible values) or a pickle/dill blob
 The driver prefers ``dill`` when available in the target venv and falls back to
 stdlib ``pickle``.
 
-This is the lighter of the two sandbox modes. The heavier one — forking from a
-live process state (CoW) to push execution into a blind branch with the real
-in-scope objects — is the planned **fork-server** (see ``sandbox.py``).
+Nothing is forked or kept alive: each re-invocation is a fresh subprocess.
 """
 
 import json

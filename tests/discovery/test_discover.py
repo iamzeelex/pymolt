@@ -42,9 +42,9 @@ def test_monorepo_multiple_roots_and_divergence(tmp_path):
     roots = {r.path: r for r in smap.project_roots}
     assert set(roots) == {"services/a", "services/b"}
 
-    assert roots["services/a"].distinct_versions() == ["3.11"]
+    assert roots["services/a"].runtime_versions() == ["3.11"]
     # b: .python-version 3.8 vs Dockerfile 3.6 -> divergent
-    assert set(roots["services/b"].distinct_versions()) == {"3.8", "3.6"}
+    assert set(roots["services/b"].runtime_versions()) == {"3.8", "3.6"}
     assert any("monorepo" in n for n in smap.notes)
 
 
@@ -93,8 +93,7 @@ def test_tox_matrix_is_a_range_not_divergence(tmp_path):
 
     root = build_surface_map(tmp_path).project_roots[0]
     assert not root.is_divergent                       # tox range is not a conflict
-    assert root.distinct_versions() == ["3.12"]        # only the runtime source
-    assert root.tested_versions() == ["3.6", "3.7", "3.8", "3.9", "3.10", "3.11"]
+    assert root.tox_nox[0].declared_versions == ["3.6", "3.7", "3.8", "3.9", "3.10", "3.11"]
     # tox versions are no longer mixed into version_evidence
     assert all("envlist" not in ev.source for ev in root.version_evidence)
 

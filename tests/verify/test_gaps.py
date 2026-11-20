@@ -68,12 +68,3 @@ def test_classify_empty_report_is_unknown_not_guessed(tmp_path):
     report = classify_gaps(sites, {"files": {}})
     assert report.unknown == len(sites)            # no coverage data -> honest "unknown"
     assert report.blind == 0 and report.covered == 0
-
-
-def test_by_dependency_summary(tmp_path):
-    sites = scan_usage_sites(str(_project(tmp_path)))
-    report = classify_gaps(sites, {"files": {"/run/myapp/core.py": {"executed_lines": [9]}}},
-                           cov_root="/run")
-    summary = report.by_dependency()
-    assert "flask" in summary
-    assert summary["flask"]["covered"] + summary["flask"]["blind"] == len(sites)

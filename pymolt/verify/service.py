@@ -243,13 +243,6 @@ def trace_env(
     return env
 
 
-def sampling_policy(env: dict, source: str) -> dict:
-    """The value-sampling policy a capture ran with (recorded in its metadata)."""
-    rate = float(env.get("PYMOLT_TRACE_SAMPLE_RATE", "1"))
-    first = int(env.get("PYMOLT_TRACE_SAMPLE_FIRST", "0")) if rate < 1 else 0
-    return {"rate": rate, "first": first, "source": source}
-
-
 def default_sample_rate(mode: CaptureMode) -> float:
     """Value-sampling rate when the caller passes none: every call of a test suite (the
     oracle); a tenth of a long run's repetitions, after each call site's first

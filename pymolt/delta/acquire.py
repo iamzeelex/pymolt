@@ -86,21 +86,6 @@ class Acquired:
 # ── capped reads and safe extraction ──────────────────────────────────────────────────
 
 
-def read_capped(resp: Any, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
-    """Read a file-like response, refusing anything over ``max_bytes``."""
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = resp.read(1 << 16)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > max_bytes:
-            raise UnsafeArchive(f"download exceeds the {max_bytes}-byte cap")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 def _clean_member(name: str) -> PurePosixPath:
     """The member's relative path, or :class:`UnsafeArchive` when it could escape."""
     normalised = name.replace("\\", "/")

@@ -16,7 +16,6 @@ from pymolt.verify._identity import (
     IdentityResolver,
     bind_inputs,
     callable_identity,
-    sink_accepts_identity,
 )
 from pymolt.verify._normalize import normalize
 from pymolt.verify._sinks import MemorySink
@@ -488,7 +487,7 @@ def test_callable_identity_unwraps(dep):
 
 
 def test_sink_capability_detection():
-    assert sink_accepts_identity(RecSink()) is True
+    assert "sym" in _identity.sink_identity_fields(RecSink())
 
     class V1Sink:
         def on_return(self, qualname, inputs, result_obj, site=None):
@@ -511,9 +510,9 @@ def test_sink_capability_detection():
         def on_raise(self, qualname, inputs, exc_typename, site=None, sym=None, symq=None):
             pass
 
-    assert sink_accepts_identity(V1Sink()) is False
-    assert sink_accepts_identity(KwSink()) is True
-    assert sink_accepts_identity(object()) is False
+    assert "sym" not in _identity.sink_identity_fields(V1Sink())
+    assert "sym" in _identity.sink_identity_fields(KwSink())
+    assert "sym" not in _identity.sink_identity_fields(object())
     assert _identity.sink_identity_fields(RecSink()) == {"sym", "symq", "own"}
     assert _identity.sink_identity_fields(NoOwnSink()) == {"sym", "symq"}
     assert _identity.sink_identity_fields(V1Sink()) == frozenset()
@@ -523,7 +522,7 @@ def test_v1_sink_still_receives_every_event(dep):
     """A sink without sym/symq gets the v1 call: no event is lost to a TypeError."""
     sink = MemorySink()
     _, be = _trace(lambda: (dep.plain(1), dep.decorated(2)), sink=sink)
-    assert be._sym_kw is sink_accepts_identity(sink)
+    assert be._sym_kw is ("sym" in _identity.sink_identity_fields(sink))
     quals = sorted(r["qualname"] for r in sink.records.values())
     assert quals == [MOD + ".plain", MOD + ".wrapper"]
 

@@ -1,10 +1,5 @@
-from typing import Dict, Any, Optional
+from typing import Optional
 from pydantic import BaseModel, Field
-
-
-class BaseLayer(BaseModel):
-    layer_name: str
-    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class IngestionReport(BaseModel):

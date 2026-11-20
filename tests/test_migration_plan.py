@@ -3,9 +3,9 @@ from __future__ import annotations
 import sys
 
 import pytest
+from _apply import apply_migration_plan
 
-from pymolt.codemods.models import DependencyMigration
-from pymolt.codemods.models import ApiImpact, CodemodPattern, FilePreview
+from pymolt.codemods.models import ApiImpact, CodemodPattern, DependencyMigration, FilePreview
 from pymolt.ingestion.config import EnvConfig, ToolChoice
 from pymolt.migration_plan import (
     MigrationConflictError,
@@ -14,7 +14,6 @@ from pymolt.migration_plan import (
     MigrationRunState,
     _migration_lock,
     _save_run_state,
-    apply_migration_plan,
     create_migration_plan,
     inspect_migration_plan,
     rollback_migration,

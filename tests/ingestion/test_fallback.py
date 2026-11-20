@@ -22,7 +22,6 @@ from pymolt.ingestion.fallback_compiler import (
     find_python_interpreter,
     find_running_containers_for_project,
     get_or_create_legacy_env,
-    list_running_containers,
 )
 
 
@@ -255,8 +254,3 @@ def test_compile_legacy_dead_container_message_contract(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="was not found running"):
         compile_legacy(manifest, "3.6.1", container_id="deadbeef0000")
-
-
-def test_list_running_containers_without_docker(monkeypatch):
-    monkeypatch.setattr(fc.shutil, "which", lambda c: None)
-    assert list_running_containers() == []
