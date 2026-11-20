@@ -23,6 +23,7 @@ from pymolt.core.graph import DependencyGraph
 from pymolt.ingestion.detect import detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 from pymolt.risk.models import RiskReport
+from pymolt.state_io import atomic_write_text
 
 
 class AssessResult(BaseModel):
@@ -403,7 +404,7 @@ def write_target_manifest(project_path, target_graph, selected_tool, target_pyth
             lines.append("  - pip:")
             lines += [f"    - {d}" for d in pip_deps]
         target_file = project_path / "environment-target.yml"
-        target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write_text(target_file, "\n".join(lines) + "\n")
         return target_file
 
     # PyPI requirements file.
@@ -429,7 +430,7 @@ def write_target_manifest(project_path, target_graph, selected_tool, target_pyth
         else:
             out.append(f"{name}=={version}")
     target_file = project_path / "requirements-target.txt"
-    target_file.write_text("\n".join(out) + "\n", encoding="utf-8")
+    atomic_write_text(target_file, "\n".join(out) + "\n")
     return target_file
 
 
@@ -472,15 +473,19 @@ def baseline_tests_passed(project_dir: str | Path) -> bool:
 
     Reads ``.pymolt/contract_state.json`` — the baseline slot's ``returncode``. This
     ties the medallion to existing machinery: Silver is earned by the contract phase,
-    not asserted. "Passed" means rc == 0, not merely "the command ran".
+    not asserted. "Passed" means rc == 0, not merely "the command ran". A state file that
+    is not JSON, or a newer pymolt's, raises ``StateFileError``.
     """
-    import json
+    from pymolt.state_io import read_state_json
+    from pymolt.verify.models import (
+        CONTRACT_STATE_KIND,
+        CONTRACT_STATE_REMEDY,
+        CONTRACT_STATE_SCHEMA_VERSION,
+    )
 
-    path = Path(project_dir) / ".pymolt" / "contract_state.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
+    data = read_state_json(Path(project_dir) / ".pymolt" / "contract_state.json",
+                           kind=CONTRACT_STATE_KIND, newest=CONTRACT_STATE_SCHEMA_VERSION,
+                           remedy=CONTRACT_STATE_REMEDY)
     slot = (data or {}).get("baseline")
     return isinstance(slot, dict) and slot.get("returncode") == 0
 

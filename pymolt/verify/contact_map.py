@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from pymolt.core import stdlib as stdlib_data
 from pymolt.core.legacy_stdlib import describe, is_py2_stdlib
+from pymolt.state_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -681,13 +682,8 @@ def _parse_unit(unit: tuple[str, str]) -> _Parsed:
 
 def _store_records(cache: Path, records: list[dict[str, Any]]) -> None:
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps({"version": CONTACT_MAP_VERSION, "records": records}),
-            encoding="utf-8",
-        )
-        os.replace(tmp, cache)
+        atomic_write_json(cache, {"version": CONTACT_MAP_VERSION, "records": records},
+                          indent=None)
     except OSError:  # a read-only project still scans; it just re-parses next time
         pass
 

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from pymolt.state_io import atomic_write_json, load_state, rebuild_remedy, state_lock
 from pymolt.verify.inconclusive import NEEDS_EVIDENCE, cause, kind_of
 from pymolt.verify.models import (
     GoldenDiff,
@@ -26,6 +24,10 @@ VERIFICATION_PATH = Path(".pymolt/verification.json")
 # 2: ``inconclusive_kind`` and ``inconclusive_causes`` (design decision 7). A schema-1 file
 # reads with neither (null, empty).
 SCHEMA_VERSION = 2
+#: The newest ``verification.json`` schema this pymolt reads (a higher one is refused as newer).
+VERIFICATION_SCHEMA_NEWEST = SCHEMA_VERSION
+VERIFICATION_KIND = "saved verdict"
+VERIFICATION_REMEDY = rebuild_remedy("run `pymolt verify .` to judge again")
 
 
 class VerificationEvidence(BaseModel):
@@ -65,33 +67,19 @@ class UnifiedVerificationReport(BaseModel):
     steps_run: str | None = None
 
     def save(self, project_dir: str | Path) -> Path:
+        """Write the verdict (with its steps' judgements) atomically, under the state lock;
+        never over a damaged or newer one (``StateFileError``)."""
         path = Path(project_dir) / VERIFICATION_PATH
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, staged = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(self.model_dump(mode="json"), stream, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(staged, path)
-        except BaseException:
-            try:
-                os.unlink(staged)
-            except OSError:
-                pass
-            raise
-        return path
+        with state_lock(project_dir, operation="verify"):
+            UnifiedVerificationReport.load(project_dir)
+            return atomic_write_json(path, self.model_dump(mode="json"))
 
     @classmethod
     def load(cls, project_dir: str | Path) -> UnifiedVerificationReport | None:
-        path = Path(project_dir) / VERIFICATION_PATH
-        try:
-            return cls.model_validate_json(path.read_text(encoding="utf-8"))
-        except (OSError, ValidationError):
-            return None
+        """The saved verdict; None when there is none. A damaged file, or one written by a
+        newer pymolt, raises ``StateFileError``."""
+        return load_state(Path(project_dir) / VERIFICATION_PATH, cls, kind=VERIFICATION_KIND,
+                          newest=VERIFICATION_SCHEMA_NEWEST, remedy=VERIFICATION_REMEDY)
 
 
 def _golden_evidence(diff: GoldenDiff) -> VerificationEvidence:

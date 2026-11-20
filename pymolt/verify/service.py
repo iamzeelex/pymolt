@@ -58,6 +58,7 @@ from pydantic import BaseModel, Field
 from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.ingestion.config import EnvConfig
+from pymolt.state_io import atomic_write_bytes, atomic_write_json, state_lock
 from pymolt.verify.coverage import run_coverage_json
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
@@ -1107,19 +1108,10 @@ def _backpressure_wait_seconds(backpressure: dict) -> float | None:
 
 def _write_trace_metadata(trace_path: str | Path, payload: dict) -> str | None:
     path = _trace_metadata_path(trace_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
     try:
-        with pending.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            fh.flush()
-        os.replace(pending, path)
+        atomic_write_json(path, payload, indent=2, sort_keys=True)
     except OSError as exc:
         logger.warning("could not persist trace metadata %s: %s", path, exc)
-        try:
-            pending.unlink()
-        except OSError:
-            pass
         return None
     return str(path)
 
@@ -1372,7 +1364,9 @@ def same_slot_path(project_dir: str | Path, a: str | None, b: str | None) -> boo
 
 
 def load_contract_state(project_dir: str | Path) -> ContractState:
-    """The current capture state, or a fresh empty one if none is persisted yet.
+    """The current capture state, or a fresh empty one if none is persisted yet. A damaged
+    file, or one written by a newer pymolt, raises ``StateFileError``: it is never read as
+    empty (the next save would drop every slot's pointer).
 
     Every slot path comes back absolute (anchored to the project root), whatever the
     current directory is; they are stored relative (see ``ContractState.save``).
@@ -1725,6 +1719,9 @@ def capture_named_trace(
     # Anchor everything to the project root: a relative project dir would otherwise put
     # stored paths (and the target env lookup) relative to whichever directory pymolt ran in.
     project_dir = Path(os.path.abspath(project_dir))
+    # A state file the capture could not save into refuses it now (``StateFileError``), not
+    # after the command ran for minutes.
+    load_contract_state(project_dir)
     if privacy is None:
         privacy = "values" if mode is CaptureMode.TEST_SUITE else "shape"
     sampling_source = "caller"
@@ -1838,60 +1835,8 @@ def capture_named_trace(
         staged_path.touch()
     validity, validity_reason = _capture_validity(
         result, staged_path, accept_failing=accept_failing)
-    state = load_contract_state(project_dir)
-    archived_previous = None
-
-    if validity is not CaptureValidity.VALID:
-        # Keep failed evidence for diagnosis, but never let it displace the last
-        # valid baseline/post slot.  Its distinct path also makes accidental
-        # auto-sourcing impossible.
-        diagnostic = _diagnostic_path(project_dir, when)
-        os.replace(staged_path, diagnostic)
-        result.out_path = str(diagnostic)
-        try:
-            result.metadata_path = _move_trace_metadata(staged_path, diagnostic)
-            result.facts_path = _move_facts_snapshot(staged_path, diagnostic)
-            _move_sources(staged_path, diagnostic)
-        except OSError as exc:
-            logger.warning("could not move diagnostic trace metadata: %s", exc)
-        if result.command_log:
-            pending_log = Path(result.command_log)
-            diagnostic_log = diagnostic.with_suffix(".command.log")
-            if pending_log.is_file():
-                os.replace(pending_log, diagnostic_log)
-                result.command_log = str(diagnostic_log)
-    else:
-        # Displace only a fully valid recording. If promotion fails after the
-        # archive move, restore the previous active artifact before propagating.
-        previous = getattr(state, when, None)
-        had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
-        archived_previous = archive_existing_capture(project_dir, when)
-        if had_previous_trace and archived_previous is None:
-            for pending in (staged_path, staged_log, snapshot_path(staged_path)):
-                try:
-                    pending.unlink()
-                except OSError:
-                    pass
-            raise RuntimeError(f"could not safely replace existing {when} capture")
-        try:
-            os.replace(staged_path, out_path)
-        except BaseException:
-            if archived_previous is not None and not out_path.exists():
-                shutil.move(archived_previous, out_path)
-            raise
-        result.out_path = str(out_path)
-        try:
-            result.metadata_path = _move_trace_metadata(staged_path, out_path)
-            result.facts_path = _move_facts_snapshot(staged_path, out_path)
-            _move_sources(staged_path, out_path)
-        except OSError as exc:
-            logger.warning("could not promote trace metadata: %s", exc)
-        if result.command_log:
-            pending_log = Path(result.command_log)
-            final_log = out_path.parent / f"{out_path.stem}.command.log"
-            if pending_log.is_file():
-                os.replace(pending_log, final_log)
-                result.command_log = str(final_log)
+    # The coverage pass re-runs the command: before the state lock, which only guards the
+    # slot update below (load, archive the displaced capture, promote, save).
     coverage_pct: float | None = None
     covered_sites = blind_sites = 0
     if mode == CaptureMode.TEST_SUITE and validity is CaptureValidity.VALID:
@@ -1900,50 +1845,105 @@ def capture_named_trace(
         )
         for note in coverage_notes:
             logger.info("capture_named_trace(%s): %s", when, note)
+    with state_lock(project_dir, operation=f"capture {when}"):
+        state = load_contract_state(project_dir)
+        archived_previous = None
 
-    slot = ContractSlot(
-        trace_path=result.out_path, captured_at=_now(), mode=mode,
-        command=list(command), target=target, events=result.events, processes=result.processes,
-        command_log=result.command_log, returncode=result.returncode, env_note=env_note,
-        runner=runner_spec,
-        coverage_pct=coverage_pct, covered_sites=covered_sites, blind_sites=blind_sites,
-        env_fingerprint=environment_fingerprint(project_dir),
-        env_setup_fingerprint=environment_setup_fingerprint(project_dir),
-        archived_previous=archived_previous,
-        validity=validity, validity_reason=validity_reason,
-        privacy_profile=privacy, sample_rate=sample_rate,
-        duration_seconds=result.duration_seconds,
-        deployment_id=result.deployment_id,
-        request_id=result.request_id,
-        correlation_id=result.correlation_id,
-        backend=result.backend,
-        impact_targets=result.impact_targets,
-        traced_stdlib=getattr(result, "trace_stdlib", None) or _effective_stdlib(trace_stdlib),
-        metadata_path=result.metadata_path,
-        sources_path=_existing(sources_path(result.out_path)),
-        events_seen=result.events_seen,
-        dropped_events=result.dropped_events,
-        sampling_dropped=result.sampling_dropped,
-        backpressure_dropped=result.backpressure_dropped,
-        write_failures=result.write_failures,
-        sink_failures=result.sink_failures,
-        backpressure_wait_seconds=getattr(result, "backpressure_wait_seconds", None),
-        instrumentation_skipped=result.instrumentation_skipped,
-        activation_failures=getattr(result, "activation_failures", []),
-        red=_red_stamp(result) if validity is CaptureValidity.VALID else None,
-        replicate_of=(state.baseline.captured_at if when == REPLICATE and state.baseline
-                      else None),
-    )
-    if validity is CaptureValidity.VALID:
-        setattr(state, when, slot)
-        if when == "baseline" and state.baseline_replicate is not None:
-            # A replicate measures the noise of the baseline it re-ran: a new baseline makes
-            # it stale. Archived, not deleted.
-            archive_existing_capture(project_dir, REPLICATE)
-            state.baseline_replicate = None
-    else:
-        state.diagnostic_captures.append(slot)
-    state.save(_state_path(project_dir))
+        if validity is not CaptureValidity.VALID:
+            # Keep failed evidence for diagnosis, but never let it displace the last
+            # valid baseline/post slot.  Its distinct path also makes accidental
+            # auto-sourcing impossible.
+            diagnostic = _diagnostic_path(project_dir, when)
+            os.replace(staged_path, diagnostic)
+            result.out_path = str(diagnostic)
+            try:
+                result.metadata_path = _move_trace_metadata(staged_path, diagnostic)
+                result.facts_path = _move_facts_snapshot(staged_path, diagnostic)
+                _move_sources(staged_path, diagnostic)
+            except OSError as exc:
+                logger.warning("could not move diagnostic trace metadata: %s", exc)
+            if result.command_log:
+                pending_log = Path(result.command_log)
+                diagnostic_log = diagnostic.with_suffix(".command.log")
+                if pending_log.is_file():
+                    os.replace(pending_log, diagnostic_log)
+                    result.command_log = str(diagnostic_log)
+        else:
+            # Displace only a fully valid recording. If promotion fails after the
+            # archive move, restore the previous active artifact before propagating.
+            previous = getattr(state, when, None)
+            had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
+            archived_previous = archive_existing_capture(project_dir, when)
+            if had_previous_trace and archived_previous is None:
+                for pending in (staged_path, staged_log, snapshot_path(staged_path)):
+                    try:
+                        pending.unlink()
+                    except OSError:
+                        pass
+                raise RuntimeError(f"could not safely replace existing {when} capture")
+            try:
+                os.replace(staged_path, out_path)
+            except BaseException:
+                if archived_previous is not None and not out_path.exists():
+                    shutil.move(archived_previous, out_path)
+                raise
+            result.out_path = str(out_path)
+            try:
+                result.metadata_path = _move_trace_metadata(staged_path, out_path)
+                result.facts_path = _move_facts_snapshot(staged_path, out_path)
+                _move_sources(staged_path, out_path)
+            except OSError as exc:
+                logger.warning("could not promote trace metadata: %s", exc)
+            if result.command_log:
+                pending_log = Path(result.command_log)
+                final_log = out_path.parent / f"{out_path.stem}.command.log"
+                if pending_log.is_file():
+                    os.replace(pending_log, final_log)
+                    result.command_log = str(final_log)
+
+        slot = ContractSlot(
+            trace_path=result.out_path, captured_at=_now(), mode=mode,
+            command=list(command), target=target, events=result.events, processes=result.processes,
+            command_log=result.command_log, returncode=result.returncode, env_note=env_note,
+            runner=runner_spec,
+            coverage_pct=coverage_pct, covered_sites=covered_sites, blind_sites=blind_sites,
+            env_fingerprint=environment_fingerprint(project_dir),
+            env_setup_fingerprint=environment_setup_fingerprint(project_dir),
+            archived_previous=archived_previous,
+            validity=validity, validity_reason=validity_reason,
+            privacy_profile=privacy, sample_rate=sample_rate,
+            duration_seconds=result.duration_seconds,
+            deployment_id=result.deployment_id,
+            request_id=result.request_id,
+            correlation_id=result.correlation_id,
+            backend=result.backend,
+            impact_targets=result.impact_targets,
+            traced_stdlib=getattr(result, "trace_stdlib", None) or _effective_stdlib(trace_stdlib),
+            metadata_path=result.metadata_path,
+            sources_path=_existing(sources_path(result.out_path)),
+            events_seen=result.events_seen,
+            dropped_events=result.dropped_events,
+            sampling_dropped=result.sampling_dropped,
+            backpressure_dropped=result.backpressure_dropped,
+            write_failures=result.write_failures,
+            sink_failures=result.sink_failures,
+            backpressure_wait_seconds=getattr(result, "backpressure_wait_seconds", None),
+            instrumentation_skipped=result.instrumentation_skipped,
+            activation_failures=getattr(result, "activation_failures", []),
+            red=_red_stamp(result) if validity is CaptureValidity.VALID else None,
+            replicate_of=(state.baseline.captured_at if when == REPLICATE and state.baseline
+                          else None),
+        )
+        if validity is CaptureValidity.VALID:
+            setattr(state, when, slot)
+            if when == "baseline" and state.baseline_replicate is not None:
+                # A replicate measures the noise of the baseline it re-ran: a new baseline makes
+                # it stale. Archived, not deleted.
+                archive_existing_capture(project_dir, REPLICATE)
+                state.baseline_replicate = None
+        else:
+            state.diagnostic_captures.append(slot)
+        state.save(_state_path(project_dir))
     return slot
 
 
@@ -2273,6 +2273,7 @@ def start_attached_capture(
         raise ValueError(f"when must be 'baseline' or 'post_migration', got {when!r}")
 
     project_dir = Path(os.path.abspath(project_dir))
+    load_contract_state(project_dir)        # refuses a state file collect could not save into
     if sample_rate is None:
         sample_rate = default_sample_rate(CaptureMode.LIVE_ATTACH)
     watcher_env = trace_env(
@@ -2459,19 +2460,14 @@ def record_sources(
     for _size, rel, real in rest:
         take(rel, real, True)
     out = sources_path(trace_path)
-    pending = out.with_name(f".{out.name}.{uuid.uuid4().hex}.pending")
+    snapshot = json.dumps({"schema": SOURCES_SCHEMA, "root": root,
+                           "fact_files": sorted(fact_files), "files": files,
+                           "skipped": skipped, "left_out": left_out[:500],
+                           "left_out_total": len(left_out)})
     try:
-        with gzip.open(pending, "wt", encoding="utf-8", compresslevel=6) as fh:
-            json.dump({"schema": SOURCES_SCHEMA, "root": root,
-                       "fact_files": sorted(fact_files), "files": files, "skipped": skipped,
-                       "left_out": left_out[:500], "left_out_total": len(left_out)}, fh)
-        os.replace(pending, out)
+        atomic_write_bytes(out, gzip.compress(snapshot.encode("utf-8"), compresslevel=6))
     except OSError as exc:
         logger.warning("could not write the source snapshot for %s: %s", trace_path, exc)
-        try:
-            pending.unlink()
-        except OSError:
-            pass
         return None
     return str(out)
 
@@ -2566,6 +2562,7 @@ def finalize_attached_capture(
     The slot's sample rate is the one the watcher ran with (its sidecar), else
     ``sample_rate``, else the attach default."""
     project_dir = Path(os.path.abspath(project_dir))
+    load_contract_state(project_dir)        # refuses before anything moves
     out_path = Path(out_path)
     _collect_attached_snapshot(out_path)
     events = poll_attached_capture(out_path)
@@ -2610,79 +2607,80 @@ def finalize_attached_capture(
     quality = inspect_trace_artifact(out_path)
     validity = quality.validity
     validity_reason = quality.reason
-    state = load_contract_state(project_dir)
-    archived_previous = None
-    committed_path = out_path
-    if validity is CaptureValidity.VALID:
-        final_path = project_dir / ".pymolt" / "contract_traces" / f"{when}.jsonl"
-        previous = getattr(state, when, None)
-        had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
-        archived_previous = archive_existing_capture(project_dir, when)
-        if had_previous_trace and archived_previous is None:
-            raise RuntimeError(f"could not safely replace existing {when} capture")
-        try:
-            os.replace(out_path, final_path)
-        except BaseException:
-            if archived_previous is not None and not final_path.exists():
-                shutil.move(archived_previous, final_path)
-            raise
-        try:
-            metadata_path = _move_trace_metadata(out_path, final_path)
-            _move_facts_snapshot(out_path, final_path)
-            _move_sources(out_path, final_path)
-        except OSError as exc:
-            logger.warning("could not promote attached trace metadata: %s", exc)
-            metadata_path = None
-        committed_path = final_path
-    else:
-        diagnostic = _diagnostic_path(project_dir, when)
-        if out_path.exists():
-            os.replace(out_path, diagnostic)
-        try:
-            metadata_path = _move_trace_metadata(out_path, diagnostic)
-            _move_facts_snapshot(out_path, diagnostic)
-            _move_sources(out_path, diagnostic)
-        except OSError as exc:
-            logger.warning("could not move attached diagnostic metadata: %s", exc)
-            metadata_path = None
-        committed_path = diagnostic
-    slot = ContractSlot(
-        trace_path=str(committed_path), captured_at=_now(), mode=CaptureMode.LIVE_ATTACH,
-        command=[], target=target, events=events, processes=1,
-        env_fingerprint=environment_fingerprint(project_dir),
-        env_setup_fingerprint=environment_setup_fingerprint(project_dir),
-        archived_previous=archived_previous,
-        validity=validity, validity_reason=validity_reason,
-        privacy_profile=privacy, sample_rate=sample_rate,
-        duration_seconds=metadata.get("duration_seconds"),
-        deployment_id=deployment_id,
-        request_id=request_id,
-        correlation_id=correlation_id,
-        backend=metadata.get("backend"),
-        impact_targets=normalized_targets,
-        metadata_path=metadata_path,
-        sources_path=_existing(sources_path(committed_path)),
-        events_seen=events_seen,
-        dropped_events=dropped_events,
-        sampling_dropped=(
-            counters.get("sampling_dropped") if runtime_metadata_complete else None
-        ),
-        backpressure_dropped=(
-            counters.get("backpressure_dropped") if runtime_metadata_complete else None
-        ),
-        write_failures=(
-            counters.get("write_failures") if runtime_metadata_complete else None
-        ),
-        sink_failures=(
-            counters.get("sink_failures") if runtime_metadata_complete else None
-        ),
-        instrumentation_skipped=metadata.get("instrumentation_skipped", []),
-    )
-    if validity is CaptureValidity.VALID:
-        setattr(state, when, slot)
-    else:
-        state.diagnostic_captures.append(slot)
-    state.save(_state_path(project_dir))
+    with state_lock(project_dir, operation=f"capture {when} --collect"):
+        state = load_contract_state(project_dir)
+        archived_previous = None
+        committed_path = out_path
+        if validity is CaptureValidity.VALID:
+            final_path = project_dir / ".pymolt" / "contract_traces" / f"{when}.jsonl"
+            previous = getattr(state, when, None)
+            had_previous_trace = previous is not None and Path(previous.trace_path).is_file()
+            archived_previous = archive_existing_capture(project_dir, when)
+            if had_previous_trace and archived_previous is None:
+                raise RuntimeError(f"could not safely replace existing {when} capture")
+            try:
+                os.replace(out_path, final_path)
+            except BaseException:
+                if archived_previous is not None and not final_path.exists():
+                    shutil.move(archived_previous, final_path)
+                raise
+            try:
+                metadata_path = _move_trace_metadata(out_path, final_path)
+                _move_facts_snapshot(out_path, final_path)
+                _move_sources(out_path, final_path)
+            except OSError as exc:
+                logger.warning("could not promote attached trace metadata: %s", exc)
+                metadata_path = None
+            committed_path = final_path
+        else:
+            diagnostic = _diagnostic_path(project_dir, when)
+            if out_path.exists():
+                os.replace(out_path, diagnostic)
+            try:
+                metadata_path = _move_trace_metadata(out_path, diagnostic)
+                _move_facts_snapshot(out_path, diagnostic)
+                _move_sources(out_path, diagnostic)
+            except OSError as exc:
+                logger.warning("could not move attached diagnostic metadata: %s", exc)
+                metadata_path = None
+            committed_path = diagnostic
+        slot = ContractSlot(
+            trace_path=str(committed_path), captured_at=_now(), mode=CaptureMode.LIVE_ATTACH,
+            command=[], target=target, events=events, processes=1,
+            env_fingerprint=environment_fingerprint(project_dir),
+            env_setup_fingerprint=environment_setup_fingerprint(project_dir),
+            archived_previous=archived_previous,
+            validity=validity, validity_reason=validity_reason,
+            privacy_profile=privacy, sample_rate=sample_rate,
+            duration_seconds=metadata.get("duration_seconds"),
+            deployment_id=deployment_id,
+            request_id=request_id,
+            correlation_id=correlation_id,
+            backend=metadata.get("backend"),
+            impact_targets=normalized_targets,
+            metadata_path=metadata_path,
+            sources_path=_existing(sources_path(committed_path)),
+            events_seen=events_seen,
+            dropped_events=dropped_events,
+            sampling_dropped=(
+                counters.get("sampling_dropped") if runtime_metadata_complete else None
+            ),
+            backpressure_dropped=(
+                counters.get("backpressure_dropped") if runtime_metadata_complete else None
+            ),
+            write_failures=(
+                counters.get("write_failures") if runtime_metadata_complete else None
+            ),
+            sink_failures=(
+                counters.get("sink_failures") if runtime_metadata_complete else None
+            ),
+            instrumentation_skipped=metadata.get("instrumentation_skipped", []),
+        )
+        if validity is CaptureValidity.VALID:
+            setattr(state, when, slot)
+        else:
+            state.diagnostic_captures.append(slot)
+        state.save(_state_path(project_dir))
     return slot
 
 
@@ -2704,9 +2702,13 @@ def build_contract_report_from_state(
     no diff; neither -> trace=None (today's all-BLIND behavior, unchanged).
     """
     from pymolt.migration_state import MigrationReceipt
+    from pymolt.verify.unified import UnifiedVerificationReport
 
     state = load_contract_state(project_dir)
     receipt = MigrationReceipt.load(project_dir)
+    # verify saves its verdict over the saved one: a damaged or newer file refuses it now
+    # (``StateFileError``), before the comparison.
+    UnifiedVerificationReport.load(project_dir)
 
     if changed_api_paths is None:
         from pymolt.migration_state import plans_in_effect

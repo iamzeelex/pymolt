@@ -28,8 +28,10 @@ from pymolt.interfaces.cli.output import (
     console,
     err,
     fail,
+    fail_state_file,
     next_step,
     require_project_dir,
+    wants_machine_output,
     warn,
 )
 from pymolt.interfaces.cli.verify_cmd import capture_cmd
@@ -39,19 +41,45 @@ from pymolt.setup.pythons import (
     get_eol_versions,
     version_floor,
 )
+from pymolt.state_io import atomic_write_text
 
 
 # Typer renders sub-app panels after command panels, so "Behavioural proof" lands at
 # the bottom of --help no matter where it is registered. The help text carries the
 # lead instead: the baseline capture is the one step that cannot be redone later.
 class _FlowOrderGroup(TyperGroup):
-    """List commands in the order a migration runs them, not the order they are defined."""
+    """List commands in the order a migration runs them, not the order they are defined.
+
+    Also the one place a damaged or newer state file (``StateFileError``) becomes a failure:
+    whichever command reads it exits 2 with the file, what is wrong and the remedy, as JSON
+    under ``--json``/``--agent``; and a state lock another pymolt held too long
+    (``StateLockTimeout``) exits 3."""
 
     def list_commands(self, ctx):
         names = super().list_commands(ctx)
         return sorted(names, key=lambda n: (
             _FLOW_ORDER.index(n) if n in _FLOW_ORDER else len(_FLOW_ORDER), names.index(n),
         ))
+
+    def resolve_command(self, ctx, args):
+        name, command, rest = super().resolve_command(ctx, args)
+        ctx.meta["pymolt.machine_output"] = wants_machine_output(list(rest))
+        return name, command, rest
+
+    def invoke(self, ctx):
+        from pymolt.state_io import StateFileError, StateLockTimeout
+
+        try:
+            return super().invoke(ctx)
+        except StateFileError as exc:
+            fail_state_file(exc, json_output=self._machine(ctx))
+        except StateLockTimeout as exc:     # another pymolt held the state lock too long
+            fail(str(exc), hint=exc.hint, code=EXIT_ENVIRONMENT, json_output=self._machine(ctx))
+
+    @staticmethod
+    def _machine(ctx) -> bool:
+        """``--json`` or ``--agent`` on the command line (``resolve_command`` noted it)."""
+        return ctx.meta.get("pymolt.machine_output", False)
 
 
 _FLOW_ORDER = [
@@ -247,9 +275,11 @@ def status(
 
     console.print(f"[bold]pymolt[/bold] [dim]{report.project_dir}[/dim]\n")
     for phase in report.phases:
-        glyph, colour = _STATE_MARK.get(phase.state, ("○", "dim"))
+        # A damaged or newer state file: the one thing on the screen to fix first.
+        glyph, colour = ("✗", "red") if phase.problem else _STATE_MARK.get(
+            phase.state, ("○", "dim"))
         line = f"  [{colour}]{glyph}[/{colour}] [bold]{phase.phase:<15}[/bold]"
-        detail = phase.blocker or phase.detail
+        detail = escape(phase.blocker or phase.detail)
         console.print(f"{line} [{'dim' if phase.state == 'todo' else colour}]{detail}[/]")
 
     for check in report.checks:
@@ -675,8 +705,7 @@ def plan(
         patch_path = Path(patch_file)
         if not patch_path.is_absolute():
             patch_path = project_path / patch_path
-        patch_path.parent.mkdir(parents=True, exist_ok=True)
-        patch_path.write_text("\n".join(patches), encoding="utf-8")
+        atomic_write_text(patch_path, "\n".join(patches))
     else:
         patch_path = None
 
@@ -1532,7 +1561,7 @@ def setup(
     """
     import sys
 
-    from pymolt.ingestion.config import ToolChoice
+    from pymolt.ingestion.config import EnvConfig, ToolChoice
     from pymolt.ingestion.detect import detect_local_environments
     from pymolt.setup import (
         SetupChoices,
@@ -1546,6 +1575,8 @@ def setup(
     project_path = require_project_dir(project_dir, json_output=machine)
     if agent:
         project_path = project_path.resolve()
+    # Before any question: a damaged config (or a newer pymolt's) is not replaced.
+    EnvConfig.load(project_path / ".pymolt" / "env_config.json")
     try:
         options = gather_setup_options(project_path)
     except Exception as e:
@@ -1776,9 +1807,9 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
 
     Returns the config as a plain dict (the validated :class:`EnvConfig` dumped to
     JSON-safe values) so existing key-based access keeps working. Degrades rather
-    than aborting when the file is missing or invalid. ``quiet`` suppresses the
-    warnings entirely — for callers with no stderr to speak of, like the MCP
-    server, which returns the same facts as structured data instead.
+    than aborting when the file is missing; a damaged one raises ``StateFileError``.
+    ``quiet`` suppresses the warnings entirely — for callers with no stderr to speak
+    of, like the MCP server, which returns the same facts as structured data instead.
     """
     from pymolt.ingestion.config import EnvConfig, ToolChoice
     from pymolt.ingestion.detect import (
@@ -1788,13 +1819,11 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
     )
 
     config_file = project_path / ".pymolt" / "env_config.json"
-    if config_file.is_file():
-        config = EnvConfig.load(config_file)
-        if config is not None:
-            return config.model_dump(mode="json")
-        if not quiet:
-            warn(f"failed to parse configuration file {config_file}; using defaults.")
-        return EnvConfig().model_dump(mode="json")
+    # A damaged config (or a newer pymolt's) raises StateFileError: defaults would steer the
+    # whole assessment silently.
+    config = EnvConfig.load(config_file)
+    if config is not None:
+        return config.model_dump(mode="json")
 
     if not quiet:
         warn(
@@ -2093,8 +2122,16 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             else:
                 config["target_overrides"].pop(pkg_to_override, None)
 
-            # Persist through the schema so the file stays valid and versioned.
-            EnvConfig.model_validate(config).save(config_file)
+            # Persist through the schema so the file stays valid and versioned. The config
+            # was read long before (a person answers prompts): re-read it under the state
+            # lock and change only the overrides, so a setup run meanwhile is kept.
+            from pymolt.state_io import state_lock
+
+            with state_lock(config_file.parent.parent, operation="assess: overrides"):
+                saved = EnvConfig.load(config_file)
+                fresh = saved if saved is not None else EnvConfig.model_validate(config)
+                fresh.target_overrides = dict(config["target_overrides"])
+                fresh.save(config_file)
 
 
 @app.command(rich_help_panel="Migration")
@@ -2705,8 +2742,7 @@ def _render_or_write_patches(
         output = Path(patch_file)
         if not output.is_absolute():
             output = project_path / output
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("\n".join(patches), encoding="utf-8")
+        atomic_write_text(output, "\n".join(patches))
         err.print(f"[dim]patch written → {output}[/dim]")
 
 

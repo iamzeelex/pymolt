@@ -10,10 +10,7 @@ temporary transaction files have been removed.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
-import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -21,10 +18,21 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
-from pydantic_core import ValidationError
 
 from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
+from pymolt.state_io import (
+    MIGRATION_LOCK,
+    FileLock,
+    LockBusy,
+    atomic_write_json,
+    holds_state_lock,
+    keep_remedy,
+    load_state,
+    rebuild_remedy,
+    schema_version,
+    state_lock,
+)
 from pymolt.verify.predict import PredictionReport
 from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP_ID, PlanStep
 
@@ -63,52 +71,23 @@ class MigrationCheckError(MigrationPlanError):
 
 @contextmanager
 def _migration_lock(project_dir: str | Path, operation: str):
-    """Serialize source mutations; the OS releases this lock after a crash."""
+    """Serialize source mutations; the OS releases this lock after a crash. Refused at once
+    (``MigrationConflictError``) while another operation holds it, this thread included.
+    Taken before the state lock, never while holding it (``pymolt.state_io``)."""
     root = Path(project_dir).resolve()
-    lock_path = root / ".pymolt" / "migration.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    stream = lock_path.open("a+", encoding="utf-8")
-    release = None
+    if holds_state_lock(root):
+        raise RuntimeError("lock order: migration.lock is taken before state.lock, never "
+                           "while holding it")
+    lock = FileLock(root / MIGRATION_LOCK, operation, timeout=0)
     try:
-        try:
-            try:
-                import fcntl
-
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-                def release():
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-            except ImportError:  # pragma: no cover - Windows compatibility
-                import msvcrt
-
-                stream.seek(0)
-                if not stream.read(1):
-                    stream.write("\0")
-                    stream.flush()
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-
-                def release():
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        except (BlockingIOError, OSError) as exc:
-            stream.seek(0)
-            owner = stream.read().strip() or "unknown owner"
-            raise MigrationConflictError(
-                f"another migration operation is active ({owner})"
-            ) from exc
-        stream.seek(0)
-        stream.truncate()
-        json.dump({"pid": os.getpid(), "operation": operation, "started_at": _now()}, stream)
-        stream.flush()
-        os.fsync(stream.fileno())
-        try:
-            yield
-        finally:
-            if release is not None:
-                stream.seek(0)
-                release()
+        lock.acquire()
+    except LockBusy as exc:
+        raise MigrationConflictError(
+            f"another migration operation is active ({exc.holder})") from exc
+    try:
+        yield
     finally:
-        stream.close()
+        lock.release()
 
 
 def _now() -> str:
@@ -119,25 +98,23 @@ def _sha256(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
-def _atomic_json(path: Path, payload: dict) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, staged_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(staged_name, path)
-    except BaseException:
-        try:
-            os.unlink(staged_name)
-        except OSError:
-            pass
-        raise
-    return path
+PLAN_KIND = "plan"
+PLAN_REMEDY = rebuild_remedy("run `pymolt plan .` to plan again")
+FROZEN_PLAN_KIND = "frozen plan of an apply run"
+FROZEN_PLAN_REMEDY = keep_remedy("the texts this run's rollback restores")
+RUN_STATE_KIND = "apply run state"
+RUN_STATE_REMEDY = keep_remedy("this run's rollback information")
+
+
+def _plan_file_kind(project_dir: str | Path, source: Path) -> tuple[str, str]:
+    """What a plan file is to a person (the saved plan, a run's frozen copy, or a plan file
+    given on the command line) and the remedy when it is damaged."""
+    if source.parent.parent.name == "migrations" and source.parent.parent.parent.name == \
+            ".pymolt":
+        return FROZEN_PLAN_KIND, FROZEN_PLAN_REMEDY
+    if source.resolve() == plan_path(project_dir).resolve():
+        return PLAN_KIND, PLAN_REMEDY
+    return PLAN_KIND, "Pass a readable plan file, or run `pymolt plan .` to plan again."
 
 
 def plan_path(project_dir: str | Path, path: str | Path | None = None) -> Path:
@@ -292,26 +269,31 @@ class MigrationPlan(BaseModel):
     def load(
         cls, project_dir: str | Path, path: str | Path | None = None
     ) -> MigrationPlan | None:
+        """The plan at ``path`` (default: the saved plan; a schema-1 plan is read as one
+        synthetic step); None when there is none. A damaged plan, or one written by a newer
+        pymolt, raises ``StateFileError``."""
         source = plan_path(project_dir, path)
-        if not source.is_file():
-            return None
-        try:
-            with source.open(encoding="utf-8") as stream:
-                data = json.load(stream)
-            if isinstance(data, dict) and data.get("schema_version", 1) == 1:
+        kind, remedy = _plan_file_kind(project_dir, source)
+
+        def adapt(data: dict) -> MigrationPlan:
+            if schema_version(data) == 1:
                 from pymolt.workorder.v1 import read_v1
 
                 return read_v1(cls, data)
             return cls.model_validate(data)
-        except (OSError, json.JSONDecodeError, ValidationError):
-            return None
+
+        return load_state(source, cls, kind=kind, newest=PLAN_SCHEMA_VERSION, remedy=remedy,
+                          adapt=adapt)
 
     def save(
         self, project_dir: str | Path, path: str | Path | None = None
     ) -> Path:
-        return _atomic_json(
-            plan_path(project_dir, path), self.model_dump(mode="json")
-        )
+        target = plan_path(project_dir, path)
+        if target.resolve() != plan_path(project_dir).resolve():
+            return atomic_write_json(target, self.model_dump(mode="json"))
+        with state_lock(project_dir, operation="plan"):
+            MigrationPlan.load(project_dir)     # never replaces a damaged or newer saved plan
+            return atomic_write_json(target, self.model_dump(mode="json"))
 
     def save_planned(self, project_dir: str | Path, path: str | Path | None = None) -> Path:
         """Save the plan ``pymolt plan`` made, then drop the blobs retention no longer keeps
@@ -718,15 +700,13 @@ def _run_dir(project_dir: str | Path, run_id: str) -> Path:
 
 
 def _load_run_state(path: Path) -> MigrationRunState | None:
-    try:
-        with path.open(encoding="utf-8") as stream:
-            return MigrationRunState.model_validate(json.load(stream))
-    except (OSError, json.JSONDecodeError, ValidationError):
-        return None
+    """A run's ``state.json``; None when there is none. Damaged: ``StateFileError``."""
+    return load_state(path, MigrationRunState, kind=RUN_STATE_KIND, newest=None,
+                      remedy=RUN_STATE_REMEDY)
 
 
 def _save_run_state(run_dir: Path, state: MigrationRunState) -> Path:
-    return _atomic_json(run_dir / "state.json", state.model_dump(mode="json"))
+    return atomic_write_json(run_dir / "state.json", state.model_dump(mode="json"))
 
 
 def _plan_runs(root: Path, plan_id: str) -> list[MigrationRunState]:

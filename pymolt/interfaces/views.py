@@ -131,10 +131,10 @@ def truncation_note(shown: int, dropped: int, full_report_path: str | None) -> s
 
 def write_full_report(project_dir: str | Path, name: str, payload: Any) -> str:
     """Write ``payload`` to ``.pymolt/agent/<name>.json`` and return the path."""
-    out_dir = Path(project_dir) / AGENT_REPORT_DIR
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{name}.json"
-    out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    from pymolt.state_io import atomic_write_json
+
+    out_path = Path(project_dir) / AGENT_REPORT_DIR / f"{name}.json"
+    atomic_write_json(out_path, payload, indent=2, default=str)
     return str(out_path)
 
 
@@ -174,7 +174,8 @@ def status_view(report) -> dict:
     """``FunnelStatus`` -> view. Everything fits, so there is no full report."""
     lists = _Lists()
     phases = [
-        {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker}
+        {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker,
+         **({"problem": p.problem} if p.problem else {})}
         for p in report.phases
     ]
     checks = [check.model_dump(mode="json") for check in report.checks]
@@ -188,6 +189,9 @@ def status_view(report) -> dict:
         if names:
             lines.append(f"{label}: {', '.join(names)}.")
     warnings: list[str] = []
+    for problem in report.problems:     # a damaged or newer state file: fix it first
+        warnings.append(problem["error"])
+        lines.append(f"PROBLEM {problem['error']}")
     for c in report.checks:
         if c.state != "ok":
             warnings.append(f"{c.name}: {c.detail}" + (f" ({c.hint})" if c.hint else ""))
@@ -203,6 +207,8 @@ def status_view(report) -> dict:
     }
     if report.inconclusive_kind is not None:
         data["inconclusive_kind"] = report.inconclusive_kind
+    if report.problems:
+        data["problems"] = list(report.problems)
     if report.steps:
         data["steps"] = lists.cap("steps", list(report.steps))
         data["steps_total"] = len(report.steps)

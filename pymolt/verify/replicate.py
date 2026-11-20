@@ -76,6 +76,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from pymolt.state_io import atomic_write_json
 from pymolt.verify import dict_order as _order
 from pymolt.verify import environment as _env
 from pymolt.verify.facts import (
@@ -439,9 +440,8 @@ def load_or_build_profile(
     profile = build_noise_profile(load_facts(baseline_trace, root=root),
                                   load_facts(replicate_trace, root=root))
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"schema": NOISE_PROFILE_SCHEMA, "identity": identity,
-                                     "profile": profile}), encoding="utf-8")
+        atomic_write_json(cache, {"schema": NOISE_PROFILE_SCHEMA, "identity": identity,
+                                  "profile": profile}, indent=None)
     except OSError as exc:
         logger.warning("could not cache the noise profile: %s", exc)
     return profile

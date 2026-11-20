@@ -355,9 +355,9 @@ def _begin(ctx: _Context, *, by: str, actor: str | None) -> ApplyResult:
                "step_id": ctx.step.id, "taken_at": now, "by": by, "actor": actor,
                "previous": previous.model_dump(mode="json") if previous is not None else None,
                "files": files}
-    from pymolt.migration_plan import _atomic_json
+    from pymolt.state_io import atomic_write_json
 
-    _atomic_json(manifest, payload)
+    atomic_write_json(manifest, payload)
     try:
         receipt = ctx.receipt.model_copy(deep=True) if ctx.receipt is not None else None
         receipt = _receipt_with_run(root, receipt, ctx.plan, ctx.run_id, now)

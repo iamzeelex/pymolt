@@ -18,7 +18,7 @@ The store holds copies of project source, so it writes ``.pymolt/.gitignore`` wi
   ledger).
 
 ``collect_blobs`` removes the rest; ``plan`` and ``apply`` run it under the migration lock. It
-removes nothing when the ledger or the receipt exists but cannot be read.
+removes nothing when the ledger or the receipt is damaged (``StateFileError``).
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ import gzip
 import hashlib
 import json
 import logging
-import os
 import re
-import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+from pymolt.state_io import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +82,7 @@ def ensure_gitignore(project_dir: str | Path) -> Path:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
-    try:
-        pending.write_bytes(data)
-        os.replace(pending, path)
-    except BaseException:
-        try:
-            pending.unlink()
-        except OSError:
-            pass
-        raise
+    atomic_write_bytes(path, data)
 
 
 def put_text(project_dir: str | Path, text: str) -> str:
@@ -207,21 +198,22 @@ def collect_blobs(project_dir: str | Path, *, ledger: Any = _UNSET,
     """Remove the blobs retention does not keep; returns their hashes. The caller holds the
     migration lock. Nothing is removed while the ledger or the receipt exists but cannot be
     read: what it references is unknown."""
+    from pymolt.state_io import StateFileError
+
     root = Path(project_dir)
     if not blobs_dir(root).is_dir():
         return []
-    if receipt is _UNSET:
-        from pymolt.migration_state import MigrationReceipt, receipt_path
+    try:
+        if receipt is _UNSET:
+            from pymolt.migration_state import MigrationReceipt
 
-        receipt = MigrationReceipt.load(root)
-        if receipt is None and receipt_path(root).exists():
-            return []
-    if ledger is _UNSET:
-        from pymolt.apply_ledger import ledger_path, load_ledger
+            receipt = MigrationReceipt.load(root)
+        if ledger is _UNSET:
+            from pymolt.apply_ledger import load_ledger
 
-        ledger = load_ledger(root, receipt=receipt)
-        if ledger is None and ledger_path(root).exists():
-            return []
+            ledger = load_ledger(root, receipt=receipt)
+    except StateFileError:
+        return []                       # what a damaged receipt or ledger references is unknown
     keep = referenced(root, ledger, receipt)
     removed: list[str] = []
     for digest in sorted(stored(root) - keep):
@@ -230,7 +222,9 @@ def collect_blobs(project_dir: str | Path, *, ledger: Any = _UNSET,
             removed.append(digest)
         except OSError:
             continue
-    for partial in blobs_dir(root).glob(".*.pending"):
+    # A write interrupted before its rename (``state_io.atomic_write_bytes``; ``.pending``:
+    # an older pymolt's). Blobs are written under the migration lock, which the caller holds.
+    for partial in [*blobs_dir(root).glob(".*.tmp"), *blobs_dir(root).glob(".*.pending")]:
         try:
             partial.unlink()
         except OSError:

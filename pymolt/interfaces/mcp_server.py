@@ -87,10 +87,16 @@ class Tools:
         return path
 
     def _run(self, tool: str, project_dir: str, build, hint: str) -> dict:
+        from pymolt.state_io import StateFileError, StateLockTimeout
+
         try:
             return build(self._resolve_dir(project_dir))
         except views.AgentInputError as exc:
             return views.failure(exc.error, exc.hint)
+        except StateFileError as exc:   # a damaged or newer state file: the CLI's envelope
+            return {**views.failure(exc.headline, exc.remedy), **exc.fields()}
+        except StateLockTimeout as exc:
+            return views.failure(str(exc), exc.hint)
         except Exception as exc:  # noqa: BLE001 - never cross the MCP boundary
             return views.failure(f"{tool} failed: {exc}", hint)
 

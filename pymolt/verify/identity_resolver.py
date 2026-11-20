@@ -47,6 +47,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from pymolt.adapters.python_runner import RunnerSpec, run_in, runner_available, to_container
+from pymolt.state_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -593,17 +594,10 @@ def _write_cache(
             if not identity.transient
         },
     }
-    pending = path.with_name(f".{path.name}.{os.getpid()}.pending")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pending.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(pending, path)
+        atomic_write_json(path, payload, indent=None, sort_keys=True)
     except OSError as exc:  # a read-only project still gets its answer, just uncached
         logger.debug("identity cache not written (%s): %s", path, exc)
-        try:
-            pending.unlink()
-        except OSError:
-            pass
 
 
 # ─── subprocess ───────────────────────────────────────────────────────────────

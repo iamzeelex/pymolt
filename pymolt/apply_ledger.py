@@ -57,9 +57,6 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
-import os
-import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import zip_longest
@@ -70,9 +67,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_core import ValidationError
 
 from pymolt.anchors import Anchor, Statement, StatementIndex
+from pymolt.state_io import (
+    StateFileError,
+    atomic_write_bytes,
+    atomic_write_json,
+    keep_remedy,
+    read_state_json,
+    validation_detail,
+)
 
 LEDGER_SCHEMA = "pymolt.apply_ledger/2"
 LEDGER_SCHEMA_V1 = "pymolt.apply_ledger/1"
+LEDGER_KIND = "apply ledger"
+LEDGER_REMEDY = keep_remedy(
+    "what each apply step changed, which rollback and verify read")
 #: The claims a schema-1 ledger and plan name; each is a ``basis`` of ``preserve`` in v2.
 CLAIMS = ("same-object", "same-signature", "verified-rule", "python-fixer")
 #: The step a schema-1 run is read as (``pymolt.workorder.v1``).
@@ -419,46 +427,44 @@ _UNSET: Any = object()
 
 
 def load_ledger(project_dir: str | Path, *, receipt: Any = _UNSET) -> Ledger | None:
-    """The ledger (a schema-1 file read as v2); None when there is none or it is unreadable.
-    ``receipt``: the project's ``MigrationReceipt`` (loaded when not given), which says whether
-    a schema-1 run was rolled back."""
+    """The ledger (a schema-1 file read as v2); None when there is none. A damaged ledger, or
+    one written by a newer pymolt, raises ``StateFileError``: read as none, apply and verify
+    would forget what each step changed. ``receipt``: the project's ``MigrationReceipt``
+    (loaded when not given), which says whether a schema-1 run was rolled back."""
     path = ledger_path(project_dir)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = read_state_json(path, kind=LEDGER_KIND, newest=2, remedy=LEDGER_REMEDY,
+                           version_of=_ledger_version)
+    if data is None:
         return None
-    if not isinstance(data, dict):
-        return None
-    if data.get("schema") == LEDGER_SCHEMA:
-        try:
-            return Ledger.model_validate(data)
-        except ValidationError:
-            return None
-    if data.get("schema") in (LEDGER_SCHEMA_V1, None) and "events" not in data:
-        if receipt is _UNSET:
-            from pymolt.migration_state import MigrationReceipt
+    if data.get("schema") != LEDGER_SCHEMA and receipt is _UNSET:
+        from pymolt.migration_state import MigrationReceipt
 
-            receipt = MigrationReceipt.load(project_dir)
+        receipt = MigrationReceipt.load(project_dir)
+    try:
+        if data.get("schema") == LEDGER_SCHEMA:
+            return Ledger.model_validate(data)
         return _from_v1(Path(project_dir), data, receipt)
-    return None
+    except ValidationError as exc:
+        raise StateFileError(path, kind=LEDGER_KIND, problem="damaged",
+                             detail=validation_detail(exc), remedy=LEDGER_REMEDY) from exc
+
+
+def _ledger_version(data: dict[str, Any]) -> int:
+    """A ledger's schema number: ``pymolt.apply_ledger/N``; a schema-1 ledger may have no
+    ``schema`` (and has no ``events``)."""
+    schema = data.get("schema")
+    if schema is None and "events" not in data:
+        return 1
+    prefix = "pymolt.apply_ledger/"
+    if isinstance(schema, str) and schema.startswith(prefix) and schema[len(prefix):].isdigit():
+        return int(schema[len(prefix):])
+    raise ValueError(f"its schema is {schema!r}, not an apply ledger's")
 
 
 def save_ledger(project_dir: str | Path, ledger: Ledger) -> Path:
     """Write the ledger atomically (the caller holds the migration lock)."""
-    path = ledger_path(project_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = ledger.model_dump(mode="json", by_alias=True)
-    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex}.pending")
-    try:
-        pending.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(pending, path)
-    except BaseException:
-        try:
-            pending.unlink()
-        except OSError:
-            pass
-        raise
-    return path
+    return atomic_write_json(ledger_path(project_dir),
+                             ledger.model_dump(mode="json", by_alias=True))
 
 
 def append_ledger(project_dir: str | Path,
@@ -500,9 +506,7 @@ class LedgerSnapshot:
             except OSError:
                 pass
             return
-        pending = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.pending")
-        pending.write_bytes(self.data)
-        os.replace(pending, self.path)
+        atomic_write_bytes(self.path, self.data)
 
 
 # ── in effect (verify's input) ────────────────────────────────────────────────────────────
@@ -570,6 +574,8 @@ def _v1_texts(root: Path, run: str | None) -> tuple[dict[str, tuple[str, str]], 
 
     try:
         plan = MigrationPlan.load(root, root / ".pymolt" / "migrations" / run / "plan.json")
+    except StateFileError:
+        raise                           # a damaged frozen plan is not read as missing
     except Exception:  # noqa: BLE001 - a run id that is no directory name, an odd plan
         plan = None
     if plan is None:

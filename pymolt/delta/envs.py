@@ -32,6 +32,7 @@ from packaging.version import InvalidVersion, Version
 
 from pymolt.adapters.python_runner import RunnerSpec, run_in, runner_available
 from pymolt.delta.models import Interpreter
+from pymolt.state_io import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -265,10 +266,10 @@ def throwaway_env(
     exe = python_in(env_dir)
     if exe is None:
         return None, f"uv built {env_dir} but it has no interpreter", None
-    (env_dir / _MARKER).write_text(json.dumps({
+    atomic_write_json(env_dir / _MARKER, {
         "python": python, "requirements": sorted(requirements),
         "manifest": str(manifest) if manifest else None,
-    }, indent=2), encoding="utf-8")
+    })
     return exe, None, round(time.perf_counter() - t0, 2)
 
 
