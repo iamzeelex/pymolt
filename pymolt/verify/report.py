@@ -153,12 +153,15 @@ class ComparedRecordings(BaseModel):
     ``*_capture`` is ``"post-migration"`` or ``"baseline"`` when the recording is that
     capture's own, None when it is a file named on the command line that is no capture (or
     there is no recording on that side). Only a verdict whose ``after`` side is the
-    post-migration capture is this migration's verdict."""
+    post-migration capture is this migration's verdict. ``*_capture_id`` is that capture's id
+    (``verify.models.capture_id``), None when the side is no capture."""
 
     after: str | None = None
     after_capture: str | None = None
+    after_capture_id: str | None = None
     before: str | None = None
     before_capture: str | None = None
+    before_capture_id: str | None = None
 
     @property
     def captures(self) -> bool:

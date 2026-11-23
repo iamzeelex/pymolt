@@ -158,17 +158,10 @@ def _utc_minutes(value: str | None) -> str | None:
 
 
 def capture_name(captured_at: str | None, sha256: str | None) -> str | None:
-    """``<YYYYMMDDTHHMMSSZ>-<8 hex of the trace sha256>``; the sha part is left out if missing."""
-    if not captured_at:
-        return None
-    try:
-        when = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if when.tzinfo is not None:
-        when = when.astimezone(timezone.utc)
-    stamp = when.strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-{str(sha256)[:8]}" if sha256 else stamp
+    """The capture id (``verify.models.capture_id``); without a sha, its time stamp alone."""
+    from pymolt.verify.models import capture_id, capture_stamp
+
+    return capture_id(captured_at, sha256) or capture_stamp(captured_at)
 
 
 def _baseline_text(plan) -> str:

@@ -597,6 +597,8 @@ def verify_migration(
         if unified.rollback_executed else ""
     )
     saved_lines = [f"saved: {saved_path}"] if saved_path else []
+    if compared := views.compared_captures_line(contract_report.compared):
+        saved_lines.insert(0, compared)
     if note := views.saved_verdict_note(contract_report.compared, saved_path):
         saved_lines.append(note)
     console.print(Panel(

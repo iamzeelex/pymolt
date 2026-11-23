@@ -690,6 +690,7 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
         "accepted": accepted,
         "validity": validity,
         "validity_reason": slot.validity_reason,
+        "capture_id": slot.capture_id,
         "events": slot.events,
         "processes": slot.processes,
         "returncode": slot.returncode,
@@ -1211,6 +1212,17 @@ def inconclusive_line(unified) -> str | None:
         if more:
             line += f" It also needs evidence ({more} reason(s))."
     return line
+
+
+def compared_captures_line(compared) -> str | None:
+    """``baseline <id> → post-migration <id>``: the captures a report compared, by id (a side
+    that is no capture, or whose id is unknown, is left out). None when neither side is."""
+    if compared is None:
+        return None
+    sides = [f"{name} {ident}" for name, ident in (
+        (compared.before_capture, compared.before_capture_id),
+        (compared.after_capture, compared.after_capture_id)) if name and ident]
+    return " → ".join(sides) or None
 
 
 def saved_verdict_note(compared, saved_path) -> str | None:
