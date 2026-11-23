@@ -10,7 +10,6 @@ line); a risk the plan fixed links to ``v1``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from pymolt.workorder.edits import make_edit
@@ -28,16 +27,13 @@ from pymolt.workorder.models import (
 _CLAIMS = ("same-object", "same-signature", "verified-rule", "python-fixer")
 
 
-def read_v1(model: type, data: dict[str, Any], *,
-            modified: Callable[[], float | None] | None = None):
+def read_v1(model: type, data: dict[str, Any]):
     """``data`` (a schema-1 plan's JSON) as a ``model`` (``MigrationPlan``) of the current
-    schema, its identity filled as a schema-2 plan's (``migration_plan.fill_identity``;
-    ``modified``: the file's mtime, for a ``created_at`` that is not a time)."""
+    schema, its identity filled as a schema-2 plan's (``migration_plan.fill_identity``)."""
     from pymolt.migration_plan import PLAN_SCHEMA_VERSION, fill_identity
 
     plan = fill_identity(model.model_validate({**data, "schema_version": PLAN_SCHEMA_VERSION,
-                                               "adapted_from": 1, "steps": []}),
-                         modified=modified)
+                                               "adapted_from": 1, "steps": []}))
     if plan.changes:
         plan.steps = [v1_step(plan)]
         if plan.risks is not None:

@@ -20,6 +20,8 @@ from pymolt.migration_plan import (
     content_digest_of,
     create_migration_plan,
     inspect_migration_plan,
+    name_of,
+    name_time_known,
     plan_name,
 )
 from pymolt.state_io import StateFileError
@@ -102,6 +104,11 @@ def test_the_name_is_time_id8_and_label():
         assert not NAME_RE.match(bad), bad
     with pytest.raises(ValueError):
         plan_name("not a time", "f" * 32)
+    undated = MigrationPlan(target_python="3.12", source_manifest="r.txt", plan_id="f" * 32,
+                            created_at="not a time", label="x")
+    assert name_of(undated) == "00000000T0000Z-ffffffff-x"
+    assert name_time_known("20261120T0631Z-f74941c5")
+    assert not name_time_known(name_of(undated)) and not name_time_known(None)
     with pytest.raises(ValueError, match="label"):
         plan_name("2026-11-20T06:31:59+00:00", "f" * 32, "NumPy")
 
@@ -167,12 +174,28 @@ def test_a_schema_2_plan_without_a_baseline_has_none(tmp_path):
     assert MigrationPlan.load(tmp_path).baseline is None
 
 
-def test_a_created_at_that_is_not_a_time_names_the_plan_by_the_files_mtime(tmp_path):
+def test_a_created_at_that_is_not_a_time_names_every_copy_of_the_plan_alike(tmp_path):
+    """Its time is unknown, and said so: the plan file and its run's frozen copy get the same
+    name whatever their mtimes, so apply's frozen check holds on an open 0.2 run."""
     import os
+    import shutil
 
-    _v2_file(tmp_path, created_at="yesterday")
-    os.utime(tmp_path / LEGACY, (1_763_620_260, 1_763_620_260))     # 2025-11-20 06:31 UTC
-    assert MigrationPlan.load(tmp_path).name == "20251120T0631Z-55555555"
+    from pymolt.workorder.apply import _check_frozen
+
+    data = _v2_file(tmp_path, created_at="yesterday")
+    frozen = tmp_path / ".pymolt" / "migrations" / data["plan_id"] / "plan.json"
+    frozen.parent.mkdir(parents=True)
+    shutil.copy(tmp_path / LEGACY, frozen)
+    os.utime(tmp_path / LEGACY, (1_700_000_000, 1_700_000_000))
+    os.utime(frozen, (1_763_620_260, 1_763_620_260))
+
+    plan = MigrationPlan.load(tmp_path)
+    copy = MigrationPlan.load(tmp_path, frozen)
+
+    assert plan.name == copy.name == "00000000T0000Z-55555555"
+    assert NAME_RE.match(plan.name) and not name_time_known(plan.name)
+    assert copy.model_dump() == plan.model_dump()
+    _check_frozen(tmp_path.resolve(), data["plan_id"], plan)        # no StepRefusal
 
 
 def test_a_frozen_copy_of_a_schema_1_plan_keeps_adapted_from_1(tmp_path):

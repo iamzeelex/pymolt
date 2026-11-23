@@ -14,7 +14,6 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +65,9 @@ LABEL_RULE = ("a label is 1 to 32 lowercase letters, digits, '.', '_' or '-', be
 #: A plan's name: ``YYYYMMDDTHHMMZ-<id8>[-<label>]``, its creation time in UTC to the minute, the
 #: first 8 hex of its id and its label. It sorts by time and is safe as a folder name.
 NAME_RE = re.compile(rf"^(\d{{8}}T\d{{4}}Z)-([0-9a-f]{{8}})(?:-({LABEL_PATTERN}))?$")
+#: The time part of the name of a plan whose ``created_at`` is not a time: unknown, said so,
+#: and the same in every copy of the plan (a file's mtime would differ between them).
+UNKNOWN_TIME = "00000000T0000Z"
 
 
 class MigrationPlanError(RuntimeError):
@@ -250,6 +252,21 @@ def plan_name(created_at: str, plan_id: str, label: str | None = None) -> str:
     if label is not None and not LABEL_RE.match(label):
         raise ValueError(f"invalid label {label!r}: {LABEL_RULE}")
     return f"{when:%Y%m%dT%H%MZ}-{_validate_run_id(plan_id)[:8]}" + (f"-{label}" if label else "")
+
+
+def name_of(plan: MigrationPlan) -> str:
+    """The name ``plan`` gets from what it holds: ``plan_name``, or with a ``created_at`` that is
+    not a time, ``UNKNOWN_TIME`` in its place (``00000000T0000Z-<id8>[-<label>]``). It reads
+    nothing else, so a plan and each copy of it get the same name."""
+    try:
+        return plan_name(plan.created_at, plan.plan_id, plan.label)
+    except ValueError:
+        return f"{UNKNOWN_TIME}-{plan.plan_id[:8]}" + (f"-{plan.label}" if plan.label else "")
+
+
+def name_time_known(name: str | None) -> bool:
+    """Whether a plan name carries its plan's creation time (not ``UNKNOWN_TIME``)."""
+    return bool(name) and not str(name).startswith(UNKNOWN_TIME)
 
 
 def _plan_id_field(value: str | None) -> str | None:
@@ -487,23 +504,17 @@ class MigrationPlan(BaseModel):
             source = plan_path(project_dir, path)
         kind, remedy = _plan_file_kind(project_dir, source)
 
-        def modified() -> float | None:
-            try:
-                return source.stat().st_mtime
-            except OSError:
-                return None
-
         def adapt(data: dict) -> MigrationPlan:
             version = schema_version(data)
             if version == 1:
                 from pymolt.workorder.v1 import read_v1
 
-                plan = read_v1(cls, data, modified=modified)
+                plan = read_v1(cls, data)
             elif version == 2:
                 plan = fill_identity(cls.model_validate({
                     **data, "schema_version": PLAN_SCHEMA_VERSION,
                     # A frozen copy 0.2 made of a schema-1 plan keeps 1.
-                    "adapted_from": data.get("adapted_from") or 2}), modified=modified)
+                    "adapted_from": data.get("adapted_from") or 2}))
             else:
                 plan = cls.model_validate(data)
             plan._stored = data
@@ -556,24 +567,17 @@ class MigrationPlan(BaseModel):
         return save_planned(project_dir, self, output=output)
 
 
-def fill_identity(plan: MigrationPlan, *,
-                  modified: Callable[[], float | None] | None = None) -> MigrationPlan:
+def fill_identity(plan: MigrationPlan) -> MigrationPlan:
     """Fill the schema-3 identity of a plan read from an older schema, from what it holds:
-    ``name`` from ``created_at`` and ``plan_id`` (``modified()``, the file's mtime, in UTC when
-    ``created_at`` is not a time), a fresh ``lineage`` and ``baseline`` from
+    ``name`` from ``created_at`` and ``plan_id`` (``name_of``: with a ``created_at`` that is not a
+    time, its time part is ``UNKNOWN_TIME``), a fresh ``lineage`` and ``baseline`` from
     ``baseline_captured_at`` and ``baseline_trace_sha256``. ``pymolt_version``, ``source`` and
     ``content_digest`` stay None: unknown. It reads nothing else and is deterministic, so a
-    plan and its frozen copy fill alike."""
+    plan and its frozen copy fill alike (apply's frozen check compares them)."""
     from pymolt.verify.models import capture_id
 
     if plan.name is None:
-        try:
-            plan.name = plan_name(plan.created_at, plan.plan_id, plan.label)
-        except ValueError:
-            stamp = modified() if modified is not None else None
-            if stamp is not None:
-                plan.name = plan_name(datetime.fromtimestamp(stamp, UTC).isoformat(),
-                                      plan.plan_id, plan.label)
+        plan.name = name_of(plan)
     if plan.lineage is None:
         plan.lineage = PlanLineage(root=plan.plan_id)
     if plan.baseline is None and plan.baseline_captured_at:
