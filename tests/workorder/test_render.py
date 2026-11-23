@@ -64,14 +64,38 @@ def _plan(tmp_path, *, warning="numeric_only will default to False"):
         "python": {"from": "3.11", "to": "3.12"}})
 
 
-def test_plan_md_matches_the_golden_file(tmp_path):
+def test_plan_md_matches_the_golden_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("pymolt.__version__", "0.2.0.dev0")
     _root, plan = _plan(tmp_path)
+    plan = plan.model_copy(update={"created_at": "2026-11-20T06:31:09+00:00",
+                                   "baseline_trace_sha256": "b3e1a2c0" + "f" * 56})
     text = plan_markdown(plan)
     if os.environ.get("PYMOLT_REGEN_GOLDEN"):
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(text, encoding="utf-8")
     assert text == GOLDEN.read_text(encoding="utf-8"), (
         "PLAN.md changed: review it, then regenerate with PYMOLT_REGEN_GOLDEN=1")
+
+
+def test_header_names_the_capture_and_survives_missing_data(tmp_path, monkeypatch):
+    from pymolt.workorder.render import capture_name
+    monkeypatch.setattr("pymolt.__version__", "9.9.9")
+    _root, plan = _plan(tmp_path)
+    base = plan.model_copy(update={"created_at": "2026-11-20T06:31:09+00:00",
+                                   "baseline_captured_at": "2026-11-20T06:06:20+00:00",
+                                   "baseline_trace_sha256": "b3e1a2c0" + "9" * 56})
+    line = plan_markdown(base).splitlines()[1]
+    assert line == ("Made 2026-11-20 06:31 UTC by pymolt 9.9.9 · baseline captured "
+                    "2026-11-20 06:06 UTC (20261120T060620Z-b3e1a2c0)")
+    assert capture_name("2026-11-20T06:06:20Z", "abcdef0123") == "20261120T060620Z-abcdef01"
+    no_sha = plan_markdown(base.model_copy(update={"baseline_trace_sha256": None}))
+    assert no_sha.splitlines()[1].endswith("baseline captured 2026-11-20 06:06 UTC")
+    none = plan_markdown(base.model_copy(update={"baseline_captured_at": None}))
+    assert none.splitlines()[1].endswith("· no baseline capture")
+    for bad in ("", "not a date"):
+        text = plan_markdown(base.model_copy(update={"created_at": bad}))
+        assert text.splitlines()[1].startswith(f"Made {bad + ' ' if bad else ''}by pymolt 9.9.9")
+    assert capture_name("garbage", "abc") is None
 
 
 def test_plan_md_collapses_low_steps_the_baseline_never_ran(tmp_path):

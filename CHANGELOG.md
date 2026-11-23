@@ -76,6 +76,9 @@ All notable changes to pymolt. The format follows
 
 ### Added
 
+- The `PLAN.md` header says when the plan was made (UTC), by which pymolt version, and from which
+  baseline capture (its time and its name, such as `20261120T060620Z-b3e1a2c0`).
+
 #### Capture and tracer
 
 - `capture baseline --replicate` runs the baseline's command again on the same code and

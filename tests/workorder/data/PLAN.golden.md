@@ -1,5 +1,6 @@
 # Migration plan 3f2a9c1e
-pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12 · baseline 2026-11-17T09:12:00+00:00
+Made 2026-11-20 06:31 UTC by pymolt 0.2.0.dev0 · baseline captured 2026-11-17 09:12 UTC (20261117T091200Z-b3e1a2c0)
+pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12
 8 steps: 3 by pymolt, 3 for an agent, 2 for a person. Next: `pymolt apply .`
 
 | Step | What | Who | Claim | Sites (run / not run) | Effort | Depends on |

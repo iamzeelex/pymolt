@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pymolt
 from pymolt.workorder.models import LIST_CAP, TEXT_CAP, PlanStep
 
 DEFAULT_PLAN_MD = Path(".pymolt") / "PLAN.md"
@@ -142,18 +144,58 @@ def next_command(plan) -> str:
     return "pymolt capture post-migration"
 
 
+def _utc_minutes(value: str | None) -> str | None:
+    """``2026-11-20T06:31:09+00:00`` as ``2026-11-20 06:31 UTC``; None when it does not parse."""
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    return when.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def capture_name(captured_at: str | None, sha256: str | None) -> str | None:
+    """``<YYYYMMDDTHHMMSSZ>-<8 hex of the trace sha256>``; the sha part is left out if missing."""
+    if not captured_at:
+        return None
+    try:
+        when = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    stamp = when.strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{str(sha256)[:8]}" if sha256 else stamp
+
+
+def _baseline_text(plan) -> str:
+    if not plan.baseline_captured_at:
+        return "no baseline capture"
+    when = _utc_minutes(plan.baseline_captured_at) or str(plan.baseline_captured_at)
+    name = capture_name(plan.baseline_captured_at, plan.baseline_trace_sha256)
+    text = f"baseline captured {when}"
+    return f"{text} ({name})" if name and plan.baseline_trace_sha256 else text
+
+
 def _header(plan) -> list[str]:
     moves = [f"{d.name} {d.from_version} → {d.to_version}" for d in plan.dependencies]
     if plan.python:
         moves.append(f"Python {plan.python.get('from')} → {plan.python.get('to')}")
-    baseline = (f"baseline {plan.baseline_captured_at}" if plan.baseline_captured_at
-                else "no baseline capture")
+    made = _utc_minutes(plan.created_at) or plan.created_at
+    made_by = f"pymolt {pymolt.__version__}"
+    made_by = f"Made {made} by {made_by}" if made else f"Made by {made_by}"
     who = {k: sum(1 for s in plan.steps if s.executor == k) for k in _WHO}
     parts = ", ".join(f"{n} {_WHO[k]}" for k, n in who.items() if n)
-    return [f"# Migration plan {plan.plan_id[:8]}",
-            _plain(" · ".join([*moves, baseline]), 500),
-            f"{len(plan.steps)} steps" + (f": {parts}" if parts else "")
-            + f". Next: `{next_command(plan)}`"]
+    lines = [f"# Migration plan {plan.plan_id[:8]}",
+             _plain(f"{made_by} · {_baseline_text(plan)}", 500)]
+    if moves:
+        lines.append(_plain(" · ".join(moves), 500))
+    lines.append(f"{len(plan.steps)} steps" + (f": {parts}" if parts else "")
+                 + f". Next: `{next_command(plan)}`")
+    return lines
 
 
 # ── PLAN.md ───────────────────────────────────────────────────────────────────────────────
