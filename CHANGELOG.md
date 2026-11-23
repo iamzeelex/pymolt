@@ -89,6 +89,12 @@ All notable changes to pymolt. The format follows
 - `capture --accept-failing` keeps a run whose command exited non-zero, if it recorded calls,
   stamped red.
 - `capture --json` and `capture --agent`.
+- Each capture has an id, its UTC time and the first 8 hex of its recording's sha256, such as
+  `20261120T060620Z-b3e1a2c0`. `capture` prints it (`captured <id>: 15 events -> …`) and the
+  slot keeps it with the sha256 (`capture_id`, `trace_sha256`); a capture made by an earlier
+  pymolt gets its id computed when it is read. `verify` names the two captures it compared
+  (`baseline <id> → post-migration <id>`; `compared.before_capture_id` and `after_capture_id`
+  in `--json` and `verification.json`).
 - Each recorded call carries its canonical callee, whatever name the code used, and the
   arguments the caller passed; a parameter left at its default is recorded by name only.
 - Also recorded: the project lines that ran (3.12+) or the functions that started (3.6–3.11),

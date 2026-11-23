@@ -101,6 +101,7 @@ from pymolt.verify.models import (
     InconclusiveCause,
     TraceArtifactQuality,
     VerificationVerdict,
+    capture_id,
 )
 from pymolt.verify.report import ComparedRecordings, ContractReport, build_contract_report
 
@@ -1363,6 +1364,75 @@ def same_slot_path(project_dir: str | Path, a: str | None, b: str | None) -> boo
         slot_path(project_dir, b))
 
 
+def trace_sha256(path: str | Path | None) -> str | None:
+    """The sha256 of a recording's bytes, read in chunks; None when it cannot be read."""
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+#: ``{project-relative path: {size, mtime_ns, sha256}}``: the recordings' hashes, for slots
+#: older than their stamped ``capture_id``. A cache: a damaged file is read as empty.
+CAPTURE_ID_CACHE = Path(".pymolt") / "cache" / "capture_ids.json"
+
+
+def _cached_trace_sha256(project_dir: str | Path, path: str) -> str | None:
+    """``trace_sha256`` through ``CAPTURE_ID_CACHE``: a file is hashed again only when its size
+    or mtime moved. Saving the cache never fails the caller, and it is written only inside an
+    existing ``.pymolt``."""
+    root = Path(os.path.abspath(project_dir))
+    full = Path(slot_path(root, path))
+    try:
+        st = full.stat()
+    except OSError:
+        return None
+    try:
+        key = full.relative_to(root).as_posix()
+    except ValueError:
+        key = str(full)
+    cache_file = root / CAPTURE_ID_CACHE
+    try:
+        cache = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    entry = cache.get(key)
+    if (isinstance(entry, dict) and entry.get("size") == st.st_size
+            and entry.get("mtime_ns") == st.st_mtime_ns
+            and isinstance(entry.get("sha256"), str)):
+        return entry["sha256"]
+    digest = trace_sha256(full)
+    if digest is None or not (root / ".pymolt").is_dir():
+        return digest
+    cache[key] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha256": digest}
+    try:
+        from pymolt.workorder.blobs import ensure_gitignore
+
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        ensure_gitignore(root)
+        atomic_write_json(cache_file, cache, indent=None)
+    except OSError:
+        logger.debug("could not save the capture id cache", exc_info=True)
+    return digest
+
+
+def slot_capture_id(project_dir: str | Path, slot: ContractSlot | None) -> str | None:
+    """A slot's capture id: the one stamped at capture, else computed from its recording as it
+    is now (through ``CAPTURE_ID_CACHE``; never written back into ``contract_state.json``).
+    None without a slot, or when the recording cannot be read."""
+    if slot is None:
+        return None
+    if slot.capture_id:
+        return slot.capture_id
+    return capture_id(slot.captured_at, slot.trace_sha256
+                      or _cached_trace_sha256(project_dir, slot.trace_path))
+
+
 def load_contract_state(project_dir: str | Path) -> ContractState:
     """The current capture state, or a fresh empty one if none is persisted yet. A damaged
     file, or one written by a newer pymolt, raises ``StateFileError``: it is never read as
@@ -1846,8 +1916,12 @@ def capture_named_trace(
                     os.replace(pending_log, final_log)
                     result.command_log = str(final_log)
 
+        # The recording is final here (promoted or set aside as a diagnostic): its hash and
+        # the time name the capture.
+        captured_at, sha = _now(), trace_sha256(result.out_path)
         slot = ContractSlot(
-            trace_path=result.out_path, captured_at=_now(), mode=mode,
+            trace_path=result.out_path, captured_at=captured_at, mode=mode,
+            trace_sha256=sha, capture_id=capture_id(captured_at, sha),
             command=list(command), target=target, events=result.events, processes=result.processes,
             command_log=result.command_log, returncode=result.returncode, env_note=env_note,
             runner=runner_spec,
@@ -2588,8 +2662,10 @@ def finalize_attached_capture(
                 logger.warning("could not move attached diagnostic metadata: %s", exc)
                 metadata_path = None
             committed_path = diagnostic
+        captured_at, sha = _now(), trace_sha256(committed_path)
         slot = ContractSlot(
-            trace_path=str(committed_path), captured_at=_now(), mode=CaptureMode.LIVE_ATTACH,
+            trace_path=str(committed_path), captured_at=captured_at, mode=CaptureMode.LIVE_ATTACH,
+            trace_sha256=sha, capture_id=capture_id(captured_at, sha),
             command=[], target=target, events=events, processes=1,
             env_fingerprint=environment_fingerprint(project_dir),
             env_setup_fingerprint=environment_setup_fingerprint(project_dir),
@@ -2768,9 +2844,15 @@ def _compared_recordings(project_dir: str | Path, state: ContractState, trace: s
                 return name
         return None
 
+    def ident(name: str | None) -> str | None:
+        return slot_capture_id(project_dir, getattr(state, name.replace("-", "_"))) \
+            if name else None
+
+    after_capture = capture(trace, "post-migration", "baseline")
+    before_capture = capture(against, "baseline")
     return ComparedRecordings(
-        after=trace, after_capture=capture(trace, "post-migration", "baseline"),
-        before=against, before_capture=capture(against, "baseline"),
+        after=trace, after_capture=after_capture, after_capture_id=ident(after_capture),
+        before=against, before_capture=before_capture, before_capture_id=ident(before_capture),
     )
 
 
