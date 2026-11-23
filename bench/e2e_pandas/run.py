@@ -147,10 +147,20 @@ def capture(root: Path, when: str, spec: dict) -> int:
                   log=f"capture_{when}.log")
 
 
+def current_plan_file(root: Path) -> Path:
+    """The current plan's file: the one ``.pymolt/plans/current.json`` names, else the 0.2
+    layout's single file."""
+    try:
+        name = json.loads((root / ".pymolt" / "plans" / "current.json").read_text())["name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return root / ".pymolt" / "migration_plan.json"
+    return root / ".pymolt" / "plans" / str(name) / "plan.json"
+
+
 def check_plan(root: Path, change: bool) -> tuple[bool, str]:
     """The offline plan's from-side, rewrite and predictions (acceptance criterion 1)."""
     try:
-        plan = json.loads((root / ".pymolt" / "migration_plan.json").read_text())
+        plan = json.loads(current_plan_file(root).read_text())
     except (OSError, ValueError):
         return False, "no plan"
     deps = {d.get("name"): d.get("from_version") for d in plan.get("dependencies", [])}

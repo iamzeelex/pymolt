@@ -6,7 +6,9 @@ atomically, and never changed; reading one checks its hash, and a blob that does
 treated as missing. Design: ``docs/design/apply-work-order.md`` 2.1.
 
 The store holds copies of project source, so it writes ``.pymolt/.gitignore`` with ``blobs/``,
-``cache/`` and ``migrations/*/steps/``. The project's own ``.gitignore`` is never touched.
+``cache/`` and ``migrations/*/steps/``, and ``plans/current.json`` (which plan is current is this
+checkout's local state; the plans themselves can be committed). The project's own ``.gitignore``
+is never touched.
 
 **Retention.** A blob stays while one of these names it:
 
@@ -36,7 +38,7 @@ from pymolt.state_io import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
-GITIGNORE_LINES = ("blobs/", "cache/", "migrations/*/steps/")
+GITIGNORE_LINES = ("blobs/", "cache/", "migrations/*/steps/", "plans/current.json")
 _GITIGNORE_HEAD = "# pymolt: local stores that hold copies of the project's source\n"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 #: How many runs that left the chain keep their blobs.

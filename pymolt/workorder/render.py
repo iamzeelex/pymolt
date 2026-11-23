@@ -27,7 +27,6 @@ from typing import Any
 import pymolt
 from pymolt.workorder.models import LIST_CAP, TEXT_CAP, PlanStep
 
-DEFAULT_PLAN_MD = Path(".pymolt") / "PLAN.md"
 _DIFF_CAP = 200          # diff lines per step in PLAN.md; the plan file has every hunk
 
 _UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x80-\x9f  ‪-‮⁦-⁩]")
@@ -294,10 +293,24 @@ def _do(s: PlanStep) -> list[str]:
     return out
 
 
-def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None) -> Path:
-    """Write PLAN.md (default ``.pymolt/PLAN.md``) and return its path."""
+def plan_md_path(plan, project_dir: str | Path) -> Path:
+    """Where PLAN.md goes by default: beside the stored plan
+    (``.pymolt/plans/<name>/PLAN.md``); for a plan only exported (``plan -o``), which is not
+    stored, ``.pymolt/PLAN.md`` as in 0.2."""
+    from pymolt.plan_store import LEGACY_PLAN_MD, PLAN_MD_FILE, stored_plan_file
+
     root = Path(project_dir).resolve()
-    out = Path(path).expanduser() if path else DEFAULT_PLAN_MD
+    if plan.name:
+        stored = stored_plan_file(root, plan.name)
+        if stored.is_file():
+            return stored.parent / PLAN_MD_FILE
+    return root / LEGACY_PLAN_MD
+
+
+def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None) -> Path:
+    """Write PLAN.md (default ``plan_md_path``) and return its path."""
+    root = Path(project_dir).resolve()
+    out = Path(path).expanduser() if path else plan_md_path(plan, root)
     if not out.is_absolute():
         out = root / out
     from pymolt.state_io import atomic_write_text

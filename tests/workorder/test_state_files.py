@@ -4,6 +4,7 @@ state's schema 2."""
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 
 import pytest
@@ -43,7 +44,8 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-# file (relative to .pymolt/, ``{run}`` for the run's id) -> the command that reads it.
+# file (relative to .pymolt/, ``{run}`` for the run's id, ``{plan}`` for the plan's name) -> the
+# command that reads it.
 CASES = {
     "env_config.json": lambda d: [
         "setup", d, "--manifest", "requirements.txt", "--tool", "system",
@@ -51,7 +53,9 @@ CASES = {
     "contract_state.json": lambda d: [
         "capture", "post-migration", "--project-dir", d, "--mode", "command", "--json", "--",
         sys.executable, "-c", "open('RAN', 'w')"],
-    "migration_plan.json": lambda d: ["plan", d, "--json"],
+    "migration_plan.json": lambda d: ["plan", d, "--json"],          # the 0.2 file plan moves
+    "plans/current.json": lambda d: ["plan", d, "--json"],
+    "plans/{plan}/plan.json": lambda d: ["apply", d, "--json"],
     "migration_state.json": lambda d: ["apply", d, "--json"],
     "apply_ledger.json": lambda d: ["rollback", d, "--json"],
     "migrations/{run}/state.json": lambda d: ["rollback", d, "--json"],
@@ -65,7 +69,7 @@ CASES = {
 def test_a_damaged_state_file_refuses_the_command_that_reads_it_and_stays_as_it_was(
         applied, name):
     root, plan = applied
-    path = root / ".pymolt" / name.format(run=plan.plan_id)
+    path = root / ".pymolt" / name.format(run=plan.plan_id, plan=plan.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(DAMAGED)
 
@@ -75,7 +79,7 @@ def test_a_damaged_state_file_refuses_the_command_that_reads_it_and_stays_as_it_
     failure = json.loads(result.stdout)
     assert failure["ok"] is False and failure["problem"] == "damaged"
     assert failure["path"] == str(path)
-    assert failure["error"].startswith(f".pymolt/{name.format(run=plan.plan_id)} (")
+    assert failure["error"].startswith(f".pymolt/{name.format(run=plan.plan_id, plan=plan.name)} (")
     assert "pymolt will not overwrite it" in failure["error"]
     assert failure["remedy"] and failure["hint"] == failure["remedy"]
     assert path.read_bytes() == DAMAGED
@@ -85,7 +89,7 @@ def test_a_damaged_state_file_refuses_the_command_that_reads_it_and_stays_as_it_
 @pytest.mark.parametrize("name", list(CASES))
 def test_status_reports_a_damaged_state_file_as_a_problem_of_its_phase(applied, name):
     root, plan = applied
-    path = root / ".pymolt" / name.format(run=plan.plan_id)
+    path = root / ".pymolt" / name.format(run=plan.plan_id, plan=plan.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(DAMAGED)
 
@@ -129,15 +133,92 @@ def test_status_reports_a_file_that_fails_validation(applied):
     assert status["problems"][0]["detail"].startswith("baseline.")
 
 
-def test_status_reports_a_large_file_it_scans_as_json_only_once_reading_it_fails(applied):
-    root, _plan = applied
-    path = root / ".pymolt" / "migration_plan.json"
+@pytest.mark.parametrize("layout", ["store", "0.2"])
+def test_status_reports_a_large_file_it_scans_as_json_only_once_reading_it_fails(applied,
+                                                                               layout):
+    root, plan = applied
+    if layout == "store":
+        path = root / ".pymolt" / "plans" / plan.name / "plan.json"
+    else:                                   # the 0.2 layout: its single file, no pointer
+        shutil.rmtree(root / ".pymolt" / "plans")
+        path = root / ".pymolt" / "migration_plan.json"
     path.write_text(json.dumps({"schema_version": 2, "target_python": 5}))
 
     status = json.loads(runner.invoke(app, ["status", str(root), "--json"]).stdout)
 
     assert [(p["phase"], p["path"]) for p in status["problems"]] == [("plan", str(path))]
     assert status["next_command"] is None
+
+
+# ── the current-plan pointer ─────────────────────────────────────────────────────────────
+
+
+def _pointer_cases(root, plan) -> dict:
+    """How a pointer goes wrong -> (its bytes, the problem, a phrase of the detail)."""
+    pointer = json.loads((root / ".pymolt" / "plans" / "current.json").read_text())
+    other = "f" * 32
+    return {
+        "damaged": (DAMAGED, "damaged", "not JSON"),
+        "newer": (json.dumps({**pointer, "schema_version": 2}).encode(), "newer",
+                  "schema 2; this pymolt reads up to 1"),
+        "missing target": (json.dumps({**pointer, "name": f"20200101T0000Z-{other[:8]}",
+                                       "plan_id": other}).encode(),
+                           "damaged", "which is not in .pymolt/plans/"),
+        "another id": (json.dumps({**pointer, "plan_id": plan.plan_id[:8] + "0" * 24}).encode(),
+                       "damaged", "but that plan.json holds plan"),
+    }
+
+
+POINTER_COMMANDS = {
+    "plan": lambda d: ["plan", d, "--json"],
+    "apply": lambda d: ["apply", d, "--json"],
+    "verify": lambda d: ["verify", d, "--json"],
+}
+
+
+@pytest.mark.parametrize("case", ["damaged", "newer", "missing target", "another id"])
+@pytest.mark.parametrize("command", list(POINTER_COMMANDS))
+def test_a_bad_pointer_refuses_the_commands_that_need_the_current_plan(applied, case,
+                                                                       command):
+    root, plan = applied
+    path = root / ".pymolt" / "plans" / "current.json"
+    data, problem, detail = _pointer_cases(root, plan)[case]
+    path.write_bytes(data)
+
+    result = runner.invoke(app, POINTER_COMMANDS[command](str(root)))
+
+    assert result.exit_code == 2, result.output
+    failure = json.loads(result.stdout)
+    assert failure["problem"] == problem and failure["path"] == str(path)
+    assert failure["kind"] == "current-plan pointer" and detail in failure["detail"]
+    assert path.read_bytes() == data
+    assert sorted(p.name for p in (root / ".pymolt" / "plans").iterdir()) == sorted(
+        [plan.name, "current.json"])
+
+
+@pytest.mark.parametrize("case", ["damaged", "newer", "missing target", "another id"])
+def test_status_shows_a_bad_pointer_as_a_problem_of_the_plan(applied, case):
+    root, plan = applied
+    path = root / ".pymolt" / "plans" / "current.json"
+    data, problem, detail = _pointer_cases(root, plan)[case]
+    path.write_bytes(data)
+
+    status = json.loads(runner.invoke(app, ["status", str(root), "--json"]).stdout)
+
+    assert [(p["phase"], p["path"], p["problem"]) for p in status["problems"]] == [
+        ("plan", str(path), problem)]
+    assert detail in status["problems"][0]["detail"]
+    assert status["next_command"] is None
+    assert path.read_bytes() == data
+
+
+def test_a_damaged_pointer_never_stops_a_runs_frozen_copy_from_loading(applied):
+    from pymolt.migration_plan import MigrationPlan
+
+    root, plan = applied
+    (root / ".pymolt" / "plans" / "current.json").write_bytes(DAMAGED)
+    frozen = root / ".pymolt" / "migrations" / plan.plan_id / "plan.json"
+    assert MigrationPlan.load(root, frozen).plan_id == plan.plan_id
 
 
 def test_the_mcp_tools_return_the_cli_envelope_and_status_view(applied):

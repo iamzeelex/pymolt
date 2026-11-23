@@ -10,6 +10,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from pymolt.migration_plan import MigrationPlan
 from pymolt.verify.facts import CallWarning
 from pymolt.verify.predict import PredictionReport, RiskTier
 from pymolt.workorder.manual import T0, link_and_manual_steps
@@ -107,9 +108,13 @@ def test_plan_md_collapses_low_steps_the_baseline_never_ran(tmp_path):
     assert f"## {low[0].id} ·" not in text                    # no section of its own
 
 
-def test_write_plan_md_defaults_to_dot_pymolt(tmp_path):
+def test_write_plan_md_defaults_to_the_plans_folder(tmp_path):
     root, plan = _plan(tmp_path)
+    # A plan only exported (`plan -o`) is not stored: PLAN.md goes where 0.2 put it.
     assert write_plan_md(plan, root) == root / ".pymolt" / "PLAN.md"
+    stored = plan.save(root)
+    assert write_plan_md(plan, root) == stored.parent / "PLAN.md"
+    assert stored.parent.name == plan.name
     assert write_plan_md(plan, root, "docs/PLAN.md") == root / "docs" / "PLAN.md"
     assert (root / "docs" / "PLAN.md").read_text(encoding="utf-8").startswith(
         "# Migration plan 3f2a9c1e")
@@ -199,8 +204,10 @@ def test_plan_writes_plan_md_and_lists_the_steps(tmp_path, monkeypatch):
     out = runner.invoke(app, ["plan", str(tmp_path), "--json"])
     assert out.exit_code == 0, out.output
     payload = json.loads(out.stdout)
-    assert payload["plan_md"] == str(tmp_path / ".pymolt" / "PLAN.md")
-    assert (tmp_path / ".pymolt" / "PLAN.md").is_file()
+    folder = tmp_path.resolve() / ".pymolt" / "plans" / MigrationPlan.load(tmp_path).name
+    assert payload["plan_path"] == str(folder / "plan.json")
+    assert payload["plan_md"] == str(folder / "PLAN.md")
+    assert (folder / "PLAN.md").is_file() and not (tmp_path / ".pymolt" / "PLAN.md").exists()
     assert [(s["id"], s["type"], s["executor"]) for s in payload["steps"]] == [
         ("env-1", "manifest-pin", "pymolt"), ("env-2", "target-env", "person"),
         ("mech-1", "codemod", "pymolt")]

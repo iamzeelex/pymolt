@@ -34,7 +34,7 @@ def test_the_store_writes_its_own_gitignore_and_never_the_projects(tmp_path):
     (tmp_path / ".pymolt" / ".gitignore").write_text("mine/")
     blobs.put_text(tmp_path, "x = 1\n")
     lines = (tmp_path / ".pymolt" / ".gitignore").read_text().splitlines()
-    assert lines == ["mine/", "blobs/", "cache/", "migrations/*/steps/"]
+    assert lines == ["mine/", "blobs/", "cache/", "migrations/*/steps/", "plans/current.json"]
     assert (tmp_path / ".gitignore").read_text() == "build/\n"
     blobs.ensure_gitignore(tmp_path)                          # idempotent
     assert (tmp_path / ".pymolt" / ".gitignore").read_text().count("blobs/") == 1
