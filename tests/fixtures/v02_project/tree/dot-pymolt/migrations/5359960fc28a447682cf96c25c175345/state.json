@@ -1,0 +1,31 @@
+{
+  "run_id": "5359960fc28a447682cf96c25c175345",
+  "status": "applied",
+  "plan_id": null,
+  "attempt": 1,
+  "prepared_at": "2026-11-23T00:55:53+00:00",
+  "applied_at": "2026-11-23T00:55:53+00:00",
+  "rolled_back_at": null,
+  "error": null,
+  "steps": {
+    "env-1": "applied"
+  },
+  "invocation": {
+    "id": "1a684da3d8c74c8d894db390d1bbe4a5",
+    "operation": "apply",
+    "status": "done",
+    "at": "2026-11-23T00:55:53+00:00",
+    "steps": [
+      "env-1"
+    ],
+    "files": [
+      {
+        "file": "requirements.txt",
+        "before": "a5a210dd34b98c6dfb8e625f42b123d98d504d39be0b389e12cd4c6d2db3a06c",
+        "after": "681a49ae6167dc98f923c64a2ca7a3ed841f7786cfa07a0996a2451d3966fa3d"
+      }
+    ],
+    "ledger_next_seq": 1,
+    "error": null
+  }
+}
