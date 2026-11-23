@@ -400,6 +400,9 @@ All notable changes to pymolt. The format follows
   says to capture post-migration again. It showed `recorded`: the new record is diffed from the
   step's first before-text, which the capture did not have either, so the step looked overtaken
   by a later edit, as if the capture held it.
+- `status` after `apply` and a new `plan` describes the new plan. The plan phase said "applied
+  by migration run" for the earlier plan; it now shows the saved plan and names the earlier
+  run, and the next command applies the new plan's steps.
 
 #### Assess, scan and setup
 
