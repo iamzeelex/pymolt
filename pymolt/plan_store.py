@@ -56,12 +56,14 @@ from pymolt.migration_plan import (
     NAME_RE,
     PLAN_KIND,
     PLAN_REMEDY,
+    UNKNOWN_TIME,
     MigrationPlan,
     MigrationPlanError,
     PlanSource,
     _now,
     _validate_run_id,
     content_digest_of,
+    name_of,
     plan_name,
 )
 from pymolt.state_io import (
@@ -211,12 +213,9 @@ def saved_plans(project_dir: str | Path) -> list[str]:
 
 
 def _stamp_name(plan: MigrationPlan) -> str:
-    """The plan's name, stamped when it has none (a ``created_at`` that is not a time: now)."""
+    """The plan's name, stamped when it has none (``migration_plan.name_of``)."""
     if plan.name is None:
-        try:
-            plan.name = plan_name(plan.created_at, plan.plan_id, plan.label)
-        except ValueError:
-            plan.name = plan_name(_now(), plan.plan_id, plan.label)
+        plan.name = name_of(plan)
     return plan.name
 
 
@@ -574,11 +573,14 @@ def _saved_hint(root: Path) -> str:
 
 
 def _legacy_name(data: dict) -> str | None:
+    """The name the 0.2 file's plan reads with (``migration_plan.name_of``), from its JSON."""
+    plan_id, label = str(data.get("plan_id") or ""), data.get("label")
     try:
-        return plan_name(str(data.get("created_at")), str(data.get("plan_id")),
-                         data.get("label"))
-    except (ValueError, MigrationPlanError):
+        return plan_name(str(data.get("created_at")), plan_id, label)
+    except MigrationPlanError:
         return None
+    except ValueError:
+        return f"{UNKNOWN_TIME}-{plan_id[:8]}" + (f"-{label}" if label else "")
 
 
 def _by_prefix(root: Path, prefix: str) -> Path:

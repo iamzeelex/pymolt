@@ -494,3 +494,20 @@ def test_saved_plans_without_a_pointer_make_no_plan_current(tmp_path):
     result = runner.invoke(app, ["apply", str(tmp_path), "--json"])
     assert result.exit_code == 2 and json.loads(result.stdout)["error"] == message
     assert not (tmp_path / ".pymolt" / "plans" / "current.json").exists()
+
+
+def test_a_02_plan_without_a_readable_date_moves_under_an_unknown_time(tmp_path):
+    root = _v02(tmp_path)
+    legacy = root / LEGACY
+    data = {**json.loads(legacy.read_text()), "created_at": "sometime"}
+    legacy.write_text(json.dumps(data))
+    frozen = root / ".pymolt" / "migrations" / data["plan_id"] / "plan.json"
+    frozen.write_text(json.dumps(data))
+    plan = MigrationPlan.load(root)
+
+    name = migrate_legacy(root)
+
+    assert name == f"00000000T0000Z-{data['plan_id'][:8]}" == plan.name
+    assert MigrationPlan.load(root).name == MigrationPlan.load(root, frozen).name == name
+    (root / LEGACY).write_text(json.dumps(data))      # the same plan in both places
+    assert resolve_plan_ref(root, data["plan_id"][:6]) == stored_plan_file(root, name)
