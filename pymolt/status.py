@@ -13,6 +13,10 @@ orientation without a state machine. It decides nothing and writes nothing.
 A state file that is damaged, or was written by a newer pymolt (``pymolt.state_io``), does
 not make status fail: it is read as missing, and reported as a problem of the phase it
 belongs to, with no next command and its remedy as the reason.
+
+It also names the current plan (``plan``: its identity) and the captures (``captures``: their
+ids), notes a plan still in the 0.2 layout, and says when the current plan was made at another
+commit than ``HEAD`` (``drift``): advisories, never a phase state or a next command.
 """
 
 from __future__ import annotations
@@ -73,6 +77,17 @@ class FunnelStatus(BaseModel):
     # Every damaged or newer state file found (``StateFileError.as_dict()`` plus ``phase``),
     # in funnel order; while there is one, there is no next command.
     problems: list[dict] = Field(default_factory=list)
+    # The current plan's identity (None: no current plan): ``name``, ``plan_id``, ``label``,
+    # ``created_at``, ``schema`` (the schema it was written in), ``pymolt_version``,
+    # ``git_commit``, ``git_dirty``, ``lineage`` and ``identity`` (its line in words).
+    plan: dict | None = None
+    # The captures' ids (``verify.models.capture_id``), None for a slot with no capture:
+    # ``baseline``, ``post_migration``, ``baseline_replicate``.
+    captures: dict = Field(default_factory=dict)
+    # The current plan was made (or confirmed by an unchanged re-plan) at another commit than
+    # HEAD: ``{plan_commit, head}``. An advisory only, never a phase state or a next command;
+    # None when either commit is unknown.
+    drift: dict | None = None
 
     def phase(self, name: str) -> PhaseState | None:
         return next((p for p in self.phases if p.phase == name), None)
@@ -172,12 +187,14 @@ def _age(iso_timestamp: str | None) -> str:
 
 
 def _capture_phase(
-    name: str, slot, current_fingerprint: str | None, *, world: str = ""
+    name: str, slot, current_fingerprint: str | None, *, world: str = "",
+    capture_id: str | None = None,
 ) -> PhaseState:
     """Project one capture slot, including whether its evidence still applies.
 
     ``current_fingerprint`` is the environment the capture must describe;
-    ``world`` names it in the stale detail when it is not the project as it is now.
+    ``world`` names it in the stale detail when it is not the project as it is now;
+    ``capture_id`` (``verify.service.slot_capture_id``) begins the detail.
     """
     label = "baseline" if name == "baseline" else "post-migration"
     if slot is None:
@@ -186,7 +203,8 @@ def _capture_phase(
             detail="not captured",
         )
 
-    bits = [f"{slot.events} events"]
+    bits = [capture_id] if capture_id else []
+    bits.append(f"{slot.events} events")
     if age := _age(slot.captured_at):
         bits.append(age)
     if slot.command:
@@ -232,7 +250,7 @@ def _capture_phase(
 
 def _baseline_phase(
     slot, current_fingerprint: str | None, receipt, project_path: Path,
-    current_setup: str | None = None,
+    current_setup: str | None = None, capture_id: str | None = None,
 ) -> PhaseState:
     """Project the baseline against the world it must describe.
 
@@ -242,18 +260,18 @@ def _baseline_phase(
     then would record the migrated world, not the starting point.
     """
     if receipt is None or receipt.status != "applied":
-        phase = _capture_phase("baseline", slot, current_fingerprint)
+        phase = _capture_phase("baseline", slot, current_fingerprint, capture_id=capture_id)
         return _content_only_move(phase, slot, current_setup)
     run = receipt.run_id[:8]
     start = receipt.starting_fingerprint(project_path)
     if start is not None:
         world = f"the one migration run {run} started from"
-        phase = _capture_phase("baseline", slot, start, world=world)
+        phase = _capture_phase("baseline", slot, start, world=world, capture_id=capture_id)
         # Pins bumped in the same manifest before the apply are part of the migration.
         return _content_only_move(
             phase, slot, getattr(receipt, "environment_setup_fingerprint", None),
             than=f" than {world}")
-    phase = _capture_phase("baseline", slot, None)
+    phase = _capture_phase("baseline", slot, None, capture_id=capture_id)
     if (
         phase.state == DONE
         and current_fingerprint is not None
@@ -373,9 +391,11 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
         applied_plan = receipt.plan_id or receipt.run_id
         saved = MigrationPlan.load(project_path)
         if saved is None or saved.plan_id == applied_plan:
+            named = f"plan {_plan_label(saved)} " if saved is not None else ""
             return PhaseState(
                 phase="plan", state=DONE,
-                detail=f"applied by migration run {receipt.run_id[:8]} (its steps: see steps)",
+                detail=f"{named}applied by migration run {receipt.run_id[:8]} (its steps: "
+                       "see steps)",
             )
         # A re-plan after an apply: the saved plan is a new one, projected as such.
         earlier = (f" · an earlier run ({receipt.run_id[:8]}) applied a previous plan "
@@ -400,7 +420,7 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     if not inspection.valid:
         return PhaseState(
             phase="plan", state=STALE,
-            detail=f"plan {plan.plan_id[:8]} is stale: {inspection.reasons[0]}{earlier}",
+            detail=f"plan {_plan_label(plan)} is stale: {inspection.reasons[0]}{earlier}",
         )
     # A rolled-back plan whose files are back at their planned originals applies again as is.
     again = (receipt is not None and receipt.status == "rolled_back"
@@ -408,13 +428,18 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     return PhaseState(
         phase="plan", state=DONE,
         detail=(
-            f"plan {plan.plan_id[:8]} · {len(plan.changes)} file(s) · "
+            f"plan {_plan_label(plan)} · {len(plan.changes)} file(s) · "
             f"{sum(change.sites for change in plan.changes)} rewrite(s)"
             + (f" · rolled back in run {receipt.run_id[:8]}; apply runs it again"
                if again else "")
             + earlier
         ),
     )
+
+
+def _plan_label(plan) -> str:
+    """How status names a plan: its name (``YYYYMMDDTHHMMZ-<id8>[-<label>]``), else its id."""
+    return plan.name or plan.plan_id[:8]
 
 
 def _precedes_start(post_slot, baseline_slot, receipt) -> bool:
@@ -620,6 +645,7 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
         environment_fingerprint,
         environment_setup_fingerprint,
         load_contract_state,
+        slot_capture_id,
         sources_changed,
         usable_replicate,
     )
@@ -681,8 +707,14 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
     baseline_slot = contract.baseline
     post_slot = contract.post_migration
     receipt = MigrationReceipt.load(project_path)
+    status.captures = {
+        "baseline": slot_capture_id(project_path, baseline_slot),
+        "post_migration": slot_capture_id(project_path, post_slot),
+        "baseline_replicate": slot_capture_id(project_path, contract.baseline_replicate),
+    }
     baseline = _baseline_phase(
         baseline_slot, fingerprint, receipt, project_path, current_setup=setup_fingerprint,
+        capture_id=status.captures["baseline"],
     )
     assess_phase = status.phase("assess")
     assert assess_phase is not None
@@ -702,7 +734,8 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
     if by_hand and plan.state == TODO:
         plan = plan.model_copy(update={"detail": plan.detail + " (optional: the migration was "
                                                                "made by hand)"})
-    post = _capture_phase("post_migration", post_slot, fingerprint)
+    post = _capture_phase("post_migration", post_slot, fingerprint,
+                          capture_id=status.captures["post_migration"])
     if post_slot is not None and hand and _precedes_start(post_slot, baseline_slot, receipt):
         post = PhaseState(
             phase="post-migration", state=STALE,
@@ -732,6 +765,7 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
                 detail=f"{post.detail} — {shown} changed since it was captured",
             )
     status.phases.extend([baseline, plan, *([steps] if steps else []), migration, post])
+    _plan_identity(status, project_path)
 
     if baseline.state == TODO and post.state == TODO:
         report = PhaseState(
@@ -793,6 +827,57 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
         and sources_changed(project_path, baseline_slot.sources_path) == [],
     )
     return status
+
+
+LEGACY_NOTE = ("this plan is in the 0.2 layout (.pymolt/migration_plan.json); the next "
+               "`pymolt plan .` moves it into .pymolt/plans/")
+LEGACY_BESIDE_NOTE = ("a plan in the 0.2 layout (.pymolt/migration_plan.json) is there beside the "
+                      "current plan; the next `pymolt plan .` moves it into .pymolt/plans/")
+
+
+def _plan_identity(status: FunnelStatus, project_path: Path) -> None:
+    """The current plan's identity (``status.plan``), the note when a plan is in the 0.2
+    layout, and the branch-drift advisory (``status.drift``): the commit the current plan was
+    made at (the pointer's ``checked_commit`` when an unchanged re-plan confirmed it since, else
+    the plan's ``source``) is known and is not ``HEAD``'s. Never a phase state or a next
+    command; silent when either commit is unknown. Reads one git commit, only for a plan made
+    in a repository."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.plan_store import legacy_plan_file, load_pointer
+    from pymolt.workorder.render import identity_line
+
+    plan = MigrationPlan.load(project_path)
+    pointer = load_pointer(project_path)
+    if legacy_plan_file(project_path).exists():
+        status.notes.append(LEGACY_NOTE if pointer is None else LEGACY_BESIDE_NOTE)
+    if plan is None:
+        return
+    source = plan.source
+    status.plan = {
+        "name": plan.name, "plan_id": plan.plan_id, "label": plan.label,
+        "created_at": plan.created_at, "schema": plan.adapted_from or plan.schema_version,
+        "pymolt_version": plan.pymolt_version,
+        "git_commit": source.git_commit if source is not None else None,
+        "git_dirty": source.git_dirty if source is not None else None,
+        "lineage": plan.lineage.model_dump(mode="json") if plan.lineage is not None else None,
+        "identity": identity_line(plan),
+    }
+    checked = pointer.checked_commit if pointer is not None \
+        and pointer.plan_id == plan.plan_id else None
+    made = checked or (source.git_commit if source is not None else None)
+    if not made:
+        return
+    from pymolt.adapters.git import head_commit
+
+    head = head_commit(project_path)
+    if head is None or head == made:
+        return
+    dirty = " with uncommitted changes" if checked is None and source is not None \
+        and source.git_dirty else ""
+    status.drift = {"plan_commit": made, "head": head}
+    status.notes.append(f"the current plan was made at commit {made[:7]}{dirty}; HEAD is "
+                        f"{head[:7]}: re-plan (`pymolt plan .`) if the code it plans for "
+                        "changed")
 
 
 def _projection(project_path: Path, receipt, post_slot):

@@ -290,8 +290,10 @@ def status(
             f"[{'dim' if check.state == 'ok' else colour}]{detail}[/]"
         )
 
+    if report.plan is not None:
+        console.print(f"  [dim]current plan: {escape(report.plan['identity'])}[/dim]")
     for note in report.notes:
-        console.print(f"  [dim]note: {note}[/dim]")
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
 
     console.print()
     if report.next_command:

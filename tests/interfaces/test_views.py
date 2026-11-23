@@ -78,7 +78,9 @@ def test_status_surfaces_environment_problems():
         next_reason="The baseline no longer describes the project.",
     )
     view = views.status_view(report)
-    data = _assert_envelope(view, {"phases", "checks", "next_command", "next_reason", "notes"})
+    data = _assert_envelope(view, {"phases", "checks", "next_command", "next_reason", "notes",
+                                   "plan", "captures", "drift"})
+    assert (data["plan"], data["captures"], data["drift"]) == (None, {}, None)
     assert view["full_report_path"] is None, "status fits whole: nothing to point at"
     assert data["warnings"] == ["base environment: container abc is not running (start it)"]
     assert "ERROR base environment" in view["summary"]
