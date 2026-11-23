@@ -781,6 +781,8 @@ def plan(
                 f"[green]{escape(str(saved_path))}[/green] only: not saved in .pymolt/plans/")
     if saved.moved_legacy:
         done += f"\nThe 0.2 plan file was moved into .pymolt/plans/{escape(saved.moved_legacy)}"
+    if pruned := views.pruned_line(saved.pruned):
+        done += f"\n[dim]{escape(pruned)}[/dim]"
     console.print(Panel(
         f"{escape(identity_line(migration_plan))}\n{done}\n\n"
         f"Dependencies: [bold]{payload['dependencies']}[/bold]   "

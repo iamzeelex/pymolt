@@ -221,3 +221,37 @@ def test_nothing_absolute_or_personal_in_the_facts(tmp_path, monkeypatch):
                     "secret"):
         assert private not in text
     assert facts[0].git_prefix == "svc" and facts[0].git_dirty is True
+
+
+# ── tracked_files (plan retention) ───────────────────────────────────────────────────────
+
+
+def test_tracked_files_lists_what_git_tracks_under_the_project(tmp_path):
+    repo = _repo(tmp_path / "mono", {"svc/.pymolt/plans/a/plan.json": "{}\n",
+                                     "svc/app.py": "x = 1\n"})
+    root = repo / "svc"
+    (root / ".pymolt" / "plans" / "b").mkdir()
+    (root / ".pymolt" / "plans" / "b" / "plan.json").write_text("{}\n")      # untracked
+    assert git.tracked_files(root, ".pymolt/plans") == [".pymolt/plans/a/plan.json"]
+    assert git.tracked_files(repo, "svc/.pymolt/plans") == ["svc/.pymolt/plans/a/plan.json"]
+
+
+def test_tracked_files_outside_a_repository_or_without_git_is_empty(tmp_path, monkeypatch):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert git.tracked_files(plain, ".pymolt/plans") == []
+    root = _repo(tmp_path / "r", {".pymolt/plans/a/plan.json": "{}\n"})
+    monkeypatch.setenv("PATH", "")
+    assert git.tracked_files(root, ".pymolt/plans") == []
+
+
+@pytest.mark.parametrize("answer", [
+    subprocess.TimeoutExpired(["git"], 5), OSError("busy"),
+    (128, "fatal: detected dubious ownership in repository at '/x'\n"),
+    (1, "fatal: something else\n"),
+])
+def test_tracked_files_cannot_say_when_git_fails(tmp_path, monkeypatch, answer):
+    _stub(monkeypatch, lambda args: answer if isinstance(answer, BaseException)
+          else _done(args, answer[0], stderr=answer[1]))
+    assert git.tracked_files(tmp_path, ".pymolt/plans") is None
+    assert git.tracked_files(tmp_path / "missing", ".pymolt/plans") is None

@@ -25,6 +25,11 @@ The calls:
 A call that times out, fails or writes undecodable output leaves every fact None, with quality
 ``error`` and a fixed note; except ``status``: when only it fails, the commit and prefix are
 kept (quality ``git``), ``git_dirty`` is None and the note says so.
+
+``tracked_files`` (plan retention never removes a plan folder git tracks) is one
+``git -c core.fsmonitor=false ls-files -z -- <pathspec>``: outside a repository, or without
+git, nothing is tracked (``[]``); a call that fails, times out or meets a repository of
+dubious ownership cannot say (None).
 """
 
 from __future__ import annotations
@@ -136,4 +141,27 @@ def git_facts(project_dir: str | Path) -> GitFacts:
                     quality="git")
 
 
-__all__ = ["GIT_ENV", "GitFacts", "Quality", "git_facts", "head_commit"]
+def tracked_files(project_dir: str | Path, pathspec: str) -> list[str] | None:
+    """The files git tracks under ``pathspec``, as git prints them (POSIX, relative to the
+    project folder): ``[]`` outside a repository or without git, where nothing is tracked;
+    None when git cannot say (it failed, timed out, wrote unreadable output, or refuses the
+    repository as of dubious ownership). Never raises."""
+    root = Path(project_dir)
+    if not root.is_dir():
+        return None
+    try:
+        done = _git(root, "-c", "core.fsmonitor=false", "ls-files", "-z", "--", pathspec)
+    except FileNotFoundError:
+        return []
+    except _Failed:
+        return None
+    if done.returncode != 0:
+        stderr = done.stderr or ""
+        if done.returncode == 128 and "not a git repository" in stderr \
+                and "dubious ownership" not in stderr:
+            return []
+        return None
+    return [path for path in (done.stdout or "").split("\0") if path]
+
+
+__all__ = ["GIT_ENV", "GitFacts", "Quality", "git_facts", "head_commit", "tracked_files"]

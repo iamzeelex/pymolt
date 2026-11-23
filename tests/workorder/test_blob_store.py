@@ -120,9 +120,9 @@ def test_nothing_is_collected_while_the_receipt_or_ledger_cannot_be_read(tmp_pat
 def test_plan_collects_when_the_lock_is_free_and_leaves_it_otherwise(tmp_path):
     stray = blobs.put_text(tmp_path, "nobody = 1\n")
     with _migration_lock(tmp_path, "apply"):
-        assert blobs.collect_after_plan(tmp_path) == []
+        assert blobs.collect_after_plan(tmp_path).blobs == []
     assert blobs.has_blob(tmp_path, stray)
-    assert blobs.collect_after_plan(tmp_path) == [stray]
+    assert blobs.collect_after_plan(tmp_path).blobs == [stray]
 
 
 def test_apply_collects_what_no_run_keeps(tmp_path):

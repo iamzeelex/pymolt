@@ -26,6 +26,11 @@ saves nothing: the current plan stays, with its approvals, and the pointer recor
 it was confirmed for. Otherwise the new plan is derived from the current one (its lineage:
 root, parent, generation; recorded only) unless ``--fresh``; a new ``--label`` always saves.
 
+**Retention** (``prune_plans``, after each ``plan``, with the blob store's collection under the
+migration lock). Kept: the current plan and its parent, every plan a run references, every plan
+folder git tracks, and the 20 newest; the rest are removed. Nothing is removed when a state file
+it reads is damaged or git cannot say what it tracks, and ``pruned`` says so.
+
 **A 0.2 project.** Only ``plan`` moves the 0.2 file into the store (``migrate_legacy``), by its
 stored form, so its runs, frozen copies and agent approvals hold. Every other command reads it
 where it is and writes nothing under ``plans/``.
@@ -51,6 +56,7 @@ import dataclasses
 import json
 import logging
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -101,6 +107,9 @@ POINTER_REMEDY = rebuild_remedy(
     "`pymolt apply . --plan NAME`")
 #: How many new plan ids ``store`` draws when the plan's folder is taken.
 REDRAWS = 3
+#: How many plans retention keeps by age (the newest, by name), besides those it keeps for what
+#: they are: the current plan, its parent, every plan a run references, every plan git tracks.
+KEEP_NEWEST = 20
 
 _HEX_PREFIX = re.compile(r"^[0-9a-f]{4,32}$")
 _PLAN_ID = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -155,13 +164,26 @@ class PlanPointer(BaseModel):
 
 
 @dataclasses.dataclass
+class PruneResult:
+    """What retention did after a ``plan`` (``prune_plans``): the plans it ``removed``, or why
+    it removed none when it had to stop (``skipped``: a damaged state file, git unable to say
+    which plan folders it tracks, another operation holding the migration lock)."""
+
+    removed: list[str] = dataclasses.field(default_factory=list)
+    skipped: str | None = None
+
+    def as_dict(self) -> dict:
+        return {"removed": list(self.removed), "skipped": self.skipped}
+
+
+@dataclasses.dataclass
 class PlanSaveResult:
     """What ``save_planned`` did. ``plan``: the plan made, or for an unchanged re-plan the
     current plan it kept; ``path``: where that plan is (its ``plan.json``, or the ``-o``
     file); ``saved``: whether a new plan was stored under ``plans/`` and made current;
     ``unchanged_from``: the name of the current plan an unchanged re-plan kept;
-    ``moved_legacy``: the name the 0.2 plan file was moved in under; ``pruned``: the plans
-    retention removed; ``baseline_warning``: the plan's ``baseline_warning`` (never saved);
+    ``moved_legacy``: the name the 0.2 plan file was moved in under; ``pruned``: what
+    retention did (``PruneResult``); ``baseline_warning``: the plan's ``baseline_warning`` (never saved);
     ``exported``: written to ``-o``'s file only."""
 
     plan: MigrationPlan
@@ -169,7 +191,7 @@ class PlanSaveResult:
     saved: bool
     unchanged_from: str | None = None
     moved_legacy: str | None = None
-    pruned: list[str] = dataclasses.field(default_factory=list)
+    pruned: PruneResult = dataclasses.field(default_factory=PruneResult)
     baseline_warning: str | None = None
     exported: bool = False
 
@@ -502,8 +524,8 @@ def save_planned(project_dir: str | Path, plan: MigrationPlan, *,
     4. otherwise its lineage is stamped (``stamp_lineage``) and it is stored and made current
        (``MigrationPlan.save``); with ``output`` (``-o``) it is only written there (``export``).
 
-    Then the blobs retention no longer keeps are dropped (``collect_after_plan``: skipped while
-    another operation holds the migration lock). With ``output`` an unchanged plan writes the
+    Then the blobs and the plans retention no longer keeps are removed (``collect_after_plan``,
+    ``prune_plans``: both skipped while another operation holds the migration lock). With ``output`` an unchanged plan writes the
     current plan's stored form there, so applying that file applies the current plan."""
     from pymolt.migration_plan import plan_path
     from pymolt.workorder.blobs import collect_after_plan
@@ -537,7 +559,7 @@ def save_planned(project_dir: str | Path, plan: MigrationPlan, *,
                                         moved_legacy=moved)
     result.baseline_warning = warning
     result.exported = output is not None
-    collect_after_plan(root)
+    result.pruned = collect_after_plan(root, plans=True).plans or PruneResult()
     return result
 
 
@@ -586,6 +608,116 @@ def _move_plan_md(root: Path, plan: MigrationPlan) -> None:
 
     write_plan_md(plan, root, plan_folder(root, _stamp_name(plan)) / PLAN_MD_FILE)
     old.unlink()
+
+
+# ── retention ─────────────────────────────────────────────────────────────────────────────
+
+
+def plan_folders(project_dir: str | Path) -> list[str]:
+    """The folders of ``.pymolt/plans/`` named like a plan (``NAME_RE``), oldest first: the
+    only entries retention may remove."""
+    base = plans_dir(project_dir)
+    if not base.is_dir():
+        return []
+    return sorted(child.name for child in base.iterdir()
+                  if NAME_RE.match(child.name) and child.is_dir() and not child.is_symlink())
+
+
+def needs_pruning(project_dir: str | Path) -> bool:
+    """Whether there are more plan folders than retention keeps by age."""
+    return len(plan_folders(project_dir)) > KEEP_NEWEST
+
+
+def kept_plan_ids(project_dir: str | Path) -> set[str]:
+    """The plan ids retention keeps whatever their age:
+
+    - the current plan (the pointer's) and its parent (``lineage.parent``);
+    - every plan a run references: the receipt's own and each of its runs' (``plan_id``, else
+      the run's id, which is its plan's for a first run), the ledger's runs, and for each
+      ``migrations/<dir>/`` its ``state.json``'s plan (else the folder's name: a folder that
+      holds only an approval is named by its plan).
+
+    ``StateFileError`` when the pointer, the current plan, the receipt, the ledger or a run's
+    state cannot be read: what it references is unknown."""
+    from pymolt.apply_ledger import load_ledger
+    from pymolt.migration_plan import _load_run_state
+    from pymolt.migration_state import MigrationReceipt
+
+    root = Path(project_dir).resolve()
+    keep: set[str] = set()
+    pointer, path = current_pointer(root)
+    if pointer is not None:
+        keep.add(pointer.plan_id)
+        data = read_state_json(path, kind=PLAN_KIND, newest=PLAN_SCHEMA_VERSION,
+                               remedy=PLAN_REMEDY) or {}
+        lineage = data.get("lineage")
+        parent = lineage.get("parent") if isinstance(lineage, dict) else None
+        if isinstance(parent, str):
+            keep.add(parent)
+    receipt = MigrationReceipt.load(root)
+    ledger = load_ledger(root, receipt=receipt)
+    if receipt is not None:
+        keep.add(receipt.plan_id or receipt.run_id)
+        keep |= {run.plan_id or run.run_id for run in getattr(receipt, "runs", None) or ()}
+    keep |= {event.run_id for event in getattr(ledger, "events", None) or ()}
+    runs = root / ".pymolt" / "migrations"
+    for child in sorted(runs.iterdir()) if runs.is_dir() else ():
+        if child.is_dir():
+            state = _load_run_state(child / "state.json")
+            keep.add((state.plan_id or state.run_id) if state is not None else child.name)
+    return keep
+
+
+def prune_plans(project_dir: str | Path) -> PruneResult:
+    """Remove the stored plans retention does not keep (design §1, owner decisions 2026-11-22).
+
+    Only folders named like a plan (``plan_folders``) are candidates; anything else under
+    ``plans/`` is never touched. Kept: the plans of ``kept_plan_ids`` (matched by the id in the
+    folder's name, so a plan whose first 8 hex another plan shares is kept too), the
+    ``KEEP_NEWEST`` newest by name, and every plan folder git tracks (one ``git ls-files``,
+    ``adapters.git.tracked_files``; outside a repository or without git none is). Nothing is
+    removed, and ``skipped`` says why, when a state file it reads is damaged or git cannot say
+    what it tracks. A folder that cannot be removed is only logged.
+
+    The caller holds the migration lock (``workorder.blobs.collect_after_plan``); the state
+    lock is held while pruning."""
+    from pymolt.adapters.git import tracked_files
+
+    root = Path(project_dir).resolve()
+    if not needs_pruning(root):
+        return PruneResult()
+    with state_lock(root, operation="plan: remove old plans"):
+        names = plan_folders(root)
+        try:
+            kept = {plan_id[:8] for plan_id in kept_plan_ids(root)}
+        except StateFileError as exc:
+            return PruneResult(skipped=f"no plan was removed: {exc.headline}, so the plans it "
+                                       "references are unknown")
+        newest = set(names[-KEEP_NEWEST:])
+        candidates = [name for name in names
+                      if name not in newest and NAME_RE.match(name).group(2) not in kept]
+        if not candidates:
+            return PruneResult()
+        tracked = tracked_files(root, PLANS_DIR.as_posix())
+        if tracked is None:
+            return PruneResult(skipped="no plan was removed: git could not say which plan "
+                                       "folders it tracks (it failed or timed out)")
+        prefix = PLANS_DIR.parts
+        tracked_names = {parts[len(prefix)] for parts in (tuple(p.split("/")) for p in tracked)
+                         if len(parts) > len(prefix) + 1 and parts[:len(prefix)] == prefix}
+        removed: list[str] = []
+        for name in candidates:
+            if name in tracked_names:
+                continue
+            try:
+                shutil.rmtree(plan_folder(root, name))
+            except OSError:
+                logger.warning("could not remove the old plan %s", name, exc_info=True)
+                continue
+            removed.append(name)
+    if removed:
+        logger.info("removed %d old plan(s) from .pymolt/plans/", len(removed))
+    return PruneResult(removed=removed)
 
 
 # ── adoption ──────────────────────────────────────────────────────────────────────────────
@@ -722,5 +854,6 @@ __all__ = [
     "legacy_plan_file", "load_pointer", "migrate_legacy", "no_current_plan", "plan_folder",
     "plans_dir", "pointer_path", "resolve_plan_ref", "save_planned", "saved_plans",
     "check_label", "stamp_lineage", "stamp_provenance", "store", "stored_plan_file",
-    "unchanged_from", "write_pointer",
+    "unchanged_from", "write_pointer", "KEEP_NEWEST", "PruneResult", "kept_plan_ids",
+    "needs_pruning", "plan_folders", "prune_plans",
 ]
