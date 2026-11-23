@@ -873,8 +873,28 @@ def plan_identity(plan, saved=None) -> dict:
         "saved": saved.saved if saved is not None else True,
         "unchanged_from": getattr(saved, "unchanged_from", None),
         "moved_legacy": getattr(saved, "moved_legacy", None),
-        "pruned": list(getattr(saved, "pruned", None) or ()),
+        # What plan retention did: the plans it removed, or why it removed none.
+        "pruned": pruned_data(getattr(saved, "pruned", None)),
     }
+
+
+def pruned_data(pruned) -> dict:
+    """``plan_store.PruneResult`` -> ``{removed, skipped}`` (None: nothing was pruned)."""
+    if pruned is None:
+        return {"removed": [], "skipped": None}
+    return pruned.as_dict()
+
+
+def pruned_line(pruned) -> str | None:
+    """What plan retention did, in words; None when it did nothing."""
+    data = pruned_data(pruned)
+    if data["skipped"]:
+        return f"Old plans: {data['skipped']}."
+    if data["removed"]:
+        return (f"Removed {len(data['removed'])} old plan(s) retention no longer keeps "
+                "(the current plan, its parent, plans runs reference, plans git tracks and the "
+                "20 newest are kept).")
+    return None
 
 
 #: What an unchanged re-plan says (``plan``'s panel, its view and PLAN.md's writer).
@@ -990,6 +1010,8 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
     ]
     if identity["moved_legacy"]:
         lines.append(f"The 0.2 plan file was moved into .pymolt/plans/{identity['moved_legacy']}.")
+    if pruned := pruned_line(getattr(saved, "pruned", None)):
+        lines.append(pruned)
     if advisories:
         lines.append(f"{len(advisories)} site(s) need manual review (data.advisories).")
     if manual:

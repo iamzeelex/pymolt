@@ -312,7 +312,8 @@ def test_plan_json_says_what_was_saved_and_what_was_kept(cli_project):
     assert first["plan_source"]["quality"] in ("not-a-repo", "git", "no-git", "error")
     assert first["baseline_capture_id"] == capture.capture_id
     assert len(first["content_digest"]) == 64 and first["label"] is None
-    assert first["pruned"] == [] and first["moved_legacy"] is None
+    assert first["pruned"] == {"removed": [], "skipped": None}
+    assert first["moved_legacy"] is None
     assert first["baseline_warning"] is None
 
     again = _plan_json(root)
