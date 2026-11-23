@@ -179,7 +179,7 @@ def test_a_re_plan_after_an_applied_run_is_projected_as_the_saved_plan(tmp_path)
 
     plan_phase = status.phase("plan")
     assert plan_phase.state == "done"
-    assert f"plan {new.plan_id[:8]}" in plan_phase.detail
+    assert f"plan {new.name} · " in plan_phase.detail
     assert "applied by migration run" not in plan_phase.detail
     assert f"applied a previous plan ({old.plan_id[:8]})" in plan_phase.detail
     assert status.next_command == "pymolt apply ."

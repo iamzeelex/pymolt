@@ -188,6 +188,13 @@ def status_view(report) -> dict:
         names = [p.phase for p in report.phases if p.state == state]
         if names:
             lines.append(f"{label}: {', '.join(names)}.")
+    captures = dict(getattr(report, "captures", None) or {})
+    plan = getattr(report, "plan", None)
+    if plan is not None:
+        lines.append(f"Plan {plan['name'] or plan['plan_id'][:8]}; baseline "
+                     f"{captures.get('baseline') or 'not captured'}.")
+    for note in report.notes:           # the 0.2 layout, the branch drift: advisories
+        lines.append(f"Note: {note}.")
     warnings: list[str] = []
     for problem in report.problems:     # a damaged or newer state file: fix it first
         warnings.append(problem["error"])
@@ -204,6 +211,9 @@ def status_view(report) -> dict:
         "next_command": report.next_command,
         "next_reason": report.next_reason,
         "notes": list(report.notes),
+        "plan": plan,
+        "captures": captures,
+        "drift": getattr(report, "drift", None),
     }
     if report.inconclusive_kind is not None:
         data["inconclusive_kind"] = report.inconclusive_kind
@@ -819,7 +829,8 @@ def apply_view(result, plan, project_dir=None) -> dict:
     remaining = {status: lists.cap(f"remaining.{status}", ids)
                  for status, ids in result.remaining.items()}
     data = {
-        "outcome": result.outcome, "plan_id": result.plan_id, "run_id": result.run_id,
+        "outcome": result.outcome, "plan_id": result.plan_id,
+        "plan_name": getattr(plan, "name", None), "run_id": result.run_id,
         "applied": [{"step": sid, "title": titles.get(sid), "rebased": sid in result.rebased,
                      "wrote": sid not in result.unwritten} for sid in result.applied],
         "rebased": list(result.rebased), "noop": list(result.noop),
@@ -843,6 +854,7 @@ def rollback_view(result) -> dict:
     summary = (f"rolled back {', '.join(result.steps) or 'no step'} of run {result.run_id[:8]}"
                f"; {len(result.files_restored)} file(s) restored")
     data = {"run_id": result.run_id, "plan_id": result.plan.plan_id,
+            "plan_name": getattr(result.plan, "name", None),
             "rolled_back_at": result.rolled_back_at, "steps": list(result.steps),
             "kept": list(result.kept), "files_restored": list(result.files_restored),
             "post_migration_capture": result.post, "post_migration_trace": result.post_trace}
