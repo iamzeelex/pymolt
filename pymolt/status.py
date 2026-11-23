@@ -368,11 +368,18 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     """Project the saved exact plan, including hash/environment staleness."""
     from pymolt.migration_plan import MigrationPlan, inspect_migration_plan
 
+    earlier = ""
     if receipt is not None and getattr(receipt, "status", "applied") == "applied":
-        return PhaseState(
-            phase="plan", state=DONE,
-            detail=f"applied by migration run {receipt.run_id[:8]} (its steps: see steps)",
-        )
+        applied_plan = receipt.plan_id or receipt.run_id
+        saved = MigrationPlan.load(project_path)
+        if saved is None or saved.plan_id == applied_plan:
+            return PhaseState(
+                phase="plan", state=DONE,
+                detail=f"applied by migration run {receipt.run_id[:8]} (its steps: see steps)",
+            )
+        # A re-plan after an apply: the saved plan is a new one, projected as such.
+        earlier = (f" · an earlier run ({receipt.run_id[:8]}) applied a previous plan "
+                   f"({applied_plan[:8]})")
     if assess.state != DONE:
         return PhaseState(
             phase="plan", state=BLOCKED,
@@ -391,7 +398,7 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     if not inspection.valid:
         return PhaseState(
             phase="plan", state=STALE,
-            detail=f"plan {plan.plan_id[:8]} is stale: {inspection.reasons[0]}",
+            detail=f"plan {plan.plan_id[:8]} is stale: {inspection.reasons[0]}{earlier}",
         )
     # A rolled-back plan whose files are back at their planned originals applies again as is.
     again = (receipt is not None and receipt.status == "rolled_back"
@@ -403,6 +410,7 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
             f"{sum(change.sites for change in plan.changes)} rewrite(s)"
             + (f" · rolled back in run {receipt.run_id[:8]}; apply runs it again"
                if again else "")
+            + earlier
         ),
     )
 

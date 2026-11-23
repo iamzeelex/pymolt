@@ -166,6 +166,38 @@ def test_an_earlier_run_in_effect_keeps_the_migration_applied(tmp_path):
     assert migration.state == "done" and "is in effect" in migration.detail
 
 
+def test_a_re_plan_after_an_applied_run_is_projected_as_the_saved_plan(tmp_path):
+    """`apply` then `plan` again: the plan phase describes the new plan, not the applied run."""
+    from pymolt.migration_plan import MigrationPlan
+
+    old = plan_for(tmp_path, {M: (APP, [rename("a.f", "a.g")])})
+    apply_steps(tmp_path, MigrationPlan.load(tmp_path))
+    new = plan_next(tmp_path, {M: [rename("a.h", "a.k")]})
+    assert new.plan_id != old.plan_id
+
+    status = build_status(tmp_path)
+
+    plan_phase = status.phase("plan")
+    assert plan_phase.state == "done"
+    assert f"plan {new.plan_id[:8]}" in plan_phase.detail
+    assert "applied by migration run" not in plan_phase.detail
+    assert f"applied a previous plan ({old.plan_id[:8]})" in plan_phase.detail
+    assert status.next_command == "pymolt apply ."
+    assert {s["id"]: s["status"] for s in status.steps if s["id"] == "mech-1"} == {
+        "mech-1": "planned"}
+
+
+def test_the_applied_plan_itself_is_still_reported_as_applied(tmp_path):
+    from pymolt.migration_plan import MigrationPlan
+
+    plan_for(tmp_path, {M: (APP, [rename("a.f", "a.g")])})
+    apply_steps(tmp_path, MigrationPlan.load(tmp_path))
+
+    detail = build_status(tmp_path).phase("plan").detail
+
+    assert "applied by migration run" in detail
+
+
 # ── the next command, rule by rule (design 6) ─────────────────────────────────────────────
 
 
