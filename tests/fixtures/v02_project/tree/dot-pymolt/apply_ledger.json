@@ -1,0 +1,27 @@
+{
+  "schema": "pymolt.apply_ledger/2",
+  "events": [
+    {
+      "seq": 1,
+      "event": "apply",
+      "run_id": "5359960fc28a447682cf96c25c175345",
+      "step_id": "env-1",
+      "at": "2026-11-23T00:55:53+00:00",
+      "executor": "pymolt",
+      "actor": "pymolt",
+      "attestation": null,
+      "files": [
+        {
+          "file": "requirements.txt",
+          "before": "a5a210dd34b98c6dfb8e625f42b123d98d504d39be0b389e12cd4c6d2db3a06c",
+          "after": "681a49ae6167dc98f923c64a2ca7a3ed841f7786cfa07a0996a2451d3966fa3d"
+        }
+      ],
+      "risk_ids": [],
+      "wrote": true,
+      "restored": null,
+      "reason": null
+    }
+  ],
+  "entries": []
+}

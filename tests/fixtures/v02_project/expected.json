@@ -1,0 +1,96 @@
+{
+  "fixture": 1,
+  "made_by": {
+    "pymolt_version": "0.2.0.dev0",
+    "commit": "d197ae7dabc47d4e64ccae9c2ef8109dcd8f1f6d",
+    "dirty": false
+  },
+  "toy": "bench/e2e_pandas, equiv scenario; requirements.txt pins pandas==1.5.3",
+  "commands": [
+    [
+      "setup",
+      ".",
+      "--base-python",
+      "3.11",
+      "--target-python",
+      "3.12",
+      "--target-env",
+      "<ENVS>/3.12"
+    ],
+    [
+      "capture",
+      "baseline",
+      "--mode",
+      "tests",
+      "--project-dir",
+      ".",
+      "--force",
+      "--",
+      "<ENVS>/3.11/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "-p",
+      "no:cacheprovider"
+    ],
+    [
+      "plan",
+      ".",
+      "--target-manifest",
+      "requirements-target.txt"
+    ],
+    [
+      "apply",
+      ".",
+      "--step",
+      "env-1"
+    ]
+  ],
+  "plan": {
+    "file": ".pymolt/migration_plan.json",
+    "plan_id": "5359960fc28a447682cf96c25c175345",
+    "schema_version": 2,
+    "created_at": "2026-11-23T00:55:52+00:00",
+    "steps": [
+      "env-1",
+      "env-2",
+      "mech-1",
+      "beh-1",
+      "beh-2",
+      "beh-3"
+    ],
+    "pymolt_steps": [
+      "env-1",
+      "mech-1"
+    ],
+    "plan_digest": "2c335c1f6b318f5f2907836bd02577dce9c5d27a16546a7a579f355be458947b"
+  },
+  "baseline": {
+    "trace": ".pymolt/contract_traces/baseline.jsonl",
+    "captured_at": "2026-11-23T00:55:49+00:00",
+    "trace_sha256": "c25dfdb2dc1742cf36993ff6869e1b3fead32d509417bde6efafa5424a91f82f"
+  },
+  "run": {
+    "run_id": "5359960fc28a447682cf96c25c175345",
+    "closed": false,
+    "frozen_plan": ".pymolt/migrations/5359960fc28a447682cf96c25c175345/plan.json",
+    "applied": [
+      "env-1"
+    ]
+  },
+  "approval": null,
+  "relocate": {
+    "placeholders": {
+      "<ROOT>": "the project root",
+      "<ENVS>": "the e2e_pandas environments folder",
+      "<TMPDIR>": "the generating machine's temp folder",
+      "~": "the generating user's home"
+    },
+    "rehash": [
+      {
+        "file": ".pymolt/contract_traces/baseline.jsonl",
+        "sha256": "c25dfdb2dc1742cf36993ff6869e1b3fead32d509417bde6efafa5424a91f82f"
+      }
+    ]
+  }
+}

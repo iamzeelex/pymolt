@@ -1,0 +1,73 @@
+{
+  "schema_version": 2,
+  "run_id": "5359960fc28a447682cf96c25c175345",
+  "plan_id": "5359960fc28a447682cf96c25c175345",
+  "status": "applied",
+  "progress": "partial",
+  "applied_at": "2026-11-23T00:55:53+00:00",
+  "updated_at": "2026-11-23T00:55:53+00:00",
+  "target_python": "3.12",
+  "source_manifest": "requirements.txt",
+  "target_manifest_path": "<ROOT>/requirements-target.txt",
+  "baseline_trace_path": "<ROOT>/.pymolt/contract_traces/baseline.jsonl",
+  "baseline_captured_at": "2026-11-23T00:55:49+00:00",
+  "environment_fingerprint": "398821f463f095ff",
+  "environment_setup_fingerprint": "e11ff84c8cfb5f48",
+  "allow_no_baseline": false,
+  "files_changed": [],
+  "patterns_applied": 0,
+  "no_codemods_required": false,
+  "plan_path": "<ROOT>/.pymolt/migrations/5359960fc28a447682cf96c25c175345/plan.json",
+  "rolled_back_at": null,
+  "files_restored": null,
+  "self_check": {
+    "compile": [],
+    "smoke": {
+      "status": "skipped",
+      "python": null,
+      "executable": null,
+      "modules": [],
+      "failed": {},
+      "pre_existing": {},
+      "not_imported": {},
+      "reason": "no changed file is an importable module"
+    }
+  },
+  "runs": [
+    {
+      "run_id": "5359960fc28a447682cf96c25c175345",
+      "plan_id": "5359960fc28a447682cf96c25c175345",
+      "plan_path": "<ROOT>/.pymolt/migrations/5359960fc28a447682cf96c25c175345/plan.json",
+      "opened_at": "2026-11-23T00:55:53+00:00",
+      "closed": false,
+      "closed_at": null,
+      "starting_fingerprint": "398821f463f095ff",
+      "setup_fingerprint": "e11ff84c8cfb5f48",
+      "target_manifest_sha256": "681a49ae6167dc98f923c64a2ca7a3ed841f7786cfa07a0996a2451d3966fa3d",
+      "baseline_kind": "full"
+    }
+  ],
+  "steps": {
+    "5359960fc28a447682cf96c25c175345:env-1": {
+      "status": "applied",
+      "epoch": 1,
+      "executor": "pymolt",
+      "actor": "pymolt",
+      "claim": "intended",
+      "applied_at": "2026-11-23T00:55:53+00:00",
+      "rolled_back_at": null,
+      "files": [
+        "requirements.txt"
+      ],
+      "files_restored": null,
+      "risk_ids": [],
+      "sites": 1,
+      "checks": {
+        "compile_target": "not checked: no file compiled",
+        "compile_base": "not checked: no base claim",
+        "smoke_import": "not checked: no changed file is an importable module"
+      }
+    }
+  },
+  "last_invocation": "1a684da3d8c74c8d894db390d1bbe4a5"
+}

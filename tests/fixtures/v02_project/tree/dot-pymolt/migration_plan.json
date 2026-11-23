@@ -1,0 +1,1480 @@
+{
+  "schema_version": 2,
+  "plan_id": "5359960fc28a447682cf96c25c175345",
+  "created_at": "2026-11-23T00:55:52+00:00",
+  "target_python": "3.12",
+  "source_manifest": "requirements.txt",
+  "target_manifest_path": "requirements-target.txt",
+  "target_manifest_sha256": "681a49ae6167dc98f923c64a2ca7a3ed841f7786cfa07a0996a2451d3966fa3d",
+  "environment_fingerprint": "398821f463f095ff",
+  "environment_setup_fingerprint": "e11ff84c8cfb5f48",
+  "baseline_trace_path": "<ROOT>/.pymolt/contract_traces/baseline.jsonl",
+  "baseline_captured_at": "2026-11-23T00:55:49+00:00",
+  "baseline_trace_sha256": "c25dfdb2dc1742cf36993ff6869e1b3fead32d509417bde6efafa5424a91f82f",
+  "dependencies": [
+    {
+      "name": "certifi",
+      "from_version": "2026.10.23",
+      "to_version": "2026.11.20"
+    },
+    {
+      "name": "numpy",
+      "from_version": "1.26.4",
+      "to_version": "2.5.5"
+    },
+    {
+      "name": "pandas",
+      "from_version": "1.5.3",
+      "to_version": "2.2.3"
+    }
+  ],
+  "impacts": [
+    {
+      "path": "certifi",
+      "replacement_path": null,
+      "kind": "INCONCLUSIVE",
+      "state": "unknown",
+      "risk": "unknown",
+      "explanation": "API changes for certifi 2026.10.23 \u2192 2026.11.20 could not be computed: old: baseline capture interpreter (<ENVS>/3.11/bin/python); the new interpreter (<ENVS>/3.12/bin/python) has certifi 2026.10.23, not 2026.11.20",
+      "transition_confidence": null,
+      "transition_reason": null,
+      "package": "certifi"
+    },
+    {
+      "path": "pandas.core.series.Series.append",
+      "replacement_path": "pandas.concat",
+      "kind": "REMOVED",
+      "state": "removed",
+      "risk": "high",
+      "explanation": "pandas.core.series.Series.append no longer exists in pandas 1.5.3 \u2192 2.2.3; use pandas.concat",
+      "transition_confidence": "hint:warning",
+      "transition_reason": "existence; absent in new: AttributeError: type object 'Series' has no attribute 'append'; docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.frame.DataFrame.groupby",
+      "replacement_path": null,
+      "kind": "SIGNATURE",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.frame.DataFrame.groupby: parameter squeeze changes POSITIONAL_OR_KEYWORD \u2192 None (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.series.Series.to_dict",
+      "replacement_path": null,
+      "kind": "SIGNATURE",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.series.Series.to_dict: parameter into changes POSITIONAL_OR_KEYWORD \u2192 KEYWORD_ONLY (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.frame.DataFrame.groupby",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.frame.DataFrame.groupby: default of axis changes 0 \u2192 <no_default> (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.frame.DataFrame.groupby",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.frame.DataFrame.groupby: default of group_keys changes <no_default> \u2192 True (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.frame.DataFrame.groupby",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.frame.DataFrame.groupby: default of observed changes False \u2192 <no_default> (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.groupby.groupby.GroupBy.sum",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.groupby.groupby.GroupBy.sum: default of numeric_only changes <no_default> \u2192 False (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.series.Series",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.series.Series: default of copy changes False \u2192 None (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.series.Series",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.series.Series: default of fastpath changes False \u2192 <no_default> (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.series.Series.__init__",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.series.Series.__init__: default of copy changes False \u2192 None (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    },
+    {
+      "path": "pandas.core.series.Series.__init__",
+      "replacement_path": null,
+      "kind": "DEFAULT",
+      "state": "changed",
+      "risk": "medium",
+      "explanation": "pandas.core.series.Series.__init__: default of fastpath changes False \u2192 <no_default> (pandas 1.5.3 \u2192 2.2.3)",
+      "transition_confidence": null,
+      "transition_reason": "signature",
+      "package": "pandas"
+    }
+  ],
+  "files_scanned": 2,
+  "changes": [
+    {
+      "path": "toyapp/core.py",
+      "old_sha256": "00dd66f792c2158bf395d2be524c7494915ecfbd9c60a7547b51c1831dd42d66",
+      "new_sha256": "53e84643f94fa23f22e35a05fe90f010672890eed2d803066c36e03ce28c6828",
+      "old_source": "import pandas as pd\nimport requests\n\n\ndef build_url(q):\n    req = requests.Request(\"GET\", \"http://x.test/a\", params={\"q\": q})\n    return req.prepare().url\n\n\ndef combine(a, b):\n    s1 = pd.Series(a)\n    s2 = pd.Series(b)\n    return s1.append(s2, ignore_index=True)\n\n\ndef summarize(rows):\n    df = pd.DataFrame(rows)\n    return df.groupby(\"k\")[\"v\"].sum().to_dict()\n",
+      "new_source": "import pandas as pd\nimport requests\n\n\ndef build_url(q):\n    req = requests.Request(\"GET\", \"http://x.test/a\", params={\"q\": q})\n    return req.prepare().url\n\n\ndef combine(a, b):\n    s1 = pd.Series(a)\n    s2 = pd.Series(b)\n    return pd.concat([s1, s2], ignore_index=True)\n\n\ndef summarize(rows):\n    df = pd.DataFrame(rows)\n    return df.groupby(\"k\")[\"v\"].sum().to_dict()\n",
+      "sites": 1,
+      "recipes": [
+        "template:$S.append($OTHER, ignore_index=$IGN)\u2192pd.concat([$S, $OTHER], ignore_index=$IGN)"
+      ],
+      "claims": {
+        "template:$S.append($OTHER, ignore_index=$IGN)\u2192pd.concat([$S, $OTHER], ignore_index=$IGN)": "verified-rule"
+      },
+      "runs_on_base": null
+    }
+  ],
+  "advisories": [],
+  "manual": [],
+  "risks": {
+    "schema": "pymolt.risks/2",
+    "status": "partial",
+    "risks": [
+      {
+        "id": "f478aaf6cfeb",
+        "tier": "medium",
+        "symbol": "pandas.core.series.Series.__init__",
+        "package": "pandas",
+        "site": {
+          "file": "toyapp/core.py",
+          "func": "combine",
+          "line": 11,
+          "text": "s1 = pd.Series(a)",
+          "nth": 0
+        },
+        "basis": "trace",
+        "reason": "the default of copy changes (False -> None); this site relies on it, but the default is resolved at call time",
+        "fact": {
+          "symbol": "pandas.core.series.Series.__init__",
+          "aliases": [],
+          "kind": "DEFAULT",
+          "param": "copy",
+          "old": "False",
+          "new": "None",
+          "deprecated_in_old": false,
+          "successor": null,
+          "evidence": [
+            "signature"
+          ]
+        },
+        "facts": [
+          {
+            "symbol": "pandas.core.series.Series.__init__",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "copy",
+            "old": "False",
+            "new": "None",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.series.Series.__init__",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "fastpath",
+            "old": "False",
+            "new": "<no_default>",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.series.Series",
+            "aliases": [
+              "pandas.Series"
+            ],
+            "kind": "DEFAULT",
+            "param": "copy",
+            "old": "False",
+            "new": "None",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.series.Series",
+            "aliases": [
+              "pandas.Series"
+            ],
+            "kind": "DEFAULT",
+            "param": "fastpath",
+            "old": "False",
+            "new": "<no_default>",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          }
+        ],
+        "evidence": [
+          "delta: DEFAULT pandas.core.series.Series.__init__(copy) default False -> None [pandas]",
+          "delta evidence: signature",
+          "baseline: copy left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change",
+          "delta: DEFAULT pandas.core.series.Series.__init__(fastpath) default False -> <no_default> [pandas]",
+          "baseline: fastpath left at its default at this site",
+          "delta: DEFAULT pandas.core.series.Series(copy) default False -> None [pandas]",
+          "matched by constructor",
+          "delta: DEFAULT pandas.core.series.Series(fastpath) default False -> <no_default> [pandas]"
+        ],
+        "warnings": [],
+        "calls": 1,
+        "fixed_by_plan": false,
+        "fixed_by": [],
+        "scope": "dependency",
+        "reached_at": null,
+        "guard": null,
+        "fix": null,
+        "step_id": "beh-1"
+      },
+      {
+        "id": "592f08535020",
+        "tier": "medium",
+        "symbol": "pandas.core.series.Series.__init__",
+        "package": "pandas",
+        "site": {
+          "file": "toyapp/core.py",
+          "func": "combine",
+          "line": 12,
+          "text": "s2 = pd.Series(b)",
+          "nth": 0
+        },
+        "basis": "trace",
+        "reason": "the default of copy changes (False -> None); this site relies on it, but the default is resolved at call time",
+        "fact": {
+          "symbol": "pandas.core.series.Series.__init__",
+          "aliases": [],
+          "kind": "DEFAULT",
+          "param": "copy",
+          "old": "False",
+          "new": "None",
+          "deprecated_in_old": false,
+          "successor": null,
+          "evidence": [
+            "signature"
+          ]
+        },
+        "facts": [
+          {
+            "symbol": "pandas.core.series.Series.__init__",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "copy",
+            "old": "False",
+            "new": "None",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.series.Series.__init__",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "fastpath",
+            "old": "False",
+            "new": "<no_default>",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.series.Series",
+            "aliases": [
+              "pandas.Series"
+            ],
+            "kind": "DEFAULT",
+            "param": "copy",
+            "old": "False",
+            "new": "None",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.series.Series",
+            "aliases": [
+              "pandas.Series"
+            ],
+            "kind": "DEFAULT",
+            "param": "fastpath",
+            "old": "False",
+            "new": "<no_default>",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          }
+        ],
+        "evidence": [
+          "delta: DEFAULT pandas.core.series.Series.__init__(copy) default False -> None [pandas]",
+          "delta evidence: signature",
+          "baseline: copy left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change",
+          "delta: DEFAULT pandas.core.series.Series.__init__(fastpath) default False -> <no_default> [pandas]",
+          "baseline: fastpath left at its default at this site",
+          "delta: DEFAULT pandas.core.series.Series(copy) default False -> None [pandas]",
+          "matched by constructor",
+          "delta: DEFAULT pandas.core.series.Series(fastpath) default False -> <no_default> [pandas]"
+        ],
+        "warnings": [],
+        "calls": 1,
+        "fixed_by_plan": false,
+        "fixed_by": [],
+        "scope": "dependency",
+        "reached_at": null,
+        "guard": null,
+        "fix": null,
+        "step_id": "beh-1"
+      },
+      {
+        "id": "66c2bc17ee21",
+        "tier": "medium",
+        "symbol": "pandas.core.frame.DataFrame.groupby",
+        "package": "pandas",
+        "site": {
+          "file": "toyapp/core.py",
+          "func": "summarize",
+          "line": 18,
+          "text": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+          "nth": 0
+        },
+        "basis": "trace",
+        "reason": "the default of axis changes (0 -> <no_default>); this site relies on it, but the default is resolved at call time",
+        "fact": {
+          "symbol": "pandas.core.frame.DataFrame.groupby",
+          "aliases": [],
+          "kind": "DEFAULT",
+          "param": "axis",
+          "old": "0",
+          "new": "<no_default>",
+          "deprecated_in_old": false,
+          "successor": null,
+          "evidence": [
+            "signature"
+          ]
+        },
+        "facts": [
+          {
+            "symbol": "pandas.core.frame.DataFrame.groupby",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "axis",
+            "old": "0",
+            "new": "<no_default>",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.frame.DataFrame.groupby",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "group_keys",
+            "old": "<no_default>",
+            "new": "True",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          },
+          {
+            "symbol": "pandas.core.frame.DataFrame.groupby",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "observed",
+            "old": "False",
+            "new": "<no_default>",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          }
+        ],
+        "evidence": [
+          "delta: DEFAULT pandas.core.frame.DataFrame.groupby(axis) default 0 -> <no_default> [pandas]",
+          "delta evidence: signature",
+          "baseline: axis left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change",
+          "delta: DEFAULT pandas.core.frame.DataFrame.groupby(group_keys) default <no_default> -> True [pandas]",
+          "baseline: group_keys left at its default at this site",
+          "delta: DEFAULT pandas.core.frame.DataFrame.groupby(observed) default False -> <no_default> [pandas]",
+          "baseline: observed left at its default at this site"
+        ],
+        "warnings": [],
+        "calls": 1,
+        "fixed_by_plan": false,
+        "fixed_by": [],
+        "scope": "dependency",
+        "reached_at": null,
+        "guard": null,
+        "fix": null,
+        "step_id": "beh-2"
+      },
+      {
+        "id": "d77a9cae5377",
+        "tier": "medium",
+        "symbol": "pandas.core.groupby.groupby.GroupBy.sum",
+        "package": "pandas",
+        "site": {
+          "file": "toyapp/core.py",
+          "func": "summarize",
+          "line": 18,
+          "text": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+          "nth": 0
+        },
+        "basis": "trace",
+        "reason": "the default of numeric_only changes (<no_default> -> False); this site relies on it, but the default is resolved at call time",
+        "fact": {
+          "symbol": "pandas.core.groupby.groupby.GroupBy.sum",
+          "aliases": [],
+          "kind": "DEFAULT",
+          "param": "numeric_only",
+          "old": "<no_default>",
+          "new": "False",
+          "deprecated_in_old": false,
+          "successor": null,
+          "evidence": [
+            "signature"
+          ]
+        },
+        "facts": [
+          {
+            "symbol": "pandas.core.groupby.groupby.GroupBy.sum",
+            "aliases": [],
+            "kind": "DEFAULT",
+            "param": "numeric_only",
+            "old": "<no_default>",
+            "new": "False",
+            "deprecated_in_old": false,
+            "successor": null,
+            "evidence": [
+              "signature"
+            ]
+          }
+        ],
+        "evidence": [
+          "delta: DEFAULT pandas.core.groupby.groupby.GroupBy.sum(numeric_only) default <no_default> -> False [pandas]",
+          "delta evidence: signature",
+          "baseline: numeric_only left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change"
+        ],
+        "warnings": [],
+        "calls": 1,
+        "fixed_by_plan": false,
+        "fixed_by": [],
+        "scope": "dependency",
+        "reached_at": null,
+        "guard": null,
+        "fix": null,
+        "step_id": "beh-3"
+      },
+      {
+        "id": "a576ecc156f8",
+        "tier": "certain",
+        "symbol": "pandas.core.series.Series.append",
+        "package": "pandas",
+        "site": {
+          "file": "toyapp/core.py",
+          "func": "combine",
+          "line": 13,
+          "text": "return s1.append(s2, ignore_index=True)",
+          "nth": 0
+        },
+        "basis": "trace",
+        "reason": "the symbol is removed in the new version; it warned in the baseline",
+        "fact": {
+          "symbol": "pandas.core.series.Series.append",
+          "aliases": [],
+          "kind": "REMOVED",
+          "param": null,
+          "old": "pandas.core.series.Series.append",
+          "new": null,
+          "deprecated_in_old": true,
+          "successor": "pandas.concat",
+          "evidence": [
+            "existence",
+            "absent in new: AttributeError: type object 'Series' has no attribute 'append'",
+            "docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+            "warning:FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+            "successor:warning"
+          ]
+        },
+        "facts": [
+          {
+            "symbol": "pandas.core.series.Series.append",
+            "aliases": [],
+            "kind": "REMOVED",
+            "param": null,
+            "old": "pandas.core.series.Series.append",
+            "new": null,
+            "deprecated_in_old": true,
+            "successor": "pandas.concat",
+            "evidence": [
+              "existence",
+              "absent in new: AttributeError: type object 'Series' has no attribute 'append'",
+              "docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+              "warning:FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+              "successor:warning"
+            ]
+          }
+        ],
+        "evidence": [
+          "baseline warning: FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+          "delta: REMOVED pandas.core.series.Series.append -> pandas.concat [pandas]",
+          "delta evidence: existence",
+          "delta evidence: absent in new: AttributeError: type object 'Series' has no attribute 'append'",
+          "delta evidence: docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+          "delta evidence: warning:FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+          "delta evidence: successor:warning",
+          "plan: rewrites toyapp/core.py:13 (template:$S.append($OTHER, ignore_index=$IGN)\u2192pd.concat([$S, $OTHER], ignore_index=$IGN))"
+        ],
+        "warnings": [
+          {
+            "category": "FutureWarning",
+            "message": "The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+            "count": 1
+          }
+        ],
+        "calls": 1,
+        "fixed_by_plan": true,
+        "fixed_by": [
+          "template:$S.append($OTHER, ignore_index=$IGN)\u2192pd.concat([$S, $OTHER], ignore_index=$IGN)"
+        ],
+        "scope": "dependency",
+        "reached_at": null,
+        "guard": null,
+        "fix": null,
+        "step_id": "mech-1"
+      }
+    ],
+    "deltas": [
+      {
+        "package": "certifi",
+        "subject": "dependency",
+        "from_version": "2026.10.23",
+        "to_version": "2026.11.20",
+        "quality": "inconclusive",
+        "changes": 0,
+        "notes": [
+          "old: baseline capture interpreter (<ENVS>/3.11/bin/python)",
+          "the new interpreter (<ENVS>/3.12/bin/python) has certifi 2026.10.23, not 2026.11.20"
+        ]
+      },
+      {
+        "package": "numpy",
+        "subject": "dependency",
+        "from_version": "1.26.4",
+        "to_version": "2.5.5",
+        "quality": "complete",
+        "changes": 0,
+        "notes": [
+          "old: baseline capture interpreter (<ENVS>/3.11/bin/python)",
+          "new: configured target environment (<ENVS>/3.12)",
+          "the touched symbols include nothing from numpy"
+        ]
+      },
+      {
+        "package": "pandas",
+        "subject": "dependency",
+        "from_version": "1.5.3",
+        "to_version": "2.2.3",
+        "quality": "complete",
+        "changes": 11,
+        "notes": [
+          "old: baseline capture interpreter (<ENVS>/3.11/bin/python)",
+          "new: configured target environment (<ENVS>/3.12)"
+        ]
+      },
+      {
+        "package": "python",
+        "subject": "python",
+        "from_version": "3.11",
+        "to_version": "3.12",
+        "quality": "complete",
+        "changes": 0,
+        "notes": [
+          "no stdlib spellings in the project's sites: nothing to check"
+        ]
+      }
+    ],
+    "notes": [
+      "delta for certifi is inconclusive: old: baseline capture interpreter (<ENVS>/3.11/bin/python); the new interpreter (<ENVS>/3.12/bin/python) has certifi 2026.10.23, not 2026.11.20"
+    ],
+    "guarded": [],
+    "pre_existing": []
+  },
+  "type_relocations": [],
+  "python": {
+    "from": "3.11",
+    "to": "3.12",
+    "quality": "complete",
+    "sides": {},
+    "sites": 0,
+    "fixes": {
+      "patterns": 0,
+      "files": 0
+    },
+    "notes": [
+      "no stdlib spellings in the project's sites: nothing to check"
+    ]
+  },
+  "compile_findings": [],
+  "steps": [
+    {
+      "id": "env-1",
+      "key": "787d0454e2",
+      "phase": "env",
+      "type": "manifest-pin",
+      "title": "Pin the target versions in requirements.txt: 1 line(s)",
+      "executor": "pymolt",
+      "claim": "intended",
+      "basis": "target-manifest",
+      "runs_on_base": null,
+      "scope": "env",
+      "package": null,
+      "from": null,
+      "to": null,
+      "symbol": {
+        "old": null,
+        "new": null
+      },
+      "depends_on": [],
+      "status": "planned",
+      "where": [],
+      "why": {
+        "evidence": [
+          "requirements-target.txt pins pandas at 2.2.3; requirements.txt pins 1.5.3"
+        ],
+        "tier": null,
+        "risk_ids": [],
+        "baseline": {
+          "calls": 0,
+          "sites": 0,
+          "warnings": []
+        },
+        "delta": null,
+        "claim": null
+      },
+      "do": {
+        "recipe": {
+          "kind": "manifest-pin",
+          "keys": [
+            "manifest-pin:pandas==1.5.3\u21922.2.3"
+          ],
+          "rule": null,
+          "patterns": [],
+          "move": null,
+          "pins": [
+            {
+              "name": "pandas",
+              "from_version": "1.5.3",
+              "to_version": "2.2.3",
+              "old": "pandas==1.5.3\n",
+              "new": "pandas==2.2.3\n",
+              "line": 1
+            }
+          ],
+          "sites": "all"
+        },
+        "manual": null
+      },
+      "edits": [
+        {
+          "file": "requirements.txt",
+          "before_sha256": "a5a210dd34b98c6dfb8e625f42b123d98d504d39be0b389e12cd4c6d2db3a06c",
+          "after_sha256": "681a49ae6167dc98f923c64a2ca7a3ed841f7786cfa07a0996a2451d3966fa3d",
+          "hunks": [
+            {
+              "old_start": 1,
+              "old": [
+                "pandas==1.5.3\n"
+              ],
+              "new_start": 1,
+              "new": [
+                "pandas==2.2.3\n"
+              ],
+              "anchors": []
+            }
+          ],
+          "effect": {
+            "replace": [
+              [
+                "830c5704bbae0766",
+                "6c8f851fb569750f"
+              ]
+            ],
+            "insert": [],
+            "delete": [],
+            "imports_inserted": [],
+            "key_kind": "tokens"
+          },
+          "anchors_old": [],
+          "anchors_new": []
+        }
+      ],
+      "verify": {
+        "judge": "none",
+        "expect": null,
+        "sites": [],
+        "tests": null,
+        "note": null,
+        "command": null,
+        "uncovered": 0
+      },
+      "effort": {
+        "size": "none",
+        "sites": 1,
+        "files": 1,
+        "why": "executor pymolt"
+      },
+      "checks_at_plan": null
+    },
+    {
+      "id": "env-2",
+      "key": "7f7d0417f5",
+      "phase": "env",
+      "type": "target-env",
+      "title": "Build the target environment (Python 3.12)",
+      "executor": "person",
+      "claim": null,
+      "basis": null,
+      "runs_on_base": null,
+      "scope": "env",
+      "package": null,
+      "from": null,
+      "to": null,
+      "symbol": {
+        "old": null,
+        "new": null
+      },
+      "depends_on": [],
+      "status": "planned",
+      "where": [],
+      "why": {
+        "evidence": [
+          "the post-migration capture and apply's smoke import need it",
+          "setup names a target environment: <ENVS>/3.12"
+        ],
+        "tier": null,
+        "risk_ids": [],
+        "baseline": {
+          "calls": 0,
+          "sites": 0,
+          "warnings": []
+        },
+        "delta": null,
+        "claim": null
+      },
+      "do": {
+        "recipe": null,
+        "manual": {
+          "summary": "Build the target environment; pymolt does not build or install it.",
+          "successor": null,
+          "signature": null,
+          "before_after": null,
+          "pitfalls": [],
+          "consumers": [],
+          "suggestion": null,
+          "commands": [
+            "uv venv .venv-target --python 3.12",
+            "uv pip install -r requirements-target.txt --python .venv-target/bin/python"
+          ],
+          "lines": []
+        }
+      },
+      "edits": [],
+      "verify": {
+        "judge": "none",
+        "expect": null,
+        "sites": [],
+        "tests": null,
+        "note": null,
+        "command": null,
+        "uncovered": 0
+      },
+      "effort": {
+        "size": "small",
+        "sites": 0,
+        "files": 0,
+        "why": "a build from the target manifest's pins"
+      },
+      "checks_at_plan": null
+    },
+    {
+      "id": "mech-1",
+      "key": "a27a961186",
+      "phase": "mechanical",
+      "type": "codemod",
+      "title": "`$S.append($OTHER, ignore_index=$IGN)` \u2192 `pd.concat([$S, $OTHER], ignore_index=$IGN)`",
+      "executor": "pymolt",
+      "claim": "preserve",
+      "basis": "verified-rule",
+      "runs_on_base": null,
+      "scope": "dependency",
+      "package": "pandas",
+      "from": "1.5.3",
+      "to": "2.2.3",
+      "symbol": {
+        "old": null,
+        "new": null
+      },
+      "depends_on": [],
+      "status": "planned",
+      "where": [
+        {
+          "id": "a896c9314",
+          "file": "toyapp/core.py",
+          "scope": "combine",
+          "func": "combine",
+          "symbol": null,
+          "stmt": "return s1.append(s2, ignore_index=True)",
+          "key": "38fea36e95347fe4",
+          "key_kind": "ast",
+          "prev": "05d12ab495c26e97",
+          "next": "$",
+          "nth": 0,
+          "count": 1,
+          "site_text": null,
+          "line": 13,
+          "frames": []
+        }
+      ],
+      "why": {
+        "evidence": [
+          "pandas 1.4.0 deprecated Series.append and DataFrame.append in favour of pandas.concat",
+          "pandas 2.0.0 removed both",
+          "pymolt knowledge pandas-append-to-concat (pandas whatsnew v1.4.0 (GH#35407) and v2.0.0 removals, 2026-11-15)",
+          "the symbol is removed in the new version; it warned in the baseline",
+          "baseline warning: FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+          "delta: REMOVED pandas.core.series.Series.append -> pandas.concat [pandas]",
+          "delta evidence: existence",
+          "delta evidence: absent in new: AttributeError: type object 'Series' has no attribute 'append'",
+          "delta evidence: docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+          "delta evidence: warning:FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead."
+        ],
+        "tier": "certain",
+        "risk_ids": [
+          "a576ecc156f8"
+        ],
+        "baseline": {
+          "calls": 1,
+          "sites": 1,
+          "warnings": [
+            "FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead."
+          ]
+        },
+        "delta": {
+          "kind": "REMOVED",
+          "param": null,
+          "old": "pandas.core.series.Series.append",
+          "new": null
+        },
+        "claim": null
+      },
+      "do": {
+        "recipe": {
+          "kind": "rule",
+          "keys": [
+            "template:$S.append($OTHER, ignore_index=$IGN)\u2192pd.concat([$S, $OTHER], ignore_index=$IGN)"
+          ],
+          "rule": {
+            "library": "pandas",
+            "from_version": "1.5.3",
+            "to_version": "2.2.3",
+            "match": "$S.append($OTHER, ignore_index=$IGN)",
+            "rewrite": [
+              "pd.concat([$S, $OTHER], ignore_index=$IGN)"
+            ],
+            "condition": "simple_name_args",
+            "runtime_precondition": null,
+            "result_var": null,
+            "confidence": "verified",
+            "test_before": "out = s1.append(s2, ignore_index=True)\n",
+            "test_after": "out = pd.concat([s1, s2], ignore_index=True)\n",
+            "doc_link": "https://pandas.pydata.org/docs/whatsnew/v2.0.0.html#removal-of-prior-version-deprecations-changes",
+            "kind": null,
+            "old_qualname": null,
+            "new_qualname": null,
+            "evidence": [
+              "pandas 1.4.0 deprecated Series.append and DataFrame.append in favour of pandas.concat",
+              "pandas 2.0.0 removed both",
+              "pymolt knowledge pandas-append-to-concat (pandas whatsnew v1.4.0 (GH#35407) and v2.0.0 removals, 2026-11-15)"
+            ]
+          },
+          "patterns": [],
+          "move": null,
+          "pins": [],
+          "sites": "anchors"
+        },
+        "manual": null
+      },
+      "edits": [
+        {
+          "file": "toyapp/core.py",
+          "before_sha256": "00dd66f792c2158bf395d2be524c7494915ecfbd9c60a7547b51c1831dd42d66",
+          "after_sha256": "53e84643f94fa23f22e35a05fe90f010672890eed2d803066c36e03ce28c6828",
+          "hunks": [
+            {
+              "old_start": 13,
+              "old": [
+                "    return s1.append(s2, ignore_index=True)\n"
+              ],
+              "new_start": 13,
+              "new": [
+                "    return pd.concat([s1, s2], ignore_index=True)\n"
+              ],
+              "anchors": [
+                "a896c9314",
+                "a30fc5086"
+              ]
+            }
+          ],
+          "effect": {
+            "replace": [
+              [
+                "38fea36e95347fe4",
+                "ea1fc441cf502367"
+              ]
+            ],
+            "insert": [],
+            "delete": [],
+            "imports_inserted": [],
+            "key_kind": "ast"
+          },
+          "anchors_old": [
+            {
+              "id": "a896c9314",
+              "file": "toyapp/core.py",
+              "scope": "combine",
+              "func": "combine",
+              "symbol": null,
+              "stmt": "return s1.append(s2, ignore_index=True)",
+              "key": "38fea36e95347fe4",
+              "key_kind": "ast",
+              "prev": "05d12ab495c26e97",
+              "next": "$",
+              "nth": 0,
+              "count": 1,
+              "site_text": null,
+              "line": 13,
+              "frames": []
+            }
+          ],
+          "anchors_new": [
+            {
+              "id": "a30fc5086",
+              "file": "toyapp/core.py",
+              "scope": "combine",
+              "func": "combine",
+              "symbol": null,
+              "stmt": "return pd.concat([s1, s2], ignore_index=True)",
+              "key": "ea1fc441cf502367",
+              "key_kind": "ast",
+              "prev": "05d12ab495c26e97",
+              "next": "$",
+              "nth": 0,
+              "count": 1,
+              "site_text": null,
+              "line": 13,
+              "frames": []
+            }
+          ]
+        }
+      ],
+      "verify": {
+        "judge": "strict",
+        "expect": null,
+        "sites": [
+          {
+            "anchor": "a896c9314",
+            "file": "toyapp/core.py",
+            "func": "combine",
+            "baseline_calls": 1,
+            "coverage": "recorded"
+          }
+        ],
+        "tests": null,
+        "note": "the baseline capture does not record which tests ran a site",
+        "command": [
+          "<ENVS>/3.11/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "uncovered": 0
+      },
+      "effort": {
+        "size": "none",
+        "sites": 1,
+        "files": 1,
+        "why": "executor pymolt"
+      },
+      "checks_at_plan": null
+    },
+    {
+      "id": "beh-1",
+      "key": "951a12da70",
+      "phase": "behaviour",
+      "type": "behaviour-change",
+      "title": "`Series`: default `copy` False \u2192 None",
+      "executor": "person",
+      "claim": "preserve",
+      "basis": "manual",
+      "runs_on_base": null,
+      "scope": "dependency",
+      "package": "pandas",
+      "from": "1.5.3",
+      "to": "2.2.3",
+      "symbol": {
+        "old": "pandas.core.series.Series.__init__",
+        "new": null
+      },
+      "depends_on": [],
+      "status": "planned",
+      "where": [
+        {
+          "id": "a1277bf15",
+          "file": "toyapp/core.py",
+          "scope": "combine",
+          "func": "combine",
+          "symbol": "pandas.core.series.Series.__init__",
+          "stmt": "s1 = pd.Series(a)",
+          "key": "20bb9d9c040af8e3",
+          "key_kind": "ast",
+          "prev": "^",
+          "next": "05d12ab495c26e97",
+          "nth": 0,
+          "count": 1,
+          "site_text": "s1 = pd.Series(a)",
+          "line": 11,
+          "frames": []
+        },
+        {
+          "id": "abf731d59",
+          "file": "toyapp/core.py",
+          "scope": "combine",
+          "func": "combine",
+          "symbol": "pandas.core.series.Series.__init__",
+          "stmt": "s2 = pd.Series(b)",
+          "key": "05d12ab495c26e97",
+          "key_kind": "ast",
+          "prev": "20bb9d9c040af8e3",
+          "next": "38fea36e95347fe4",
+          "nth": 0,
+          "count": 1,
+          "site_text": "s2 = pd.Series(b)",
+          "line": 12,
+          "frames": []
+        }
+      ],
+      "why": {
+        "evidence": [
+          "the default of copy changes (False -> None); this site relies on it, but the default is resolved at call time",
+          "delta: DEFAULT pandas.core.series.Series.__init__(copy) default False -> None [pandas]",
+          "delta evidence: signature",
+          "baseline: copy left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change",
+          "delta: DEFAULT pandas.core.series.Series.__init__(fastpath) default False -> <no_default> [pandas]",
+          "baseline: fastpath left at its default at this site",
+          "delta: DEFAULT pandas.core.series.Series(copy) default False -> None [pandas]",
+          "matched by constructor",
+          "delta: DEFAULT pandas.core.series.Series(fastpath) default False -> <no_default> [pandas]"
+        ],
+        "tier": "medium",
+        "risk_ids": [
+          "f478aaf6cfeb",
+          "592f08535020"
+        ],
+        "baseline": {
+          "calls": 2,
+          "sites": 2,
+          "warnings": []
+        },
+        "delta": {
+          "kind": "DEFAULT",
+          "param": "copy",
+          "old": "False",
+          "new": "None"
+        },
+        "claim": "a behaviour change: the fix is expected to keep the old outcome"
+      },
+      "do": {
+        "recipe": null,
+        "manual": {
+          "summary": "Decide at each site: the default of copy changed from False to None. Passing copy=False keeps the old outcome only if the new version still reads that value the old way: check it, or keep the new default (a person attests the new outcome).",
+          "successor": null,
+          "signature": null,
+          "before_after": {
+            "before": "s1 = pd.Series(a)",
+            "after": null
+          },
+          "pitfalls": [
+            "copy left at its default at this site",
+            "fastpath left at its default at this site"
+          ],
+          "consumers": [],
+          "suggestion": null,
+          "commands": [],
+          "lines": []
+        }
+      },
+      "edits": [],
+      "verify": {
+        "judge": "strict",
+        "expect": null,
+        "sites": [
+          {
+            "anchor": "a1277bf15",
+            "file": "toyapp/core.py",
+            "func": "combine",
+            "baseline_calls": 1,
+            "coverage": "recorded"
+          },
+          {
+            "anchor": "abf731d59",
+            "file": "toyapp/core.py",
+            "func": "combine",
+            "baseline_calls": 1,
+            "coverage": "recorded"
+          }
+        ],
+        "tests": null,
+        "note": "the baseline capture does not record which tests ran a site",
+        "command": [
+          "<ENVS>/3.11/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "uncovered": 0
+      },
+      "effort": {
+        "size": "large",
+        "sites": 2,
+        "files": 1,
+        "why": "a behaviour change: a person decides the outcome"
+      },
+      "checks_at_plan": null
+    },
+    {
+      "id": "beh-2",
+      "key": "a874f0e070",
+      "phase": "behaviour",
+      "type": "behaviour-change",
+      "title": "`DataFrame.groupby`: default `axis` 0 \u2192 <no_default>",
+      "executor": "person",
+      "claim": "preserve",
+      "basis": "manual",
+      "runs_on_base": null,
+      "scope": "dependency",
+      "package": "pandas",
+      "from": "1.5.3",
+      "to": "2.2.3",
+      "symbol": {
+        "old": "pandas.core.frame.DataFrame.groupby",
+        "new": null
+      },
+      "depends_on": [],
+      "status": "planned",
+      "where": [
+        {
+          "id": "a45593f9f",
+          "file": "toyapp/core.py",
+          "scope": "summarize",
+          "func": "summarize",
+          "symbol": "pandas.core.frame.DataFrame.groupby",
+          "stmt": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+          "key": "9cf2a8706bf6d44d",
+          "key_kind": "ast",
+          "prev": "929e5f52df919c8f",
+          "next": "$",
+          "nth": 0,
+          "count": 1,
+          "site_text": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+          "line": 18,
+          "frames": []
+        }
+      ],
+      "why": {
+        "evidence": [
+          "the default of axis changes (0 -> <no_default>); this site relies on it, but the default is resolved at call time",
+          "delta: DEFAULT pandas.core.frame.DataFrame.groupby(axis) default 0 -> <no_default> [pandas]",
+          "delta evidence: signature",
+          "baseline: axis left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change",
+          "delta: DEFAULT pandas.core.frame.DataFrame.groupby(group_keys) default <no_default> -> True [pandas]",
+          "baseline: group_keys left at its default at this site",
+          "delta: DEFAULT pandas.core.frame.DataFrame.groupby(observed) default False -> <no_default> [pandas]",
+          "baseline: observed left at its default at this site"
+        ],
+        "tier": "medium",
+        "risk_ids": [
+          "66c2bc17ee21"
+        ],
+        "baseline": {
+          "calls": 1,
+          "sites": 1,
+          "warnings": []
+        },
+        "delta": {
+          "kind": "DEFAULT",
+          "param": "axis",
+          "old": "0",
+          "new": "<no_default>"
+        },
+        "claim": "a behaviour change: the fix is expected to keep the old outcome"
+      },
+      "do": {
+        "recipe": null,
+        "manual": {
+          "summary": "Decide at each site: the default of axis changed from 0 to <no_default>. Passing axis=0 keeps the old outcome only if the new version still reads that value the old way: check it, or keep the new default (a person attests the new outcome).",
+          "successor": null,
+          "signature": null,
+          "before_after": {
+            "before": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+            "after": null
+          },
+          "pitfalls": [
+            "axis left at its default at this site",
+            "group_keys left at its default at this site",
+            "observed left at its default at this site"
+          ],
+          "consumers": [],
+          "suggestion": null,
+          "commands": [],
+          "lines": []
+        }
+      },
+      "edits": [],
+      "verify": {
+        "judge": "strict",
+        "expect": null,
+        "sites": [
+          {
+            "anchor": "a45593f9f",
+            "file": "toyapp/core.py",
+            "func": "summarize",
+            "baseline_calls": 1,
+            "coverage": "recorded"
+          }
+        ],
+        "tests": null,
+        "note": "the baseline capture does not record which tests ran a site",
+        "command": [
+          "<ENVS>/3.11/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "uncovered": 0
+      },
+      "effort": {
+        "size": "large",
+        "sites": 1,
+        "files": 1,
+        "why": "a behaviour change: a person decides the outcome"
+      },
+      "checks_at_plan": null
+    },
+    {
+      "id": "beh-3",
+      "key": "57b40deadc",
+      "phase": "behaviour",
+      "type": "behaviour-change",
+      "title": "`GroupBy.sum`: default `numeric_only` <no_default> \u2192 False",
+      "executor": "person",
+      "claim": "preserve",
+      "basis": "manual",
+      "runs_on_base": null,
+      "scope": "dependency",
+      "package": "pandas",
+      "from": "1.5.3",
+      "to": "2.2.3",
+      "symbol": {
+        "old": "pandas.core.groupby.groupby.GroupBy.sum",
+        "new": null
+      },
+      "depends_on": [],
+      "status": "planned",
+      "where": [
+        {
+          "id": "a45593f9f",
+          "file": "toyapp/core.py",
+          "scope": "summarize",
+          "func": "summarize",
+          "symbol": "pandas.core.groupby.groupby.GroupBy.sum",
+          "stmt": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+          "key": "9cf2a8706bf6d44d",
+          "key_kind": "ast",
+          "prev": "929e5f52df919c8f",
+          "next": "$",
+          "nth": 0,
+          "count": 1,
+          "site_text": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+          "line": 18,
+          "frames": []
+        }
+      ],
+      "why": {
+        "evidence": [
+          "the default of numeric_only changes (<no_default> -> False); this site relies on it, but the default is resolved at call time",
+          "delta: DEFAULT pandas.core.groupby.groupby.GroupBy.sum(numeric_only) default <no_default> -> False [pandas]",
+          "delta evidence: signature",
+          "baseline: numeric_only left at its default at this site",
+          "delta: a call-time default (None or a sentinel) on one side: the effective value may not change"
+        ],
+        "tier": "medium",
+        "risk_ids": [
+          "d77a9cae5377"
+        ],
+        "baseline": {
+          "calls": 1,
+          "sites": 1,
+          "warnings": []
+        },
+        "delta": {
+          "kind": "DEFAULT",
+          "param": "numeric_only",
+          "old": "<no_default>",
+          "new": "False"
+        },
+        "claim": "a behaviour change: the fix is expected to keep the old outcome"
+      },
+      "do": {
+        "recipe": null,
+        "manual": {
+          "summary": "Decide at each site: the default of numeric_only changed from <no_default> to False. Passing numeric_only=<no_default> keeps the old outcome only if the new version still reads that value the old way: check it, or keep the new default (a person attests the new outcome).",
+          "successor": null,
+          "signature": null,
+          "before_after": {
+            "before": "return df.groupby(\"k\")[\"v\"].sum().to_dict()",
+            "after": null
+          },
+          "pitfalls": [
+            "numeric_only left at its default at this site",
+            "old default <no_default> is decided at call time: passing it may not restore the old behaviour"
+          ],
+          "consumers": [],
+          "suggestion": null,
+          "commands": [],
+          "lines": []
+        }
+      },
+      "edits": [],
+      "verify": {
+        "judge": "strict",
+        "expect": null,
+        "sites": [
+          {
+            "anchor": "a45593f9f",
+            "file": "toyapp/core.py",
+            "func": "summarize",
+            "baseline_calls": 1,
+            "coverage": "recorded"
+          }
+        ],
+        "tests": null,
+        "note": "the baseline capture does not record which tests ran a site",
+        "command": [
+          "<ENVS>/3.11/bin/python",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider"
+        ],
+        "uncovered": 0
+      },
+      "effort": {
+        "size": "large",
+        "sites": 1,
+        "files": 1,
+        "why": "a behaviour change: a person decides the outcome"
+      },
+      "checks_at_plan": null
+    }
+  ],
+  "adapted_from": null
+}
