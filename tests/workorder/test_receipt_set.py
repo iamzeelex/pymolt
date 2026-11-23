@@ -9,6 +9,7 @@ from _apply import apply_migration_plan
 from pymolt.apply_ledger import build_entries, in_effect_entries, ledger_path, load_ledger
 from pymolt.codemods.models import ApiImpact, CodemodPattern, DependencyMigration, FilePreview
 from pymolt.migration_plan import (
+    DEFAULT_PLAN_PATH,
     MigrationPlan,
     create_migration_plan,
     rollback_migration,
@@ -161,7 +162,8 @@ def _v1_files(tmp_path, *, status="applied", files_restored=None):
     for key in ("steps", "adapted_from"):
         data.pop(key)
     data["schema_version"] = 1
-    for path in (run_dir / "plan.json", tmp_path / ".pymolt" / "migration_plan.json"):
+    # A schema-1 apply left the 0.1/0.2 layout: the single plan file, and no pointer.
+    for path in (run_dir / "plan.json", tmp_path / DEFAULT_PLAN_PATH):
         path.write_text(json.dumps(data))
     (run_dir / "state.json").write_text(json.dumps({
         "run_id": run, "status": status, "attempt": 1, "prepared_at": "2026-11-01T00:00:00",

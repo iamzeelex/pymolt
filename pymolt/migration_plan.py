@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 # an identity (its name, source, baseline and lineage). A schema-2 file is read as a schema-3
 # plan whose identity is filled from what it holds (``fill_identity``); a schema-1 file as one
 # synthetic step (``pymolt.workorder.v1``).
+# Plans are stored in ``.pymolt/plans/<name>/plan.json`` (``pymolt.plan_store``); this is the
+# 0.2 layout's single plan file, read while there is no current-plan pointer.
 DEFAULT_PLAN_PATH = Path(".pymolt/migration_plan.json")
 
 #: A plan's label (``plan --label``): lowercase letters, digits, ``.``, ``_`` and ``-``, 1 to 32
@@ -130,20 +132,30 @@ RUN_STATE_REMEDY = keep_remedy("this run's rollback information")
 
 
 def _plan_file_kind(project_dir: str | Path, source: Path) -> tuple[str, str]:
-    """What a plan file is to a person (the saved plan, a run's frozen copy, or a plan file
-    given on the command line) and the remedy when it is damaged."""
+    """What a plan file is to a person (a saved plan, a run's frozen copy, or a plan file
+    given on the command line) and the remedy when it is damaged. By its path alone: a damaged
+    pointer never stops a frozen copy from loading."""
+    from pymolt.plan_store import is_stored_plan_file
+
     if source.parent.parent.name == "migrations" and source.parent.parent.parent.name == \
             ".pymolt":
         return FROZEN_PLAN_KIND, FROZEN_PLAN_REMEDY
-    if source.resolve() == plan_path(project_dir).resolve():
+    root = Path(project_dir).resolve()
+    resolved = source.resolve()
+    if is_stored_plan_file(root, resolved) or resolved == (root / DEFAULT_PLAN_PATH).resolve():
         return PLAN_KIND, PLAN_REMEDY
     return PLAN_KIND, "Pass a readable plan file, or run `pymolt plan .` to plan again."
 
 
 def plan_path(project_dir: str | Path, path: str | Path | None = None) -> Path:
+    """``path`` (relative to the project), or the current plan's file: the one the current-plan
+    pointer names (``.pymolt/plans/<name>/plan.json``), else the 0.2 layout's single file. A
+    pointer whose plan is not in the store raises ``StateFileError``."""
     root = Path(project_dir).resolve()
     if path is None:
-        return root / DEFAULT_PLAN_PATH
+        from pymolt.plan_store import current_pointer
+
+        return current_pointer(root)[1]
     candidate = Path(path).expanduser()
     return candidate if candidate.is_absolute() else root / candidate
 
@@ -462,10 +474,17 @@ class MigrationPlan(BaseModel):
     def load(
         cls, project_dir: str | Path, path: str | Path | None = None
     ) -> MigrationPlan | None:
-        """The plan at ``path`` (default: the saved plan; a schema-1 plan is read as one
-        synthetic step); None when there is none. A damaged plan, or one written by a newer
-        pymolt, raises ``StateFileError``."""
-        source = plan_path(project_dir, path)
+        """The plan at ``path`` (default: the current plan, ``plan_path``; a schema-2 plan is
+        read with its identity filled, a schema-1 plan as one synthetic step); None when there
+        is none. A damaged plan, one written by a newer pymolt, or a current plan whose id is
+        not the pointer's raises ``StateFileError``."""
+        pointer = None
+        if path is None:
+            from pymolt.plan_store import current_pointer
+
+            pointer, source = current_pointer(project_dir)
+        else:
+            source = plan_path(project_dir, path)
         kind, remedy = _plan_file_kind(project_dir, source)
 
         def modified() -> float | None:
@@ -490,8 +509,13 @@ class MigrationPlan(BaseModel):
             plan._stored = data
             return plan
 
-        return load_state(source, cls, kind=kind, newest=PLAN_SCHEMA_VERSION, remedy=remedy,
+        plan = load_state(source, cls, kind=kind, newest=PLAN_SCHEMA_VERSION, remedy=remedy,
                           adapt=adapt)
+        if pointer is not None and plan is not None:
+            from pymolt.plan_store import check_plan_id
+
+            check_plan_id(project_dir, pointer, plan.plan_id)
+        return plan
 
     def freeze(self, path: str | Path) -> Path:
         """Write the plan's stored form (``stored_form``) to ``path``: a run's frozen copy is
@@ -501,22 +525,35 @@ class MigrationPlan(BaseModel):
     def save(
         self, project_dir: str | Path, path: str | Path | None = None
     ) -> Path:
-        target = plan_path(project_dir, path)
-        if target.resolve() != plan_path(project_dir).resolve():
+        """Store the plan and make it the current plan (``pymolt.plan_store``): its name is
+        stamped when it has none, ``.pymolt/plans/<name>/plan.json`` is written in a folder
+        created for it (a folder another plan took draws a new id: the plan is not bound to
+        anything yet), and the pointer names it. Refused while the pointer or the current plan
+        is damaged or newer (``StateFileError``). With ``path``: written there only, as an
+        export (``model_dump``; nothing is stored, the current plan stays)."""
+        from pymolt.plan_store import in_store, store, write_pointer
+
+        if path is not None:
+            target = plan_path(project_dir, path)
+            if in_store(project_dir, target):
+                raise MigrationPlanError(
+                    f"refusing to write a plan into the plan store by path: {target}")
             return atomic_write_json(target, self.model_dump(mode="json"))
         with state_lock(project_dir, operation="plan"):
-            MigrationPlan.load(project_dir)     # never replaces a damaged or newer saved plan
-            return atomic_write_json(target, self.model_dump(mode="json"))
+            MigrationPlan.load(project_dir)     # never replaces a damaged or newer current plan
+            stored = store(project_dir, self)
+            write_pointer(project_dir, self, set_by="plan")
+            return stored
 
-    def save_planned(self, project_dir: str | Path, path: str | Path | None = None) -> Path:
-        """Save the plan ``pymolt plan`` made, then drop the blobs retention no longer keeps
-        (``plan`` and ``apply`` collect the store; it waits when another operation holds the
-        migration lock)."""
-        from pymolt.workorder.blobs import collect_after_plan
+    def save_planned(self, project_dir: str | Path, *,
+                     output: str | Path | None = None):
+        """Save the plan ``pymolt plan`` made (``plan_store.save_planned``): with ``output``
+        (``-o``) only there; otherwise the 0.2 plan file is moved into the store, the plan is
+        stored and made current, and the blob store is collected. Returns a
+        ``plan_store.PlanSaveResult``."""
+        from pymolt.plan_store import save_planned
 
-        saved = self.save(project_dir, path)
-        collect_after_plan(project_dir)
-        return saved
+        return save_planned(project_dir, self, output=output)
 
 
 def fill_identity(plan: MigrationPlan, *,

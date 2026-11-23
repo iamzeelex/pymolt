@@ -194,6 +194,23 @@ All notable changes to pymolt. The format follows
   agent approvals hold; pymolt 0.2 refuses a schema-3 plan as newer.
 - `plan` warns when the baseline's recording changed since it was captured: the plan binds the
   recording as it is now.
+- Plans are kept, one folder each: `plan` saves `.pymolt/plans/<name>/plan.json`, written once
+  and never changed, with its `PLAN.md` beside it, and makes it the current plan. A plan's name
+  is its UTC time to the minute and the first 8 hex of its id, such as
+  `20261120T0631Z-f74941c5`. `.pymolt/plans/current.json` names the current plan; it is local
+  state, listed in `.pymolt/.gitignore`, while the plan folders can be committed. A damaged
+  pointer, or one that names a plan the store does not hold, refuses `plan`, `apply` and
+  `verify`, and `status` reports it. A checkout with saved plans and no pointer makes none of
+  them current: `status` and `apply` name the newest and how to choose one.
+- `apply --plan` takes `current` (the default), a plan name, a plan id prefix (4 to 32 hex) or a
+  path. A reference that matches no plan, or several, exits 2. An `apply` that writes (a step,
+  `--skip`, `--record`) makes its plan the current plan; a plan file written with `plan -o` is
+  saved into `.pymolt/plans/` first. `--dry-run`, `--brief` and `--approve-agent` leave the
+  current plan as it is.
+- A project from pymolt 0.2 keeps working: `status`, `apply` and `verify` read its
+  `.pymolt/migration_plan.json` where it is, and its open run and agent approval hold. The first
+  `plan` moves that file, as it is, into `.pymolt/plans/` (and its `.pymolt/PLAN.md` into the
+  plan's folder). pymolt 0.2 does not read the moved plan.
 
 #### Assess, scan and setup
 

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from pymolt.anchors import StatementIndex
 from pymolt.codemods.models import CodemodPattern
 from pymolt.migration_plan import (
+    DEFAULT_PLAN_PATH,
     PLAN_SCHEMA_VERSION,
     MigrationPlan,
     PlannedFileChange,
@@ -188,9 +189,9 @@ def _v1_json(tmp_path) -> dict:
     for item in data["risks"]["risks"]:
         item.pop("step_id")
     data["risks"]["schema"] = "pymolt.risks/1"
+    # A schema-1 plan is a file of the 0.1/0.2 layout: read while there is no pointer.
     (tmp_path / ".pymolt").mkdir(exist_ok=True)
-    (tmp_path / ".pymolt" / "migration_plan.json").write_text(json.dumps(data),
-                                                             encoding="utf-8")
+    (tmp_path / DEFAULT_PLAN_PATH).write_text(json.dumps(data), encoding="utf-8")
     return data
 
 
@@ -225,8 +226,7 @@ def test_a_v1_plan_is_read_as_the_one_step_v1(tmp_path):
 def test_a_v1_plan_with_mixed_claims_names_no_single_basis(tmp_path):
     data = _v1_json(tmp_path)
     data["changes"][0]["claims"]["rename-call:a→b"] = "same-object"
-    (tmp_path / ".pymolt" / "migration_plan.json").write_text(json.dumps(data),
-                                                             encoding="utf-8")
+    (tmp_path / DEFAULT_PLAN_PATH).write_text(json.dumps(data), encoding="utf-8")
     step = MigrationPlan.load(tmp_path).steps[0]
     assert step.claim == "preserve" and step.basis is None
     assert any("different claims" in e for e in step.why.evidence)

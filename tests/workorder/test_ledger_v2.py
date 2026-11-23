@@ -21,9 +21,11 @@ from pymolt.apply_ledger import (
 )
 from pymolt.codemods.models import CodemodPattern, DependencyMigration, FilePreview
 from pymolt.migration_plan import (
+    DEFAULT_PLAN_PATH,
     MigrationPlan,
     _ledger_steps,
     create_migration_plan,
+    plan_path,
     rollback_migration,
 )
 from pymolt.migration_state import MigrationReceipt
@@ -369,8 +371,9 @@ def test_a_v1_plan_applies_as_step_v1(tmp_path):
     data.update(schema_version=1)
     data.pop("steps"), data.pop("adapted_from")
     v1 = MigrationPlan.model_validate({**data, "schema_version": 2})
-    v1.save(tmp_path)
-    path = tmp_path / ".pymolt" / "migration_plan.json"
+    # A schema-1 plan is a file of the 0.2 layout, which no pointer shadows here.
+    path = v1.save(tmp_path, DEFAULT_PLAN_PATH)
+    assert path == plan_path(tmp_path)
     path.write_text(json.dumps({**json.loads(path.read_text()), "schema_version": 1}))
     loaded = MigrationPlan.load(tmp_path)
     assert loaded.adapted_from == 1 and [s.id for s in loaded.steps] == ["v1"]

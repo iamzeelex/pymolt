@@ -388,9 +388,11 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
         )
     plan = MigrationPlan.load(project_path)
     if plan is None:
+        from pymolt.plan_store import no_current_plan
+
         return PhaseState(
             phase="plan", state=TODO,
-            detail="no plan saved",
+            detail=no_current_plan(project_path) or "no plan saved",
         )
     # Run-level only: a planned file that moved is a step's business (re-based, present or
     # stale: the steps phase).
@@ -503,11 +505,12 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
 
 
 #: Which phase a state file belongs to, by name (the files of ``.pymolt/migrations/<run>/``
-#: are the migration's).
+#: are the migration's, those of ``.pymolt/plans/<name>/`` the plan's).
 _STATE_FILE_PHASES = {
     "env_config.json": "setup",
     "contract_state.json": "baseline",
     "migration_plan.json": "plan",
+    "current.json": "plan",
     "migration_state.json": "migration",
     "apply_ledger.json": "migration",
     "verification.json": "report",
@@ -517,6 +520,8 @@ _STATE_FILE_PHASES = {
 def _problem_phase(path: Path) -> str:
     if path.parent.parent.name == "migrations":
         return "migration"
+    if path.parent.parent.name == "plans" or path.parent.name == "plans":
+        return "plan"
     return _STATE_FILE_PHASES.get(path.name, "migration")
 
 
@@ -535,6 +540,7 @@ def _state_file_problems(root: Path) -> list:
         _load_run_state,
     )
     from pymolt.migration_state import MigrationReceipt
+    from pymolt.plan_store import check_current
     from pymolt.state_io import StateFileError, read_state_json
     from pymolt.verify.models import ContractState
     from pymolt.verify.unified import (
@@ -556,6 +562,9 @@ def _state_file_problems(root: Path) -> list:
 
     check(lambda: EnvConfig.load(state / "env_config.json"))
     check(lambda: ContractState.load(state / "contract_state.json"))
+    # The current-plan pointer and the plan it names (not every saved plan), and the 0.2
+    # layout's plan file while it is there.
+    check(lambda: check_current(root))
     check(lambda: read_state_json(state / "migration_plan.json", kind=PLAN_KIND,
                                   newest=PLAN_SCHEMA_VERSION, remedy=PLAN_REMEDY))
     check(lambda: MigrationReceipt.load(root))

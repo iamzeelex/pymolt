@@ -430,10 +430,10 @@ def test_plan_shows_manual_review_and_an_unbound_baseline():
         advisories=[PlannedAdvisory(path="core.py", line=24, column=0, severity="manual",
                                     reason="DataFrame.mean default changed")],
     )
-    view = views.plan_view(plan, {"pandas": []}, "requirements-target.txt",
-                           plan_path="/p/.pymolt/migration_plan.json")
+    stored = "/p/.pymolt/plans/20261120T0631Z-f74941c5/plan.json"
+    view = views.plan_view(plan, {"pandas": []}, "requirements-target.txt", plan_path=stored)
     data = _assert_envelope(view, _PLAN_KEYS)
-    assert view["full_report_path"] == "/p/.pymolt/migration_plan.json"
+    assert view["full_report_path"] == stored
     assert data["files_to_change"] == ["core.py"]
     assert "pd.concat" in data["diffs"][0]["diff"]
     assert data["advisories"] == ["core.py:24 [not applied] DataFrame.mean default changed"]

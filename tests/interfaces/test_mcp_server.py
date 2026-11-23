@@ -21,6 +21,7 @@ pytest.importorskip("mcp")
 from pymolt.interfaces import mcp_server  # noqa: E402
 from pymolt.interfaces.cli.commands import app  # noqa: E402
 from pymolt.interfaces.mcp_server import Grants, Tools, build_server  # noqa: E402
+from pymolt.migration_plan import MigrationPlan  # noqa: E402
 
 _DEFAULT_TOOLS = {"status", "scan", "setup", "assess", "plan", "verify", "apply", "rollback"}
 _ALL_TOOLS = _DEFAULT_TOOLS | {"capture"}
@@ -306,7 +307,10 @@ def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch, tools):
     source = _fake_codemods(monkeypatch, project)
     result = tools.plan(project_dir=str(project))
     assert result["ok"] is True, result
-    assert (project / ".pymolt" / "migration_plan.json").is_file()
+    plan = MigrationPlan.load(project)
+    assert (project / ".pymolt" / "plans" / plan.name / "plan.json").is_file()
+    assert (project / ".pymolt" / "plans" / plan.name / "PLAN.md").is_file()
+    assert not (project / ".pymolt" / "migration_plan.json").exists()
     assert result["data"]["files_to_change"] == ["app.py"]
     assert "requests.api.get" in result["data"]["diffs"][0]["diff"]
     assert (project / "app.py").read_text(encoding="utf-8") == source

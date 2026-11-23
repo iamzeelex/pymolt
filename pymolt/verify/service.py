@@ -2724,11 +2724,15 @@ def build_contract_report_from_state(
     from pymolt.migration_state import MigrationReceipt
     from pymolt.verify.unified import UnifiedVerificationReport
 
+    from pymolt.plan_store import check_current
+
     state = load_contract_state(project_dir)
     receipt = MigrationReceipt.load(project_dir)
     # verify saves its verdict over the saved one: a damaged or newer file refuses it now
     # (``StateFileError``), before the comparison.
     UnifiedVerificationReport.load(project_dir)
+    # It judges the current plan's steps: a pointer that names no plan as it is refuses it too.
+    check_current(project_dir)
 
     if changed_api_paths is None:
         from pymolt.migration_state import plans_in_effect

@@ -660,22 +660,26 @@ def plan(
              "(package names and versions only)",
     ),
     output: str | None = typer.Option(
-        None, "--output", "-o", help="Where to save the plan (default: .pymolt/migration_plan.json)"
+        None, "--output", "-o",
+        help="Write the plan only to this file: it is not saved in .pymolt/plans/ and the "
+             "current plan stays (`pymolt apply . --plan PATH` saves and applies it)",
     ),
     patch_file: str | None = typer.Option(
         None, "--patch", help="Also write the diff to this file"
     ),
     plan_md: str | None = typer.Option(
         None, "--plan-md",
-        help="Where to write the plan for a person (default: .pymolt/PLAN.md)",
+        help="Where to write the plan for a person (default: PLAN.md in the plan's folder, "
+             ".pymolt/plans/<name>/)",
     ),
     json_output: bool = typer.Option(False, "--json", help="Print the plan summary as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
     """Save the codemods for the target manifest as a plan and show the diff.
 
-    Writes no source file. The plan's steps are also written as PLAN.md. `pymolt apply`
-    applies the plan and refuses it if a planned file changed since.
+    Writes no source file. The plan is saved as .pymolt/plans/<name>/plan.json, named by its
+    time and id, and becomes the current plan; its steps are also written as PLAN.md beside
+    it. `pymolt apply` applies the current plan and refuses it if a planned file changed since.
     """
     import json
 
@@ -694,7 +698,7 @@ def plan(
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
                 online=online,
             )
-        saved_path = migration_plan.save_planned(project_path, output)
+        saved_path = migration_plan.save_planned(project_path, output=output).path
         from pymolt.workorder.render import write_plan_md
 
         plan_md_path = write_plan_md(migration_plan, project_path, plan_md)
@@ -950,7 +954,9 @@ def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=())
 def apply_plan_cmd(
     project_dir: str = typer.Argument(".", help="Project directory"),
     plan_file: str | None = typer.Option(
-        None, "--plan", help="Plan file (default: .pymolt/migration_plan.json)"
+        None, "--plan",
+        help="The plan: `current` (default), a name, an id prefix or a path. A mutating "
+             "apply of another plan makes it the current plan",
     ),
     step: str | None = typer.Option(
         None, "--step", help="Apply this step only (its dependencies must be in effect)"),
@@ -1015,21 +1021,13 @@ def apply_plan_cmd(
         MigrationCheckError,
         MigrationConflictError,
         MigrationEvidenceError,
-        MigrationPlan,
         MigrationPlanError,
-        plan_path,
     )
     from pymolt.workorder.apply import StepRefusal, apply_steps, skip_step
 
     json_output = json_output or agent
     project_path = require_project_dir(project_dir, json_output=json_output)
-    migration_plan = MigrationPlan.load(project_path, plan_file)
-    if migration_plan is None:
-        fail(
-            f"migration plan is missing or invalid: {plan_path(project_path, plan_file)}",
-            hint="Create a fresh plan with `pymolt plan .`.",
-            json_output=json_output,
-        )
+    migration_plan = _load_plan_ref(project_path, plan_file, json_output=json_output)
     if (brief or skip or record) and not step:
         flag = "brief" if brief else "skip" if skip else "record"
         fail(f"--{flag} needs --step ID", json_output=json_output)
@@ -1118,6 +1116,29 @@ def apply_plan_cmd(
         _render_left_to_you(migration_plan)
     next_step(project_path)
     raise typer.Exit(code=code)
+
+
+def _load_plan_ref(project_path: Path, ref: str | None, *, json_output: bool):
+    """``apply --plan REF``: the current plan (no ref, or ``current``), or the plan the
+    reference names (``plan_store.resolve_plan_ref``). Fails (exit 2) when there is none."""
+    from pymolt.migration_plan import MigrationPlan, plan_path
+    from pymolt.plan_store import PlanRefError, no_current_plan, resolve_plan_ref
+
+    if ref is None or ref.strip() == "current":
+        plan = MigrationPlan.load(project_path)
+        if plan is None:
+            fail(no_current_plan(project_path) or "no plan saved: there is no current plan",
+                 hint="Make one with `pymolt plan .`.", json_output=json_output)
+        return plan
+    try:
+        path = resolve_plan_ref(project_path, ref)
+    except PlanRefError as exc:
+        fail(str(exc), hint=exc.hint, json_output=json_output)
+    plan = MigrationPlan.load(project_path, path)
+    if plan is None:
+        fail(f"migration plan is missing: {plan_path(project_path, path)}",
+             hint="Create a fresh plan with `pymolt plan .`.", json_output=json_output)
+    return plan
 
 
 def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool) -> None:
@@ -2976,7 +2997,7 @@ def _save_succession_plan(project_dir: str, edges, files_scanned: int, json_outp
             files_scanned=files_scanned,
             recorder=recorder,
         )
-        return migration_plan.save(project_dir)
+        return migration_plan.save_planned(project_dir).path
     except (MigrationPlanError, OSError) as exc:
         fail(f"could not save the plan: {exc}", hint="No source files were changed.",
              code=EXIT_ENVIRONMENT, json_output=json_output)

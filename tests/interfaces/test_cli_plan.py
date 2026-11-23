@@ -188,7 +188,10 @@ def test_plan_json_is_machine_readable(tmp_path, monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["files_to_change"] == 1
     assert payload["rewrite_sites"] == 1
-    assert payload["plan_path"].endswith(".pymolt/migration_plan.json")
+    plan = MigrationPlan.load(tmp_path)
+    assert payload["plan_path"] == str(tmp_path.resolve() / ".pymolt" / "plans" / plan.name
+                                      / "plan.json")
+    assert payload["plan_id"] == plan.plan_id
 
 
 def test_apply_rejects_source_changed_after_plan(tmp_path, monkeypatch):
