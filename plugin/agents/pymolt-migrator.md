@@ -47,7 +47,7 @@ Operating principles:
   intended), plus the diffs and `data.advisories`. `pymolt status <dir> --agent` names the next
   step; `pymolt apply <dir> --step ID --brief --agent` prints its brief.
   - pymolt steps: a person approves the plan once, on a terminal
-    (`pymolt apply <dir> --approve-agent`); a re-plan or any change voids it. Then
+    (`pymolt apply <dir> --approve-agent`); a new plan or any change voids it. Then
     `pymolt apply <dir> --agent` (or `--step ID` / `--through ID`). Never work around a
     refusal; ask the person.
   - agent steps, your edits: `pymolt apply <dir> --step ID --record --agent` BEFORE editing,

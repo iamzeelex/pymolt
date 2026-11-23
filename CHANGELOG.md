@@ -211,6 +211,29 @@ All notable changes to pymolt. The format follows
   `.pymolt/migration_plan.json` where it is, and its open run and agent approval hold. The first
   `plan` moves that file, as it is, into `.pymolt/plans/` (and its `.pymolt/PLAN.md` into the
   plan's folder). pymolt 0.2 does not read the moved plan.
+- A `plan` with the same steps, baseline capture, setup and target manifest as the current plan
+  saves nothing: it says "Unchanged: same steps, baseline, setup and target manifest as the
+  current plan. Nothing saved; its approvals still hold." and keeps the current plan, its id and
+  its agent approval. A plan that changed is saved and derived from the current plan: its
+  `lineage` records the parent's id, the lineage's first plan and the generation (recorded only:
+  nothing is inherited yet). `plan --fresh` starts a new lineage; `plan --label TEXT` adds a label
+  to the plan's name (`20261120T0631Z-f74941c5-numpy2`). Both always save a plan; a label outside
+  the rule (lowercase letters, digits, `.`, `_`, `-`) exits 2. The MCP `plan` tool takes `label`
+  and `fresh`.
+- The plan panel, `PLAN.md`'s header and `status` show a plan's identity line: `plan f74941c5 ·
+  2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 (dirty) · derived
+  from 3c9e0d12` ("made by pymolt before 0.3" for a 0.2 plan). `PLAN.md` is titled by the plan's
+  name. `plan --json` and `--agent` add `plan_name`, `label`, `created_at`, `pymolt_version`,
+  `plan_source`, `baseline_capture_id`, `baseline_warning`, `lineage`, `content_digest`, `saved`,
+  `unchanged_from`, `moved_legacy` and `pruned`; the apply and rollback views add `plan_name`.
+- `plan` removes old plans: it keeps the current plan, its parent, every plan an apply run
+  references, every plan folder git tracks (one `git ls-files`) and the 20 newest. It removes
+  nothing when a state file it reads is damaged or git cannot say what it tracks, and `pruned`
+  says why.
+- `status` names the current plan and begins each capture's line with its capture id
+  (`plan`, `captures` in `--json` and `--agent`). It notes when the current plan was made at
+  another commit than `HEAD` (`drift`), and when a plan is still in the 0.2 layout; neither
+  changes a phase or the next command.
 
 #### Assess, scan and setup
 
@@ -259,6 +282,11 @@ All notable changes to pymolt. The format follows
 
 ### Changed
 
+- A plan stores the path of its baseline recording relative to the project
+  (`baseline_trace_path`), so a committed plan names no folder of the machine it was made on. A
+  plan saved by pymolt 0.2 keeps its absolute path and still binds the same recording.
+- `apply --approve-agent` says what voids an approval: a new plan (a re-plan that changes
+  anything) or any change to the plan. A re-plan that changes nothing keeps it.
 - CI runs the injected tracer's tests on Python 3.6 and 3.7 as well (3.8 and 3.11 ran already),
   checks pyflakes errors with ruff, installs from the lock file (`--locked`) and pins every
   GitHub Action by commit. The package no longer claims Python 3.13 (14 tests fail there; see

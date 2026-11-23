@@ -122,6 +122,24 @@ Two cases go the other way. Both still fail, although they may be noise:
   Neither has been looked into yet.
 - The tracer is written to load on Python 3.4–3.5. That is not tested.
 
+### Saved plans
+
+- **Git facts are local and partial.** A plan records `HEAD`'s commit, whether a tracked file
+  under the project differed from it, and the project's folder in the repository, read from the
+  local repository with a 5-second limit. Untracked files and `.pymolt/` never count as a
+  change, so a plan made with a new untracked file reads as clean. Outside a repository, without
+  git, with no commit yet, or in a repository git refuses as of dubious ownership (pymolt never
+  changes `safe.directory`), the commit is unknown and the plan says why. The branch-drift note
+  in `status` compares commits only: it does not see uncommitted edits made after the plan.
+- **Retention removes plans.** After each `plan`, plans beyond the 20 newest are removed unless
+  they are the current plan, its parent, a plan an apply run references, or a plan folder git
+  tracks. A grandparent goes like any other old plan. Commit a plan folder to keep it.
+- **Unchanged is exact.** A re-plan is unchanged only when its whole content and inputs are the
+  same; any difference, however small, saves a new plan, and agent approvals do not carry over
+  to it. Lineage is recorded only: a derived plan inherits nothing from its parent yet.
+- **No downgrade.** pymolt 0.2 does not read a project 0.3 has planned in: it finds no plan in
+  `.pymolt/plans/` and refuses a schema-3 frozen copy of a run as written by a newer pymolt.
+
 ## Overhead
 
 | Workload | Measured |
