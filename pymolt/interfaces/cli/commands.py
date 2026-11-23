@@ -708,6 +708,8 @@ def plan(
             json_output=json_output,
         )
 
+    if migration_plan.baseline_warning:
+        warn(escape(migration_plan.baseline_warning))
     if patch_file:
         patches = _unified_patches(previews, project_path)
         patch_path = Path(patch_file)

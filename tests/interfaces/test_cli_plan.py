@@ -396,3 +396,19 @@ def test_apply_lists_what_the_plan_leaves_to_a_person(tmp_path, monkeypatch):
     assert [(a["path"], a["line"], a["severity"]) for a in payload["advisories"]] == [
         ("app.py", 1, "precondition"), ("app.py", 7, "not-applied")]
     assert payload["manual"] == []
+
+
+def test_plan_warns_when_the_baseline_recording_changed_since_its_capture(tmp_path,
+                                                                          monkeypatch):
+    _configured_project(tmp_path)
+    _mock_plan_services(tmp_path, monkeypatch)
+    slot = verify_service.load_contract_state(tmp_path).baseline
+    with open(slot.trace_path, "a", encoding="utf-8") as fh:
+        fh.write("\n")
+
+    result = runner.invoke(app, ["plan", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert "changed since its capture" in " ".join(result.stderr.split())
+    plan = MigrationPlan.load(tmp_path)
+    assert plan.baseline.trace_sha256 == plan.baseline_trace_sha256 != slot.trace_sha256

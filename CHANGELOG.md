@@ -187,6 +187,13 @@ All notable changes to pymolt. The format follows
   same files; `--cascade` rolls back the steps that depend on it first.
 - An append-only apply ledger, and the step texts kept once by hash in `.pymolt/blobs/`, with a
   `.pymolt/.gitignore` for them. The project's own `.gitignore` is not touched.
+- Plan files are schema 3 (`pymolt.plan/3`, `pymolt/schemas/migration_plan-3.schema.json`): a
+  plan also records its name, label, the pymolt version and git commit it was made with, the
+  baseline capture it was made from (`baseline.capture_id`), its lineage and a digest of its
+  content. A schema-2 plan made by pymolt 0.2 is read as it is, so its runs, frozen copies and
+  agent approvals hold; pymolt 0.2 refuses a schema-3 plan as newer.
+- `plan` warns when the baseline's recording changed since it was captured: the plan binds the
+  recording as it is now.
 
 #### Assess, scan and setup
 
