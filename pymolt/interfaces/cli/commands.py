@@ -1192,8 +1192,9 @@ def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool)
     console.print(Panel(
         f"Approved plan [bold cyan]{plan.plan_id[:8]}[/bold cyan] for agents "
         f"(attestation {escape(done['attestation'])}): `pymolt apply --agent` may write its "
-        "pymolt steps, and `pymolt rollback --step ID --agent` roll one back. A re-plan or any "
-        "change to the plan voids it. [bold]Nothing was written to your code.[/bold]",
+        "pymolt steps, and `pymolt rollback --step ID --agent` roll one back. A new plan (a "
+        "re-plan that changes anything) or any change to the plan voids it. [bold]Nothing was "
+        "written to your code.[/bold]",
         title="Approved for agents", border_style="green", expand=False))
 
 

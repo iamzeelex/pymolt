@@ -8,6 +8,7 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **manifest** | The file that declares dependencies: `requirements.txt`, `pyproject.toml`, `environment.yml`, and so on. setup picks one; assess writes the **target manifest** (`requirements-target.txt` or `environment-target.yml`) |
 | **capture** | The calls your code made into its dependencies while a command ran, recorded without changing the code |
 | **baseline** | The capture taken before the migration. Nothing else is called baseline |
+| **capture id** | A capture's name: its UTC time and the first 8 hex of its recording's sha256, `20261120T060620Z-b3e1a2c0`. It names the recording, not its path, so it survives archiving |
 | **post-migration** | The capture taken after the migration, in the target environment |
 | **call site** / **contact** | A place in your code that touches a dependency: file, line, symbol and kind (call, decorator, context manager, protocol, attribute read, base class, constant). `scan` lists them (the contact map) |
 | **fact** | A callee, a call site and the arguments your code passed, mapped to the outcomes seen |
@@ -21,14 +22,17 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **granularity** | How coverage and recall knew a contact ran: `line` (3.12+), `function` (3.6–3.11), `file` (captures without the executed-code record), `symbol` (traces without call sites) |
 | **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)) |
 | **replicate** | A second run of the baseline's command on the same code and environment; what differs between the two is run-to-run noise |
-| **approval** | A person's attested `apply --approve-agent`: agents may apply this plan's pymolt steps and roll one back. A re-plan or any change to the plan voids it |
+| **approval** | A person's attested `apply --approve-agent`: agents may apply this plan's pymolt steps and roll one back. A new plan (a re-plan that changes anything) or any change to the plan voids it; an unchanged re-plan keeps it |
 | **attestation** | A person's confirmation, typed on a terminal, kept outside the project with an HMAC. Only an attestation can judge an edit more leniently than a hand edit |
 | **ACCEPTED** | A changed outcome on an edited line that a person attested as intended: it counts as compared equal and is always printed, with who accepted it and when |
 | **review item** | A difference pymolt cannot judge on its own: a hand edit's new value, a value that may be run noise, an input that changed with no visible cause, a dict order, an environment difference. It makes the verdict INCONCLUSIVE and names what settles it: a person (`needs_review`) or more evidence (`needs_evidence`) |
 | **finding** | One reported difference: failing facts grouped by symbol and call site, or a review item |
 | **API change** | A symbol your code uses that is removed, moved, or changed in signature, default or deprecation status between base and target |
 | **codemod** | A rewrite for one API or Python-version change, applied with LibCST |
-| **plan** | The API changes, the codemods applied to your files as a diff, and the predicted risks, saved for `apply` |
+| **plan** | The API changes, the codemods applied to your files as a diff, and the predicted risks, saved for `apply` in `.pymolt/plans/<name>/plan.json`, never changed after |
+| **plan name** | A plan's name and folder: its UTC time to the minute, the first 8 hex of its id and its label, `20261120T0631Z-f74941c5-numpy2`. `apply --plan` takes it, or an id prefix |
+| **current plan** | The plan `apply`, `verify` and `status` use: the one `.pymolt/plans/current.json` names, set by `plan` and by an `apply` that writes another plan. Local to the checkout |
+| **lineage** | Where a plan comes from: the plan it was derived from (`parent`), the first plan of the lineage (`root`) and how many derivations lie between (`generation`). `plan --fresh` starts a new one. A plan the same as the current one is **unchanged** and not saved |
 | **step** | One unit of the plan: a recipe pymolt applies across every file it changes, or work for an agent or a person. `apply --step ID` applies one |
 | **executor** | Who carries out a step: `pymolt` (apply writes it), `agent` or `person` (they make the edit and record it with `apply --step ID --record`) |
 | **anchor** | A statement named by what it is (its code with the formatting stripped), its function or class and its neighbours, never by its line, so it is found again after lines move |

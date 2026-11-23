@@ -41,7 +41,7 @@ You decide in the server command, where the agent cannot change it:
 |---|---|
 | `--root DIR` | Every tool's `project_dir` must lie under `DIR` (default: where the server starts). |
 | `--allow-run` | Adds the `capture` tool, which runs the agent's command on this machine, and lets `apply` run its import check. Without it the agent runs no program. |
-| your approval of a plan | `apply` and `rollback` write a step only on a plan you approved for agents on a terminal (`pymolt apply . --approve-agent`). A re-plan or any change to the plan voids it. |
+| your approval of a plan | `apply` and `rollback` write a step only on a plan you approved for agents on a terminal (`pymolt apply . --approve-agent`). A new plan (a re-plan that changes anything) or any change to the plan voids it. |
 
 Every tool refuses an argument it does not take. `capture`, `apply` and `rollback` carry the
 MCP `destructiveHint` annotation, so a client can ask you before each call.
@@ -110,7 +110,7 @@ Output is plain text, with no rich/ANSI.
 ## Source writes
 
 Only `apply` and `rollback` write source files, and only on a plan a person approved
-for agents on a terminal (`pymolt apply . --approve-agent`). A re-plan or any change to
+for agents on a terminal (`pymolt apply . --approve-agent`). A new plan or any change to
 the plan voids the approval. Without `--allow-run`, `apply` runs no import check and the
 receipt says so. Their dry runs and briefs need no approval. Details:
 [agents.md](../agents.md).

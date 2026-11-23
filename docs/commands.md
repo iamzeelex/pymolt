@@ -27,6 +27,23 @@ itself: after `rollback --step`, the next command is the post-migration capture 
 with `pymolt apply --step ID` if you want it back). The post-migration capture is stale when a
 file it recorded no longer has the recorded text, whatever changed it.
 
+`status` names the current plan by its name and prints its identity line (`current plan: plan
+f74941c5 · 2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 · fresh`),
+and each capture's line begins with its capture id. `--json` and `--agent` carry them as `plan`
+(name, id, label, time, schema, pymolt version, commit, lineage) and `captures` (`baseline`,
+`post_migration`, `baseline_replicate`). Two notes are advice, never a phase state or the next
+command:
+- **branch drift**: the current plan was made at another commit than `HEAD` (or an unchanged
+  re-plan last confirmed it at one): "the current plan was made at commit 1a2b3c4; HEAD is
+  9f8e7d6: re-plan (`pymolt plan .`) if the code it plans for changed" (`drift` in `--json`).
+  Silent outside git or when either commit is unknown;
+- **the 0.2 layout**: a plan still in `.pymolt/migration_plan.json`, which the next
+  `pymolt plan .` moves into `.pymolt/plans/`.
+
+With saved plans and no current plan (a fresh clone of a repository that commits its plan
+folders), the plan phase says so and names the newest: choose one with
+`pymolt apply . --plan NAME`, or make a new one with `pymolt plan .`.
+
 ### `pymolt scan [dir]`
 Lists the manifests, the Python-version divergence, the dependency edges, and every place your code
 touches a dependency: calls, attribute reads, decorators, base classes, context managers, constants
@@ -88,16 +105,37 @@ before any code change, because it cannot be recreated later. Details are in
 ### `pymolt plan [dir]`
 Computes which APIs your code uses changed between the base and the target, which Python-version
 changes affect it, the codemods for both and the predicted risk at each call site. Saves this as a
-plan of ordered steps, writes it for a person as `.pymolt/PLAN.md`, and shows the diff and the
-steps. It writes no source file. Its `--json` adds `steps` and `plan_md`. Details are in
-[plan.md](plan.md).
+plan of ordered steps in `.pymolt/plans/<name>/plan.json`, makes it the current plan, writes it
+for a person as `PLAN.md` beside it, and shows the diff and the steps. It writes no source file.
+Details are in [plan.md](plan.md#saved-plans).
+
+- **Unchanged.** A plan with the same steps, baseline capture, setup and target manifest as the
+  current plan saves nothing: "Unchanged: same steps, baseline, setup and target manifest as the
+  current plan. Nothing saved; its approvals still hold." The current plan stays, with its id
+  and its agent approval.
+- **Derived.** A changed plan is derived from the current plan (its lineage: the parent's id, the
+  lineage's first plan and the generation). `--fresh` starts a new lineage; with no current plan
+  every plan is fresh.
+- **Retention.** After saving, `plan` removes the old plans it no longer keeps: it keeps the
+  current plan, its parent, every plan an apply run references, every plan folder git tracks,
+  and the 20 newest.
+
+The panel and `PLAN.md` begin with the plan's identity line: its id, time, baseline capture,
+commit and lineage. `--json` and `--agent` add `plan_name`, `label`, `created_at`,
+`pymolt_version`, `plan_source` (the git facts), `baseline_capture_id`, `baseline_warning`,
+`lineage`, `content_digest`, `saved`, `unchanged_from` (the current plan an unchanged plan
+kept), `moved_legacy` (a 0.2 plan file moved into `.pymolt/plans/`), `pruned` (`removed`, and
+`skipped` with why when retention removed nothing), `steps` and `plan_md`.
 
 | Option | Meaning |
 |---|---|
 | `--target-manifest` | The target manifest to plan for (default: the one assess wrote) |
 | `--online` | Read intermediate releases from PyPI for successor hints (package names and versions only) |
-| `--output`, `--patch` | Where to save the plan; also write the diff to a file |
-| `--plan-md` | Where to write the plan for a person (default: `.pymolt/PLAN.md`) |
+| `--label` | A label for the plan's name (`20261120T0631Z-f74941c5-numpy2`): 1 to 32 lowercase letters, digits, `.`, `_` or `-`, beginning and ending with a letter or digit; anything else exits 2. A new label always saves a plan |
+| `--fresh` | Start a new lineage: inherit nothing from the current plan. Always saves a plan |
+| `--output`, `-o` | Write the plan only to this file, as 0.2 did: it is not saved in `.pymolt/plans/` and the current plan stays. `pymolt apply . --plan PATH` saves and applies it. Unchanged, it is the current plan's file |
+| `--patch` | Also write the diff to this file |
+| `--plan-md` | Where to write the plan for a person (default: `PLAN.md` in the plan's folder). An unchanged plan writes it only when it is missing or with this option |
 
 ### `pymolt apply [dir]`
 Writes the saved plan's pymolt steps: with no option, every one whose dependencies are in effect,
@@ -158,7 +196,7 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 
 | Option | Meaning |
 |---|---|
-| `--plan` | The plan file (default: `.pymolt/migration_plan.json`) |
+| `--plan` | The plan: `current` (default), a plan name, a plan id prefix (4 to 32 hex) or a path. A reference that matches no plan, or several, exits 2. An `apply` that writes (a step, `--skip`, `--record`) makes its plan the current plan, saving a plan file from outside `.pymolt/plans/` there first; `--dry-run`, `--brief` and `--approve-agent` do not |
 | `--step` | That step only. Refused when one of its dependencies is not in effect, or when it is a step for an agent or a person |
 | `--through` | Every pymolt step up to that one that is not in effect. Refused when a dependency on the way is not in effect and not on the way |
 | `--dry-run` | Decide and compile, then print the diff that would be written. Writes nothing |
@@ -170,7 +208,7 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 | `--claim` | With `--record --done`: `preserve` or `intended`. It may only tighten the step's claim; loosening it needs a person's attestation |
 | `--expect` | With `--record --done --claim intended`: `any` or `representation`. `raise:<Type>` and `return:<Type>` are a person's attested expectation |
 | `--pair` | With `--record --done`: `OLD=NEW`, a pairing anchor verify pairs old calls with new ones by (repeatable) |
-| `--approve-agent` | A person approves this plan for agents, on a terminal (an attestation). Refused under `--agent` and `--json`. A re-plan or any change to the plan voids it |
+| `--approve-agent` | A person approves this plan for agents, on a terminal (an attestation). Refused under `--agent` and `--json`. A new plan (a re-plan that changes anything) or any change to the plan voids it; an unchanged re-plan keeps it |
 | `--agent` | The agent view. It writes pymolt steps only on a plan a person approved for agents; it refuses `--skip`, `--allow-no-baseline` and `--by person`. `--dry-run`, `--brief` and `--record` work on any plan |
 | `--allow-no-baseline` | Apply without a baseline capture; `verify` will then be INCONCLUSIVE |
 | `--no-smoke` | Skip the smoke import. By default apply imports the changed modules in the target environment setup names, before and after the write; a module that imported before and fails after undoes the write, and the ledger records the rollback. It runs your code's import-time code. When it does not run (`--no-smoke`, no target environment), the receipt says `not checked` and why |
@@ -223,10 +261,12 @@ after that step. Otherwise it still describes the code and is kept.
 ## Damaged or newer state files
 
 pymolt keeps its state in `.pymolt/`: `env_config.json` (setup's choices), `contract_state.json`
-(the captures), `migration_plan.json` (the plan), `migration_state.json` (apply's receipt),
-`apply_ledger.json` (the ledger), `verification.json` (the saved verdict), and each apply run's
-`migrations/<run-id>/state.json`, `plan.json` and `approval.json`. A missing file is simply not
-there yet. A file that cannot be read, is not JSON, or does not match what pymolt expects is
+(the captures), `plans/current.json` (which plan is current) and the current plan's
+`plans/<name>/plan.json`, `migration_state.json` (apply's receipt), `apply_ledger.json` (the
+ledger), `verification.json` (the saved verdict), and each apply run's
+`migrations/<run-id>/state.json`, `plan.json` and `approval.json`. A project from pymolt 0.2
+also has `migration_plan.json` (its plan) until the next `plan` moves it. A missing file is
+simply not there yet. A file that cannot be read, is not JSON, or does not match what pymolt expects is
 **damaged**; one with a higher `schema_version` than this pymolt reads was written by a **newer**
 pymolt. pymolt never reads either as missing and never overwrites it: every command that needs
 the file exits with code 2, naming the file, what is wrong and what to do; `--json` and `--agent`
@@ -238,6 +278,8 @@ anything.
 - The plan, the setup choices, the saved verdict or an approval: move the file into
   `.pymolt/archive/` to keep it, then run the command that rebuilds it (`pymolt plan .`,
   `pymolt setup .`, `pymolt verify .`, or a person's `pymolt apply . --approve-agent`).
+- The current-plan pointer: move it into `.pymolt/archive/`, then make a saved plan current with
+  `pymolt apply . --plan NAME`, or plan again with `pymolt plan .`.
 - The capture state points at the recordings, which stay in `.pymolt/contract_traces/`:
   restore it from version control or a backup if you can; otherwise move it aside and capture
   again (a baseline can only be captured before the code changes).

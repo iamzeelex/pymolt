@@ -297,6 +297,18 @@ summaries, PR comments and ticket descriptions.
   behind a verified upload. Scenario 9.
 - **M5 (optional):** `plan --from`, the team effort mapping, calibration, same-commit capture shards.
 
+### 8.3 M1: owner decisions (2026-11-22)
+
+Taken on the M1 implementation spec's open questions. They amend §1 where they differ.
+
+| Question | Decision |
+|---|---|
+| Retention | Keep the current plan, its **parent only** (not every ancestor: a derived re-plan is the default, so a lineage grows without bound), every plan a run references, and the 20 newest |
+| `--fresh` or a new `--label` on an unchanged plan | Saves a new plan; the old plan's approvals do not carry to it |
+| `plan -o PATH` | Keeps 0.2's meaning: the plan is written only to `PATH`; nothing is stored under `plans/` and the pointer stays. A mutating `apply --plan PATH` imports it (its stored form, under its name) |
+| `plans/current.json` | Local state, gitignored. With no pointer and no 0.2 file but saved plans (a fresh clone, a CI checkout), nothing is adopted silently: `status` names the newest and how to choose one, `plan` starts a fresh lineage, and commands that need the current plan say the same |
+| Plan folders git tracks | Retention never removes them (one `git ls-files -z -- .pymolt/plans` through `adapters/git.py`). Outside a repository or without git nothing is tracked; when git fails or times out, nothing is pruned and `pruned` says so |
+
 ## 9. Sources
 
 - SARIF 2.1.0 (OASIS): https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html

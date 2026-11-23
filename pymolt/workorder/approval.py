@@ -72,7 +72,8 @@ def approve(project_dir: str | Path, plan: MigrationPlan, *, attester) -> dict:
         text = (f"Approve plan {plan.plan_id[:8]} for agents: they may apply its "
                 f"{len(pymolt_steps)} pymolt step(s) ({', '.join(pymolt_steps[:8]) or 'none'}"
                 f"{' ...' if len(pymolt_steps) > 8 else ''}) and roll back one step at a time. "
-                "A re-plan or any change to the plan voids it.")
+                "A new plan (a re-plan that changes anything) or any change to the "
+                "plan voids it.")
         record, why = attester.ask(text, {
             "kind": "approval", "project": project_id(root), "plan_id": plan.plan_id,
             "run_id": run_id, "plan_sha256": digest, "scope": list(SCOPE)}) if attester \

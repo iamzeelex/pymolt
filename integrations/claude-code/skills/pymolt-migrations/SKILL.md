@@ -28,8 +28,8 @@ pymolt rollback . --step ID --agent           # undo one step
 ## Rules
 
 - Each step has an executor (pymolt / agent / person) and a claim (preserve / intended).
-  pymolt steps need a person's `pymolt apply . --approve-agent` on a terminal; a re-plan or
-  any change voids it. Never work around it. Record every edit you make, or verify judges it
+  pymolt steps need a person's `pymolt apply . --approve-agent` on a terminal; a new plan
+  (`saved: true`) or any change voids it. Never work around it. Record every edit you make, or verify judges it
   as a hand edit. Person steps are the user's: relay the brief.
 - `verify . --step ID` exits 0 verified, 1 failed, 4 needs review or evidence.
   An INCONCLUSIVE verdict's `data.inconclusive_kind` says who settles it: `needs_review` is a
