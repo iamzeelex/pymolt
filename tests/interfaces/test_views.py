@@ -410,6 +410,10 @@ _PLAN_KEYS = {
     "risks_attention_total", "risks_fixed", "risks_fixed_total",
     "python", "compile_findings", "compile_findings_total",
     "steps", "steps_total", "steps_by_executor", "plan_md", "next",
+    # the plan's identity, and what `plan` did with it
+    "plan_name", "label", "created_at", "pymolt_version", "plan_source", "baseline_capture_id",
+    "baseline_warning", "lineage", "content_digest", "saved", "unchanged_from", "moved_legacy",
+    "pruned",
 }
 
 
@@ -611,5 +615,5 @@ def test_plan_keeps_the_plain_risk_line_when_every_delta_is_conclusive():
     plan = _plan_with_risks(["complete"], changes=False)
     summary = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")["summary"]
     assert "Predicted risks: 0 need attention, 0 fixed by the plan (" in summary
-    assert "unknown" not in summary
+    assert "API changes unknown" not in summary and "inconclusive" not in summary
     assert "The plan changes no file." in summary

@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -317,16 +319,47 @@ def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch, tools):
     assert "pymolt apply" in result["hint"]
 
 
+def test_plan_takes_a_label_and_fresh_and_says_when_it_is_unchanged(tmp_path, monkeypatch,
+                                                                      tools):
+    project = _configured_project(tmp_path)
+    _fake_codemods(monkeypatch, project)
+    first = tools.plan(project_dir=str(project), label="numpy2")
+    again = tools.plan(project_dir=str(project))
+    fresh = tools.plan(project_dir=str(project), fresh=True)
+    bad = tools.plan(project_dir=str(project), label="Not A Label")
+
+    assert first["ok"] and first["data"]["saved"] is True
+    assert first["data"]["plan_name"].endswith("-numpy2")
+    assert again["data"]["saved"] is False
+    assert again["data"]["unchanged_from"] == first["data"]["plan_name"]
+    assert again["data"]["plan_id"] == first["data"]["plan_id"]
+    assert fresh["data"]["saved"] is True and fresh["data"]["lineage"]["parent"] is None
+    assert bad["ok"] is False and "invalid label" in bad["error"]
+    assert "lowercase" in bad["hint"]
+
+
 # ── parity: MCP tool == `pymolt <command> --agent` ────────────────────────────
 
 
+_NAME_TIME = re.compile(r"\b\d{8}T\d{4}Z-")
+_CAPTURE_ID = re.compile(r"\b\d{8}T\d{6}Z-[0-9a-f]{8}\b")
+_UTC_MINUTE = re.compile(r"\b\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\b")
+
+
 def _normalize(view: dict) -> dict:
-    """Plan ids are random per plan; everything else must match byte for byte."""
+    """Plan ids are random per plan, and a plan's name and ``created_at`` carry the minute it
+    was made (capture ids, the minute of a capture); everything else must match byte for
+    byte."""
+    data = view.get("data") or {}
     text = json.dumps(view, sort_keys=True)
-    plan_id = (view.get("data") or {}).get("plan_id")
+    plan_id = data.get("plan_id")
     if plan_id:
         text = text.replace(plan_id, "<plan-id>").replace(plan_id[:8], "<plan-id8>")
-    return json.loads(text)
+    if data.get("created_at"):
+        text = text.replace(json.dumps(data["created_at"]), '"<created-at>"')
+    text = _CAPTURE_ID.sub("<capture-id>", text)
+    text = _NAME_TIME.sub("<name-time>-", text)
+    return json.loads(_UTC_MINUTE.sub("<utc-minute>", text))
 
 
 def _parity_cases(tools, p: str):
@@ -347,6 +380,8 @@ def _parity_cases(tools, p: str):
             lambda: tools.capture(project_dir=p, when="baseline", mode="tests",
                                        command=["pytest"], force=True)),
         "plan": (["plan", p], lambda: tools.plan(project_dir=p)),
+        "plan-label-fresh": (["plan", p, "--label", "x", "--fresh"],
+                             lambda: tools.plan(project_dir=p, label="x", fresh=True)),
         "verify": (["verify", p], lambda: tools.verify(project_dir=p)),
     }
 
@@ -369,6 +404,9 @@ def test_mcp_tool_returns_the_cli_agent_view(case, tmp_path, monkeypatch, tools)
         argv = [*argv, "--agent"]
     result = runner.invoke(app, argv)
     cli_view = json.loads(result.stdout)
+    if case.startswith("plan"):
+        # The second plan would be unchanged from the first (saved: false): plan afresh.
+        shutil.rmtree(project / ".pymolt" / "plans")
     mcp_view = call()
 
     assert cli_view["ok"] is True, cli_view

@@ -20,6 +20,12 @@ is held), never as a symlink. ``migration_plan.plan_path`` resolves it, so every
 ``MigrationPlan.load(root)`` reads the current plan; with no pointer it reads the 0.2 layout's
 single file, ``.pymolt/migration_plan.json``.
 
+**Re-planning** (``save_planned``). A plan the same as the current one (``unchanged_from``: its
+content digest, baseline capture, baseline trace path, setup fingerprint and target manifest)
+saves nothing: the current plan stays, with its approvals, and the pointer records the commit
+it was confirmed for. Otherwise the new plan is derived from the current one (its lineage:
+root, parent, generation; recorded only) unless ``--fresh``; a new ``--label`` always saves.
+
 **A 0.2 project.** Only ``plan`` moves the 0.2 file into the store (``migrate_legacy``), by its
 stored form, so its runs, frozen copies and agent approvals hold. Every other command reads it
 where it is and writes nothing under ``plans/``.
@@ -53,12 +59,15 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from pymolt.migration_plan import (
     DEFAULT_PLAN_PATH,
+    LABEL_RE,
+    LABEL_RULE,
     NAME_RE,
     PLAN_KIND,
     PLAN_REMEDY,
     UNKNOWN_TIME,
     MigrationPlan,
     MigrationPlanError,
+    PlanLineage,
     PlanSource,
     _now,
     _validate_run_id,
@@ -147,11 +156,13 @@ class PlanPointer(BaseModel):
 
 @dataclasses.dataclass
 class PlanSaveResult:
-    """What ``save_planned`` did. ``path``: where the plan is (its ``plan.json``, or the
-    ``-o`` file); ``saved``: whether it was stored under ``plans/`` and made current;
-    ``unchanged_from``: the current plan an unchanged re-plan kept (its name; never set yet);
+    """What ``save_planned`` did. ``plan``: the plan made, or for an unchanged re-plan the
+    current plan it kept; ``path``: where that plan is (its ``plan.json``, or the ``-o``
+    file); ``saved``: whether a new plan was stored under ``plans/`` and made current;
+    ``unchanged_from``: the name of the current plan an unchanged re-plan kept;
     ``moved_legacy``: the name the 0.2 plan file was moved in under; ``pruned``: the plans
-    retention removed."""
+    retention removed; ``baseline_warning``: the plan's ``baseline_warning`` (never saved);
+    ``exported``: written to ``-o``'s file only."""
 
     plan: MigrationPlan
     path: Path
@@ -159,6 +170,8 @@ class PlanSaveResult:
     unchanged_from: str | None = None
     moved_legacy: str | None = None
     pruned: list[str] = dataclasses.field(default_factory=list)
+    baseline_warning: str | None = None
+    exported: bool = False
 
 
 # ── paths ─────────────────────────────────────────────────────────────────────────────────
@@ -331,7 +344,6 @@ def store(project_dir: str | Path, plan: MigrationPlan) -> Path:
     rewritten) makes the plan draw a new id, ``REDRAWS`` times, then ``MigrationPlanError``:
     the plan is not bound to anything until it is stored. A plan with no lineage gets a fresh
     one. The caller holds the state lock."""
-    from pymolt.migration_plan import PlanLineage
 
     root = Path(project_dir).resolve()
     if plan.lineage is None:                  # no lineage given: a fresh one
@@ -385,9 +397,11 @@ def _put_stored_form(root: Path, name: str, data: dict, *, what: str) -> Path:
     return path
 
 
-def export(project_dir: str | Path, plan: MigrationPlan, output: str | Path) -> Path:
+def export(project_dir: str | Path, plan: MigrationPlan, output: str | Path, *,
+           stored: bool = False) -> Path:
     """``plan -o PATH``: the plan written only to ``PATH`` (as 0.2 did); nothing is stored and
-    the current plan stays. ``apply --plan PATH`` imports it into the store (``adopt``)."""
+    the current plan stays. ``apply --plan PATH`` imports it into the store (``adopt``).
+    ``stored``: write the plan's stored form (the current plan as read), not ``model_dump``."""
     from pymolt.migration_plan import plan_path
 
     root = Path(project_dir).resolve()
@@ -396,6 +410,8 @@ def export(project_dir: str | Path, plan: MigrationPlan, output: str | Path) -> 
         raise MigrationPlanError(
             f"-o cannot write into the plan store: {display_path(target)}",
             hint="Leave out -o to store the plan, or write it outside .pymolt/plans/.")
+    if stored:
+        return atomic_write_json(target, plan.stored_form())
     _stamp_name(plan)
     return atomic_write_json(target, plan.model_dump(mode="json"))
 
@@ -416,26 +432,113 @@ def stamp_provenance(project_dir: str | Path, plan: MigrationPlan) -> MigrationP
     return plan
 
 
+def check_label(label: str | None) -> str | None:
+    """``plan --label``: the label as given, or ``ValueError`` with the rule
+    (``LABEL_RULE``). Nothing is rewritten into a label."""
+    if label is not None and not LABEL_RE.match(label):
+        raise ValueError(f"invalid label {label!r}: {LABEL_RULE}")
+    return label
+
+
+def _capture_id(plan: MigrationPlan) -> str | None:
+    return plan.baseline.capture_id if plan.baseline is not None else None
+
+
+def unchanged_from(plan: MigrationPlan, current: MigrationPlan | None, *,
+                   label: str | None = None, fresh: bool = False) -> bool:
+    """Whether ``plan`` (just made) is the current plan again: not ``fresh``, no new label,
+    the same content (``content_digest_of``, recomputed on both sides) and the same inputs:
+    the baseline capture (by id), the baseline trace path apply binds, the setup fingerprint
+    and the target manifest's sha256. A plan saved then would differ by its id and time only,
+    and the current plan's approvals would not carry to it."""
+    if current is None or fresh:
+        return False
+    if label is not None and label != current.label:
+        return False
+    return (content_digest_of(plan) == content_digest_of(current)
+            and _capture_id(plan) == _capture_id(current)
+            and plan.baseline_trace_path == current.baseline_trace_path
+            and plan.environment_setup_fingerprint == current.environment_setup_fingerprint
+            and plan.target_manifest_sha256 == current.target_manifest_sha256)
+
+
+def stamp_lineage(plan: MigrationPlan, current: MigrationPlan | None, *,
+                  fresh: bool = False) -> PlanLineage:
+    """The plan's lineage (recorded only): derived from the current plan (its id the parent,
+    its root the root, one generation more; a plan with no lineage is its own root), or fresh
+    (``--fresh``, or no current plan): its own root, no parent, generation 0."""
+    if fresh or current is None:
+        plan.lineage = PlanLineage(root=plan.plan_id)
+    else:
+        parent = current.lineage or PlanLineage(root=current.plan_id)
+        plan.lineage = PlanLineage(root=parent.root, parent=current.plan_id,
+                                   generation=parent.generation + 1)
+    return plan.lineage
+
+
+def _confirm(root: Path, pointer: PlanPointer | None, commit: str | None) -> None:
+    """An unchanged re-plan: the pointer records the commit it confirmed the current plan for
+    (``checked_commit``); nothing else changes. Unknown (outside git): left as it is."""
+    if pointer is None or commit is None or pointer.checked_commit == commit:
+        return
+    with state_lock(root, operation="plan: confirm the current plan"):
+        atomic_write_json(pointer_path(root), pointer.model_copy(
+            update={"checked_commit": commit}).model_dump(mode="json"))
+
+
 def save_planned(project_dir: str | Path, plan: MigrationPlan, *,
+                 label: str | None = None, fresh: bool = False,
                  output: str | Path | None = None) -> PlanSaveResult:
-    """Save the plan ``pymolt plan`` made. With ``output`` (``-o``) it is only written there
-    (``export``). Otherwise, under the state lock: the 0.2 plan file is moved into the store
-    (``migrate_legacy``), and the plan is stored and made current (``MigrationPlan.save``).
-    Then the blobs retention no longer keeps are dropped (``collect_after_plan``: it waits when
-    another operation holds the migration lock)."""
+    """Save the plan ``pymolt plan`` made (``label``: ``plan --label``; ``fresh``: ``--fresh``).
+
+    Its version, git source, label, name and content digest are stamped first (git is read
+    outside the lock). Then, under the state lock:
+
+    1. the 0.2 plan file is moved into the store (``migrate_legacy``; not for ``-o``);
+    2. the current plan is read;
+    3. when the plan is unchanged from it (``unchanged_from``), nothing is stored: the result
+       is the current plan (``saved`` False, ``unchanged_from`` its name), its approvals hold,
+       and the pointer records the commit it was confirmed for;
+    4. otherwise its lineage is stamped (``stamp_lineage``) and it is stored and made current
+       (``MigrationPlan.save``); with ``output`` (``-o``) it is only written there (``export``).
+
+    Then the blobs retention no longer keeps are dropped (``collect_after_plan``: skipped while
+    another operation holds the migration lock). With ``output`` an unchanged plan writes the
+    current plan's stored form there, so applying that file applies the current plan."""
+    from pymolt.migration_plan import plan_path
     from pymolt.workorder.blobs import collect_after_plan
 
     root = Path(project_dir).resolve()
+    if label is not None:
+        plan.label = check_label(label)
+        plan.name = None                      # the name carries the label
     stamp_provenance(root, plan)
-    if output is not None:
-        path = export(root, plan, output)
-        collect_after_plan(root)
-        return PlanSaveResult(plan=plan, path=path, saved=False)
+    commit = plan.source.git_commit if plan.source is not None else None
+    warning = plan.baseline_warning
+    moved = None
     with state_lock(root, operation="plan"):
-        moved = migrate_legacy(root)
-        path = plan.save(root)
+        if output is None:
+            moved = migrate_legacy(root)
+        current = MigrationPlan.load(root)
+        if unchanged_from(plan, current, label=label, fresh=fresh):
+            if output is not None:
+                path = export(root, current, output, stored=True)
+            else:
+                path = plan_path(root)
+                _confirm(root, load_pointer(root), commit)
+            result = PlanSaveResult(plan=current, path=path, saved=False,
+                                    unchanged_from=current.name, moved_legacy=moved)
+        else:
+            stamp_lineage(plan, current, fresh=fresh)
+            if output is not None:
+                result = PlanSaveResult(plan=plan, path=export(root, plan, output), saved=False)
+            else:
+                result = PlanSaveResult(plan=plan, path=plan.save(root), saved=True,
+                                        moved_legacy=moved)
+    result.baseline_warning = warning
+    result.exported = output is not None
     collect_after_plan(root)
-    return PlanSaveResult(plan=plan, path=path, saved=True, moved_legacy=moved)
+    return result
 
 
 # ── a 0.2 project ─────────────────────────────────────────────────────────────────────────
@@ -618,5 +721,6 @@ __all__ = [
     "current_pointer", "export", "in_store", "is_current", "is_stored_plan_file",
     "legacy_plan_file", "load_pointer", "migrate_legacy", "no_current_plan", "plan_folder",
     "plans_dir", "pointer_path", "resolve_plan_ref", "save_planned", "saved_plans",
-    "stamp_provenance", "store", "stored_plan_file", "write_pointer",
+    "check_label", "stamp_lineage", "stamp_provenance", "store", "stored_plan_file",
+    "unchanged_from", "write_pointer",
 ]
