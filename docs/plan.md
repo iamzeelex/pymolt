@@ -162,7 +162,9 @@ is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema
 ### PLAN.md
 
 `plan` also writes the plan for a person, `.pymolt/PLAN.md` (`--plan-md PATH` writes it
-elsewhere). It starts with the moves and a table of the steps: what each does, who does it, its
+elsewhere). It starts with a header: when the plan was made (UTC) and by which pymolt
+version, the baseline capture it was made from (its time and its name, `<time>-<8 hex of the
+trace's sha256>`), the moves, and the step counts with the next command. Then a table of the steps: what each does, who does it, its
 claim, its sites (run / not run in the baseline), its effort and what it depends on. Then one
 section per step: where (with the line numbers at plan time), why, what to do (the diff, for a
 pymolt step), how verify judges it, and its effort. Low-tier steps the baseline never ran are
