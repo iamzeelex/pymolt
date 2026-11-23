@@ -136,6 +136,16 @@ def test_each_input_that_makes_a_replan_a_new_plan(tmp_path, change):
     assert load_pointer(tmp_path).plan_id == again.plan_id
 
 
+def test_the_baseline_recording_is_bound_by_its_path_in_the_project(tmp_path):
+    first = plan_for(tmp_path, {M: (APP, RECIPES)})
+    assert first.baseline_trace_path.startswith(".pymolt/")      # never the checkout's path
+    again = _again(tmp_path)
+    # A 0.2 plan stored the same recording's absolute path: the same binding.
+    again.baseline_trace_path = str(tmp_path.resolve() / first.baseline_trace_path)
+
+    assert again.save_planned(tmp_path).unchanged_from == first.name
+
+
 # ── labels ───────────────────────────────────────────────────────────────────────────────
 
 

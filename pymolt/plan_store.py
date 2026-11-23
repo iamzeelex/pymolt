@@ -467,7 +467,8 @@ def _capture_id(plan: MigrationPlan) -> str | None:
 
 
 def unchanged_from(plan: MigrationPlan, current: MigrationPlan | None, *,
-                   label: str | None = None, fresh: bool = False) -> bool:
+                   label: str | None = None, fresh: bool = False,
+                   project_dir: str | Path = ".") -> bool:
     """Whether ``plan`` (just made) is the current plan again: not ``fresh``, no new label,
     the same content (``content_digest_of``, recomputed on both sides) and the same inputs:
     the baseline capture (by id), the baseline trace path apply binds, the setup fingerprint
@@ -479,9 +480,18 @@ def unchanged_from(plan: MigrationPlan, current: MigrationPlan | None, *,
         return False
     return (content_digest_of(plan) == content_digest_of(current)
             and _capture_id(plan) == _capture_id(current)
-            and plan.baseline_trace_path == current.baseline_trace_path
+            and _same_trace(project_dir, plan, current)
             and plan.environment_setup_fingerprint == current.environment_setup_fingerprint
             and plan.target_manifest_sha256 == current.target_manifest_sha256)
+
+
+def _same_trace(project_dir: str | Path, plan: MigrationPlan,
+                current: MigrationPlan) -> bool:
+    """The two plans bind the same baseline recording: a 0.2 plan stores its path absolute, a
+    0.3 plan relative to the project (``verify.service.same_slot_path``)."""
+    from pymolt.verify.service import same_slot_path
+
+    return same_slot_path(project_dir, plan.baseline_trace_path, current.baseline_trace_path)
 
 
 def stamp_lineage(plan: MigrationPlan, current: MigrationPlan | None, *,
@@ -542,7 +552,7 @@ def save_planned(project_dir: str | Path, plan: MigrationPlan, *,
         if output is None:
             moved = migrate_legacy(root)
         current = MigrationPlan.load(root)
-        if unchanged_from(plan, current, label=label, fresh=fresh):
+        if unchanged_from(plan, current, label=label, fresh=fresh, project_dir=root):
             if output is not None:
                 path = export(root, current, output, stored=True)
             else:
