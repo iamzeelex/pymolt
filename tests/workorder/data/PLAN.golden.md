@@ -1,5 +1,5 @@
-# Migration plan 3f2a9c1e
-Made 2026-11-20 06:31 UTC by pymolt 0.2.0.dev0 · baseline captured 2026-11-17 09:12 UTC (20261117T091200Z-b3e1a2c0)
+# Migration plan 20261120T0631Z-3f2a9c1e
+plan 3f2a9c1e · 2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 (dirty) · derived from 3c9e0d12 · pymolt 0.3.0.dev0
 pandas 1.5.3 → 2.2.3 · Python 3.11 → 3.12
 8 steps: 3 by pymolt, 3 for an agent, 2 for a person. Next: `pymolt apply .`
 

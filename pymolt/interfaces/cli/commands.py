@@ -672,6 +672,10 @@ def plan(
         help="Where to write the plan for a person (default: PLAN.md in the plan's folder, "
              ".pymolt/plans/<name>/)",
     ),
+    label: str | None = typer.Option(
+        None, "--label", help="A label for the plan's name (e.g. numpy2)"),
+    fresh: bool = typer.Option(
+        False, "--fresh", help="Start a new lineage: inherit nothing from the current plan"),
     json_output: bool = typer.Option(False, "--json", help="Print the plan summary as JSON"),
     agent: bool = typer.Option(False, "--agent", help=_AGENT_HELP),
 ):
@@ -679,16 +683,23 @@ def plan(
 
     Writes no source file. The plan is saved as .pymolt/plans/<name>/plan.json, named by its
     time and id, and becomes the current plan; its steps are also written as PLAN.md beside
-    it. `pymolt apply` applies the current plan and refuses it if a planned file changed since.
+    it. A plan the same as the current one (same steps, baseline, setup and target manifest)
+    saves nothing, and the current plan's approvals hold. A new plan is derived from the
+    current one unless --fresh. `pymolt apply` applies the current plan and refuses it if a
+    planned file changed since.
     """
     import json
 
     from pymolt.codemods.service import PlanInputError, build_migration_plan
+    from pymolt.migration_plan import LABEL_RE, LABEL_RULE
 
     json_output = json_output or agent  # --agent is machine output too: failures stay JSON
     project_path = require_project_dir(project_dir, json_output=json_output)
     if agent:
         project_path = project_path.resolve()
+    if label is not None and not LABEL_RE.match(label):
+        fail(f"invalid label {label!r}", hint=f"A plan label: {LABEL_RULE}.",
+             json_output=json_output)
     target_file = target_file or target_file_old
     try:
         with err.status("Building the migration plan…", spinner="dots") as status:
@@ -698,10 +709,11 @@ def plan(
                 progress=lambda msg: status.update(f"[cyan]{msg}[/cyan]"),
                 online=online,
             )
-        saved_path = migration_plan.save_planned(project_path, output=output).path
-        from pymolt.workorder.render import write_plan_md
+        saved = migration_plan.save_planned(project_path, label=label, fresh=fresh,
+                                            output=output)
+        from pymolt.workorder.render import write_saved_plan_md
 
-        plan_md_path = write_plan_md(migration_plan, project_path, plan_md)
+        plan_md_path = write_saved_plan_md(saved, project_path, plan_md)
     except PlanInputError as exc:
         fail(str(exc), hint=exc.hint or None, json_output=json_output)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -711,9 +723,12 @@ def plan(
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
+    from pymolt.interfaces import views
 
-    if migration_plan.baseline_warning:
-        warn(escape(migration_plan.baseline_warning))
+    # An unchanged re-plan is the current plan: its id, name and file are the ones shown.
+    migration_plan, saved_path = saved.plan, saved.path
+    if saved.baseline_warning:
+        warn(escape(saved.baseline_warning))
     if patch_file:
         patches = _unified_patches(previews, project_path)
         patch_path = Path(patch_file)
@@ -726,6 +741,7 @@ def plan(
     payload = {
         "plan_id": migration_plan.plan_id,
         "plan_path": str(saved_path),
+        **views.plan_identity(migration_plan, saved),
         "source": source_desc,
         "dependencies": len(migration_plan.dependencies),
         "files_scanned": migration_plan.files_scanned,
@@ -742,19 +758,31 @@ def plan(
         "steps": [_step_payload(step) for step in migration_plan.steps],
     }
     if agent:
-        from pymolt.interfaces import views
-
         typer.echo(views.dumps(views.plan_view(
             migration_plan, by_pkg, source_desc, plan_path=saved_path,
-            plan_md=plan_md_path, project_dir=project_path)))
+            plan_md=plan_md_path, project_dir=project_path, saved=saved)))
         return
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
         return
 
+    from pymolt.workorder.render import identity_line
+
+    name = escape(migration_plan.name or migration_plan.plan_id[:8])
+    if saved.unchanged_from:
+        done = f"[bold]{escape(views.UNCHANGED)}[/bold]\n" + (
+            f"Written to [green]{escape(str(saved_path))}[/green]" if saved.exported
+            else f"Plan [bold cyan]{name}[/bold cyan]: [green]{escape(str(saved_path))}[/green]")
+    elif saved.saved:
+        done = (f"Plan [bold cyan]{name}[/bold cyan] saved to\n"
+                f"[green]{escape(str(saved_path))}[/green]")
+    else:
+        done = (f"Plan [bold cyan]{name}[/bold cyan] written to\n"
+                f"[green]{escape(str(saved_path))}[/green] only: not saved in .pymolt/plans/")
+    if saved.moved_legacy:
+        done += f"\nThe 0.2 plan file was moved into .pymolt/plans/{escape(saved.moved_legacy)}"
     console.print(Panel(
-        f"Plan [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan] saved to\n"
-        f"[green]{saved_path}[/green]\n\n"
+        f"{escape(identity_line(migration_plan))}\n{done}\n\n"
         f"Dependencies: [bold]{payload['dependencies']}[/bold]   "
         f"files: [bold]{payload['files_to_change']}[/bold]   "
         f"rewrite sites: [bold]{payload['rewrite_sites']}[/bold]   "
@@ -773,9 +801,10 @@ def plan(
     _render_python(migration_plan)
     _render_or_write_patches(previews, project_path, None)
     _render_steps(migration_plan, plan_md_path)
-    console.print(
-        f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
-    )
+    # A plan written only to -o's file is not the current plan: apply names it.
+    later = (f" --plan {escape(str(saved_path))}" if saved.exported and not saved.unchanged_from
+             else "")
+    console.print(f"\n[bold]Next:[/bold] pymolt apply .{later}")
 
 
 def _step_payload(step) -> dict:

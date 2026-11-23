@@ -556,15 +556,17 @@ class MigrationPlan(BaseModel):
             write_pointer(project_dir, self, set_by="plan")
             return stored
 
-    def save_planned(self, project_dir: str | Path, *,
-                     output: str | Path | None = None):
-        """Save the plan ``pymolt plan`` made (``plan_store.save_planned``): with ``output``
-        (``-o``) only there; otherwise the 0.2 plan file is moved into the store, the plan is
-        stored and made current, and the blob store is collected. Returns a
+    def save_planned(self, project_dir: str | Path, *, label: str | None = None,
+                     fresh: bool = False, output: str | Path | None = None):
+        """Save the plan ``pymolt plan`` made (``plan_store.save_planned``): unchanged from the
+        current plan, nothing is stored and the current plan stays; otherwise it is stamped
+        with its lineage (derived from the current plan, or ``fresh``) and ``label``, and
+        stored and made current (with ``output``, ``-o``, only written there). The 0.2 plan
+        file is moved into the store first, and the blob store is collected after. Returns a
         ``plan_store.PlanSaveResult``."""
         from pymolt.plan_store import save_planned
 
-        return save_planned(project_dir, self, output=output)
+        return save_planned(project_dir, self, label=label, fresh=fresh, output=output)
 
 
 def fill_identity(plan: MigrationPlan) -> MigrationPlan:

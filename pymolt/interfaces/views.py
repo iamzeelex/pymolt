@@ -849,12 +849,48 @@ def rollback_view(result) -> dict:
     return ok(summary, _Lists().finish(data, list(result.notes)))
 
 
+def plan_identity(plan, saved=None) -> dict:
+    """The plan's identity and what ``plan`` did with it (``plan_store.PlanSaveResult``;
+    None: a plan stored as it is): the keys ``plan --json`` and the plan view share.
+    ``saved``: a new plan was stored and made current; ``unchanged_from``: the current plan an
+    unchanged re-plan kept (then ``plan`` is that plan)."""
+    baseline = getattr(plan, "baseline", None)
+    source = getattr(plan, "source", None)
+    lineage = getattr(plan, "lineage", None)
+    return {
+        "plan_name": getattr(plan, "name", None),
+        "label": getattr(plan, "label", None),
+        "created_at": plan.created_at,
+        "pymolt_version": getattr(plan, "pymolt_version", None),
+        # ``source`` in the plan file; ``plan_source`` here, where ``source`` is the target
+        # manifest the plan was made for.
+        "plan_source": source.model_dump(mode="json") if source is not None else None,
+        "baseline_capture_id": baseline.capture_id if baseline is not None else None,
+        "baseline_warning": getattr(saved, "baseline_warning", None)
+        if saved is not None else getattr(plan, "baseline_warning", None),
+        "lineage": lineage.model_dump(mode="json") if lineage is not None else None,
+        "content_digest": getattr(plan, "content_digest", None),
+        "saved": saved.saved if saved is not None else True,
+        "unchanged_from": getattr(saved, "unchanged_from", None),
+        "moved_legacy": getattr(saved, "moved_legacy", None),
+        "pruned": list(getattr(saved, "pruned", None) or ()),
+    }
+
+
+#: What an unchanged re-plan says (``plan``'s panel, its view and PLAN.md's writer).
+UNCHANGED = ("Unchanged: same steps, baseline, setup and target manifest as the current plan. "
+             "Nothing saved; its approvals still hold.")
+
+
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
-              plan_md: str | Path | None = None, project_dir: str | Path | None = None) -> dict:
+              plan_md: str | Path | None = None, project_dir: str | Path | None = None,
+              saved=None) -> dict:
     """A saved ``MigrationPlan`` -> view. The full report is the plan file itself.
-    ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines."""
+    ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines;
+    ``saved``: what ``plan`` did (``plan_store.PlanSaveResult``: stored, unchanged, or only
+    written to ``-o``'s file)."""
     from pymolt.codemods.models import CodemodPattern
-    from pymolt.workorder.render import brief_data, next_agent_step, next_command
+    from pymolt.workorder.render import brief_data, identity_line, next_agent_step, next_command
 
     full_path = str(plan_path)
     lists = _Lists()
@@ -890,9 +926,11 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
         plan.baseline_trace_path is not None or delta_total > 0
         or any(getattr(r, "scope", "dependency") == "dependency" for r in risks_report.risks))
 
+    identity = plan_identity(plan, saved)
     data: dict[str, Any] = {
         "plan_id": plan.plan_id,
         "plan_path": full_path,
+        **identity,
         "source": source_desc,
         "dependencies": lists.cap("dependencies", [
             f"{d.name} {d.from_version}>{d.to_version}" for d in plan.dependencies]),
@@ -928,15 +966,30 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
         "brief": brief_data(plan, agent_step, project_dir) if agent_step else None,
     }
     warnings: list[str] = []
+    if identity["baseline_warning"]:
+        warnings.append(identity["baseline_warning"])
     if plan.baseline_trace_path is None:
         warnings.append("No baseline capture is bound to this plan: apply refuses it without "
                         "--allow-no-baseline and verify could only be INCONCLUSIVE. Capture "
                         "the baseline, then plan again.")
+    name = identity["plan_name"] or plan.plan_id[:8]
+    exported = bool(getattr(saved, "exported", False))
+    if identity["unchanged_from"]:
+        done = f"Plan {name}. {UNCHANGED}" + (f" Written to {full_path}." if exported else "")
+    elif identity["saved"]:
+        done = f"Plan {name} saved: it is the current plan."
+    else:
+        done = (f"Plan {name} written to {full_path} only: not saved in .pymolt/plans/ "
+                "(`pymolt apply . --plan PATH` saves and applies it).")
     lines = [
-        f"Plan {plan.plan_id[:8]} saved: {len(plan.changes)} file(s) to change, {sites} "
-        f"site(s), {len(plan.dependencies)} dependency move(s), from {source_desc}.",
+        done,
+        identity_line(plan) + ".",
+        f"{len(plan.changes)} file(s) to change, {sites} site(s), "
+        f"{len(plan.dependencies)} dependency move(s), from {source_desc}.",
         "Files: " + _note(lists, "files_to_change", len(files), full_path),
     ]
+    if identity["moved_legacy"]:
+        lines.append(f"The 0.2 plan file was moved into .pymolt/plans/{identity['moved_legacy']}.")
     if advisories:
         lines.append(f"{len(advisories)} site(s) need manual review (data.advisories).")
     if manual:
