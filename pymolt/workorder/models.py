@@ -1,4 +1,4 @@
-"""Plan schema 2: a migration plan as a work order of ordered steps.
+"""Plan schema 3: a migration plan as a work order of ordered steps.
 
 HOST side (3.12+, pydantic). A step is one unit of the migration: a recipe pymolt applies
 (``codemod``, ``python-fix``, ``manifest-pin``), or work it leaves to an agent or a person
@@ -11,7 +11,10 @@ The plan file is immutable once saved: ``status`` is always ``planned`` there, a
 status is projected from the receipts, the ledger and the files.
 
 ``MigrationPlan`` (``pymolt.migration_plan``) holds the steps; ``MigrationPlan.model_json_schema()``
-is committed as ``pymolt/schemas/migration_plan-2.schema.json`` (``write_plan_schema``).
+is committed as ``pymolt/schemas/migration_plan-3.schema.json`` (``write_plan_schema``). Schema 3
+adds the plan's identity (name, label, the pymolt that made it, its git source, its baseline
+capture, its lineage, its content digest) to schema 2's work order; the steps are unchanged.
+``migration_plan-2.schema.json`` stays committed, frozen, for the plans pymolt 0.2 wrote.
 """
 
 from __future__ import annotations
@@ -27,9 +30,9 @@ from pymolt.anchors import Anchor
 from pymolt.codemods.models import CodemodPattern
 from pymolt.codemods.rules import CodemodRule
 
-PLAN_SCHEMA_VERSION = 2
-PLAN_SCHEMA_ID = "pymolt.plan/2"
-SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schemas" / "migration_plan-2.schema.json"
+PLAN_SCHEMA_VERSION = 3
+PLAN_SCHEMA_ID = "pymolt.plan/3"
+SCHEMA_FILE = Path(__file__).resolve().parent.parent / "schemas" / "migration_plan-3.schema.json"
 
 #: The cap on one item of text taken from a dependency, the project or a capture (1.10).
 TEXT_CAP = 300

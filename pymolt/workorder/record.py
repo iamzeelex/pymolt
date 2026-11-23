@@ -388,7 +388,7 @@ def _save_state(ctx: _Context, now: str, status: str | None) -> None:
     run_dir = _run_dir(ctx.root, ctx.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     if not (run_dir / "plan.json").is_file():
-        ctx.plan.save(ctx.root, run_dir / "plan.json")
+        ctx.plan.freeze(run_dir / "plan.json")
     base = ctx.state or MigrationRunState(
         run_id=ctx.run_id, status="prepared", prepared_at=now,
         plan_id=None if ctx.run_id == ctx.plan.plan_id else ctx.plan.plan_id)

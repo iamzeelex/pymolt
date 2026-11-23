@@ -1,4 +1,5 @@
-"""Plan schema 2: the committed JSON schema, a round trip, and a schema-1 plan read as step v1."""
+"""The plan's work order (schema 2's steps, in schema 3): the committed JSON schemas, a round
+trip, and a schema-1 plan read as step v1."""
 
 from __future__ import annotations
 
@@ -44,11 +45,20 @@ NEW = "import pandas as pd\n\n\ndef combine(s1, s2):\n    return pd.concat([s1, 
 
 def test_the_committed_schema_is_the_generated_one():
     committed = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
+    assert SCHEMA_FILE.name == "migration_plan-3.schema.json"
     assert committed == plan_json_schema(), (
-        "pymolt/schemas/migration_plan-2.schema.json is stale: regenerate it with "
+        "pymolt/schemas/migration_plan-3.schema.json is stale: regenerate it with "
         "`python -m pymolt.workorder.models`")
-    assert committed["$id"] == "pymolt.plan/2"
-    assert committed["properties"]["schema_version"]["default"] == PLAN_SCHEMA_VERSION == 2
+    assert committed["$id"] == "pymolt.plan/3"
+    assert committed["properties"]["schema_version"]["default"] == PLAN_SCHEMA_VERSION == 3
+
+
+def test_the_schema_2_file_stays_committed_and_frozen():
+    frozen = json.loads((SCHEMA_FILE.parent / "migration_plan-2.schema.json").read_text(
+        encoding="utf-8"))
+    assert frozen["$id"] == "pymolt.plan/2"
+    assert frozen["properties"]["schema_version"]["default"] == 2
+    assert not {"name", "label", "lineage", "content_digest"} & set(frozen["properties"])
 
 
 def _steps() -> list[PlanStep]:
@@ -107,7 +117,7 @@ def test_a_plan_with_every_kind_of_step_round_trips(tmp_path):
                              old_source=OLD, new_source=NEW, sites=1)])
     path = plan.save(tmp_path)
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 2
+    assert raw["schema_version"] == 3
     assert raw["steps"][2]["from"] == "1.5.3" and "from_" not in raw["steps"][2]
     loaded = MigrationPlan.load(tmp_path)
     assert loaded is not None and loaded.adapted_from is None
@@ -188,7 +198,9 @@ def test_a_v1_plan_is_read_as_the_one_step_v1(tmp_path):
     _v1_json(tmp_path)
     plan = MigrationPlan.load(tmp_path)
     assert plan is not None
-    assert plan.schema_version == 2 and plan.adapted_from == 1
+    assert plan.schema_version == PLAN_SCHEMA_VERSION and plan.adapted_from == 1
+    # Its identity is filled as a schema-2 plan's.
+    assert plan.name == "20261101T0000Z-ffffffff" and plan.lineage.root == "f" * 32
     assert [s.id for s in plan.steps] == ["v1"]
     step = plan.steps[0]
     assert (step.type, step.executor, step.claim, step.basis) == (

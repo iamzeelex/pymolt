@@ -609,7 +609,7 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
     run_dir.mkdir(parents=True, exist_ok=True)
     frozen = run_dir / "plan.json"
     if not frozen.is_file():
-        plan.save(root, frozen)
+        plan.freeze(frozen)
     base_state = state or MigrationRunState(
         run_id=run_id, status="prepared", prepared_at=now,
         plan_id=None if run_id == plan.plan_id else plan.plan_id)
@@ -946,7 +946,7 @@ def _skip(root: Path, plan: MigrationPlan, step_id: str, reason: str) -> ApplyRe
         run_dir = _run_dir(root, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         if not (run_dir / "plan.json").is_file():
-            plan.save(root, run_dir / "plan.json")
+            plan.freeze(run_dir / "plan.json")
         base_state = state or MigrationRunState(
             run_id=run_id, status="prepared", prepared_at=now,
             plan_id=None if run_id == plan.plan_id else plan.plan_id)
