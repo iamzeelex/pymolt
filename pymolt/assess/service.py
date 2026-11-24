@@ -280,6 +280,8 @@ def build_comparison_rows(
     Shared by the CLI table renderer and ``--json``. One row per package
     in the union; visibility filtering is the renderer's concern.
     """
+    from pymolt.core.versions import marker_excludes, same_version
+
     rows = []
     if target_culprits is None:
         target_culprits = getattr(target_error, "culprits", None)
@@ -311,10 +313,14 @@ def build_comparison_rows(
                     status = "added"
                 elif not b.version:
                     status = "base-unknown"
-                elif b.version != t.version:
-                    status = "upgrade"
+                elif not same_version(b.version, t.version):
+                    status = "upgrade"             # 3.2 and 3.2.0 are one release
                 else:
                     status = "unchanged"
+            elif b and marker_excludes(b.declared_requirement, target_python):
+                # Gated by a marker that is false on the target (PyPy only, < 2.7.9): it
+                # does not apply there, which is not the same as dropping it.
+                target_version, status = None, "excluded"
             else:
                 target_version, status = None, "removed"
         else:

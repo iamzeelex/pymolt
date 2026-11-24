@@ -1957,6 +1957,7 @@ _STATUS_MARK = {
     "conflict": ("⚠ conflict", "bold red"),
     "unresolved": ("? unresolved", "yellow"),
     "removed": ("⚠ removed", "red"),
+    "excluded": ("– excluded by marker on the target", "dim"),
     "unchanged": ("✔ same", "green"),
 }
 
@@ -1998,6 +1999,8 @@ def _render_comparison_table(rows, verbose):
             move = f"{b_ver} → [yellow]unresolved[/yellow]"
         elif status == "removed":
             move = f"{b_ver} → [red]—[/red]"
+        elif status == "excluded":
+            move = f"{b_ver} → —"
         elif status == "unchanged":
             move = b_ver                       # a version that did not move, said once
         elif status == "baseline":
