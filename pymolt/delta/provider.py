@@ -8,8 +8,11 @@
   → ``rename-call`` (binding-aware). Only spellings a module exports (``from m import x``)
   get one: a class member has no import to rewrite.
 - **rules** are the curated structural rewrites from ``pymolt/knowledge`` (e.g. pandas
-  ``append`` → ``pd.concat``), included when the project touches a symbol they address
-  (or the delta could not be computed), and re-verified locally against their golden pair.
+  ``append`` → ``pd.concat``) for the migration's window, re-verified locally against their
+  golden pair. A rule is left out only when the delta is evidence against it: it probed a
+  symbol the rule addresses and found it still there. Its silence is no such evidence: the
+  delta probes only what the baseline ran and the contact map resolved, and
+  ``df.append(...)`` on a local the baseline never ran is neither.
   When a package has rules, its patterns travel as kind-tagged LEGACY rules (the
   rules-only policy in ``codemods.service._split_bundles`` would otherwise drop them).
 - **impacts** hold every non-UNCHANGED fact, so the plan shows what changed even when
@@ -232,12 +235,14 @@ class LocalDeltaProvider:
 
         rules: list[CodemodRule] = []
         downgraded: list[str] = []
-        touched = {s for f in report.changes() if f.kind in ("REMOVED", "MOVED")
-                   for s in f.spellings()}
+        gone = {s for f in report.facts if f.kind in ("REMOVED", "MOVED") for s in f.spellings()}
+        there = {s for f in report.facts if f.kind not in ("REMOVED", "MOVED")
+                 for s in f.spellings()}
         for entry in knowledge.curated_rules(report.package, report.from_version,
                                              report.to_version):
-            if report.quality == "complete" and not (touched & set(entry.symbols)):
-                continue
+            names = set(entry.symbols)
+            if report.quality == "complete" and there & names and not gone & names:
+                continue        # probed, and still there in the new version
             payload = dict(entry.rule)
             payload.update(library=report.package, from_version=report.from_version,
                            to_version=report.to_version)
