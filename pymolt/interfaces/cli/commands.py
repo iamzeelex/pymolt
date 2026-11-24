@@ -396,6 +396,7 @@ def verify_migration(
         _inconclusive_note,
         _render_contract_report,
         _step_lines,
+        _unobservable_note,
         _verification_exit,
     )
     from pymolt.migration_plan import MigrationPlanError, rollback_migration
@@ -616,6 +617,7 @@ def verify_migration(
         f"[bold {border}]{unified.verdict.value.upper()}[/bold {border}]"
         f"{_inconclusive_note(unified)}"
         f"{_fail_note(unified, project_dir)}"
+        f"{_unobservable_note(contract_report)}"
         f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
         title="Verdict", border_style=border, expand=False,
     ))

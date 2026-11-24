@@ -3183,12 +3183,7 @@ def _stamp_verdict(
     causes.extend(_fact_diff_causes(whole_diff))
     causes.extend(_blind_causes(report))
     _held, waived = _blind_held(report)
-    if waived:
-        names = sorted(s.target for s in waived)
-        report.notes.append(
-            f"{len(waived)} unobservable BLIND symbol(s) do not keep the verdict from PASS: no "
-            "capture can record them, so a person reviews each use of "
-            + ", ".join(names[:5]) + (", …" if len(names) > 5 else ""))
+    report.unobservable_uses = sorted(s.target for s in waived)
     if report.dynamic_only:
         unverified = _unverified_dynamic_only(report)
         if unverified:

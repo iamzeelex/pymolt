@@ -544,6 +544,15 @@ def _inconclusive_note(unified) -> str:
     return f"\n{escape(line)}" if line else ""
 
 
+def _unobservable_note(rep) -> str:
+    """The Verdict panel's line naming the dependency uses no capture can observe: they do not
+    keep the verdict from PASS, so the panel says the verdict does not cover them."""
+    from pymolt.interfaces.views import unobservable_line
+
+    line = unobservable_line(rep)
+    return f"\n[dim]{escape(line)}[/dim]" if line else ""
+
+
 def _fail_note(unified, project_dir: str = ".") -> str:
     """The Verdict panel's lines for a FAIL: the plan steps whose sites failed, when known, and
     a person's two options (empty for PASS and INCONCLUSIVE)."""

@@ -1251,6 +1251,18 @@ def inconclusive_line(unified) -> str | None:
     return line
 
 
+def unobservable_line(rep) -> str | None:
+    """One line naming the dependency uses no capture can observe (``unobservable_uses``): they
+    do not keep the verdict from PASS (``inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS``), so the
+    verdict says it did not see them. None when there are none."""
+    uses = list(getattr(rep, "unobservable_uses", None) or ())
+    if not uses:
+        return None
+    shown = ", ".join(uses[:5]) + (f", … ({len(uses) - 5} more)" if len(uses) > 5 else "")
+    return (f"{len(uses)} dependency use(s) cannot be observed by a capture, so this verdict "
+            f"does not cover them; a person may glance at: {shown}")
+
+
 def failing_steps_text(steps) -> str:
     """``beh-1 (rolled_back), mech-1 (applied)``: the plan steps whose sites failed."""
     return ", ".join(f"{s['id']} ({s['status']})" for s in steps)
@@ -1338,12 +1350,17 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         # FAIL: the plan steps whose sites failed, in effect or not (id, executor, status,
         # findings).
         "failing_steps": list(getattr(unified, "failing_steps", None) or ()),
+        # BLIND symbols no capture can observe: they do not keep the verdict from PASS, and the
+        # verdict does not cover them (``unobservable_line``).
+        "unobservable_uses": list(getattr(rep, "unobservable_uses", None) or ()),
     }
     lines = [f"VERDICT: {verdict.upper()}"
              + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]
     settles = inconclusive_line(unified)
     if settles:
         lines.append(settles)
+    if unseen := unobservable_line(rep):
+        lines.append(unseen)
     if rep.baseline_stale:
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "

@@ -245,6 +245,10 @@ class ContractReport(BaseModel):
     # no source snapshot, so this cannot be checked (never read as fresh).
     stale_sources: dict[str, list[str]] = Field(default_factory=dict)
     sources_unchecked: list[str] = Field(default_factory=list)
+    # The BLIND symbols no capture can observe that do not keep the verdict from PASS
+    # (``inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS``): the verdict lists them, so a PASS never
+    # hides uses it could not see.
+    unobservable_uses: list[str] = Field(default_factory=list)
     verdict: VerificationVerdict = VerificationVerdict.INCONCLUSIVE
     verdict_reasons: list[str] = Field(default_factory=list)
     # An INCONCLUSIVE verdict's reasons, each with its kind (needs_review / needs_evidence) and
