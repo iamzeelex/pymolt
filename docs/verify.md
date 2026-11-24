@@ -312,9 +312,12 @@ and the count for each.
   run when it did not;
 - chains through a function's return value (`typer.prompt().strip`), which have no static name;
 - dependencies that are not installed where the capture ran;
-- the test runner (`pytest`, `pluggy` and similar), which captures do not trace, unless a target
-  names it;
 - protocol use that resolves to interpreter code (`A | B` on two classes runs `type.__or__`).
+
+The test runner's symbols (`pytest`, `pluggy` and similar, e.g. `@pytest.fixture` in a test) are
+not your project's dependency surface: captures do not trace the runner, so they are left out of
+every count, table and verdict reason, and a note counts them. A target that names the runner
+lifts this, and they count like any dependency.
 
 BLIND symbols are split the same way: not run, ran but not recorded, unobservable. The report also
 shows **symbol matching**: the share of static symbols the exact string join confirms, then the
