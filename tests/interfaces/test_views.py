@@ -447,7 +447,8 @@ _VERIFY_KEYS = {
     "verdict", "reasons", "inconclusive_kind", "inconclusive_causes", "saved_path",
     "compared_recordings", "baseline_stale",
     "static_targets", "confirmed",
-    "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "blind_split",
+    "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "coverage_bounded",
+    "blind_split",
     "unobservable_contacts", "compared", "changes", "change_counts", "calibration",
     "impact_focus",
 }

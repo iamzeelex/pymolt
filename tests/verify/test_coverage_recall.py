@@ -182,6 +182,30 @@ def test_function_granularity_counts_a_contact_in_a_function_that_started(projec
     assert rep.coverage_granularity == "function"
 
 
+def test_ran_only_by_a_function_makes_coverage_an_upper_and_recall_a_lower_bound(
+        project, tmp_path):
+    """QA V6: at function granularity a branch not taken counts as ran, so coverage may be too
+    high and recall too low; the report, `--agent` and `status` label them as bounds."""
+    from pymolt.interfaces.views import coverage_lines
+
+    core = str(project / "app" / "core.py")
+    tables = MODULE_LINES | TESTED_RAN | _lines(CORE, ["branch", "reads-ran"])
+    rep = _report(project, _trace(project, tmp_path, executed=_record(
+        "function", {core: {"functions": ",".join(map(str, sorted(tables)))}})))
+    assert rep.coverage_bounded is True
+    assert coverage_lines(rep)[0].startswith("Coverage: at most ")
+    assert "   Recall: at least " in coverage_lines(rep)[0]
+    assert any(n.startswith("2 contact(s) count as ran only because their function or file "
+                            "ran (2 by their function)") and "recall a lower bound" in n
+               for n in rep.notes)
+
+    ran = sorted(MODULE_LINES | TESTED_RAN)
+    exact = _report(project, _trace(project, tmp_path, executed=_record(
+        "line", {core: {"lines": ",".join(map(str, ran))}})))
+    assert exact.coverage_bounded is False
+    assert coverage_lines(exact)[0].startswith("Coverage: 44% (")
+
+
 def test_file_granularity_without_an_executed_record(project, tmp_path):
     rep = _report(project, _trace(project, tmp_path))
     got = _status(rep)
