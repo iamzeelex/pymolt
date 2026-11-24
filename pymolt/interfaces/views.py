@@ -520,7 +520,7 @@ def assess_hints(project_dir: str | Path, result) -> dict:
 def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False,
                 baseline_hint=None, target_hint=None) -> dict:
     """``AssessResult`` -> view. The verdict wording is the service's own."""
-    from pymolt.assess.service import BaselineTier, compatibility_verdict
+    from pymolt.assess.service import BaselineTier, compatibility_verdict, unpinned_example
 
     full_path = write_full_report(project_dir, "assess", assess_payload(
         result, baseline_hint=baseline_hint, target_hint=target_hint))
@@ -560,7 +560,8 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 
     verdict = None
     found = compatibility_verdict(result.target_python, result.target_error,
-                                  BaselineTier(result.baseline_tier))
+                                  BaselineTier(result.baseline_tier),
+                                  unpinned_example(result.rows))
     if found is not None:
         title, body, style = found
         verdict = {"title": re.sub(r"^\W+", "", title), "detail": body,
@@ -773,7 +774,8 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
                          f"({failed if failed is not None else 'some'} test(s) failed); kept "
                          "because --accept-failing was given. The calls from failing tests are "
                          "compared as usual.")
-        hint = ("Next: change the code (or apply a plan), then capture post-migration."
+        hint = ("Next: plan the migration (`pymolt plan .`) and apply it, or change the code "
+                "yourself; then capture post-migration."
                 if "post_migration" not in filled else
                 "Next: verify (compares baseline and post-migration).")
     else:
@@ -1479,8 +1481,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append(note)
 
     if not data["compared"]:
-        hint = ("Only one side is recorded, so nothing was compared: change the code, then "
-                "capture post-migration.")
+        hint = ("Only one side is recorded, so nothing was compared: plan the migration "
+                "(`pymolt plan .`) and apply it, or change the code yourself; then capture "
+                "post-migration.")
     elif verdict == "fail":
         steps = list(getattr(unified, "failing_steps", None) or ())
         at = f" at the sites of plan step(s) {failing_steps_text(steps)}" if steps else ""
