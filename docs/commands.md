@@ -52,7 +52,10 @@ error.
 ### `pymolt assess [dir]`
 Resolves the dependencies for the target Python and writes the pinned target manifest
 (`requirements-target.txt`). It shows which versions move, which conflict, what needs manual work,
-and how to build the target environment.
+and how to build the target environment. When the project's own `setup.py` or `pyproject.toml`
+does not build on the target Python, assess says so: it resolves the dependencies it reads from
+that file without running it (`target_basis: static-read` in `--json`), or, when it reads none,
+names the way forward (fix the build, or `setup --manifest` a requirements file).
 
 | Option | Meaning |
 |---|---|

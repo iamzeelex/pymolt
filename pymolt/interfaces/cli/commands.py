@@ -2056,8 +2056,9 @@ def _render_risk(risk_report):
     console.print(table)
 
 
-def _render_manual_zone(report):
-    """Render the manual-zone panel (or the all-clear message)."""
+def _render_manual_zone(report, target_resolved: bool = True):
+    """Render the manual-zone panel (or the all-clear message, only when there is something
+    to be clear about: a base was reconstructed and the target resolved)."""
     if report.manual_zone:
         console.print(Panel(
             f"[bold red]Manual Zone Alert ({len(report.manual_zone)} unresolved packages):[/bold red]\n"
@@ -2077,6 +2078,8 @@ def _render_manual_zone(report):
             "[yellow]No manual zone to resolve — there is no base to compare "
             "against (see above).[/yellow]"
         )
+    elif not target_resolved:
+        return          # an all-clear under a failed resolve read as a contradiction
     else:
         console.print(
             "[bold green]✔ All package twins resolved automatically. "
@@ -2350,17 +2353,18 @@ def assess(
     if json_output:
         import json as json_lib
 
+        target_notes: list[str] = []
         target_graph, target_error = _resolve_target_graph(
             project_dir, project_path, chosen_source, target_python_to_use,
             None, upgrade_constraint, config.get("target_overrides", {}),
-            use_cache=not no_cache, tool=target_tool,
+            use_cache=not no_cache, tool=target_tool, notes=target_notes,
         )
         rows = _build_comparison_rows(
             baseline_graph, target_graph, target_python_to_use, target_error
         )
         target_resolved = target_error is None and target_graph is not None
         target_manifest_path = None
-        warnings = list(report.warnings)
+        warnings = [*report.warnings, *target_notes]
         if target_python_to_use and target_resolved and not no_write:
             try:
                 written = _write_target_manifest(
@@ -2392,6 +2396,8 @@ def assess(
             target_error=None if target_error is None else str(target_error),
             target_error_detail=failure_evidence(target_error)[0],
             target_culprits=failure_evidence(target_error)[1],
+            target_hint=getattr(target_error, "hint", None),
+            target_basis="static-read" if target_notes else "manifest",
             baseline_unresolved=baseline_unresolved,
             baseline_tier=baseline_tier.value,
             target_manifest_path=target_manifest_path,
@@ -2417,10 +2423,11 @@ def assess(
     # Interactive customize loop
     risk_report = None  # computed once (network-heavy); reflects the initial resolution
     while True:
+        target_notes = []
         target_graph, target_error = _resolve_target_graph(
             project_dir, project_path, chosen_source, target_python_to_use,
             None, upgrade_constraint, config.get("target_overrides", {}),
-            use_cache=not no_cache, tool=target_tool,
+            use_cache=not no_cache, tool=target_tool, notes=target_notes,
         )
 
         # Two different facts that were both labelled "fixation" and read as a
@@ -2434,7 +2441,7 @@ def assess(
         console.print()
 
         # Diagnostics belong on stderr — the answer below is what stdout carries.
-        for warning in report.warnings:
+        for warning in [*report.warnings, *target_notes]:
             warn(warning)
 
         # Dynamic target Python verdict — bounded by the baseline's medallion tier
@@ -2455,6 +2462,8 @@ def assess(
                 if detail:
                     console.print(Panel(escape(detail), title="Resolver output (tail)",
                                         border_style="dim"))
+                if getattr(target_error, "hint", None):
+                    console.print(f"[bold]What to do:[/bold] {escape(target_error.hint)}")
             console.print()
 
         if not verbose:
@@ -2477,7 +2486,7 @@ def assess(
         console.print(table)
         console.print()
 
-        _render_manual_zone(report)
+        _render_manual_zone(report, target_resolved=target_graph is not None and not target_error)
 
         # Migration risk (opt-in, network). Computed once on the first pass.
         # Skipped when the baseline is unresolved — risk compares the two graphs.
@@ -2541,6 +2550,14 @@ def assess(
     if target_hint is not None:
         _render_target_hint(target_hint)
 
+    if target_error is not None:
+        # `status` would send the reader back to the same assess unchanged; the way
+        # forward is to change what failed first.
+        culprits = ", ".join(failure_evidence(target_error)[1])
+        way = getattr(target_error, "hint", None) or (
+            f"Fix or loosen {culprits or 'what the resolver output names'}, then assess again.")
+        err.print(f"\n[dim]next →[/dim] [white]{escape(way)}[/white]")
+        return
     next_step(project_path)
 
 
