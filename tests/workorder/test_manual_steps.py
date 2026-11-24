@@ -362,3 +362,37 @@ def test_an_unverified_risk_is_a_check_with_no_successor_and_a_preserve_claim(tm
     assert "pydoc.locate('pandas.core.frame.DataFrame.groupby')" in summary
     assert "No successor" not in summary and "Replace the calls" not in summary
     assert other.claim == "intended"
+
+
+def test_a_call_time_default_reads_as_a_sentinel_and_is_medium_effort(tmp_path):
+    """Legacy QA P5: zipline's person steps "`Timestamp`: default `tz` None → <object
+    object>" and "`dropna` True → <no_default>" were all large; a default decided at call time
+    is a medium risk (docs/plan.md), and its effort says so."""
+    from pymolt.workorder.manual import readable_default
+    from pymolt.workorder.verify_effort import finish_steps
+
+    root, plan = _automated(tmp_path)
+    tz = {"kind": "DEFAULT", "symbol": "pandas._libs.tslibs.timestamps.Timestamp.__new__",
+          "param": "tz", "old": "None", "new": "<object object>"}
+    dropna = {"kind": "DEFAULT", "symbol": "pandas.core.frame.DataFrame.stack",
+              "param": "dropna", "old": "True", "new": "<no_default>"}
+    concrete = {"kind": "DEFAULT", "symbol": "pandas.core.frame.DataFrame.rank",
+                "param": "method", "old": "'average'", "new": "'min'"}
+    risks = PredictionReport(risks=[
+        _risk(tz["symbol"], "app.py", 7, "combine", tier=RiskTier.MEDIUM, fact=tz),
+        _risk(dropna["symbol"], "app.py", 11, "frame", tier=RiskTier.MEDIUM, fact=dropna),
+        _risk(concrete["symbol"], "app.py", 11, "frame", tier=RiskTier.HIGH, fact=concrete)])
+    t0 = T0(root, plan.changes, "3.11")
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=risks,
+                                  manual_items=[], advisories=[], compile_findings=[],
+                                  dependencies=PANDAS, t0=t0)
+    finish_steps(steps, risks, root=root, t0=t0)
+    by_param = {s.why.delta.param: s for s in steps if s.why.delta is not None}
+    assert by_param["tz"].title == "`Timestamp`: default `tz` None → a sentinel"
+    assert by_param["dropna"].title == ("`DataFrame.stack`: default `dropna` True → "
+                                        "a sentinel (no_default)")
+    assert by_param["tz"].effort.size == by_param["dropna"].effort.size == "medium"
+    assert "may well not change" in by_param["tz"].do.manual.summary
+    assert by_param["method"].effort.size == "large"
+    assert readable_default("<no value>") == "a sentinel (no value)"
+    assert readable_default("'raise'") == "'raise'"

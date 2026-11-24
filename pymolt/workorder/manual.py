@@ -244,6 +244,24 @@ def _check_command(spelling: str) -> str:
     return (f"python -c \"import pydoc, sys; sys.exit(pydoc.locate('{spelling}') is None)\"")
 
 
+_SENTINELS = {"<object object>": "a sentinel", "<no_default>": "a sentinel (no_default)",
+              "<NoDefault.no_default>": "a sentinel (no_default)",
+              "<_NoDefault.no_default>": "a sentinel (no_default)",
+              "<no value>": "a sentinel (no value)", "<sentinel>": "a sentinel"}
+
+
+def readable_default(value: Any) -> str:
+    """A default as a person reads it: a sentinel object (``<object object>``, pandas'
+    ``<no_default>``, numpy's ``<no value>``) is "a sentinel", not its repr."""
+    text = "?" if value is None else str(value)
+    return _SENTINELS.get(text.strip(), text)
+
+
+def _resolved_at_call(value: Any) -> bool:
+    text = "" if value is None else str(value).strip()
+    return text == "None" or (text.startswith("<") and text.endswith(">"))
+
+
 def _title(step_type: str, risk: Any, target: str | None) -> str:
     fact = _fact(risk)
     kind, param = fact.get("kind"), fact.get("param")
@@ -255,7 +273,8 @@ def _title(step_type: str, risk: Any, target: str | None) -> str:
         return _cap(f"`{_short(spelling or risk.symbol)}`: check it still resolves{where}", 120)
     if step_type == "behaviour-change":
         if kind == "DEFAULT":
-            return _cap(f"{name}: default `{param}` {fact.get('old')} → {fact.get('new')}", 120)
+            return _cap(f"{name}: default `{param}` {readable_default(fact.get('old'))} → "
+                        f"{readable_default(fact.get('new'))}", 120)
         if kind == "BEHAVIOR":
             return _cap(f"{name}: its behaviour changes on Python {target or '?'}", 120)
         return _cap(f"{name}: it warned in the baseline", 120)
@@ -294,11 +313,21 @@ def _summary(step_type: str, risk: Any, hint: str = "") -> str:
             # Passing the old default explicitly keeps the old outcome only if the new version
             # still gives that value its old meaning (pandas 2 reads numeric_only=None as False),
             # which the delta does not know: say so instead of promising it.
-            new = f" to {fact.get('new')}" if fact.get("new") is not None else ""
-            return (f"Decide at each site: the default of {param} changed from "
-                    f"{fact.get('old')}{new}. Passing {param}={fact.get('old')} keeps the old "
-                    "outcome only if the new version still reads that value the old way: check "
-                    "it, or keep the new default (a person attests the new outcome).")
+            old, new_value = fact.get("old"), fact.get("new")
+            new = f" to {readable_default(new_value)}" if new_value is not None else ""
+            head = (f"Decide at each site: the default of {param} changed from "
+                    f"{readable_default(old)}{new}.")
+            if (_resolved_at_call(old) or _resolved_at_call(new_value)) and \
+                    _tier(risk.tier) != "high":       # high: the site's own warning names it
+                head += (" A side is resolved when the call runs, so the outcome may well not "
+                         "change.")
+            if str(old or "").startswith("<"):
+                return (f"{head} The old default is a sentinel: no value passed explicitly "
+                        "restores it. Keep the new default if the outcome holds (a person "
+                        "attests the new outcome), or pass the value the old version used.")
+            return (f"{head} Passing {param}={old} keeps the old outcome only if the new "
+                    "version still reads that value the old way: check it, or keep the new "
+                    "default (a person attests the new outcome).")
         if kind == "BEHAVIOR":
             return "Check the code at these sites against the new behaviour."
         return ("The baseline warned at these sites; find what the warning announces and act "
