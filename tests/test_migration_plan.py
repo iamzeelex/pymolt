@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 
 import pytest
@@ -564,6 +565,90 @@ def test_re_apply_after_rollback_still_needs_the_plan_s_baseline(tmp_path):
         apply_migration_plan(tmp_path, plan)
 
     assert (tmp_path / "app0.py").read_text(encoding="utf-8") == plan.changes[0].old_source
+
+
+def test_the_plan_binds_its_baseline_by_its_path_in_the_project(tmp_path):
+    plan = _plan(tmp_path)
+    assert plan.baseline_trace_path == ".pymolt/contract_traces/baseline.jsonl"
+
+
+def _moved(tmp_path, *, stored: str):
+    """A plan made in one checkout, then the project at another path (a copy, a second
+    worktree, a CI workspace). ``stored``: how the plan names its baseline, as this version
+    writes it (relative) or as pymolt 0.2 did (the absolute path of the checkout it was made
+    in)."""
+    a = tmp_path / "a" / "proj"
+    a.mkdir(parents=True)
+    plan = _plan(a)
+    if stored == "absolute":
+        plan.baseline_trace_path = str(a.resolve() / plan.baseline_trace_path)
+    plan.save(a)
+    b = tmp_path / "b" / "proj"
+    b.parent.mkdir()
+    shutil.move(str(a), str(b))
+    return b, MigrationPlan.load(b)
+
+
+@pytest.mark.parametrize("stored", ["relative", "absolute"])
+def test_a_plan_made_in_another_checkout_applies_in_this_one(tmp_path, stored):
+    from pymolt.status import build_status
+    from pymolt.workorder.state import project_steps
+
+    b, plan = _moved(tmp_path, stored=stored)
+    assert project_steps(b, plan).run_stale == []
+
+    receipt = apply_migration_plan(b, plan)
+
+    assert receipt.status == "applied"
+    assert receipt.baseline_trace_path == ".pymolt/contract_traces/baseline.jsonl"
+    assert "werkzeug.utils" in (b / "app0.py").read_text(encoding="utf-8")
+    migration = build_status(b).phase("migration")
+    assert "replaced" not in migration.detail, migration.detail
+
+
+def test_a_receipt_written_in_another_checkout_still_binds_its_baseline(tmp_path):
+    """pymolt 0.2 stored the receipt's baseline absolute too: after a move the migration is
+    not "stale: baseline was replaced"."""
+    from pymolt.status import build_status
+
+    a = tmp_path / "a" / "proj"
+    a.mkdir(parents=True)
+    plan = _plan(a)
+    plan.save(a)
+    receipt = apply_migration_plan(a, plan)
+    receipt.baseline_trace_path = str(a.resolve() / receipt.baseline_trace_path)
+    receipt.save(a)
+    b = tmp_path / "b" / "proj"
+    b.parent.mkdir()
+    shutil.move(str(a), str(b))
+
+    migration = build_status(b).phase("migration")
+
+    assert "replaced" not in migration.detail, migration.detail
+
+
+def test_another_checkouts_baseline_does_not_bind_a_replaced_one(tmp_path):
+    """Read in this checkout, the 0.2 form still binds only the capture it names."""
+    b, plan = _moved(tmp_path, stored="absolute")
+    script = b / "baseline.py"
+    service.capture_named_trace(b, "baseline", CaptureMode.LIVE_COMMAND,
+                                command=[sys.executable, str(script)], target="json")
+
+    with pytest.raises(MigrationPlanError, match="baseline"):
+        apply_migration_plan(b, plan)
+
+
+def test_same_slot_path_reads_a_path_written_in_another_checkout(tmp_path):
+    trace = tmp_path / "proj" / ".pymolt" / "contract_traces" / "baseline.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text("")
+    root = tmp_path / "proj"
+    elsewhere = "/home/user/work/proj/.pymolt/contract_traces/baseline.jsonl"
+    assert service.same_slot_path(root, elsewhere, str(trace))
+    assert service.same_slot_path(root, elsewhere, ".pymolt/contract_traces/baseline.jsonl")
+    assert not service.same_slot_path(
+        root, "/home/user/work/proj/.pymolt/contract_traces/post_migration.jsonl", str(trace))
+    assert not service.same_slot_path(root, "/home/user/work/proj/baseline.jsonl", str(trace))
 
 
 def test_an_interrupted_re_apply_is_recovered_under_its_own_run(tmp_path):
