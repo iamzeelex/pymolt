@@ -25,6 +25,7 @@ from pymolt.interfaces.cli.output import (
     require_project_dir,
 )
 from pymolt.verify import service
+from pymolt.verify.inconclusive import NEEDS_REVIEW, blind_blocks_pass, blind_kind, coarse_ran
 from pymolt.verify.models import (
     CaptureMode,
     CaptureValidity,
@@ -368,6 +369,21 @@ _BLIND_WHY = {
     "unobservable": "[dim]unobservable[/dim]",
 }
 
+def _blind_caption(symbol, contacts, coarse: set[str]) -> str:
+    """What settles one BLIND row, for the table caption (the verdict's causes say the same)."""
+    if blind_kind(symbol, contacts) is NEEDS_REVIEW:
+        text = ("unobservable" if symbol.blind_reason == "unobservable"
+                else "ran, not recorded") + (": no capture can record them, a person reviews "
+                                             "each use")
+        if not blind_blocks_pass(symbol):
+            text += " (they do not keep the verdict from PASS)"
+        return text
+    if coarse:
+        return (f"ran by their {' or '.join(sorted(coarse))}: maybe not run, a test that reaches "
+                "them settles them")
+    return "not run: a test that reaches them settles them"
+
+
 _IDENTITY_TIER_LABELS = {
     "exact": "exact-join",
     "canonical": "canonical",
@@ -665,10 +681,21 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         t.add_column("Why", overflow="fold", ratio=1)
         t.add_column("Called from (your code)", overflow="fold", ratio=2)
         t.add_column("File", style="dim", overflow="fold", ratio=1)
+        by_target: dict[str, list] = {}
+        for c in rep.contacts:
+            by_target.setdefault(c.target, []).append(c)
+        settled: dict[str, None] = {}
         for s in blind:
-            t.add_row(s.target, _BLIND_WHY.get(s.blind_reason or "", "—"),
-                      ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
-        t.caption = "a test that reaches them, or `--probe-python`, would settle them"
+            mine = by_target.get(s.target, ())
+            why = _BLIND_WHY.get(s.blind_reason or "", "—")
+            coarse = coarse_ran(mine) if s.blind_reason == "ran-not-recorded" else set()
+            if coarse:
+                why += f" (by its {' or '.join(sorted(coarse))})"
+            t.add_row(s.target, why, ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
+            settled[_blind_caption(s, mine, coarse)] = None
+        # What settles each kind of row, in the words of the verdict's causes (``blind_kind``):
+        # a probe replays recorded calls, so it never settles a BLIND symbol.
+        t.caption = "; ".join(settled)
         console.print(t)
 
     dyn = [s for s in visible_symbols if s.status == "dynamic-only"]

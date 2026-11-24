@@ -346,3 +346,46 @@ def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeyp
     assert {c["target"]: c["status"] for c in data["contacts"]} == {
         "fakedep.fetch": "recorded", "fakedep.other": "not-run"}
     assert "trust" not in data
+
+
+def test_the_blind_table_says_what_settles_each_kind_and_the_verdict_agrees(tmp_path,
+                                                                           monkeypatch):
+    """QA V2b/V5: a probe never settles a BLIND symbol, and no test settles one no capture can
+    record: the caption says per kind what does, and the verdict box and --agent agree."""
+    site = tmp_path / "site" / "fakedep"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("from fakedep._impl import fetch, other, SETTING\n")
+    (site / "_impl.py").write_text("SETTING = 1\n\ndef fetch(value):\n    return value\n\n"
+                                   "def other():\n    return 2\n")
+    monkeypatch.setenv("PYTHONPATH", str(site.parent))
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "app.py").write_text("import fakedep\nfrom fakedep import fetch, other\n\n"
+                                    "def run():\n    fetch(fakedep.SETTING)\n\n"
+                                    "def never():\n    other()\n")
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "t": "return", "q": "fakedep._impl.fetch", "sym": "fakedep._impl.fetch",
+        "in": {"bound": {}}, "result": 1,
+        "where": {"file": str(project / "app.py"), "line": 5, "func": "run"},
+    }) + "\n")
+    (tmp_path / "trace.jsonl.meta.json").write_text(json.dumps({"processes": [{"executed": {
+        "v": 1, "granularity": "line", "complete": True, "until": None,
+        "files": {str(project / "app.py"): {"lines": "1,2,4,5,7"}}}}]}))
+    args = ["verify", str(project), "--baseline", str(trace), "--post-migration", str(trace)]
+
+    text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", runner.invoke(
+        cli, args, env={"COLUMNS": "200"}).output).split())
+
+    assert "probe-python" not in text
+    assert "unobservable: no capture can record them, a person reviews each use" in text
+    assert "not run: a test that reaches them settles them" in text
+    assert ("Needs a person: no capture can record them: a person reviews each use of "
+            "fakedep.SETTING.") in text
+    view = json.loads(runner.invoke(cli, [*args, "--agent"]).output)
+    assert view["data"]["inconclusive_kind"] == "needs_review"
+    kinds = {c["reason"]: c["kind"] for c in view["data"]["inconclusive_causes"]}
+    assert kinds["contract: 1 static dependency symbol(s) no capture can record "
+                 "(1 unobservable): fakedep.SETTING"] == "needs_review"
+    assert kinds["contract: 1 static dependency symbol(s) were not exercised (1 not run by "
+                 "the workload)"] == "needs_evidence"

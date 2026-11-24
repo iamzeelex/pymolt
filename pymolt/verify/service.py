@@ -89,7 +89,10 @@ from pymolt.verify.inconclusive import (
     SETTLE_NOT_EXERCISED,
     SETTLE_REVIEW,
     SETTLE_UNCOMPARABLE,
+    blind_blocks_pass,
+    blind_kind,
     cause,
+    coarse_ran,
     entry_cause,
     settle_uncomparable,
 )
@@ -3161,6 +3164,13 @@ def _stamp_verdict(
         causes.append(_opaque_cause(whole_diff))
     causes.extend(_fact_diff_causes(whole_diff))
     causes.extend(_blind_causes(report))
+    _held, waived = _blind_held(report)
+    if waived:
+        names = sorted(s.target for s in waived)
+        report.notes.append(
+            f"{len(waived)} unobservable BLIND symbol(s) do not keep the verdict from PASS: no "
+            "capture can record them, so a person reviews each use of "
+            + ", ".join(names[:5]) + (", …" if len(names) > 5 else ""))
     if report.dynamic_only:
         unverified = _unverified_dynamic_only(report)
         if unverified:
@@ -3224,13 +3234,24 @@ def _blind_split(symbols: list, report: ContractReport) -> str:
     return "; ".join(parts)
 
 
-def _blind_settle(symbols: list) -> str:
-    """What settles these BLIND symbols: a test reaches those the workload did not run; those
-    that ran but were not recorded, or that no trace can observe, are a watcher limit."""
+def _blind_settle(symbols: list, report: ContractReport) -> str:
+    """What settles these BLIND symbols, which a capture can still settle (``blind_kind``): a
+    test that reaches them. Those that "ran" only by their function or file may not have run at
+    all: the text says so."""
     if not symbols or any(s.blind_reason in ("not-run", None) for s in symbols):
         return SETTLE_NOT_EXERCISED
-    return ("no new test settles them: they ran but the watcher did not record them, or no "
-            "trace can observe them")
+    targets = {s.target for s in symbols}
+    coarse = coarse_ran(c for c in report.contacts if c.target in targets)
+    if not coarse:
+        return SETTLE_NOT_EXERCISED
+    which = " or ".join(sorted(coarse))
+    return ("add a test that reaches those statements, then capture post-migration again: at "
+            f"{which} granularity only their {which} is known to have run, not the statement")
+
+
+def _blind_review_settle(names: str) -> str:
+    """What settles BLIND symbols no capture can record (``blind_kind`` needs_review)."""
+    return f"no capture can record them: a person reviews each use of {names}"
 
 
 def _blind_reasons(report: ContractReport) -> list[str]:
@@ -3238,29 +3259,56 @@ def _blind_reasons(report: ContractReport) -> list[str]:
     return [c.reason for c in _blind_causes(report)]
 
 
+def _blind_held(report: ContractReport) -> tuple[list, list]:
+    """The BLIND symbols that keep the verdict from PASS, and those that do not
+    (``inconclusive.blind_blocks_pass``, the owner's open decision on unobservable ones)."""
+    blind = [s for s in report.symbols if s.status == "blind"]
+    return ([s for s in blind if blind_blocks_pass(s)],
+            [s for s in blind if not blind_blocks_pass(s)])
+
+
 def _blind_causes(report: ContractReport) -> list[InconclusiveCause]:
-    """Why BLIND symbols block PASS, split by why each is BLIND. After ``apply`` the reasons
-    name those inside the plan's predicted impacts apart from those outside them; both block.
-    An unobservable symbol blocks too (the owner's open decision). BLIND needs evidence."""
+    """Why BLIND symbols block PASS, split by who settles them (``inconclusive.blind_kind``): a
+    test that reaches them (needs evidence: the reason gives why each is BLIND), or a person who
+    reviews uses no capture can record (needs review: the reason and what settles it name them).
+    After ``apply`` the reasons name those inside the plan's predicted impacts apart from those
+    outside them; both block. Whether an unobservable symbol blocks at all is the owner's open
+    decision (``inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS``)."""
     if not report.blind:
         return []
-    blind = [s for s in report.symbols if s.status == "blind"]
-    if not report.impact_filter_active or not blind:
-        split = _blind_split(blind, report)
-        return [cause(f"{report.blind} static dependency symbol(s) were not exercised"
-                      + (f" ({split})" if split else ""),
-                      NEEDS_EVIDENCE, "not-exercised", _blind_settle(blind))]
+    held, _waived = _blind_held(report)
+    by_target: dict[str, list] = {}
+    for c in report.contacts:
+        by_target.setdefault(c.target, []).append(c)
+    review = [s for s in held if blind_kind(s, by_target.get(s.target, ())) is NEEDS_REVIEW]
+    evidence = [s for s in held if s not in review]
+    if report.impact_filter_active:
+        groups = [(" inside the plan's predicted impacts", [s for s in evidence if s.impacted],
+                   [s for s in review if s.impacted]),
+                  (" outside the plan's predicted impacts",
+                   [s for s in evidence if not s.impacted],
+                   [s for s in review if not s.impacted])]
+    else:
+        groups = [("", evidence, review)]
+
+    def named(members: list) -> str:
+        targets = sorted(s.target for s in members)
+        return ", ".join(targets[:5]) + (", …" if len(targets) > 5 else "")
+
     causes = []
-    for where, members in (("inside", [s for s in blind if s.impacted]),
-                           ("outside", [s for s in blind if not s.impacted])):
-        if members:
-            targets = sorted(s.target for s in members)
-            names = ", ".join(targets[:5]) + (", …" if len(targets) > 5 else "")
-            causes.append(cause(f"{len(members)} static dependency symbol(s) {where} the "
-                                f"plan's predicted impacts were not exercised "
-                                f"({_blind_split(members, report)}): "
-                                f"{names}",
-                                NEEDS_EVIDENCE, "not-exercised", _blind_settle(members)))
+    for where, needs_evidence, needs_review in groups:
+        if needs_evidence:
+            text = (f"{len(needs_evidence)} static dependency symbol(s){where} were not "
+                    f"exercised ({_blind_split(needs_evidence, report)})")
+            if where:
+                text += f": {named(needs_evidence)}"
+            causes.append(cause(text, NEEDS_EVIDENCE, "not-exercised",
+                                _blind_settle(needs_evidence, report)))
+        if needs_review:
+            causes.append(cause(
+                f"{len(needs_review)} static dependency symbol(s){where} no capture can record "
+                f"({_blind_split(needs_review, report)}): {named(needs_review)}",
+                NEEDS_REVIEW, "unobservable", _blind_review_settle(named(needs_review))))
     return causes
 
 

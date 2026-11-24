@@ -11,6 +11,7 @@ import json
 import pytest
 
 from pymolt.verify import service
+from pymolt.verify.inconclusive import NEEDS_EVIDENCE, NEEDS_REVIEW
 from pymolt.verify.report import build_contract_report
 
 CORE = '''import fakedep
@@ -258,14 +259,54 @@ def test_an_unobserved_symbols_existence_contact_stays_out_even_when_its_line_ra
     assert rep.recall == pytest.approx(4 / 5)
 
 
-def test_the_inconclusive_reason_names_the_blind_split(project, tmp_path):
+def test_blind_symbols_no_capture_can_record_need_a_person(project, tmp_path):
+    """QA V2b: dump ran at its line unrecorded and SETTING is unobservable: capturing again
+    records the same, so no evidence settles them. They need a person's review, and the cause
+    lists them; they still keep the verdict from PASS (the owner's open decision)."""
     core = str(project / "app" / "core.py")
     ran = sorted(MODULE_LINES | TESTED_RAN)
     rep = _report(project, _trace(project, tmp_path, executed=_record(
         "line", {core: {"lines": ",".join(map(str, ran))}})))
-    (reason,) = service._blind_reasons(rep)
-    assert reason == ("2 static dependency symbol(s) were not exercised "
-                      "(1 ran but not recorded; 1 unobservable)")
+    (why,) = service._blind_causes(rep)
+    assert why.reason == ("2 static dependency symbol(s) no capture can record "
+                          "(1 ran but not recorded; 1 unobservable): fakedep.SETTING, "
+                          "fakedep.dump")
+    assert (why.kind, why.cause) == (NEEDS_REVIEW, "unobservable")
+    assert why.settle == ("no capture can record them: a person reviews each use of "
+                          "fakedep.SETTING, fakedep.dump")
+
+
+def test_ran_only_by_its_function_is_still_a_test_gap(project, tmp_path):
+    """At function granularity "ran" means its function started: the statement may not have
+    run (a branch not taken), so a test that reaches it is evidence that settles it."""
+    core = str(project / "app" / "core.py")
+    tables = MODULE_LINES | TESTED_RAN | _lines(CORE, ["branch"])   # tested() started
+    rep = _report(project, _trace(project, tmp_path, executed=_record(
+        "function", {core: {"functions": ",".join(map(str, sorted(tables)))}})))
+    assert {(c.target, c.status, c.granularity) for c in rep.contacts
+            if c.target == "fakedep.dump"} == {("fakedep.dump", "ran-not-recorded", "function")}
+    evidence, review = service._blind_causes(rep)
+    assert evidence.reason == ("1 static dependency symbol(s) were not exercised "
+                               "(1 ran but not recorded at function granularity)")
+    assert evidence.kind is NEEDS_EVIDENCE
+    assert evidence.settle.startswith("add a test that reaches those statements")
+    assert "only their function is known to have run" in evidence.settle
+    assert review.kind is NEEDS_REVIEW and review.reason.endswith(": fakedep.SETTING")
+
+
+def test_whether_unobservable_blind_blocks_pass_is_one_switch(project, tmp_path, monkeypatch):
+    """The owner's open decision lives in one constant: off, an unobservable BLIND symbol is
+    noted, never a reason."""
+    from pymolt.verify import inconclusive
+
+    core = str(project / "app" / "core.py")
+    ran = sorted(MODULE_LINES | TESTED_RAN)
+    rep = _report(project, _trace(project, tmp_path, executed=_record(
+        "line", {core: {"lines": ",".join(map(str, ran))}})))
+    assert inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS is True
+    monkeypatch.setattr(inconclusive, "UNOBSERVABLE_BLIND_BLOCKS_PASS", False)
+    (why,) = service._blind_causes(rep)
+    assert why.reason.endswith("(1 ran but not recorded): fakedep.dump")
 
 
 def test_no_trace_every_observable_contact_is_not_run(project):
