@@ -328,6 +328,8 @@ commands, targets, modes, privacy profiles or sampling rates, the verdict is INC
 when facts changed. Sampled captures must also have complete call counts.
 
 - **FAIL**: a compared fact failed anywhere in the recording, or a `--probe-python` replay failed.
+  A replay compares with the recording it replays, so it fails the verdict even when only one
+  capture exists (that capture must be otherwise sound).
 - **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
   - at least one fact compared equal (or was accepted). Noise a replicate measured, a call
