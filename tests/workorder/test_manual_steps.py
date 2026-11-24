@@ -303,3 +303,33 @@ def test_a_plan_keeps_the_representation_expectation_and_shows_why(tmp_path):
         "preserve", None)
     with pytest.raises(StepRefusal, match="loosens it"):
         check_claim(step, claim=None, expect="any", attested=False)
+
+
+def test_a_compile_finding_and_its_risk_make_one_step(tmp_path):
+    """QA H6: predict rates each compile finding as a python risk too. The risk used to become a
+    step of its own ("`SyntaxWarning`: changed", no successor) beside the compile step, for the
+    same sites; it now joins the compile step."""
+    root, plan = _automated(tmp_path)
+    findings = [{"file": "app.py", "line": 14, "kind": "SyntaxWarning",
+                 "message": "invalid escape sequence '\\d'", "base": None},
+                {"file": "c_only.py", "line": 5, "kind": "SyntaxWarning",
+                 "message": "invalid escape sequence '\\w'", "base": None}]
+    compiled = [_risk("SyntaxWarning", f["file"], f["line"], "", tier=RiskTier.LOW,
+                      scope="python", package="python") for f in findings]
+    other = _risk("imp.find_module", "app.py", 1, "<module>", scope="python", package=None,
+                  fact={"kind": "REMOVED", "symbol": "imp.find_module"})
+    risks = PredictionReport(risks=[*compiled, other])
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=risks,
+                                  manual_items=[], advisories=[], compile_findings=findings,
+                                  python_move=("3.11", "3.12"))
+    python = [s for s in steps if s.type == "python-manual"]
+    assert [s.title for s in python] == ["`imp.find_module`: removed on Python 3.12",
+                                         "SyntaxWarning on Python 3.12: 2 site(s)"]
+    compile_step = python[1]
+    assert compile_step.why.risk_ids == [r.id for r in compiled]
+    assert {r.step_id for r in compiled} == {compile_step.id}
+    assert compile_step.why.tier == "low" and other.step_id == python[0].id
+    from pymolt.workorder.verify_effort import effort_of
+
+    # The message says what to do: linking its risks does not make it "no successor known".
+    assert effort_of(compile_step).size == "small"

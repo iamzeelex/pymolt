@@ -17,7 +17,8 @@ HOST side, pure over the plan's parts and the T0 texts. Every predicted risk get
 Each H5 item (a rule that matched but is not applied) becomes a ``manual-rewrite`` step per
 (rule, file); each rule advisory a ``manual-rewrite`` (``not-applied``) or a ``review``
 (``precondition``) step per (rule, file); the target's compile findings a ``python-manual``
-step per kind. Low BLIND risks are steps too (PLAN.md collapses them).
+step per kind, which also takes the risks made from those findings (they get no step of their
+own). Low BLIND risks are steps too (PLAN.md collapses them).
 
 A manual step's claim follows the kind of successor its delta fact shows (``default_claim``):
 ``preserve`` for the same object, a behaviour change, or no fact about the successor;
@@ -494,13 +495,37 @@ def _item_steps(manual_items: list[Any], advisories: list[Any], t0: T0) -> list[
     return out
 
 
+def _compile_kind(finding: Mapping[str, Any]) -> str:
+    return str(finding.get("kind") or "finding")
+
+
+def _compile_risks(risks: Iterable[Any], findings: list[Mapping[str, Any]]
+                   ) -> dict[int, str]:
+    """The risks ``verify.predict`` made from compile findings (a python risk with no fact, its
+    symbol the finding's kind, at the finding's file and line), by ``id()``, to their finding's
+    kind: they belong to that kind's compile step, not to a step of their own (QA H6: the same
+    SyntaxWarning sites were planned twice)."""
+    where = {(f.get("file"), f.get("line"), str(f.get("kind") or "SyntaxError")): _compile_kind(f)
+             for f in findings}
+    out: dict[int, str] = {}
+    for risk in risks:
+        kind = where.get((risk.site.file, risk.site.line, risk.symbol))
+        if kind is not None and risk.scope == "python" and not _fact(risk):
+            out[id(risk)] = kind
+    return out
+
+
 def _compile_steps(findings: list[Mapping[str, Any]], t0: T0,
-                   python_move: tuple[str, str] | None, target: str | None) -> list[dict]:
+                   python_move: tuple[str, str] | None, target: str | None,
+                   risks: Mapping[str, list[Any]] | None = None) -> list[dict]:
+    """One ``python-manual`` step per kind of compile finding; ``risks``: the risks made from
+    the findings, by kind, which it takes (ids, tier, baseline)."""
     groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for f in findings:
-        groups[str(f.get("kind") or "finding")].append(f)
+        groups[_compile_kind(f)].append(f)
     out = []
     for kind, items in groups.items():
+        linked = list((risks or {}).get(kind) or ())
         where = list({a.id: a for a in (t0.anchor(f.get("file"), f.get("line")) for f in items)
                       if a is not None}.values())
         evidence = []
@@ -516,12 +541,17 @@ def _compile_steps(findings: list[Mapping[str, Any]], t0: T0,
             title=f"{kind} on Python {target or '?'}: {len(items)} site(s)",
             executor="agent", claim=claim, basis="manual", scope="python",
             from_=(python_move or (None, None))[0], to=(python_move or (None, None))[1],
-            where=where, why=StepWhy(evidence=evidence[:_EVIDENCE_CAP], claim=reason),
+            where=where, why=StepWhy(
+                evidence=evidence[:_EVIDENCE_CAP], claim=reason,
+                tier=_max_tier(_tier(r.tier) for r in linked), risk_ids=[r.id for r in linked],
+                baseline=StepBaseline(calls=sum(r.calls for r in linked), sites=len(linked),
+                                      warnings=_warnings(linked))),
             do=StepDo(manual=ManualDo(summary=f"Make these files compile on Python "
                                               f"{target or 'the target'} without the {kind}.")),
             verify=verify,
             effort=StepEffort(sites=len(items),
                               files=len({f.get("file") for f in items})),
+            _risks=linked,
         ))
     return out
 
@@ -545,7 +575,12 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
     t0 = t0 if t0 is not None else T0(Path(root), changes, base)
     linked: dict[str, list[Any]] = defaultdict(list)
     groups: dict[tuple, list[Any]] = {}
+    compiled = _compile_risks(getattr(risks, "risks", None) or (), compile_findings)
+    by_kind: dict[str, list[Any]] = defaultdict(list)
     for risk in getattr(risks, "risks", None) or ():
+        if id(risk) in compiled:
+            by_kind[compiled[id(risk)]].append(risk)
+            continue
         if risk.fixed_by_plan:
             step = fixing_step(risk, automated, t0)
             if step is not None:
@@ -566,7 +601,7 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
         drafts.append(dict(_risk_step(group, step_type, target, t0, python_move, versions),
                            _risks=group))
     drafts += _item_steps(manual_items, advisories, t0)
-    drafts += _compile_steps(compile_findings, t0, python_move, target_python)
+    drafts += _compile_steps(compile_findings, t0, python_move, target_python, by_kind)
 
     counters = {phase: 0 for phase in PHASES}
     for step in automated:
