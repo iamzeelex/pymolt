@@ -345,8 +345,11 @@ when facts changed. Sampled captures must also have complete call counts.
 An INCONCLUSIVE verdict also says who settles it. Each reason is one of two kinds:
 - **needs a person** (`needs_review`): a review item. A person fixes the code, or accepts an
   intended change with `pymolt verify . --accept ID`. A difference a baseline replicate measured
-  and still could not settle is one too.
-- **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols, a fact
+  and still could not settle is one too. So are BLIND symbols no capture can record (each contact
+  unobservable, or its line ran without a recorded call): capturing again records the same, so
+  a person reviews each use; they still keep the verdict from PASS.
+- **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols a test
+  can still reach (not run, or "ran" only by their function or file), a fact
   that could not be compared, a capture that is missing, invalid, stale or unlike the other, a
   value that may be run-to-run noise while no baseline replicate was measured, an environment
   difference between the two captures, a diff in which no fact compared equal.

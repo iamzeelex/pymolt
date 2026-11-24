@@ -13,6 +13,10 @@ kinds (``InconclusiveKind``):
   noise a baseline replicate would measure, a difference of the two captures' environments, a
   diff in which no fact compared equal (every entry noise or explained away).
 
+A BLIND symbol no capture can record (``blind_kind``: every contact of it unobservable, or ran
+at its line without a record) is ``needs_review``: no evidence settles it, a person reviews
+those uses. Whether it keeps the verdict from PASS at all is ``UNOBSERVABLE_BLIND_BLOCKS_PASS``.
+
 Each reason carries its kind with it (``InconclusiveCause``), set where the reason is made and
 never parsed back from its text. The verdict's kind is ``needs_review`` when any reason needs a
 person, else ``needs_evidence``: the precedence of the step statuses (failed > needs_review >
@@ -79,6 +83,45 @@ SETTLE_UNCOMPARABLE = {
     "distribution-lost": ("capturing again does not settle it: the capture kept only part of "
                           "these calls' outcomes (too many distinct ones for one input)"),
 }
+
+
+#: OWNER DECISION (open, QA V2): whether a BLIND symbol that no capture can observe keeps the
+#: verdict from PASS. Such a symbol (``SymbolStatus.blind_reason`` "unobservable") has only
+#: unobservable contacts: an attribute read, base class or constant of a symbol never observed
+#: (``Loader=yaml.SafeLoader``), a chain through a return value, a dependency not installed where
+#: the capture ran, interpreter code. True, the rule so far: it blocks PASS, as a review item
+#: (``blind_kind``). False: it stays BLIND in the counts and tables, a note names it, and it is no
+#: reason, so it cannot keep a verdict from PASS. This constant is the one place the rule lives:
+#: everything that asks goes through ``blind_blocks_pass``.
+UNOBSERVABLE_BLIND_BLOCKS_PASS = True
+
+
+def blind_blocks_pass(symbol: Any) -> bool:
+    """Whether this BLIND symbol is a reason the verdict cannot PASS
+    (``UNOBSERVABLE_BLIND_BLOCKS_PASS``)."""
+    return UNOBSERVABLE_BLIND_BLOCKS_PASS or _get(symbol, "blind_reason") != "unobservable"
+
+
+def coarse_ran(contacts: Iterable[Any]) -> set[str]:
+    """The granularities coarser than line at which these contacts read "ran, not recorded":
+    there only their function or file is known to have run, not the statement."""
+    return {str(_get(c, "granularity")) for c in contacts
+            if _get(c, "status") == "ran-not-recorded"
+            and _get(c, "granularity") not in ("line", None)}
+
+
+def blind_kind(symbol: Any, contacts: Iterable[Any]) -> InconclusiveKind:
+    """Who settles a BLIND symbol, from its contacts (``ContactStatus``): ``needs_evidence``
+    while a test could still get one of them recorded (one was not run, or "ran" only by its
+    function or file, so the statement may not have); ``needs_review`` when none can (each is
+    unobservable, or its statement ran and the watcher did not record a call there, which
+    capturing again repeats): a person reviews those uses."""
+    mine = list(contacts)
+    if not mine:
+        return NEEDS_REVIEW if _get(symbol, "blind_reason") == "unobservable" else NEEDS_EVIDENCE
+    if any(_get(c, "status") == "not-run" for c in mine) or coarse_ran(mine):
+        return NEEDS_EVIDENCE
+    return NEEDS_REVIEW
 
 
 def _get(e: Any, key: str, default: Any = None) -> Any:
@@ -174,6 +217,7 @@ def first_settle(causes: Iterable[InconclusiveCause], kind: InconclusiveKind | N
 __all__ = [
     "NEEDS_EVIDENCE", "NEEDS_REVIEW", "REPLICATE_REVIEWS", "SETTLE_ENVIRONMENT",
     "SETTLE_NO_EQUAL", "SETTLE_NOISE", "SETTLE_NOT_EXERCISED", "SETTLE_REVIEW",
-    "SETTLE_UNCOMPARABLE", "cause", "entry_cause", "first_settle", "is_inconclusive", "kind_of",
+    "SETTLE_UNCOMPARABLE", "UNOBSERVABLE_BLIND_BLOCKS_PASS", "blind_blocks_pass", "blind_kind",
+    "cause", "coarse_ran", "entry_cause", "first_settle", "is_inconclusive", "kind_of",
     "settle_uncomparable", "uncomparable_mechanism",
 ]
