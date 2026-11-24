@@ -306,6 +306,38 @@ def test_verify_without_comparable_pair_is_inconclusive(tmp_path):
     assert payload["contract"]["verdict_reasons"]
 
 
+def _probe_project(tmp_path, result):
+    """TESTING §D: a hand-written one-call trace of yaml.safe_load, replayed by the probe."""
+    project = tmp_path / "proj"
+    (project / "app").mkdir(parents=True)
+    (project / "app" / "__init__.py").write_text("")
+    (project / "app" / "m.py").write_text(
+        "import yaml\ndef load():\n    return yaml.safe_load(\"a: 1\")\n"
+        "def dump():\n    return yaml.dump({})\n")
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({"q": "yaml.safe_load", "in": {"bound": {"stream": "a: 1"}},
+                                 "result": result, "t": "return"}) + "\n")
+    return project, trace
+
+
+def test_a_changed_probe_replay_fails_with_one_capture(tmp_path):
+    """QA V4: the replay compares with the recording it replays, not with the missing side."""
+    project, trace = _probe_project(tmp_path, {"__dict__": [["a", 2]]})
+    args = ["verify", str(project), "--post-migration", str(trace),
+            "--probe-python", sys.executable, "--json"]
+    result = runner.invoke(cli, args)
+    assert result.exit_code == EXIT_FINDING, result.output
+    payload = json.loads(result.output)
+    assert payload["verdict"] == "fail"
+    assert payload["contract"]["verdict_reasons"] == ["sandbox replay changed behavior"]
+    assert any("FAIL rests on the probe replay alone" in n for n in payload["contract"]["notes"])
+
+    stable, trace = _probe_project(tmp_path / "stable", {"__dict__": [["a", 1]]})
+    result = runner.invoke(cli, ["verify", str(stable), "--post-migration", str(trace),
+                                 "--probe-python", sys.executable, "--json"])
+    assert result.exit_code == EXIT_INCONCLUSIVE    # a stable replay proves no PASS alone
+
+
 def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeypatch):
     """The headline is coverage and recall over contacts, stamped with how "ran" was known,
     the BLIND split, and the symbol-matching tiers from exact-join up."""

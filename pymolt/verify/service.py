@@ -3137,6 +3137,17 @@ def _stamp_verdict(
     # Changed output from stale or mismatched workloads is evidence to inspect,
     # but it cannot honestly describe the current migration.
     if comparability:
+        if (report.probe_changed and trace is not None and against is None
+                and len(comparability) == 1):
+            # The one capture is otherwise sound, and a probe compares its replay under the
+            # target with that capture's own recording, not with the missing side: a CHANGED
+            # replay is a behaviour change on its own (docs/verify.md: a replay failure FAILs).
+            report.verdict = VerificationVerdict.FAIL
+            report.verdict_reasons = ["sandbox replay changed behavior"]
+            report.notes.append(
+                f"{next(iter(comparability))}: no version diff ran, so this FAIL rests on the "
+                "probe replay alone")
+            return
         report.verdict = VerificationVerdict.INCONCLUSIVE
         report.verdict_reasons = list(comparability)
         report.inconclusive_causes = list(comparability.values())
