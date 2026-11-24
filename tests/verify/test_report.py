@@ -502,6 +502,30 @@ def test_executed_scope_relative_suffix_and_missing_sites(tmp_path, monkeypatch)
     assert rep.executed_files == ["app/main.py"]
     assert any("matched by path suffix" in n for n in rep.notes)
 
+    # QA V2-4 (zipline, locust): a container capture whose executed record also names one
+    # relative file (a Cython module's ``co_filename``, a temporary locustfile) that is no
+    # project file. That path says nothing about where the capture ran: the container paths
+    # are still matched by suffix, and the contacts in them ran.
+    container = _write_trace(
+        tmp_path / "container.jsonl",
+        [{**fetch, "where": {"file": "/work/app/main.py", "line": 11}}])
+    (tmp_path / "container.jsonl.meta.json").write_text(json.dumps({"processes": [{
+        "executed": {"v": 1, "granularity": "line", "complete": True, "until": None,
+                     "files": {"/work/app/main.py": {"lines": "1,2,9,10,11,12"},
+                               "bcolz/carray_ext.pyx": {"lines": "1"}}}}]}))
+    rep = build_contract_report(root, trace=container)
+    assert rep.executed_files == ["app/main.py"]
+    assert rep.coverage > 0 and rep.contacts_recorded == 1
+    # a relative path that IS a project file still maps, and decides nothing either
+    (tmp_path / "container.jsonl.meta.json").write_text(json.dumps({"processes": [{
+        "executed": {"v": 1, "granularity": "line", "complete": True, "until": None,
+                     "files": {"/work/app/main.py": {"lines": "1,2,9,10,11,12"},
+                               "app/cold.py": {"lines": "1,3,4"}}}}]}))
+    rep = build_contract_report(root, trace=container)
+    by = {c.target: c.status for c in rep.contacts}
+    assert by["fakedep.fetch"] == "recorded"
+    assert by["fakedep.helper"] == "ran-not-recorded"
+
     no_sites = _write_trace(tmp_path / "nosites.jsonl", [fetch])
     rep = build_contract_report(root, trace=no_sites)
     assert rep.executed_scope is False
