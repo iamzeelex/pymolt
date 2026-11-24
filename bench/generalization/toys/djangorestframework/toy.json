@@ -1,0 +1,276 @@
+{
+ "name": "djangorestframework",
+ "ecosystem": "REST framework on Django",
+ "old": {
+  "python": "3.9",
+  "requirements": [
+   "Django==3.2.25",
+   "djangorestframework==3.12.4",
+   "pytz",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "Django==5.2.19",
+   "djangorestframework==3.18.3",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "Django",
+  "djangorestframework"
+ ],
+ "target_manifest": [
+  "Django==5.2.19",
+  "djangorestframework==3.18.3"
+ ],
+ "files": {
+  "app/__init__.py": "",
+  "app/serializers.py": "from django.utils.translation import ugettext_lazy as _\nfrom rest_framework import serializers\n\nfrom app import store\n\nVAGUE = {\"todo\", \"task\", \"stuff\"}\n\n\nclass TaskSerializer(serializers.Serializer):\n    id = serializers.IntegerField(read_only=True)\n    title = serializers.CharField(max_length=60)\n    done = serializers.NullBooleanField(required=False)\n    due = serializers.DateTimeField(required=False, allow_null=True)\n    tags = serializers.ListField(child=serializers.CharField(), required=False)\n\n    def validate_title(self, value):\n        if value.strip().lower() in VAGUE:\n            raise serializers.ValidationError(_(\"Title is too vague.\"))\n        return value.strip()\n\n    def create(self, validated_data):\n        return store.add(dict(validated_data))\n",
+  "app/store.py": "\"\"\"In-memory task storage: plain project code, no dependency calls.\"\"\"\nimport datetime\n\nSEED = [\n    {\"title\": \"Write report\", \"done\": False, \"due\": datetime.datetime(2024, 5, 1, 9, 30),\n     \"tags\": [\"work\"]},\n    {\"title\": \"Call Ada\", \"done\": True, \"due\": None, \"tags\": []},\n    {\"title\": \"Plan trip\", \"done\": None, \"due\": datetime.datetime(2024, 6, 2, 18, 0),\n     \"tags\": [\"home\", \"later\"]},\n]\nTASKS = {}\n\n\ndef reset():\n    TASKS.clear()\n    for row in SEED:\n        add(dict(row))\n\n\ndef add(data):\n    task = {\"id\": len(TASKS) + 1, \"title\": data[\"title\"], \"done\": data.get(\"done\"),\n            \"due\": data.get(\"due\"), \"tags\": list(data.get(\"tags\", []))}\n    TASKS[task[\"id\"]] = task\n    return task\n\n\ndef get(pk):\n    return TASKS.get(pk)\n\n\ndef all_tasks():\n    return [TASKS[k] for k in sorted(TASKS)]\n",
+  "app/urls.py": "from django.conf.urls import url\n\nfrom app import views\n\nurlpatterns = [\n    url(r\"^tasks/$\", views.task_list, name=\"task-list\"),\n    url(r\"^tasks/(?P<pk>\\d+)/$\", views.task_detail, name=\"task-detail\"),\n    url(r\"^next/$\", views.next_url),\n    url(r\"^office-time/$\", views.office_time),\n]\n",
+  "app/views.py": "import datetime\n\nimport pytz\nfrom django.utils import timezone\nfrom django.utils.http import is_safe_url\nfrom rest_framework import status\nfrom rest_framework.decorators import api_view\nfrom rest_framework.pagination import PageNumberPagination\nfrom rest_framework.response import Response\n\nfrom app import store\nfrom app.serializers import TaskSerializer\n\nOFFICE_TZ = pytz.timezone(\"Europe/Paris\")\n\n\nclass TaskPages(PageNumberPagination):\n    page_size = 2\n\n\n@api_view([\"GET\", \"POST\"])\ndef task_list(request):\n    if request.method == \"POST\":\n        serializer = TaskSerializer(data=request.data)\n        serializer.is_valid(raise_exception=True)\n        task = serializer.save()\n        return Response(TaskSerializer(task).data, status=status.HTTP_201_CREATED)\n    paginator = TaskPages()\n    page = paginator.paginate_queryset(store.all_tasks(), request)\n    return paginator.get_paginated_response(TaskSerializer(page, many=True).data)\n\n\n@api_view([\"GET\"])\ndef task_detail(request, pk):\n    task = store.get(int(pk))\n    if task is None:\n        return Response({\"detail\": \"Not found.\"}, status=status.HTTP_404_NOT_FOUND)\n    return Response(TaskSerializer(task).data)\n\n\n@api_view([\"GET\"])\ndef next_url(request):\n    target = request.query_params.get(\"next\", \"/\")\n    if not is_safe_url(target, allowed_hosts={request.get_host()}):\n        target = \"/\"\n    return Response({\"next\": target})\n\n\n@api_view([\"GET\"])\ndef office_time(request):\n    naive = datetime.datetime.strptime(request.query_params[\"at\"], \"%Y-%m-%dT%H:%M\")\n    local = OFFICE_TZ.localize(naive)\n    return Response({\"utc\": local.astimezone(timezone.utc).isoformat()})\n",
+  "tests/conftest.py": "import django\nfrom django.conf import settings\n\n\ndef pytest_configure():\n    settings.configure(\n        DEBUG=False,\n        SECRET_KEY=\"toy\",\n        ROOT_URLCONF=\"app.urls\",\n        ALLOWED_HOSTS=[\"*\"],\n        INSTALLED_APPS=[\"django.contrib.contenttypes\", \"django.contrib.auth\", \"rest_framework\"],\n        USE_I18N=True,\n        LANGUAGE_CODE=\"en-us\",\n        REST_FRAMEWORK={\n            \"DEFAULT_AUTHENTICATION_CLASSES\": [],\n            \"DEFAULT_PERMISSION_CLASSES\": [],\n            \"UNAUTHENTICATED_USER\": None,\n        },\n    )\n    django.setup()\n",
+  "tests/test_api.py": "import pytest\nfrom rest_framework.test import APIClient\n\nfrom app import store\n\n\n@pytest.fixture()\ndef client():\n    store.reset()\n    return APIClient()\n\n\ndef test_list_is_paginated(client):\n    r = client.get(\"/tasks/\")\n    assert r.status_code == 200\n    body = r.json()\n    assert body[\"count\"] == 3\n    assert [t[\"title\"] for t in body[\"results\"]] == [\"Write report\", \"Call Ada\"]\n    assert body[\"next\"] == \"http://testserver/tasks/?page=2\"\n    assert client.get(\"/tasks/?page=2\").json()[\"results\"][0][\"done\"] is None\n    assert client.get(\"/tasks/?page=9\").status_code == 404\n\n\ndef test_create_task(client):\n    r = client.post(\"/tasks/\", {\"title\": \"  Ship it \", \"done\": None, \"due\": \"2024-05-01T12:00:00\",\n                                \"tags\": [\"release\"]}, format=\"json\")\n    assert r.status_code == 201\n    assert r.json() == {\"id\": 4, \"title\": \"Ship it\", \"done\": None, \"due\": \"2024-05-01T12:00:00\",\n                        \"tags\": [\"release\"]}\n\n\ndef test_create_rejects_vague_title(client):\n    r = client.post(\"/tasks/\", {\"title\": \"todo\"}, format=\"json\")\n    assert r.status_code == 400\n    assert r.json() == {\"title\": [\"Title is too vague.\"]}\n\n\ndef test_detail(client):\n    assert client.get(\"/tasks/1/\").json()[\"due\"] == \"2024-05-01T09:30:00\"\n    assert client.get(\"/tasks/99/\").status_code == 404\n\n\ndef test_next_url_is_local(client):\n    assert client.get(\"/next/\", {\"next\": \"/tasks/\"}).json() == {\"next\": \"/tasks/\"}\n    assert client.get(\"/next/\", {\"next\": \"https://evil.test/\"}).json() == {\"next\": \"/\"}\n\n\ndef test_office_time(client):\n    r = client.get(\"/office-time/\", {\"at\": \"2024-05-01T12:00\"})\n    assert r.json() == {\"utc\": \"2024-05-01T10:00:00+00:00\"}\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/urls.py",
+   "old": "from django.conf.urls import url\n",
+   "new": "from django.urls import re_path\n",
+   "if_present": true
+  },
+  {
+   "file": "app/urls.py",
+   "old": "    url(r\"^",
+   "new": "    re_path(r\"^",
+   "replace_all": true,
+   "if_present": true
+  },
+  {
+   "file": "app/serializers.py",
+   "old": "from django.utils.translation import ugettext_lazy as _\n",
+   "new": "from django.utils.translation import gettext_lazy as _\n",
+   "if_present": true
+  },
+  {
+   "file": "app/serializers.py",
+   "old": "serializers.NullBooleanField(required=False)",
+   "new": "serializers.BooleanField(allow_null=True, required=False)"
+  },
+  {
+   "file": "app/views.py",
+   "old": "import pytz\n",
+   "new": "import zoneinfo\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "from django.utils.http import is_safe_url\n",
+   "new": "from django.utils.http import url_has_allowed_host_and_scheme\n",
+   "if_present": true
+  },
+  {
+   "file": "app/views.py",
+   "old": "OFFICE_TZ = pytz.timezone(\"Europe/Paris\")",
+   "new": "OFFICE_TZ = zoneinfo.ZoneInfo(\"Europe/Paris\")"
+  },
+  {
+   "file": "app/views.py",
+   "old": "is_safe_url(target, ",
+   "new": "url_has_allowed_host_and_scheme(target, ",
+   "if_present": true
+  },
+  {
+   "file": "app/views.py",
+   "old": "    local = OFFICE_TZ.localize(naive)\n",
+   "new": "    local = naive.replace(tzinfo=OFFICE_TZ)\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "local.astimezone(timezone.utc)",
+   "new": "local.astimezone(datetime.timezone.utc)",
+   "if_present": true
+  },
+  {
+   "file": "tests/conftest.py",
+   "old": "        USE_I18N=True,\n",
+   "new": "        USE_I18N=True,\n        USE_TZ=False,\n"
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "tests/test_api.py",
+     "append": "\n\ndef test_blank_page_parameter(client):\n    # Some clients send an empty page parameter; the test only checks the API answers.\n    assert client.get(\"/tasks/\", {\"page\": \"\"}).status_code in (200, 404)\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "rest_framework.pagination.PageNumberPagination.paginate_queryset",
+    "rest_framework.test.APIClient.get"
+   ],
+   "behaviour": "PageNumberPagination.paginate_queryset with ?page= (empty): DRF 3.12.4 raises NotFound 'Invalid page.' (404), 3.15+ (3.18.3 here) treats the empty value as page 1 and returns the first page (200). The test accepts both."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "django.conf.urls.url",
+   "kind": "REMOVED",
+   "param": null,
+   "sites": [
+    "app/urls.py:1",
+    "app/urls.py:6",
+    "app/urls.py:7",
+    "app/urls.py:8",
+    "app/urls.py:9"
+   ],
+   "breaks": "ImportError: cannot import name 'url' from 'django.conf.urls'",
+   "successor": "django.urls.re_path",
+   "fixable": "codemod",
+   "source": "Django 4.0 release notes (removed; deprecated in 3.1)",
+   "verified": {
+    "old": "3.2.25: url() works, RemovedInDjango40Warning 'django.conf.urls.url() is deprecated in favor of django.urls.re_path().'; it is a wrapper calling re_path, not the same object",
+    "new": "5.2.19: ImportError; re_path with the same regexes routes the same"
+   }
+  },
+  {
+   "symbol": "django.utils.translation.ugettext_lazy",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/serializers.py:1",
+   "breaks": "ImportError: cannot import name 'ugettext_lazy' from 'django.utils.translation'",
+   "successor": "django.utils.translation.gettext_lazy",
+   "fixable": "codemod",
+   "source": "Django 4.0 release notes (removed; deprecated in 3.0)",
+   "verified": {
+    "old": "3.2.25: `ugettext_lazy is gettext_lazy` -> False (since 3.0 a warning wrapper; in 2.2 it was an alias, MOVED in the django toy); calling it warns RemovedInDjango40Warning",
+    "new": "5.2.19: gone; gettext_lazy gives the same message"
+   }
+  },
+  {
+   "symbol": "rest_framework.serializers.NullBooleanField",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/serializers.py:12",
+   "breaks": "AttributeError: module 'rest_framework.serializers' has no attribute 'NullBooleanField'. Did you mean: 'BooleanField'?",
+   "successor": "rest_framework.serializers.BooleanField",
+   "fixable": "manual",
+   "source": "DRF 3.14 release notes (removed; deprecated in 3.12)",
+   "verified": {
+    "old": "3.12.4: works, RemovedInDRF314Warning 'The `NullBooleanField` is deprecated and will be removed starting with 3.14. Instead use the `BooleanField` field and set `allow_null=True` which does the same thing.'",
+    "new": "3.18.3: gone; BooleanField(allow_null=True, required=False) gives the same validation and output (a different class plus a keyword)"
+   }
+  },
+  {
+   "symbol": "pytz.timezone",
+   "kind": "REMOVED",
+   "param": null,
+   "sites": [
+    "app/views.py:3",
+    "app/views.py:14"
+   ],
+   "breaks": "ModuleNotFoundError: No module named 'pytz'",
+   "successor": "zoneinfo.ZoneInfo",
+   "fixable": "manual",
+   "source": "Django 4.0 release notes (zoneinfo is the default; pytz no longer a dependency) and DRF 3.15 (pytz dropped)",
+   "verified": {
+    "old": "pytz is installed only as a dependency of Django 3.2 / DRF 3.12 (the manifest does not list it); OFFICE_TZ.localize(naive) gives 2024-05-01T12:00+02:00",
+    "new": "Django 5.2.19 and DRF 3.18.3 do not install pytz: the import fails. zoneinfo.ZoneInfo with naive.replace(tzinfo=...) gives the same instant (localize() does not exist on ZoneInfo)"
+   }
+  },
+  {
+   "symbol": "django.utils.http.is_safe_url",
+   "kind": "REMOVED",
+   "param": null,
+   "sites": [
+    "app/views.py:5",
+    "app/views.py:44"
+   ],
+   "breaks": "ImportError: cannot import name 'is_safe_url' from 'django.utils.http'",
+   "successor": "django.utils.http.url_has_allowed_host_and_scheme",
+   "fixable": "codemod",
+   "source": "Django 4.0 release notes (removed; renamed in 3.0)",
+   "verified": {
+    "old": "3.2.25: is_safe_url warns RemovedInDjango40Warning 'django.utils.http.is_safe_url() is deprecated in favor of url_has_allowed_host_and_scheme().' (a wrapper, not the same object)",
+    "new": "5.2.19: gone; url_has_allowed_host_and_scheme(url, allowed_hosts=...) gives the same answers"
+   }
+  },
+  {
+   "symbol": "django.utils.timezone.utc",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/views.py:53",
+   "breaks": "AttributeError: module 'django.utils.timezone' has no attribute 'utc'",
+   "successor": "datetime.timezone.utc",
+   "fixable": "codemod",
+   "source": "Django 5.0 release notes (removed; deprecated in 4.1)",
+   "verified": {
+    "old": "3.2.25: timezone.utc is pytz.utc (`timezone.utc is datetime.timezone.utc` -> False), no warning",
+    "new": "5.2.19: AttributeError; datetime.timezone.utc gives the same isoformat '+00:00'"
+   }
+  },
+  {
+   "symbol": "django.conf.global_settings.USE_TZ",
+   "kind": "DEFAULT",
+   "param": "USE_TZ",
+   "site": "tests/conftest.py:6",
+   "breaks": "USE_TZ now defaults to True: naive datetimes are rendered in TIME_ZONE (America/Chicago by default): '2024-05-01T12:00:00' becomes '2024-05-01T12:00:00-05:00' (test_create_task, test_detail fail)",
+   "successor": "USE_TZ=False (set explicitly)",
+   "fixable": "manual",
+   "source": "Django 5.0 release notes (USE_TZ default changed to True)",
+   "verified": {
+    "old": "3.2.25: settings.USE_TZ False when not set; DateTimeField().to_representation(naive) == '2024-05-01T12:00:00'",
+    "new": "5.2.19: True; '2024-05-01T12:00:00-05:00'; validated_data datetimes become aware (zoneinfo America/Chicago)"
+   }
+  },
+  {
+   "symbol": "rest_framework.pagination.PageNumberPagination.paginate_queryset",
+   "kind": "BEHAVIOR",
+   "param": "page",
+   "site": "app/views.py:29",
+   "scenario": "change",
+   "breaks": "Only the change scenario: ?page= (empty) raises NotFound (404 Invalid page.) on 3.12.4 and returns the first page on 3.18.3",
+   "successor": null,
+   "fixable": "manual",
+   "source": "DRF 3.15.0 release notes (empty page parameter is page 1)",
+   "verified": {
+    "old": "GET /tasks/?page= -> 404 {'detail': 'Invalid page.'}",
+    "new": "200 with results of page 1"
+   }
+  }
+ ],
+ "expected_warnings": [
+  {
+   "symbol": "django.conf.urls.url",
+   "category": "RemovedInDjango40Warning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "django.utils.translation.ugettext_lazy",
+   "category": "RemovedInDjango40Warning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "django.utils.http.is_safe_url",
+   "category": "RemovedInDjango40Warning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "rest_framework.serializers.NullBooleanField",
+   "category": "RemovedInDRF314Warning",
+   "from_c": false,
+   "side": "old"
+  }
+ ],
+ "notes": "Django 3.2.25 LTS + DRF 3.12.4 on 3.9 -> Django 5.2.19 LTS + DRF 3.18.3 on 3.12. Settings follow the django toy: tests/conftest.py configures them in pytest_configure (no DJANGO_SETTINGS_MODULE, no database; the views are plain @api_view functions over an in-memory store). Unlike the django toy (2.2), on 3.2 ugettext_lazy/url/is_safe_url are warning wrappers, not aliases, so their entries are REMOVED with a successor, not MOVED. pytz is not in the manifest (as in many projects): Django 3.2 installed it, Django 4+/DRF 3.15+ do not, so `import pytz` breaks on the target with no API change in Django itself. USE_TZ: the conftest never sets it; Django 5.0 flipped the default to True, which changes every naive datetime the API renders. The equivalent migration pins USE_TZ=False (the documented way to keep 3.2 behaviour); the change scenario's break is independent of it. Old side warns RemovedInDjango40Warning (a DeprecationWarning subclass) for url (4 calls), ugettext_lazy, is_safe_url, and RemovedInDRF314Warning for NullBooleanField (all Python-level). force_text/ugettext are covered by the django toy and left out here. DRF 3.15 made serializer data plain dicts (ReturnDict no longer an OrderedDict; validated_data is a dict): equal values, different types; the tests only compare JSON. S3: importing app.views/app.serializers needs configured settings on both sides (DRF reads its settings at import of rest_framework.views)."
+}

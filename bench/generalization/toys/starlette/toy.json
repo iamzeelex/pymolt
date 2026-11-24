@@ -1,0 +1,258 @@
+{
+ "name": "starlette",
+ "ecosystem": "ASGI framework",
+ "old": {
+  "python": "3.11",
+  "requirements": [
+   "starlette==0.27.0",
+   "jinja2==3.1.6",
+   "httpx==0.24.1",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "starlette==1.10.0",
+   "jinja2==3.1.6",
+   "httpx==0.28.1",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "starlette",
+  "jinja2",
+  "httpx"
+ ],
+ "target_manifest": [
+  "starlette==1.10.0",
+  "jinja2==3.1.6",
+  "httpx==0.28.1"
+ ],
+ "files": {
+  "app/__init__.py": "",
+  "app/main.py": "from starlette.applications import Starlette\nfrom starlette.responses import JSONResponse, PlainTextResponse\nfrom starlette.routing import Route\n\nfrom app import notes, views\nfrom app.settings import DEBUG, SEED\n\nSTATS = {\"started\": 0, \"stopped\": 0}\n\n\ndef load_seed():\n    notes.reset()\n    for title in SEED:\n        notes.add(title)\n    STATS[\"started\"] += 1\n\n\ndef close_store():\n    STATS[\"stopped\"] += 1\n\n\nroutes = [\n    Route(\"/\", views.homepage),\n    Route(\"/notes\", views.list_notes, methods=[\"GET\"]),\n    Route(\"/notes\", views.create_note, methods=[\"POST\"]),\n    Route(\"/notes/latest\", views.latest),\n    Route(\"/notes/{note_id:int}\", views.get_note, name=\"note\"),\n    Route(\"/health\", views.health),\n]\n\napp = Starlette(debug=DEBUG, routes=routes, on_startup=[load_seed], on_shutdown=[close_store])\n\n\n@app.middleware(\"http\")\nasync def add_app_header(request, call_next):\n    response = await call_next(request)\n    response.headers[\"x-app\"] = \"notes\"\n    return response\n\n\n@app.exception_handler(404)\nasync def not_found(request, exc):\n    return JSONResponse({\"error\": exc.detail}, status_code=404)\n\n\n@app.route(\"/version\", methods=[\"GET\"])\nasync def version(request):\n    return PlainTextResponse(\"notes 1.0\")\n",
+  "app/notes.py": "\"\"\"A tiny notes store: plain project code, no dependency calls.\"\"\"\nimport itertools\n\n_ids = itertools.count(1)\nNOTES = {}\n\n\ndef reset():\n    global _ids\n    NOTES.clear()\n    _ids = itertools.count(1)\n\n\ndef add(title, body=\"\"):\n    note_id = next(_ids)\n    NOTES[note_id] = {\"id\": note_id, \"title\": title.strip(), \"body\": body}\n    return NOTES[note_id]\n\n\ndef validate(payload):\n    errors = []\n    if not isinstance(payload, dict):\n        return [\"body must be an object\"]\n    title = payload.get(\"title\")\n    if not isinstance(title, str) or not title.strip():\n        errors.append(\"title is required\")\n    elif len(title) > 40:\n        errors.append(\"title is too long\")\n    return errors\n",
+  "app/settings.py": "import os\n\nfrom starlette.config import Config\n\nconfig = Config()\nDEBUG = config(\"NOTES_DEBUG\", cast=bool, default=False)\nGREETING = config(\"NOTES_GREETING\", default=\"Welcome\")\nTEMPLATES = os.path.join(os.path.dirname(__file__), \"templates\")\nSEED = [\"Buy milk\", \"Write the report\"]\n",
+  "app/templates/index.html": "<h1>{{ greeting }}</h1>\n{% for note in notes %}\n<li>{{ note.title }}</li>\n{% endfor %}\n<a href=\"{{ url_for('note', note_id=1) }}\">first</a>\n",
+  "app/views.py": "from starlette import status\nfrom starlette.exceptions import HTTPException\nfrom starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse\nfrom starlette.templating import Jinja2Templates\n\nfrom app import notes\nfrom app.settings import GREETING, TEMPLATES\n\ntemplates = Jinja2Templates(directory=TEMPLATES, trim_blocks=True)\n\n\nasync def homepage(request):\n    items = sorted(notes.NOTES.values(), key=lambda n: n[\"id\"])\n    return templates.TemplateResponse(\"index.html\", {\"request\": request, \"greeting\": GREETING,\n                                                     \"notes\": items})\n\n\nasync def list_notes(request):\n    q = request.query_params.get(\"q\", \"\").lower()\n    items = [n for n in notes.NOTES.values() if q in n[\"title\"].lower()]\n    return JSONResponse({\"count\": len(items), \"notes\": items})\n\n\nasync def create_note(request):\n    payload = await request.json()\n    errors = notes.validate(payload)\n    if errors:\n        return JSONResponse({\"errors\": errors}, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)\n    note = notes.add(payload[\"title\"], payload.get(\"body\", \"\"))\n    return JSONResponse(note, status_code=status.HTTP_201_CREATED)\n\n\nasync def get_note(request):\n    note = notes.NOTES.get(request.path_params[\"note_id\"])\n    if note is None:\n        raise HTTPException(status_code=404, detail=\"no such note\")\n    return JSONResponse(note)\n\n\nasync def latest(request):\n    if not notes.NOTES:\n        raise HTTPException(status_code=404, detail=\"no notes\")\n    newest = max(notes.NOTES)\n    return RedirectResponse(url=request.url_for(\"note\", note_id=newest), status_code=303)\n\n\nasync def health(request):\n    return PlainTextResponse(\"ok\")\n",
+  "tests/test_app.py": "import pytest\nfrom starlette.testclient import TestClient\n\nfrom app.main import STATS, app\n\n\n@pytest.fixture()\ndef client():\n    with TestClient(app) as c:\n        yield c\n\n\ndef test_homepage_renders_template(client):\n    r = client.get(\"/\")\n    assert r.status_code == 200\n    assert r.headers[\"content-type\"].startswith(\"text/html\")\n    assert \"<h1>Welcome</h1>\" in r.text\n    assert \"<li>Write the report</li>\" in r.text\n    assert 'href=\"http://testserver/notes/1\"' in r.text\n\n\ndef test_list_and_search(client):\n    assert client.get(\"/notes\").json()[\"count\"] == 2\n    assert client.get(\"/notes\", params={\"q\": \"milk\"}).json()[\"notes\"][0][\"title\"] == \"Buy milk\"\n\n\ndef test_create_note(client):\n    r = client.post(\"/notes\", json={\"title\": \"  Call Ada \", \"body\": \"re: engines\"})\n    assert r.status_code == 201\n    assert r.json() == {\"id\": 3, \"title\": \"Call Ada\", \"body\": \"re: engines\"}\n    bad = client.post(\"/notes\", json={\"title\": \"\"})\n    assert bad.status_code == 422\n    assert bad.json() == {\"errors\": [\"title is required\"]}\n\n\ndef test_get_note_and_404_handler(client):\n    assert client.get(\"/notes/2\").json()[\"title\"] == \"Write the report\"\n    r = client.get(\"/notes/99\")\n    assert r.status_code == 404\n    assert r.json() == {\"error\": \"no such note\"}\n\n\ndef test_latest_redirects(client):\n    r = client.get(\"/notes/latest\", follow_redirects=False)\n    assert r.status_code == 303\n    assert r.headers[\"location\"] == \"http://testserver/notes/2\"\n\n\ndef test_middleware_header_and_legacy_route(client):\n    assert client.get(\"/health\").headers[\"x-app\"] == \"notes\"\n    assert client.get(\"/version\").text == \"notes 1.0\"\n\n\ndef test_lifecycle_hooks():\n    before = dict(STATS)\n    with TestClient(app) as c:\n        assert c.get(\"/health\").text == \"ok\"\n    assert STATS[\"started\"] == before[\"started\"] + 1\n    assert STATS[\"stopped\"] == before[\"stopped\"] + 1\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/views.py",
+   "old": "from starlette.templating import Jinja2Templates\n",
+   "new": "import jinja2\nfrom starlette.templating import Jinja2Templates\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "templates = Jinja2Templates(directory=TEMPLATES, trim_blocks=True)",
+   "new": "templates = Jinja2Templates(env=jinja2.Environment(\n    loader=jinja2.FileSystemLoader(TEMPLATES), autoescape=True, trim_blocks=True))"
+  },
+  {
+   "file": "app/views.py",
+   "old": "templates.TemplateResponse(\"index.html\", {\"request\": request, \"greeting\": GREETING,\n                                                     \"notes\": items})",
+   "new": "templates.TemplateResponse(request, \"index.html\", {\"greeting\": GREETING,\n                                                     \"notes\": items})"
+  },
+  {
+   "file": "app/views.py",
+   "old": "status.HTTP_422_UNPROCESSABLE_ENTITY",
+   "new": "status.HTTP_422_UNPROCESSABLE_CONTENT",
+   "if_present": true
+  },
+  {
+   "file": "app/main.py",
+   "old": "from starlette.applications import Starlette\n",
+   "new": "from contextlib import asynccontextmanager\n\nfrom starlette.applications import Starlette\nfrom starlette.middleware.base import BaseHTTPMiddleware\n"
+  },
+  {
+   "file": "app/main.py",
+   "old": "app = Starlette(debug=DEBUG, routes=routes, on_startup=[load_seed], on_shutdown=[close_store])",
+   "new": "@asynccontextmanager\nasync def lifespan(app):\n    load_seed()\n    yield\n    close_store()\n\n\napp = Starlette(debug=DEBUG, routes=routes, lifespan=lifespan)"
+  },
+  {
+   "file": "app/main.py",
+   "old": "@app.middleware(\"http\")\nasync def add_app_header(request, call_next):\n    response = await call_next(request)\n    response.headers[\"x-app\"] = \"notes\"\n    return response\n",
+   "new": "async def add_app_header(request, call_next):\n    response = await call_next(request)\n    response.headers[\"x-app\"] = \"notes\"\n    return response\n\n\napp.add_middleware(BaseHTTPMiddleware, dispatch=add_app_header)\n"
+  },
+  {
+   "file": "app/main.py",
+   "old": "@app.exception_handler(404)\nasync def not_found(request, exc):\n    return JSONResponse({\"error\": exc.detail}, status_code=404)\n",
+   "new": "async def not_found(request, exc):\n    return JSONResponse({\"error\": exc.detail}, status_code=404)\n\n\napp.add_exception_handler(404, not_found)\n"
+  },
+  {
+   "file": "app/main.py",
+   "old": "@app.route(\"/version\", methods=[\"GET\"])\nasync def version(request):\n    return PlainTextResponse(\"notes 1.0\")\n",
+   "new": "async def version(request):\n    return PlainTextResponse(\"notes 1.0\")\n\n\napp.add_route(\"/version\", version, methods=[\"GET\"])\n"
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "app/views.py",
+     "append": "\n\nasync def export_notes(request):\n    import os\n\n    from starlette.responses import FileResponse\n\n    path = os.path.join(os.path.dirname(__file__), \"export.txt\")\n    with open(path, \"w\") as fh:\n        for note in sorted(notes.NOTES.values(), key=lambda n: n[\"id\"]):\n            fh.write(\"%d\\t%s\\n\" % (note[\"id\"], note[\"title\"]))\n    return FileResponse(path, filename=\"notes.txt\")\n"
+    },
+    {
+     "file": "app/main.py",
+     "append": "\n\napp.add_route(\"/notes/export\", views.export_notes)\n"
+    },
+    {
+     "file": "tests/test_app.py",
+     "append": "\n\ndef test_export_download(client):\n    # A download manager resumes with a Range header; the test only checks the bytes it got.\n    r = client.get(\"/notes/export\", headers={\"Range\": \"bytes=0-9\"})\n    assert r.status_code in (200, 206)\n    assert b\"1\\tBuy milk\".startswith(r.content[:10])\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "starlette.testclient.TestClient.get"
+   ],
+   "behaviour": "FileResponse with a Range header: starlette 0.27.0 ignores Range and answers 200 with the whole file; 1.10.0 answers 206 Partial Content with the 10 requested bytes (Content-Range: bytes 0-9/29). The same TestClient.get call returns a response whose status_code differs; the test accepts both."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "starlette.applications.Starlette",
+   "kind": "SIGNATURE",
+   "param": "on_startup",
+   "site": "app/main.py:31",
+   "breaks": "TypeError: Starlette.__init__() got an unexpected keyword argument 'on_startup'",
+   "successor": "lifespan",
+   "fixable": "manual",
+   "source": "Starlette 1.0.0 release notes (removed on_startup/on_shutdown; deprecated since 0.26)",
+   "verified": {
+    "old": "0.27.0: Starlette(..., on_startup=[f], on_shutdown=[g]) works, DeprecationWarning 'The on_startup and on_shutdown parameters are deprecated, and they will be removed on version 1.0. Use the lifespan parameter instead.' (raised in Router.__init__)",
+    "new": "1.10.0: signature (debug, routes, middleware, exception_handlers, lifespan, *, max_body_size); on_startup and on_shutdown are gone (TypeError). lifespan=asynccontextmanager runs the same hooks under TestClient's context"
+   }
+  },
+  {
+   "symbol": "starlette.applications.Starlette.middleware",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/main.py:34",
+   "breaks": "AttributeError: 'Starlette' object has no attribute 'middleware'. Did you mean: 'add_middleware'?",
+   "successor": "starlette.applications.Starlette.add_middleware",
+   "fixable": "manual",
+   "source": "Starlette 1.0.0 release notes (decorators removed; deprecated since 0.24)",
+   "verified": {
+    "old": "0.27.0: @app.middleware('http') works, DeprecationWarning 'The `middleware` decorator is deprecated, and will be removed in version 1.0.0.'",
+    "new": "1.10.0: AttributeError; app.add_middleware(BaseHTTPMiddleware, dispatch=fn) (exists on both, a different object taking the class) gives the same header"
+   }
+  },
+  {
+   "symbol": "starlette.applications.Starlette.exception_handler",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/main.py:41",
+   "breaks": "AttributeError: 'Starlette' object has no attribute 'exception_handler'. Did you mean: 'exception_handlers'?",
+   "successor": "starlette.applications.Starlette.add_exception_handler",
+   "fixable": "manual",
+   "source": "Starlette 1.0.0 release notes",
+   "verified": {
+    "old": "0.27.0: @app.exception_handler(404) works, DeprecationWarning 'The `exception_handler` decorator is deprecated, and will be removed in version 1.0.0.'",
+    "new": "1.10.0: AttributeError; add_exception_handler(404, fn) exists on both (not the same object: the decorator wrapped it)"
+   }
+  },
+  {
+   "symbol": "starlette.applications.Starlette.route",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/main.py:46",
+   "breaks": "AttributeError: 'Starlette' object has no attribute 'route'. Did you mean: 'router'?",
+   "successor": "starlette.applications.Starlette.add_route",
+   "fixable": "manual",
+   "source": "Starlette 1.0.0 release notes",
+   "verified": {
+    "old": "0.27.0: @app.route('/version', methods=['GET']) works, DeprecationWarning 'The `route` decorator is deprecated, and will be removed in version 1.0.0.'; Starlette.route is not Starlette.add_route",
+    "new": "1.10.0: AttributeError; add_route('/version', fn, methods=['GET']) serves the same response"
+   }
+  },
+  {
+   "symbol": "starlette.templating.Jinja2Templates",
+   "kind": "SIGNATURE",
+   "param": "trim_blocks",
+   "site": "app/views.py:9",
+   "breaks": "TypeError: Jinja2Templates.__init__() got an unexpected keyword argument 'trim_blocks'",
+   "successor": "env",
+   "fixable": "manual",
+   "source": "Starlette 1.0.0 release notes (**env_options removed; pass env=jinja2.Environment(...))",
+   "verified": {
+    "old": "0.27.0: Jinja2Templates(directory, context_processors=None, **env_options), no warning for trim_blocks",
+    "new": "1.10.0: Jinja2Templates(directory=None, *, context_processors=None, env=None): **env_options gone. The env must then set autoescape itself"
+   }
+  },
+  {
+   "symbol": "starlette.templating.Jinja2Templates.TemplateResponse",
+   "kind": "SIGNATURE",
+   "param": "request",
+   "site": "app/views.py:14",
+   "breaks": "TypeError: unhashable type: 'dict' (the template name binds to request, the context dict to name)",
+   "successor": "TemplateResponse(request, name, context)",
+   "fixable": "manual",
+   "source": "Starlette 0.29 (request first, old order deprecated) and 1.0.0 (old order removed)",
+   "verified": {
+    "old": "0.27.0: TemplateResponse(name, context, ...) with context['request']; TemplateResponse(request, name) raises ValueError 'context must include a \"request\" key' (no request parameter yet)",
+    "new": "1.10.0: TemplateResponse(request, name, context=None, ...): the old positional order fails inside jinja2's loader cache"
+   }
+  },
+  {
+   "symbol": "starlette.status.HTTP_422_UNPROCESSABLE_ENTITY",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/views.py:28",
+   "breaks": "no break: StarletteDeprecationWarning \"'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.\"",
+   "successor": "starlette.status.HTTP_422_UNPROCESSABLE_CONTENT",
+   "fixable": "codemod",
+   "source": "Starlette 0.48 (RFC 9110 status names)",
+   "verified": {
+    "old": "0.27.0: 422, no warning; HTTP_422_UNPROCESSABLE_CONTENT does not exist yet",
+    "new": "1.10.0: 422 through the module __getattr__ with StarletteDeprecationWarning (a UserWarning subclass, not DeprecationWarning); the new name is 422"
+   }
+  },
+  {
+   "symbol": "starlette.responses.FileResponse",
+   "kind": "BEHAVIOR",
+   "param": null,
+   "site": "app/views.py:62",
+   "scenario": "change",
+   "breaks": "Only the change scenario: with Range: bytes=0-9, 0.27.0 answers 200 with the whole file, 1.10.0 answers 206 with 10 bytes (plus accept-ranges and a quoted etag)",
+   "successor": null,
+   "fixable": "manual",
+   "source": "Starlette 0.39+/0.42 FileResponse range requests",
+   "verified": {
+    "old": "status 200, content-length 29",
+    "new": "status 206, content-range bytes 0-9/29"
+   }
+  }
+ ],
+ "expected_warnings": [
+  {
+   "symbol": "starlette.applications.Starlette",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "starlette.applications.Starlette.middleware",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "starlette.applications.Starlette.exception_handler",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "starlette.applications.Starlette.route",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  }
+ ],
+ "notes": "Starlette 0.27.0 (the version FastAPI 0.95-0.100 pinned) on 3.11 -> 1.10.0 on 3.12, with jinja2 3.1.6 and httpx 0.24.1 -> 0.28.1 for TestClient. 1.0 removed everything 0.2x deprecated: on_startup/on_shutdown, the route/middleware/exception_handler/on_event decorators, Jinja2Templates(**env_options) and the old TemplateResponse(name, context) order. Old side warns (Python-level DeprecationWarning) for on_startup (from Router.__init__, called by Starlette.__init__) and the three decorators; nothing for TemplateResponse or env_options. New side: starlette.status's old names warn with StarletteDeprecationWarning, a UserWarning subclass; importing starlette.testclient warns 'Using httpx with starlette.testclient is deprecated; install httpx2' (library internal). Equivalence: the tests avoid behaviour that changed in the library (FileResponse ranges and quoted etags, CORS adding Vary: Origin everywhere, GZip skipping text/event-stream), so the migrated app answers the same; only the change scenario touches FileResponse. S1: request.url_for returns starlette.datastructures.URL on both (private state only) and TestClient returns httpx.Response objects, so most values are objects. The migrated code does not run on 0.27 (TemplateResponse(request, ...) raises there): no runs_on_base claim."
+}

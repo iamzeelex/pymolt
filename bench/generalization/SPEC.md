@@ -79,5 +79,10 @@ Plus wall time per phase. The scorecard has one row per toy, and adds pandas (`b
 | urllib3 | HTTP (no network) | 1.26 → 2.x | 3.11 | `Retry(method_whitelist=)`, `HTTPResponse.getheaders`, objects with attributes (S1) |
 | networkx | graphs | 2.x → 3.x | 3.9 | `G.node`, `to_numpy_matrix`, `nx.info` removed |
 | stdlib | Python itself | stdlib 3.8 → 3.12 | 3.8 | asyncio `loop=` removal (stdlib SIGNATURE), `imp`, `distutils.version`, collections ABCs, `unittest` aliases; plus a **C-level** deprecation (S2) |
+| fastapi | web API | FastAPI 0.95 + pydantic 1.10 → FastAPI 0.165 + pydantic 2.14 | 3.11 | `BaseSettings` moved to pydantic-settings, `Field(regex=)`, `conlist(min_items=)`, `root_validator`, `orm_mode`/`from_orm`, `Query(regex=)`, `on_event`; OpenAPI 3.0.2 → 3.1.0 |
+| starlette | ASGI framework | 0.27 → 1.10 | 3.11 | `on_startup`, the `route`/`middleware`/`exception_handler` decorators, `Jinja2Templates(**env_options)`, `TemplateResponse(name, context)`; FileResponse ranges |
+| flask | WSGI framework | Flask 2.0 + Werkzeug 2.0 → Flask 3.1 + Werkzeug 3.1 | 3.10 | `before_first_request`, `JSONEncoder`/`json_encoder`, `_app_ctx_stack`, `Markup`/`escape`, `send_file(attachment_filename=)`, `safe_join`, `safe_str_cmp`, `url_parse`; `get_json()` 415 |
+| djangorestframework | REST on Django | DRF 3.12 + Django 3.2 → DRF 3.18 + Django 5.2 | 3.9 | `NullBooleanField`, `url()`, `ugettext_lazy`, `is_safe_url`, `timezone.utc`, pytz dropped, `USE_TZ` default (S3: DRF reads settings at import) |
+| streamlit | data apps | 1.28 → 1.67 | 3.11 | `st.cache`, `experimental_memo`/`singleton`/`rerun`/`get_query_params`/`set_query_params`; AppTest path resolution; script run by `exec` in a thread |
 
 Toy apps are small (one module, about 5–15 dependency calls, real usage patterns) with a pytest suite. Each runs in under 30 s.
