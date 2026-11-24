@@ -6,7 +6,12 @@ from pymolt.core import stdlib as stdlib_data
 from pymolt.discovery.discover import build_surface_map
 from pymolt.discovery.models import SurfaceMap
 from pymolt.inventory.edges import DependencyInventory, build_inventory
-from pymolt.verify.contact_map import ContactMap, StdlibSite, build_contact_map
+from pymolt.verify.contact_map import (
+    FALLBACK_GUARDS,
+    ContactMap,
+    StdlibSite,
+    build_contact_map,
+)
 
 
 class ScanReport(BaseModel):
@@ -24,7 +29,7 @@ class ScanReport(BaseModel):
     python_exposure: dict | None = None
 
 
-_FALLBACK_GUARDS = frozenset({"fallback", "guarded-fallback", "version"})
+_FALLBACK_GUARDS = FALLBACK_GUARDS
 
 
 def _vkey(version: str) -> tuple[int, ...]:

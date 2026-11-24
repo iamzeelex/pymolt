@@ -44,6 +44,43 @@ class TestPy2Stdlib:
         assert "flask" in cmap.by_dep                # the real one still counts
         assert any("not been ported to Python 3" in n for n in cmap.notes)
 
+    def test_a_fallback_import_is_not_evidence_of_unported_code(self, tmp_path):
+        """flasgger and pyfolio import httplib/urllib2 only in ``except ImportError``
+        fallbacks: Python-3 code, which the note called "not ported to Python 3 yet"."""
+        from pymolt.verify.contact_map import build_contact_map
+
+        (tmp_path / "compat.py").write_text(
+            "import sys\n"
+            "try:\n    from urllib.request import urlopen\n"
+            "except ImportError:\n    from urllib2 import urlopen\n"
+            "try:\n    import httplib\nexcept ImportError:\n    import http.client as httplib\n"
+            "if sys.version_info[0] == 2:\n    import cPickle as pickle\n"
+            "def get(url):\n    return urlopen(url)\n",
+            encoding="utf-8",
+        )
+
+        notes = build_contact_map(tmp_path).notes
+
+        assert not any("not been ported" in n for n in notes), notes
+        fallback = [n for n in notes if "only as a fallback (3)" in n]
+        assert len(fallback) == 1 and "not dependencies" in fallback[0]
+
+    def test_one_unguarded_import_is_enough_for_the_claim(self, tmp_path):
+        from pymolt.verify.contact_map import build_contact_map
+
+        (tmp_path / "a.py").write_text(
+            "try:\n    import urllib2\nexcept ImportError:\n    urllib2 = None\n",
+            encoding="utf-8")
+        (tmp_path / "b.py").write_text("import urllib2\nimport httplib\n", encoding="utf-8")
+        (tmp_path / "c.py").write_text(
+            "try:\n    import cPickle\nexcept ImportError:\n    import pickle as cPickle\n",
+            encoding="utf-8")
+
+        notes = build_contact_map(tmp_path).notes
+
+        assert any("imported (2)" in n and "not been ported" in n for n in notes), notes
+        assert any("only as a fallback (1)" in n for n in notes), notes
+
 
 # ── a VCS dependency has a name, and git:// no longer works ───────────────────
 
