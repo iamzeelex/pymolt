@@ -15,6 +15,7 @@ from pymolt.assess.service import (
     classify_baseline_tier,
     compatibility_verdict,
     failure_evidence,
+    unpinned_example,
 )
 from pymolt.assess.service import build_comparison_rows as _build_comparison_rows
 from pymolt.assess.service import resolve_chosen_source as _service_resolve_chosen_source
@@ -2526,7 +2527,11 @@ def assess(
         # Dynamic target Python verdict — bounded by the baseline's medallion tier
         # (Gold/Silver green, Bronze/None amber), never claiming feasibility from a
         # resolve alone.
-        verdict = compatibility_verdict(target_python_to_use, target_error, baseline_tier)
+        rows = _build_comparison_rows(
+            baseline_graph, target_graph, target_python_to_use, target_error
+        )
+        verdict = compatibility_verdict(target_python_to_use, target_error, baseline_tier,
+                                        unpinned_example(rows))
         if verdict is not None:
             title, body, style = verdict
             console.print(Panel(
@@ -2558,9 +2563,6 @@ def assess(
         console.print()
 
         # Print the side-by-side comparison table.
-        rows = _build_comparison_rows(
-            baseline_graph, target_graph, target_python_to_use, target_error
-        )
         table, all_packages = _render_comparison_table(rows, verbose)
         console.print(table)
         console.print()

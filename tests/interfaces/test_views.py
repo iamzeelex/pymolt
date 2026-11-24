@@ -397,6 +397,7 @@ def test_capture_accepted_points_at_the_other_side():
     view = views.capture_view(slot, when="baseline", state=ContractState(baseline=slot))
     assert view["data"]["filled_slots"] == ["baseline"]
     assert "post-migration" in view["hint"]
+    assert "`pymolt plan .`" in view["hint"]     # QA V2-6: the next step names plan
 
 
 # ── plan ─────────────────────────────────────────────────────────────────────

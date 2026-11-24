@@ -657,10 +657,34 @@ def baseline_tests_passed(project_dir: str | Path) -> bool:
     return isinstance(slot, dict) and slot.get("returncode") == 0
 
 
+def unpinned_example(rows: list[dict]) -> str | None:
+    """One of the project's own unpinned requirements that resolved to a newer release on the
+    target than in the base, as ``"`pandas>=0.18` → 3.1.1"``: the BRONZE verdict's example (QA
+    V2-6: it always said `tensorflow>=1.3`, whatever the project). A direct dependency and a
+    new major version first. None when no row is one."""
+    def pinned(constraint: str | None) -> bool:
+        return bool(constraint) and str(constraint).lstrip().startswith("==")
+
+    def major(version: object) -> str:
+        return str(version).split(".", 1)[0]
+
+    moved = [r for r in rows if r.get("status") == "upgrade" and r.get("target_version")
+             and not pinned(r.get("declared_constraint"))]
+    if not moved:
+        return None
+    best = min(moved, key=lambda r: (not r.get("direct"),
+                                     major(r.get("baseline_version")) == major(r["target_version"]),
+                                     r["name"]))
+    constraint = best.get("declared_constraint")
+    spelled = best["name"] + (constraint if constraint and constraint != "any" else "")
+    return f"`{spelled}` → {best['target_version']}"
+
+
 def compatibility_verdict(
     target_python: str | None,
     target_error: str | None,
     baseline_tier: BaselineTier,
+    example: str | None = None,
 ) -> tuple[str, str, str] | None:
     """The honest target-Python verdict as ``(title, body, style)`` — or None.
 
@@ -669,7 +693,8 @@ def compatibility_verdict(
     verdict can honestly say is bounded by the base's medallion tier — Gold/Silver
     earn a green verdict, Bronze/None stay amber — and it always points at
     ``pymolt capture`` + ``pymolt verify`` for behavioural proof. Bronze→Silver is an
-    explicit upgrade path (run the baseline's tests), not a dead end.
+    explicit upgrade path (run the baseline's tests), not a dead end. ``example``: one of the
+    project's unpinned requirements and where it resolved (``unpinned_example``), or None.
     """
     if not target_python:
         return None
@@ -694,9 +719,9 @@ def compatibility_verdict(
         return (
             f"⚠ BRONZE base — resolves, migration unproven (Python {tp})",
             f"The latest releases matching your UNPINNED bounds install on Python {tp} — not "
-            "evidence the code migrates, and the base is an unvalidated reconstruction "
-            "(e.g. `tensorflow>=1.3` → 2.x). Capture and verify: if the project's tests "
-            "pass it becomes SILVER; pin the manifest to reach GOLD.",
+            "evidence the code migrates, and the base is an unvalidated reconstruction"
+            + (f" (e.g. {example})" if example else "") + ". Capture and verify: if the "
+            "project's tests pass it becomes SILVER; pin the manifest to reach GOLD.",
             "yellow",
         )
     if baseline_tier == BaselineTier.SILVER:
