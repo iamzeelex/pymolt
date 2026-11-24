@@ -268,7 +268,7 @@ def status(
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(views.status_view(report)))
+        typer.echo(views.dumps(views.status_view(report, shown_dir(project_dir))))
         return
     if json_output:
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
@@ -1048,7 +1048,8 @@ def apply_plan_cmd(
                        shown=shown_dir(project_dir))
         return
     if brief:
-        _print_brief(migration_plan, step, project_path, agent=agent)
+        _print_brief(migration_plan, step, project_path, agent=agent,
+                     shown=shown_dir(project_dir))
         return
     try:
         if record:
@@ -1173,7 +1174,8 @@ def _attester(agent: bool, json_output: bool):
     return Attester(prompter=TtyPrompter(agent=agent, json_output=json_output))
 
 
-def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None:
+def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool,
+                 shown: str = ".") -> None:
     from pymolt.workorder.render import brief_data, brief_markdown
 
     target = plan.step(step_id)
@@ -1183,9 +1185,9 @@ def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(brief_data(plan, target, project_path)))
+        typer.echo(views.dumps(brief_data(plan, target, project_path, shown)))
         return
-    typer.echo(brief_markdown(plan, target, project_path), nl=False)
+    typer.echo(brief_markdown(plan, target, project_path, shown), nl=False)
 
 
 def _render_apply(result, plan, shown: str) -> None:

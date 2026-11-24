@@ -109,7 +109,7 @@ class Tools:
         # The commands name the project dir as `pymolt status DIR --agent` would here.
         return self._run("status", project_dir,
                          lambda p: views.status_view(build_status(
-                             p, check_environments=True, shown=shown_dir(p))),
+                             p, check_environments=True, shown=shown_dir(p)), shown_dir(p)),
                          "Ensure project_dir is a readable directory.")
 
     def scan(self, project_dir: str = ".") -> dict:
@@ -336,7 +336,9 @@ class Tools:
             if brief:
                 if plan.step(step) is None:
                     raise views.AgentInputError(f"unknown step {step}", "status lists the steps.")
-                return brief_data(plan, plan.step(step), p)
+                from pymolt.status import shown_dir
+
+                return brief_data(plan, plan.step(step), p, shown_dir(p))
             if record:
                 result = record_step(p, plan, step, done=done, abort=abort, agent=True)
             else:

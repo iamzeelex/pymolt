@@ -361,14 +361,31 @@ def _constraints(step: PlanStep) -> list[str]:
     return out
 
 
-def _brief_commands(step: PlanStep) -> list[str]:
+def _brief_commands(step: PlanStep, shown: str = ".") -> list[str]:
+    """What runs the step: pymolt's apply; the environment named to setup; else the record
+    around the edit (``--record`` before it, ``--record --done`` after)."""
+    from pymolt.status import command
+
     if step.executor == "pymolt":
-        return ["pymolt apply ."] if step.phase == "mechanical" else []
-    return ["pymolt capture post-migration", "pymolt verify ."]
+        return [command(shown, "apply")] if step.phase == "mechanical" else []
+    if step.type == "target-env":
+        return [command(shown, "setup", "--target-env", "PATH")]
+    return [command(shown, "apply", "--step", step.id, "--record"),
+            command(shown, "apply", "--step", step.id, "--record", "--done")]
 
 
-def brief_data(plan, step: PlanStep, root: str | Path | None = None) -> dict:
-    """The step's brief as JSON (``--agent``): untrusted text under ``data``."""
+def _expected(shown: str = ".") -> str:
+    from pymolt.status import command
+
+    return (f"Then the post-migration capture records the new code (`{command(shown, 'status')}` "
+            "prints it: the baseline's workload in the target environment) and "
+            f"`{command(shown, 'verify')}` judges it.")
+
+
+def brief_data(plan, step: PlanStep, root: str | Path | None = None,
+               shown: str = ".") -> dict:
+    """The step's brief as JSON (``--agent``): untrusted text under ``data``. ``shown``: the
+    project dir as its commands name it (``status.shown_dir``)."""
     manual = step.do.manual
     root_path = Path(root).resolve() if root is not None else None
     python = plan.target_python if plan.target_python != "unknown" else None
@@ -404,16 +421,16 @@ def brief_data(plan, step: PlanStep, root: str | Path | None = None) -> dict:
                    "sites": [s.model_dump() for s in sites[:LIST_CAP]],
                    "sites_total": len(sites), "uncovered": step.verify.uncovered,
                    "note": step.verify.note},
-        "commands": _brief_commands(step),
-        "expected": "Then `pymolt capture post-migration` records the new code and "
-                    "`pymolt verify .` judges it.",
+        "commands": _brief_commands(step, shown),
+        "expected": _expected(shown),
         "depends_on": list(step.depends_on),
     }
 
 
-def brief_markdown(plan, step: PlanStep, root: str | Path | None = None) -> str:
+def brief_markdown(plan, step: PlanStep, root: str | Path | None = None,
+                   shown: str = ".") -> str:
     """The step's brief as markdown: the same content, data in fences."""
-    data = brief_data(plan, step, root)
+    data = brief_data(plan, step, root, shown)
     lines = [f"# Step {step.id}: {data['goal']}", "",
              f"Who: {step.executor}. Claim: {claim_label(step)}."
              + (f" {_sentence(data['claim_why'])}" if data["claim_why"] else ""), "",

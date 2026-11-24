@@ -106,6 +106,59 @@ def capture_command(shown: str, when: str, *args: str) -> str:
     return " ".join(("pymolt", "capture", when, *where, *args))
 
 
+#: Stands for the target Python in a printed command when setup names no target environment.
+TARGET_PYTHON = "<target-python>"
+_MODE_FLAG = {"test_suite": "tests", "live_command": "command", "live_attach": "attach"}
+
+
+def _target_interpreter(project_path: Path, config) -> str | None:
+    """The target environment's interpreter as setup names it (capture runs commands in the
+    project dir, so a relative environment stays relative); None without one that exists."""
+    if config is None or not config.target_env_path:
+        return None
+    env = Path(config.target_env_path)
+    for rel in (Path("bin") / "python", Path("Scripts") / "python.exe"):
+        if (env if env.is_absolute() else project_path / env).joinpath(rel).is_file():
+            return str(env / rel)
+    return None
+
+
+def post_capture_command(project_path: str | Path, config, baseline_slot,
+                         shown: str = ".") -> str | None:
+    """The post-migration capture verify can compare with the baseline: the baseline's mode,
+    target, privacy and sample rate, and its workload (its command after the interpreter, the
+    part ``verify.service`` compares), run by the target environment's interpreter, or by
+    ``TARGET_PYTHON`` when setup names none. None without a baseline."""
+    if baseline_slot is None:
+        return None
+    from pymolt.verify.models import CaptureMode
+    from pymolt.verify.service import default_sample_rate
+
+    mode = CaptureMode(getattr(baseline_slot.mode, "value", baseline_slot.mode))
+    args = ["--mode", _MODE_FLAG[mode.value]]
+    if baseline_slot.target and baseline_slot.target != "all":
+        args += ["--target", shlex.quote(baseline_slot.target)]
+    if baseline_slot.privacy_profile != ("values" if mode is CaptureMode.TEST_SUITE
+                                         else "shape"):
+        args += ["--privacy", shlex.quote(baseline_slot.privacy_profile)]
+    if abs(baseline_slot.sample_rate - default_sample_rate(mode)) > 1e-9:
+        args += ["--sample-rate", f"{baseline_slot.sample_rate:g}"]
+    if mode is CaptureMode.LIVE_ATTACH:
+        return capture_command(shown, "post-migration", *args)
+    if not baseline_slot.command:
+        return None
+    head, rest = baseline_slot.command[0], list(baseline_slot.command[1:])
+    if Path(head).name.lower().startswith("python"):
+        interpreter = _target_interpreter(Path(project_path), config)
+        head = shlex.quote(interpreter) if interpreter else TARGET_PYTHON
+    else:
+        # A tool (pytest, tox): by name, which capture runs from the target environment
+        # when setup names one.
+        head = shlex.quote(Path(head).name)
+    return capture_command(shown, "post-migration", *args, "--",
+                           " ".join([head, *map(shlex.quote, rest)]))
+
+
 def detect_workload_command(project_dir: str | Path) -> list[str]:
     """Return the most likely repeatable workload, without executing anything."""
     root = Path(project_dir)
@@ -822,6 +875,7 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False,
     _decide_next(
         status, config, baseline, plan, migration, post, report,
         receipt, verification, workload, by_hand=by_hand, projection=projection, shown=shown,
+        post_capture=post_capture_command(project_path, config, baseline_slot, shown),
         has_replicate=usable_replicate(project_path, contract)[0] is not None,
         can_replicate=lambda: baseline_slot is not None and fingerprint is not None
         and fingerprint == baseline_slot.env_fingerprint
@@ -934,6 +988,7 @@ def _decide_next(
     can_replicate=lambda: False,
     projection=None,
     shown: str = ".",
+    post_capture: str | None = None,
 ) -> None:
     """The single next command. One, not a menu: the point is to remove the choice. After the
     baseline, the steps decide (design 6) while a plan of steps exists. ``shown``: the project
@@ -989,9 +1044,17 @@ def _decide_next(
         )
         return
     if post.state in {TODO, STALE}:
-        status.next_command = capture_command(
+        status.next_command = post_capture or capture_command(
             shown, "post-migration", "--mode", "tests", "--", workload_text)
         status.next_reason = "Record the same calls after the migration, in the target environment."
+        if post_capture is not None:
+            status.next_reason = (
+                "Record the same calls after the migration: the baseline's workload, in the "
+                "target environment, so verify compares like with like.")
+        if post_capture is not None and TARGET_PYTHON in post_capture:
+            status.next_reason += (
+                f" Replace {TARGET_PYTHON} with the target environment's interpreter (or name "
+                f"the environment with `{command(shown, 'setup', '--target-env', 'PATH')}`).")
         return
     if report.state != DONE:
         status.next_command = command(shown, "verify")
