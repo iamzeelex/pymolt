@@ -106,6 +106,20 @@ def capture_command(shown: str, when: str, *args: str) -> str:
     return " ".join(("pymolt", "capture", when, *where, *args))
 
 
+def plan_next(project_dir: str | Path, plan_file: str | Path | None = None,
+              shown: str = ".") -> tuple[str | None, str, str | None]:
+    """``(command, reason, step)`` after ``plan`` saved a plan: status's next (QA H4: plan,
+    PLAN.md and status name one next command). A plan saved elsewhere (``plan --output``) is
+    one status does not read: its next is ``apply --plan`` of that file."""
+    from pymolt.migration_plan import plan_path
+
+    if plan_file is not None and plan_path(project_dir, plan_file) != plan_path(project_dir):
+        return (command(shown, "apply", "--plan", shlex.quote(str(plan_file))),
+                "status follows the default plan file; `apply --plan` applies this one.", None)
+    status = build_status(project_dir, shown=shown)
+    return status.next_command, status.next_reason, status.next_step
+
+
 #: Stands for the target Python in a printed command when setup names no target environment.
 TARGET_PYTHON = "<target-python>"
 _MODE_FLAG = {"test_suite": "tests", "live_command": "command", "live_attach": "attach"}

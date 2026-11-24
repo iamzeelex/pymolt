@@ -696,7 +696,7 @@ def plan(
         saved_path = migration_plan.save_planned(project_path, output)
         from pymolt.workorder.render import write_plan_md
 
-        plan_md_path = write_plan_md(migration_plan, project_path, plan_md)
+        plan_md_path = write_plan_md(migration_plan, project_path, plan_md, plan_file=output)
     except PlanInputError as exc:
         fail(str(exc), hint=exc.hint or None, json_output=json_output)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -739,7 +739,8 @@ def plan(
 
         typer.echo(views.dumps(views.plan_view(
             migration_plan, by_pkg, source_desc, plan_path=saved_path,
-            plan_md=plan_md_path, project_dir=project_path)))
+            plan_md=plan_md_path, project_dir=project_path, plan_file=output,
+            shown=shown_dir(project_dir))))
         return
     if json_output:
         typer.echo(json.dumps(payload, indent=2))
@@ -761,14 +762,31 @@ def plan(
     from pymolt.interfaces.views import dependency_risks
 
     deps = dependency_risks(migration_plan.risks)
-    _render_risks(deps if deps is not None and (
-        migration_plan.baseline_trace_path or deps.risks or deps.deltas) else None)
+    baseline = migration_plan.baseline_trace_path is not None
+    _render_risks(deps if deps is not None and (baseline or deps.risks or deps.deltas)
+                  else None, baseline=baseline)
     _render_python(migration_plan)
     _render_or_write_patches(previews, project_path, None)
     _render_steps(migration_plan, plan_md_path)
-    console.print(
-        f"\n[bold]Next:[/bold] pymolt apply {project_path} --plan {saved_path}"
-    )
+    if not baseline:
+        from pymolt.interfaces.views import NO_BASELINE_WARNING
+
+        warn(NO_BASELINE_WARNING)
+    _render_plan_next(project_path, output, shown_dir(project_dir))
+
+
+def _render_plan_next(project_path: Path, output: str | None, shown: str) -> None:
+    """The plan's next command: status's, the one PLAN.md and `pymolt status` name."""
+    from pymolt.status import plan_next
+
+    try:
+        next_command, reason, _step = plan_next(project_path, output, shown)
+    except Exception:  # noqa: BLE001 - the plan is saved; guidance must not break it
+        return
+    if next_command:
+        console.print(f"\n[bold]Next:[/bold] {escape(next_command)}\n[dim]{escape(reason)}[/dim]")
+    elif reason:
+        console.print(f"\n[yellow]{escape(reason)}[/yellow]")
 
 
 def _step_payload(step) -> dict:
@@ -846,11 +864,15 @@ def _risks_payload(risks) -> dict | None:
 _TIER_STYLE = {"certain": "bold red", "high": "red", "medium": "yellow", "low": "dim"}
 
 
-def _render_risks(risks) -> None:
-    """Predicted risks per call site, split into what the plan fixes and what it does not."""
+_NO_BASELINE_RISKS = ("\n[dim]No predicted risks at a call site: there is no baseline capture "
+                      "to predict from.[/dim]")
+
+
+def _render_risks(risks, *, baseline: bool = True) -> None:
+    """Predicted risks per call site, split into what the plan fixes and what it does not.
+    ``baseline``: a baseline capture is bound; without one no site was exercised to rate."""
     if risks is None:
-        console.print("\n[dim]No predicted risks: there is no baseline capture to predict "
-                      "from (`pymolt capture baseline`).[/dim]")
+        console.print(_NO_BASELINE_RISKS)
         return
     for title, group, border in (
         ("Needs attention", risks.needs_attention, "yellow"),
@@ -877,6 +899,8 @@ def _render_risks(risks) -> None:
         if unknown:
             console.print(f"\n[yellow]Predicted risks: none rated[/yellow] — "
                           f"{unknown_api_phrase(unknown, total)} (inconclusive).")
+        elif not baseline:
+            console.print(_NO_BASELINE_RISKS)
         else:
             console.print("\n[green]No predicted risks[/green] at the call sites the baseline "
                           "exercised.")

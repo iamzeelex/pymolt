@@ -69,7 +69,7 @@ def test_plan_md_matches_the_golden_file(tmp_path, monkeypatch):
     _root, plan = _plan(tmp_path)
     plan = plan.model_copy(update={"created_at": "2026-11-20T06:31:09+00:00",
                                    "baseline_trace_sha256": "b3e1a2c0" + "f" * 56})
-    text = plan_markdown(plan)
+    text = plan_markdown(plan, "pymolt apply .")
     if os.environ.get("PYMOLT_REGEN_GOLDEN"):
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(text, encoding="utf-8")
@@ -221,5 +221,14 @@ def test_plan_writes_plan_md_and_lists_the_steps(tmp_path, monkeypatch):
     assert data["steps_total"] == 3 and data["steps_by_executor"] == {
         "pymolt": 2, "agent": 0, "person": 1}
     assert data["steps"][2].startswith("mech-1 codemod [pymolt, ")
-    assert data["next"] == {"command": "pymolt apply .", "step": None, "brief": None}
+    # The next command is status's, the one PLAN.md names too (QA H4).
+    from pymolt.status import shown_dir
+
+    assert data["next"]["command"] == f"pymolt apply {shown_dir(tmp_path)}"
+    assert (data["next"]["step"], data["next"]["brief"]) == (None, None)
+    assert "Next: `pymolt apply .`" in (tmp_path / ".pymolt" / "PLAN.md").read_text()
+    monkeypatch.chdir(tmp_path)
+    human = runner.invoke(app, ["plan", "."])
+    assert "Next: pymolt apply .\n" in human.stdout
+    assert "--plan" not in human.stdout.split("Next:")[1]
     assert "3 step(s): 2 by pymolt, 1 for a person" in agent["summary"]

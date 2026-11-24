@@ -850,12 +850,22 @@ def rollback_view(result) -> dict:
     return ok(summary, _Lists().finish(data, list(result.notes)))
 
 
+#: A plan made with no baseline capture bound: what apply and verify then do (plan, both views).
+NO_BASELINE_WARNING = ("No baseline capture is bound to this plan: apply refuses it without "
+                       "--allow-no-baseline and verify could only be INCONCLUSIVE. Capture "
+                       "the baseline, then plan again.")
+
+
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
-              plan_md: str | Path | None = None, project_dir: str | Path | None = None) -> dict:
+              plan_md: str | Path | None = None, project_dir: str | Path | None = None,
+              plan_file: str | Path | None = None, shown: str = ".") -> dict:
     """A saved ``MigrationPlan`` -> view. The full report is the plan file itself.
-    ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines."""
+    ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines;
+    ``plan_file``: ``plan --output`` (status then does not read the plan); ``shown``: the
+    project dir as the next command names it. ``next`` is status's (``status.plan_next``)."""
     from pymolt.codemods.models import CodemodPattern
-    from pymolt.workorder.render import brief_data, next_agent_step, next_command
+    from pymolt.status import plan_next
+    from pymolt.workorder.render import brief_data
 
     full_path = str(plan_path)
     lists = _Lists()
@@ -922,17 +932,21 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
                               for who in ("pymolt", "agent", "person")},
         "plan_md": str(plan_md) if plan_md else None,
     }
-    agent_step = next_agent_step(plan)
-    data["next"] = {
-        "command": next_command(plan),
-        "step": agent_step.id if agent_step else None,
-        "brief": brief_data(plan, agent_step, project_dir) if agent_step else None,
-    }
+    data["next"] = None
+    if project_dir is not None:
+        try:
+            command, reason, step_id = plan_next(project_dir, plan_file, shown)
+        except Exception:  # noqa: BLE001 - the view stands without the next command
+            command = None
+        if command is not None or step_id is not None:
+            step = plan.step(step_id) if step_id else None
+            data["next"] = {
+                "command": command, "step": step_id, "reason": reason,
+                "brief": brief_data(plan, step, project_dir, shown)
+                if step is not None and step.executor != "pymolt" else None}
     warnings: list[str] = []
     if plan.baseline_trace_path is None:
-        warnings.append("No baseline capture is bound to this plan: apply refuses it without "
-                        "--allow-no-baseline and verify could only be INCONCLUSIVE. Capture "
-                        "the baseline, then plan again.")
+        warnings.append(NO_BASELINE_WARNING)
     lines = [
         f"Plan {plan.plan_id[:8]} saved: {len(plan.changes)} file(s) to change, {sites} "
         f"site(s), {len(plan.dependencies)} dependency move(s), from {source_desc}.",
@@ -974,14 +988,19 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
         lines.append(f"{lists.truncated['diffs']} diff(s) omitted; the plan file has every change.")
     if plan.steps:
         lines.append(f"{steps_summary(plan)} (data.steps"
-                     + (f"; PLAN.md: {plan_md}" if plan_md else "") + ")."
-                     + (f" The first for an agent is {agent_step.id}; its brief is "
-                        "data.next.brief." if agent_step else ""))
+                     + (f"; PLAN.md: {plan_md}" if plan_md else "") + ").")
+    if data["next"] is not None and data["next"]["command"]:
+        lines.append(f"Next: {data['next']['command']}"
+                     + (" (its step's brief: data.next.brief)." if data["next"]["brief"]
+                        else "."))
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
+    hint = ("Review the diffs; a person then runs `pymolt apply` in the project (it refuses "
+            "the plan if a planned file changed since).")
+    if plan.baseline_trace_path is None and data["next"] is not None:
+        hint = data["next"]["reason"] or hint
     return ok("\n".join(lines), lists.finish(data, warnings), full_report_path=full_path,
-              hint="Review the diffs; a person then runs `pymolt apply` in the project "
-                   "(it refuses the plan if a planned file changed since).")
+              hint=hint)
 
 
 def _risk_label(risk) -> str:

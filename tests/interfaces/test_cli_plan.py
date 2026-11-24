@@ -396,3 +396,51 @@ def test_apply_lists_what_the_plan_leaves_to_a_person(tmp_path, monkeypatch):
     assert [(a["path"], a["line"], a["severity"]) for a in payload["advisories"]] == [
         ("app.py", 1, "precondition"), ("app.py", 7, "not-applied")]
     assert payload["manual"] == []
+
+
+def test_plan_without_a_baseline_points_at_the_baseline_capture(tmp_path, monkeypatch):
+    """QA H3: with no baseline, `apply` refuses the plan, so plan's next is the baseline capture
+    (human, --agent and PLAN.md alike), and the human output says why and claims no risk check."""
+    _configured_project(tmp_path)
+    (tmp_path / ".pymolt" / "contract_state.json").unlink()
+    _mock_plan_services(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    human = runner.invoke(app, ["plan", "."])
+    assert human.exit_code == 0, human.output
+    assert "Next: pymolt capture baseline --mode tests -- " in human.stdout
+    assert "pymolt apply" not in human.stdout.split("Next:")[1]
+    assert "No baseline capture is bound to this plan" in human.stderr
+    assert "the call sites the baseline exercised" not in human.stdout
+    plan_md = (tmp_path / ".pymolt" / "PLAN.md").read_text(encoding="utf-8")
+    assert "Next: `pymolt capture baseline --mode tests -- " in plan_md
+
+    agent = json.loads(runner.invoke(app, ["plan", ".", "--agent"]).stdout)
+    assert agent["data"]["next"]["command"].startswith(
+        "pymolt capture baseline --mode tests -- ")
+    assert agent["data"]["warnings"][0].startswith("No baseline capture is bound")
+    assert "Record the calls your code makes" in agent["hint"]
+
+
+def test_a_plan_saved_elsewhere_is_applied_with_its_file(tmp_path, monkeypatch):
+    _configured_project(tmp_path)
+    _mock_plan_services(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    out = runner.invoke(app, ["plan", ".", "--output", "other-plan.json"])
+    assert out.exit_code == 0, out.output
+    assert "Next: pymolt apply . --plan other-plan.json" in out.stdout
+
+
+def test_no_risks_without_a_baseline_is_not_a_clean_bill(capsys):
+    """Deltas but no baseline: no site was exercised to rate, so the plan must not say the
+    baseline's call sites carry no risk (QA H3)."""
+    from types import SimpleNamespace
+
+    from pymolt.interfaces.cli import commands
+
+    report = SimpleNamespace(risks=[], needs_attention=[], fixed=[], notes=[],
+                             deltas=[SimpleNamespace(subject="dependency", quality="complete")])
+    commands._render_risks(report, baseline=False)
+    assert "the baseline exercised" not in capsys.readouterr().out
+    commands._render_risks(report, baseline=True)
+    assert "the baseline exercised" in capsys.readouterr().out

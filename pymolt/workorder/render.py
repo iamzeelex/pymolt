@@ -138,12 +138,6 @@ def _hunk_diff(step: PlanStep) -> list[str]:
     return out
 
 
-def next_command(plan) -> str:
-    if any(s.executor == "pymolt" and s.phase == "mechanical" for s in plan.steps):
-        return "pymolt apply ."
-    return "pymolt capture post-migration"
-
-
 def _utc_minutes(value: str | None) -> str | None:
     """``2026-11-20T06:31:09+00:00`` as ``2026-11-20 06:31 UTC``; None when it does not parse."""
     if not value:
@@ -180,7 +174,7 @@ def _baseline_text(plan) -> str:
     return f"{text} ({name})" if name and plan.baseline_trace_sha256 else text
 
 
-def _header(plan) -> list[str]:
+def _header(plan, next_command: str | None = None) -> list[str]:
     moves = [f"{d.name} {d.from_version} → {d.to_version}" for d in plan.dependencies]
     if plan.python:
         moves.append(f"Python {plan.python.get('from')} → {plan.python.get('to')}")
@@ -194,18 +188,20 @@ def _header(plan) -> list[str]:
     if moves:
         lines.append(_plain(" · ".join(moves), 500))
     lines.append(f"{len(plan.steps)} steps" + (f": {parts}" if parts else "")
-                 + f". Next: `{next_command(plan)}`")
+                 + (f". Next: `{_plain(next_command, 500)}`" if next_command
+                    else ". Next: `pymolt status .` names it"))
     return lines
 
 
 # ── PLAN.md ───────────────────────────────────────────────────────────────────────────────
 
 
-def plan_markdown(plan) -> str:
-    """The plan as markdown for a person (design 1.9)."""
+def plan_markdown(plan, next_command: str | None = None) -> str:
+    """The plan as markdown for a person (design 1.9). ``next_command``: status's next command
+    when the plan was made (``status.plan_next``), for the project dir as ``.``."""
     main = [s for s in plan.steps if not collapsed(s)]
     low = [s for s in plan.steps if collapsed(s)]
-    lines = [*_header(plan), ""]
+    lines = [*_header(plan, next_command), ""]
     if not plan.steps:
         lines += ["The plan has no step: nothing to change.", ""]
         return "\n".join(lines)
@@ -301,15 +297,23 @@ def _do(s: PlanStep) -> list[str]:
     return out
 
 
-def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None) -> Path:
-    """Write PLAN.md (default ``.pymolt/PLAN.md``) and return its path."""
+def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None, *,
+                  plan_file: str | Path | None = None) -> Path:
+    """Write PLAN.md (default ``.pymolt/PLAN.md``) and return its path. Its next command is
+    status's (``status.plan_next``) once the plan is saved (at ``plan_file``, default the
+    saved plan), naming the project dir ``.``: PLAN.md is read from the project."""
     root = Path(project_dir).resolve()
     out = Path(path).expanduser() if path else DEFAULT_PLAN_MD
     if not out.is_absolute():
         out = root / out
     from pymolt.state_io import atomic_write_text
+    from pymolt.status import plan_next
 
-    atomic_write_text(out, plan_markdown(plan))
+    try:
+        command = plan_next(root, plan_file)[0]
+    except Exception:  # noqa: BLE001 - PLAN.md stands without it: it then points at status
+        command = None
+    atomic_write_text(out, plan_markdown(plan, command))
     return out
 
 
@@ -462,8 +466,3 @@ def brief_markdown(plan, step: PlanStep, root: str | Path | None = None,
                      "reaches them, or verify cannot judge them.")
     lines += ["", "## Commands", *(f"- `{c}`" for c in data["commands"]), "", data["expected"]]
     return "\n".join(lines) + "\n"
-
-
-def next_agent_step(plan) -> PlanStep | None:
-    """The first step an agent acts on, in plan order, whose dependencies are pymolt's."""
-    return next((s for s in plan.steps if s.executor == "agent"), None)

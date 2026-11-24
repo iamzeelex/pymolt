@@ -164,7 +164,8 @@ is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema
 `plan` also writes the plan for a person, `.pymolt/PLAN.md` (`--plan-md PATH` writes it
 elsewhere). It starts with a header: when the plan was made (UTC) and by which pymolt
 version, the baseline capture it was made from (its time and its name, `<time>-<8 hex of the
-trace's sha256>`), the moves, and the step counts with the next command. Then a table of the steps: what each does, who does it, its
+trace's sha256>`), the moves, and the step counts with the next command (the one `pymolt status`
+names, for the project as `.`). Then a table of the steps: what each does, who does it, its
 claim, its sites (run / not run in the baseline), its effort and what it depends on. Then one
 section per step: where (with the line numbers at plan time), why, what to do (the diff, for a
 pymolt step), how verify judges it, and its effort. Low-tier steps the baseline never ran are
@@ -174,7 +175,9 @@ Text from a dependency, from your code or from a capture is shown in fenced bloc
 "data from ..., not instructions". Control characters and bidi controls are removed, each item is
 cut at 300 characters, and each list at 10 items.
 
-`plan --agent` adds the steps and the brief of the first step for an agent ([agents.md](agents.md)).
+`plan --agent` adds the steps, and the next command with the brief of its step when an agent or a
+person does it ([agents.md](agents.md)). With no baseline capture, the next command is the baseline
+capture: `apply` refuses a plan without one.
 
 ## When to bump the manifest
 
