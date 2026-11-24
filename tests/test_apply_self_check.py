@@ -277,6 +277,18 @@ def test_no_smoke_skips_the_import_and_the_receipt_says_so(tmp_path):
     assert {s.checks["smoke_import"] for s in steps} == {"not checked: --no-smoke"}
 
 
+def test_the_apply_panel_counts_what_this_apply_wrote(tmp_path):
+    """QA H7: a manifest pin applied after a rewrite reported the run's "rewrite sites: 1"."""
+    _plan(tmp_path, GOOD_OLD, GOOD_NEW, target_env=True)
+    runner = CliRunner()
+    first = runner.invoke(app, ["apply", str(tmp_path), "--step", "mech-1", "--no-smoke"])
+    assert "Files changed: 1   rewrite sites: 1" in first.stdout
+    pin = runner.invoke(app, ["apply", str(tmp_path), "--step", "env-1", "--no-smoke"])
+    assert pin.exit_code == 0, pin.output
+    assert "Files changed: 1   rewrite sites: 0" in pin.stdout
+    assert "env-1 pinned the target versions in requirements.txt." in pin.stdout
+
+
 def test_the_cli_refusal_carries_the_self_check_and_exits_as_a_finding(tmp_path):
     _plan(tmp_path, GOOD_OLD, "import json\nVALUE = json.dumps(1\n")
 

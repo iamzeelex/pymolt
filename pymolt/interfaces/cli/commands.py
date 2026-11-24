@@ -1266,13 +1266,21 @@ def _render_apply(result, plan, shown: str) -> None:
             title="Nothing to change", border_style="yellow", expand=False,
         ))
     else:
-        files = len(receipt.files_changed) if receipt is not None else len(result.files)
-        sites = receipt.patterns_applied if receipt is not None else 0
+        # What this invocation wrote, not the run's totals (the receipt sums the run's code
+        # steps in effect): a manifest pin applied after a rewrite rewrote no call site.
+        applied = [step for sid in result.applied if (step := plan.step(sid)) is not None]
+        pins = [f"{s.id} pinned the target versions in {', '.join(s.files)}" for s in applied
+                if s.type == "manifest-pin"]
+        mine = receipt.steps_of(result.run_id) if receipt is not None and result.run_id else {}
+        sites = sum(mine[s.id].sites for s in applied
+                    if s.type != "manifest-pin" and s.id in mine)
         console.print(Panel(
             f"Applied plan {plan_label}: "
             f"[bold]{escape(', '.join(_marked(result)))}[/bold]\n"
-            f"Files changed: [bold]{files}[/bold]   rewrite sites: [bold]{sites}[/bold]\n"
-            f"Rollback: [bold]{escape(command(shown, 'rollback'))}[/bold]",
+            f"Files changed: [bold]{len(result.files)}[/bold]   "
+            f"rewrite sites: [bold]{sites}[/bold]\n"
+            + "".join(f"{escape(p)}.\n" for p in pins)
+            + f"Rollback: [bold]{escape(command(shown, 'rollback'))}[/bold]",
             title="Migration applied", border_style="green", expand=False,
         ))
         for sid in result.applied:
