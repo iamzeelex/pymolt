@@ -51,6 +51,25 @@ def test_capture_before_setup_is_refused(tmp_path):
     assert not (tmp_path / ".pymolt" / "contract_state.json").exists()
 
 
+def test_capture_hints_name_the_project_dir(tmp_path, monkeypatch):
+    """QA H1: the commands capture prints carry the dir the user gave."""
+    monkeypatch.chdir(tmp_path.parent)
+    rel = tmp_path.name
+    started = runner.invoke(cli, ["capture", "post-migration", "--mode", "attach",
+                                  "--project-dir", rel])
+    assert started.exit_code == 0, started.output
+    shown = " ".join(re.sub("[│╭╮╰╯─]", " ", started.output).split())
+    assert f"pymolt capture post-migration --project-dir {rel} --mode attach --collect" in shown
+    missing = runner.invoke(cli, ["capture", "baseline", "--mode", "attach",
+                                  "--project-dir", rel, "--collect"])
+    assert f"pymolt capture baseline --project-dir {rel} --mode attach" in " ".join(
+        missing.output.split())
+    (tmp_path / ".pymolt" / "env_config.json").unlink()
+    refused = runner.invoke(cli, ["capture", "baseline", "--mode", "tests",
+                                  "--project-dir", rel, "--", "python", "-c", "1"])
+    assert f"pymolt setup {rel}" in " ".join(refused.output.split())
+
+
 def _write_app(tmp_path, *, third_party: bool):
     p = tmp_path / "app.py"
     if third_party:

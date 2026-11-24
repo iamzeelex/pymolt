@@ -83,7 +83,7 @@ def test_a_preserve_step_whose_outcome_changed_failed(tmp_path):
     assert view["data"]["step"]["failing"]
     skip_step(tmp_path, plan, "env-1", "pinned by hand")      # else rule 6 names it first
     status = build_status(tmp_path)
-    assert (status.next_command, status.next_step) == ("pymolt apply --step beh-1 --record",
+    assert (status.next_command, status.next_step) == ("pymolt apply . --step beh-1 --record",
                                                        "beh-1")
 
 

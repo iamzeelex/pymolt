@@ -42,6 +42,7 @@ from pymolt.setup.pythons import (
     version_floor,
 )
 from pymolt.state_io import atomic_write_text
+from pymolt.status import command, shown_dir
 
 
 # Typer renders sub-app panels after command panels, so "Behavioural proof" lands at
@@ -262,7 +263,7 @@ def status(
     project_path = require_project_dir(project_dir, json_output=json_output or agent)
     if agent:
         project_path = project_path.resolve()
-    report = build_status(project_path, check_environments=True)
+    report = build_status(project_path, check_environments=True, shown=shown_dir(project_dir))
 
     if agent:
         from pymolt.interfaces import views
@@ -296,11 +297,11 @@ def status(
     console.print()
     if report.next_command:
         console.print(Panel(
-            f"[white]{report.next_command}[/white]\n[dim]{report.next_reason}[/dim]",
+            f"[white]{escape(report.next_command)}[/white]\n[dim]{escape(report.next_reason)}[/dim]",
             title="next", title_align="left", border_style="green", expand=False,
         ))
     else:
-        console.print(f"[yellow]{report.next_reason}[/yellow]")
+        console.print(f"[yellow]{escape(report.next_reason)}[/yellow]")
 
 
 @app.command("verify", rich_help_panel="Behavioural proof")
@@ -1025,7 +1026,7 @@ def apply_plan_cmd(
     if migration_plan is None:
         fail(
             f"migration plan is missing or invalid: {plan_path(project_path, plan_file)}",
-            hint="Create a fresh plan with `pymolt plan .`.",
+            hint=f"Create a fresh plan with `{command(shown_dir(project_dir), 'plan')}`.",
             json_output=json_output,
         )
     if (brief or skip or record) and not step:
@@ -1043,7 +1044,8 @@ def apply_plan_cmd(
              json_output=json_output)
     if approve_agent:
         _approve_agent(project_path, migration_plan, json_output=json_output,
-                       others=bool(step or through or dry_run or skip or record or brief))
+                       others=bool(step or through or dry_run or skip or record or brief),
+                       shown=shown_dir(project_dir))
         return
     if brief:
         _print_brief(migration_plan, step, project_path, agent=agent)
@@ -1090,7 +1092,8 @@ def apply_plan_cmd(
         fail(
             f"migration plan was not applied: {exc}",
             hint=getattr(exc, "hint", None)
-            or "Nothing was written. Run `pymolt plan .` again if files changed.",
+            or f"Nothing was written. Run `{command(shown_dir(project_dir), 'plan')}` again if "
+               "files changed.",
             code=EXIT_ENVIRONMENT,
             json_output=json_output,
         )
@@ -1102,7 +1105,8 @@ def apply_plan_cmd(
     if agent:
         from pymolt.interfaces import views
 
-        typer.echo(views.dumps(views.apply_view(result, migration_plan, project_path)))
+        typer.echo(views.dumps(views.apply_view(result, migration_plan, project_path,
+                                                shown=shown_dir(project_dir))))
         raise typer.Exit(code=code)
     if json_output:
         payload = {**(receipt.model_dump(mode="json") if receipt is not None else {}),
@@ -1111,21 +1115,23 @@ def apply_plan_cmd(
                    "advisories": advisories, "manual": manual}
         typer.echo(json.dumps(payload, indent=2))
         raise typer.Exit(code=code)
-    _render_apply(result, migration_plan, project_path)
+    _render_apply(result, migration_plan, shown_dir(project_dir))
     if not record:
         _render_left_to_you(migration_plan)
     next_step(project_path)
     raise typer.Exit(code=code)
 
 
-def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool) -> None:
+def _approve_agent(project_path: Path, plan, *, json_output: bool, others: bool,
+                   shown: str = ".") -> None:
     """``apply --approve-agent``: a person approves the plan for agents (design 3.6)."""
     from pymolt.migration_plan import MigrationConflictError
     from pymolt.workorder.approval import approve
 
     if json_output:
         fail("--approve-agent is a person's attested act: it is refused under --agent and "
-             "--json", hint="A person runs `pymolt apply . --approve-agent` on a terminal.",
+             "--json",
+             hint=f"A person runs `{command(shown, 'apply', '--approve-agent')}` on a terminal.",
              json_output=json_output)
     if others:
         fail("--approve-agent goes alone: it approves the whole plan and applies nothing")
@@ -1182,9 +1188,9 @@ def _print_brief(plan, step_id: str, project_path: Path, *, agent: bool) -> None
     typer.echo(brief_markdown(plan, target, project_path), nl=False)
 
 
-def _render_apply(result, plan, project_path: Path) -> None:
+def _render_apply(result, plan, shown: str) -> None:
     """The apply summary: what was applied (re-based steps marked), each step's checks, and
-    the steps that remain, by status."""
+    the steps that remain, by status. ``shown``: the project dir as its commands name it."""
     receipt = result.receipt
     plan_label = f"[bold cyan]{plan.plan_id[:8]}[/bold cyan]"
     if result.run_id and result.run_id != plan.plan_id:
@@ -1204,7 +1210,8 @@ def _render_apply(result, plan, project_path: Path) -> None:
         console.print(Panel(
             f"Recording step [bold]{escape(sid)}[/bold] of plan {plan_label}: the files are "
             "snapshotted. Make the change, then "
-            f"[bold]pymolt apply --step {escape(sid)} --record --done[/bold] "
+            f"[bold]{escape(command(shown, 'apply', '--step', sid, '--record', '--done'))}"
+            "[/bold] "
             f"(or [bold]--record --abort[/bold]). [bold]Nothing was written.[/bold]",
             title="Record open", border_style="cyan", expand=False))
     elif result.outcome == "recorded":
@@ -1267,7 +1274,7 @@ def _render_apply(result, plan, project_path: Path) -> None:
             f"Applied plan {plan_label}: "
             f"[bold]{escape(', '.join(_marked(result)))}[/bold]\n"
             f"Files changed: [bold]{files}[/bold]   rewrite sites: [bold]{sites}[/bold]\n"
-            f"Rollback: [bold]pymolt rollback {project_path}[/bold]",
+            f"Rollback: [bold]{escape(command(shown, 'rollback'))}[/bold]",
             title="Migration applied", border_style="green", expand=False,
         ))
         for sid in result.applied:
@@ -2567,7 +2574,7 @@ def assess(
         target_graph is not None and not target_error, target_manifest,
     )
     if target_hint is not None:
-        _render_target_hint(target_hint)
+        _render_target_hint(target_hint, shown_dir(project_dir))
 
     if target_error is not None:
         # `status` would send the reader back to the same assess unchanged; the way
@@ -2589,7 +2596,7 @@ def _target_hint(project_path: Path, target_python, resolved: bool, manifest):
     return build_target_hint(project_path, target_python, manifest=manifest)
 
 
-def _render_target_hint(hint) -> None:
+def _render_target_hint(hint, shown: str = ".") -> None:
     """The target environment the post-migration capture runs in. pymolt does not build it."""
     console.print(
         f"\n[bold]Target environment[/bold] (Python {hint.target_python}; "
@@ -2603,7 +2610,7 @@ def _render_target_hint(hint) -> None:
     for note in hint.notes:
         console.print(f"  [dim]note: {note}[/dim]")
     console.print(
-        "  [dim]Once it exists: pymolt setup . --target-env PATH "
+        f"  [dim]Once it exists: {escape(command(shown, 'setup', '--target-env', 'PATH'))} "
         "(or --container on the post-migration capture).[/dim]"
     )
 

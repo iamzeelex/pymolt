@@ -175,7 +175,11 @@ def test_the_apply_view_names_the_next_command_and_brief(tmp_path):
     assert [a["step"] for a in data["applied"]] == ["mech-1", "mech-2", "mech-3"]
     assert data["refused"] == {}
     nxt = data["next"]
-    assert nxt["command"] == "pymolt apply --step env-1 --record" and nxt["step"] == "env-1"
+    # The project dir as given: outside the current directory, so as an absolute path.
+    from pymolt.status import shown_dir
+
+    assert nxt["command"] == f"pymolt apply {shown_dir(tmp_path)} --step env-1 --record"
+    assert nxt["step"] == "env-1"
     assert nxt["brief"]["step"] == "env-1"
     # The smoke import is on by default; this project names no target environment.
     assert data["checks"]["mech-1"]["smoke_import"].startswith(

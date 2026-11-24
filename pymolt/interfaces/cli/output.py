@@ -22,6 +22,7 @@ from typing import NoReturn
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 #: The answer channel. Only a report or a JSON payload is ever written here.
 console = Console()
@@ -127,18 +128,19 @@ def next_step(project_dir: str | Path, *, json_output: bool = False) -> None:
     to the reader. The answer is computed in one place (``pymolt.status``) rather
     than hardcoded per command, so the CLI cannot drift from what ``pymolt
     status`` says. Goes to stderr: it is guidance, not part of the answer, and
-    must never land in a piped report.
+    must never land in a piped report. The command names the project dir as the user gave
+    it (``status.shown_dir``), so it runs as printed from where they are.
     """
     if json_output:
         return
     try:
-        from pymolt.status import build_status
+        from pymolt.status import build_status, shown_dir
 
-        status = build_status(project_dir)
+        status = build_status(project_dir, shown=shown_dir(project_dir))
     except Exception:  # guidance must never break the command that produced a result
         return
     if status.next_command:
-        err.print(f"\n[dim]next →[/dim] [white]{status.next_command}[/white]")
+        err.print(f"\n[dim]next →[/dim] [white]{escape(status.next_command)}[/white]")
 
 
 def require_file(path: str | Path, *, what: str = "file", json_output: bool = False) -> Path:

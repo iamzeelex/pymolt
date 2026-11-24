@@ -524,11 +524,25 @@ class TestStatusCommand:
         ]
         assert payload["next_command"].startswith("pymolt assess")
 
-    def test_human_render_shows_the_next_command(self, tmp_path):
+    def test_human_render_shows_the_next_command(self, tmp_path, monkeypatch):
         _manifest(tmp_path)
-        result = runner.invoke(app, ["status", str(tmp_path)])
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["status", "."])
         assert result.exit_code == 0
         assert "pymolt setup ." in result.stdout
+
+    def test_the_next_command_names_the_dir_the_user_gave(self, tmp_path, monkeypatch):
+        """Run from another directory, `.` would point at the wrong project (QA H1)."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        _manifest(project)
+        monkeypatch.chdir(tmp_path)
+        human = runner.invoke(app, ["status", "proj"])
+        assert "pymolt setup proj" in human.stdout
+        for flag in ("--json", "--agent"):
+            payload = json.loads(runner.invoke(app, ["status", "proj", flag]).stdout)
+            data = payload.get("data", payload)
+            assert data["next_command"] == "pymolt setup proj", flag
 
     def test_writes_nothing(self, tmp_path):
         """status is a projection: it must never create the state it reports on."""
@@ -604,3 +618,50 @@ def test_the_report_phase_labels_coverage_and_recall_as_bounds(tmp_path):
     ).save(tmp_path)
     detail = build_status(tmp_path).phase("report").detail
     assert "coverage at most 66%, recall at least 77% (granularity function)" in detail
+
+
+class TestShownDir:
+    """Every printed command names the project dir the way the user can run it (QA H1)."""
+
+    def test_as_given_or_relative_to_the_current_dir(self, tmp_path):
+        from pymolt.status import shown_dir
+
+        inside = tmp_path / "a" / "b"
+        assert shown_dir("tests/artifacts/flasgger/", cwd=tmp_path) == "tests/artifacts/flasgger"
+        assert shown_dir("../other", cwd=tmp_path) == "../other"
+        assert shown_dir(".", cwd=tmp_path) == "."
+        assert shown_dir(tmp_path, cwd=tmp_path) == "."
+        assert shown_dir(inside, cwd=tmp_path) == "a/b"
+        assert shown_dir("/home/user/proj", cwd=tmp_path) == "/home/user/proj"
+        assert shown_dir("/home/user/my proj", cwd=tmp_path) == "'/home/user/my proj'"
+
+    def test_every_command_names_it(self, tmp_path):
+        from pymolt.status import capture_command, command
+
+        assert command("proj", "apply", "--step", "env-1") == "pymolt apply proj --step env-1"
+        assert capture_command("proj", "baseline", "--replicate") == \
+            "pymolt capture baseline --project-dir proj --replicate"
+        assert capture_command(".", "baseline", "--replicate") == \
+            "pymolt capture baseline --replicate"
+
+    def test_status_renders_its_commands_for_the_shown_dir(self, tmp_path):
+        _manifest(tmp_path)
+        assert build_status(tmp_path, shown="proj").next_command == "pymolt setup proj"
+        _configure(tmp_path)
+        assert build_status(tmp_path, shown="proj").next_command == \
+            "pymolt assess proj --target-python 3.12"
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        status = build_status(tmp_path, shown="proj")
+        assert status.next_command.startswith(
+            "pymolt capture baseline --project-dir proj --mode tests -- ")
+        assert build_status(tmp_path).next_command.startswith(
+            "pymolt capture baseline --mode tests -- ")
+
+    def test_a_command_hint_after_a_phase_names_the_dir(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        project.mkdir()
+        _manifest(project)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["scan", "proj"])
+        assert result.exit_code == 0
+        assert "pymolt setup proj" in result.stderr

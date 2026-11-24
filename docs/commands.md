@@ -10,7 +10,9 @@ authoritative list of options.
 
 ### `pymolt status [dir]`
 Shows where the project stands, whether its environments exist, and the single next command. Run it
-at any time. Options: `--json`, `--agent`. With no apply run in effect, a migration made by hand is
+at any time. Options: `--json`, `--agent`. The next command, here and on the `next →` line other
+commands print, names the project directory as you gave it (relative to the current directory when
+it lies inside it), so it runs as printed. With no apply run in effect, a migration made by hand is
 recognised by a post-migration capture taken since the baseline, or, unless a valid plan waits for
 `apply`, by files or pins changed since the baseline. Its verdict completes it; a FAIL then has no
 rollback to point at. After any FAIL that no single pymolt step in effect explains, `status` gives
@@ -22,8 +24,8 @@ dependency not in effect), `stale` (a statement it rewrites is gone, or the plan
 `present` (its change is already there, made by hand), `applied`, `rolled_back`, `skipped`, and
 `not_in_capture` (applied or recorded again after the post-migration capture, which holds the code from before it or an earlier version of the step). `--json` and `--agent` list them
 under `steps`; `--agent` adds the brief of the step the next command is about. The next command
-follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply --step ID --dry-run`
-for a stale one, then `pymolt apply --step ID --record` for each agent or person step in plan
+follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply . --step ID --dry-run`
+for a stale one, then `pymolt apply . --step ID --record` for each agent or person step in plan
 order (or `--skip` it), then the post-migration capture. A rolled-back step is not applied again by
 itself: after `rollback --step`, the next command is the post-migration capture (re-apply the step
 with `pymolt apply --step ID` if you want it back). The post-migration capture is stale when a

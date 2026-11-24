@@ -104,10 +104,12 @@ class Tools:
         """Where the project stands in the migration, whether the configured environments
         exist, and the one command to run next. Call it anytime to orient.
         """
-        from pymolt.status import build_status
+        from pymolt.status import build_status, shown_dir
 
+        # The commands name the project dir as `pymolt status DIR --agent` would here.
         return self._run("status", project_dir,
-                         lambda p: views.status_view(build_status(p, check_environments=True)),
+                         lambda p: views.status_view(build_status(
+                             p, check_environments=True, shown=shown_dir(p))),
                          "Ensure project_dir is a readable directory.")
 
     def scan(self, project_dir: str = ".") -> dict:
@@ -341,7 +343,9 @@ class Tools:
                 result = apply_steps(p, plan, step=step, through=through, dry_run=dry_run,
                                      agent=True, smoke=allow_run,
                                      smoke_reason=None if allow_run else NO_RUN_SMOKE)
-            return views.apply_view(result, plan, p)
+            from pymolt.status import shown_dir
+
+            return views.apply_view(result, plan, p, shown_dir(p))
 
         return self._run("apply", project_dir, build, "status names the next step and command.")
 
