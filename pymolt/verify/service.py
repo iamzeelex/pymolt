@@ -93,6 +93,7 @@ from pymolt.verify.inconclusive import (
     SETTLE_ENVIRONMENT,
     SETTLE_NO_EQUAL,
     SETTLE_NOISE,
+    SETTLE_NOISE_RECORDING,
     SETTLE_NOT_EXERCISED,
     SETTLE_REVIEW,
     SETTLE_UNCOMPARABLE,
@@ -2773,6 +2774,11 @@ def build_contract_report_from_state(
         used_slots.append(("baseline", state.baseline))
 
     noise_profile, replicate_note = None, None
+    # A replicate repeats the baseline capture: it can measure the noise of a diff whose "before"
+    # side is that capture's recording, and no other (QA V2-3: verify suggested one against a
+    # recording named with --baseline, where it cannot apply, or with no baseline captured).
+    replicate_applies = bool(against and state.baseline is not None and same_slot_path(
+        project_dir, against, state.baseline.trace_path))
     # The replicate measures the BASELINE's noise: it applies whenever the "before" side is the
     # baseline slot's recording, whether verify took it from the slot or was handed its path
     # (``--post-migration PATH`` alone fills ``--baseline`` from the slot), whatever the
@@ -2813,6 +2819,7 @@ def build_contract_report_from_state(
         predictions=predictions,
         diff_context=diff_context,
         noise_profile=noise_profile,
+        replicate_applies=replicate_applies,
     )
     if replicate_note:
         report.notes.append(replicate_note)
@@ -3467,6 +3474,7 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
     entries = all_entries = fact_diff.get("entries") or []
     counts = fact_diff.get("counts") or {}
     measured = bool(fact_diff.get("noise_measured"))
+    replicable = fact_diff.get("replicate_applies") is not False
     causes: list[InconclusiveCause] = []
     for side, label in (("old", "baseline"), ("new", "post-migration")):
         summary = fact_diff.get(side) or {}
@@ -3504,17 +3512,23 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
     )
     settle = ("the baseline replicate did not settle them (they vary there in another way, or "
               "it did not reach them)" if fact_diff.get("noise_measured")
-              else "a baseline replicate would tell run noise from a real change")
+              else "a baseline replicate would tell run noise from a real change" if replicable
+              else "a second run of the before side would tell run noise from a real change")
     order_settle = ("the baseline replicate could not tell (too few keys compared, or a pinned "
                     "hash seed)" if fact_diff.get("noise_measured")
                     else "a baseline replicate with random hash seeds would tell a hash-seeded "
-                         "order from a deterministic one")
+                         "order from a deterministic one" if replicable
+                    else "a second run of the before side with random hash seeds would tell a "
+                         "hash-seeded order from a deterministic one")
+    # What settles them: a replicate of the baseline capture, or, when the before side is
+    # another recording, a second run of that side compared with the first.
+    noise_settle = SETTLE_NOISE if replicable else SETTLE_NOISE_RECORDING
     for prefix, text in classes:
         hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
         reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
         if hit:
             names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
-            causes.append(review_cause(f"{len(hit)} {text} ({names}); {settle}", SETTLE_NOISE))
+            causes.append(review_cause(f"{len(hit)} {text} ({names}); {settle}", noise_settle))
     for prefix, text in (
             (ORDER_CHANGED, "returned dict(s) whose key order changed (same keys and values)"),
             (INPUT_ORDER_CHANGED, "call(s) whose output changed as the dict key order of "
@@ -3526,7 +3540,8 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
             causes.append(review_cause(
                 f"{len(hit)} {text} ({names}); {order_settle}",
                 "capture a baseline replicate with random hash seeds (`pymolt capture "
-                "baseline --replicate`), then verify again"))
+                "baseline --replicate`), then verify again" if replicable
+                else noise_settle))
     hit = [e for e in reviews if str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     reviews = [e for e in reviews if not str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     if hit:
