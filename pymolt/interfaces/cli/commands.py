@@ -380,6 +380,7 @@ def verify_migration(
 
     from pymolt.interfaces.cli.output import require_file
     from pymolt.interfaces.cli.verify_cmd import (
+        _fail_note,
         _inconclusive_note,
         _render_contract_report,
         _step_lines,
@@ -602,6 +603,7 @@ def verify_migration(
     console.print(Panel(
         f"[bold {border}]{unified.verdict.value.upper()}[/bold {border}]"
         f"{_inconclusive_note(unified)}"
+        f"{_fail_note(unified, project_dir)}"
         f"{rollback_note}\n[dim]{escape(chr(10).join(saved_lines))}[/dim]",
         title="Verdict", border_style=border, expand=False,
     ))

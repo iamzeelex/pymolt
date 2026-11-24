@@ -183,4 +183,46 @@ def judge_steps(project_dir: str | Path, report, calibration=None
     return projection.run_id, out
 
 
-__all__ = ["EXIT", "judge_steps"]
+def failing_steps(project_dir: str | Path, report) -> list[dict]:
+    """The saved plan's steps whose sites failed in this comparison, whatever their status: a
+    step rolled back, planned or skipped is still about its ``where`` sites, so a FAIL there
+    names it (QA V8: after ``rollback --step beh-1`` the FAIL at beh-1's site named no step).
+    Each is ``{"id", "executor", "status", "findings"}``, in plan order; ``status`` is the
+    step's projected status. A failing entry is a step's when the ledger assigns its line to the
+    step, or it lies on a ``where`` anchor of it (resolved on the baseline's source). ``[]``
+    without a compared pair, a plan of steps or a failing entry."""
+    from pymolt.migration_plan import MigrationPlan, _pythons
+    from pymolt.workorder.state import project_steps
+
+    compared = getattr(report, "compared", None)
+    fdiff = getattr(report, "_fact_diff", None)
+    if (compared is None or compared.after_capture != "post-migration"
+            or compared.before_capture != "baseline" or fdiff is None):
+        return []
+    failing = [e for e in fdiff.entries if e.fails]
+    if not failing:
+        return []
+    root = Path(project_dir).resolve()
+    plan = MigrationPlan.load(root)
+    if plan is None or not plan.steps:
+        return []
+    status_of = {s.id: s.status for s in project_steps(root, plan).steps}
+    ctx = getattr(report, "_accepts", None)
+    old_sources = getattr(ctx, "old_sources", None)
+    base, _target = _pythons(root, plan)
+    out = []
+    for step in plan.steps:
+        if step.phase == "env":
+            continue
+        mine = [e for e in failing if e.step_id == step.id]
+        at_where, _missing = _where_entries(root, step, failing, old_sources, base)
+        seen = {id(e) for e in mine}
+        mine += [e for e in at_where if id(e) not in seen]
+        if mine:
+            out.append({"id": step.id, "executor": step.executor,
+                        "status": status_of.get(step.id, "planned"),
+                        "findings": sorted({e.finding for e in mine if e.finding})})
+    return out
+
+
+__all__ = ["EXIT", "failing_steps", "judge_steps"]

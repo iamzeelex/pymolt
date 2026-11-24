@@ -449,7 +449,7 @@ _VERIFY_KEYS = {
     "static_targets", "confirmed",
     "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "blind_split",
     "unobservable_contacts", "compared", "changes", "change_counts", "calibration",
-    "impact_focus",
+    "impact_focus", "failing_steps",
 }
 
 
