@@ -627,6 +627,36 @@ def test_a_receipt_written_in_another_checkout_still_binds_its_baseline(tmp_path
     assert "replaced" not in migration.detail, migration.detail
 
 
+@pytest.mark.parametrize("stored", ["relative", "absolute"])
+def test_the_runs_in_effect_read_their_frozen_plans_in_this_checkout(tmp_path, stored):
+    """The receipt names each run's frozen plan; pymolt 0.2 stored that path absolute. After a
+    move the plans in effect (verify's successors and predictions, the starting fingerprint)
+    are this checkout's, not the old checkout's, nor missing."""
+    from pymolt.migration_state import plans_in_effect
+
+    a = tmp_path / "a" / "proj"
+    a.mkdir(parents=True)
+    plan = _plan(a)
+    plan.save(a)
+    receipt = apply_migration_plan(a, plan)
+    assert receipt.plan_path == f".pymolt/migrations/{receipt.run_id}/plan.json"
+    if stored == "absolute":
+        receipt.plan_path = str(a.resolve() / receipt.plan_path)
+        for run in receipt.runs:
+            run.plan_path = str(a.resolve() / run.plan_path)
+        receipt.environment_fingerprint = None
+        for run in receipt.runs:
+            run.starting_fingerprint = None
+        receipt.save(a)
+    b = tmp_path / "b" / "proj"
+    b.parent.mkdir()
+    shutil.move(str(a), str(b))
+    receipt = MigrationReceipt.load(b)
+
+    assert [p.plan_id for p in plans_in_effect(b, receipt)] == [plan.plan_id]
+    assert receipt.starting_fingerprint(b) == plan.environment_fingerprint
+
+
 def test_another_checkouts_baseline_does_not_bind_a_replaced_one(tmp_path):
     """Read in this checkout, the 0.2 form still binds only the capture it names."""
     b, plan = _moved(tmp_path, stored="absolute")

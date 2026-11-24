@@ -637,7 +637,7 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
         new_receipt = receipt_after_apply(
             root, receipt, plan, run_id, appended, check, now=now, start_fp=start_fp,
             start_setup=start_setup, baseline=baseline, allow_no_baseline=allow_no_baseline,
-            frozen=str(frozen), invocation=invocation.id,
+            frozen=_project_relative(root, str(frozen)), invocation=invocation.id,
             files={s.id: [d.file for d in ds] for s, ds in decided})
         new_receipt.save(root)
         steps_state = {**(base_state.steps or {}), **{s.id: "applied" for s, _e in appended}}
@@ -834,7 +834,7 @@ def _receipt_for_noop(root: Path, plan: MigrationPlan, run_id: str, state, recei
         files_changed=[str(_project_file(root, c.path)) for c in plan.changes],
         patterns_applied=sum(c.sites for c in plan.changes),
         no_codemods_required=not plan.changes,
-        plan_path=str(_run_dir(root, run_id) / "plan.json"))
+        plan_path=_project_relative(root, str(_run_dir(root, run_id) / "plan.json")))
     out.mark_outcome("already_applied")
     return out
 
@@ -980,14 +980,15 @@ def _receipt_with_run(root: Path, receipt, plan: MigrationPlan, run_id: str, now
             baseline_trace_path=plan.baseline_trace_path,
             baseline_captured_at=plan.baseline_captured_at,
             no_codemods_required=not plan.changes,
-            plan_path=str(_run_dir(root, run_id) / "plan.json"))
+            plan_path=_project_relative(root, str(_run_dir(root, run_id) / "plan.json")))
     if receipt.run(run_id) is None:
         for run in receipt.runs:
             if not run.closed:
                 run.closed, run.closed_at = True, now
         receipt.runs.append(ReceiptRun(
             run_id=run_id, plan_id=plan.plan_id,
-            plan_path=str(_run_dir(root, run_id) / "plan.json"), opened_at=now,
+            plan_path=_project_relative(root, str(_run_dir(root, run_id) / "plan.json")),
+            opened_at=now,
             starting_fingerprint=environment_fingerprint(root),
             setup_fingerprint=environment_setup_fingerprint(root),
             target_manifest_sha256=plan.target_manifest_sha256))
