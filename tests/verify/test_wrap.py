@@ -1,5 +1,6 @@
 """WrapBackend: targeted-wrap observation of named dependency symbols."""
 import importlib
+import inspect
 import sys
 import types
 
@@ -281,18 +282,21 @@ def test_wrap_reports_dur_tid_and_the_typed_raise(p2dep):
     import threading
 
     sink = _P2Sink()
+    seen = []
 
     def body():
         p2dep.ok(1)
         with pytest.raises(p2dep.DepError):
             p2dep.fail()
+        seen.append(inspect.isgeneratorfunction(p2dep.gen))
         list(p2dep.gen(2))
 
-    _p2(["wdep2.ok", "wdep2.fail", "wdep2.gen"], body, sink)
-    (ok, fail, gen) = sink.events
+    be = _p2(["wdep2.ok", "wdep2.fail", "wdep2.gen"], body, sink)
+    (ok, fail) = sink.events
     assert ok[0] == "return" and isinstance(ok[2], float) and ok[3] == threading.get_ident()
     assert fail[:2] == ("raise", "wdep2.DepError")     # module.Qualname, as monitoring labels it
-    assert gen[1] == "wdep2.gen" and gen[2] is None    # a generator's creation is not its work
+    # A wrapper is no generator function: the generator function is left as it is.
+    assert seen == [True] and ("wdep2.gen", "generator") in be.skipped
 
 
 def test_wrap_tallies_unsampled_calls(p2dep):
