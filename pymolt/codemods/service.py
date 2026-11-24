@@ -47,7 +47,7 @@ from pymolt.codemods.models import (
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory
 from pymolt.core.graph import DependencyGraph
 from pymolt.ingestion.config import EnvConfig
-from pymolt.ingestion.detect import DiscoveredSource, detect_sources
+from pymolt.ingestion.detect import DiscoveredSource, detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 
 log = logging.getLogger(__name__)
@@ -119,21 +119,35 @@ def _config_value(config: dict | EnvConfig | None, key: str, default=None):
     return getattr(config, key, default)
 
 
-def _match_source(
-    sources: list[DiscoveredSource], source_ref: str | Path
-) -> DiscoveredSource | None:
+def _locate_source(
+    project_dir: str | Path, source_ref: str | Path
+) -> tuple[Path, DiscoveredSource] | None:
+    """The ingestion root and the manifest ``source_ref`` names, or None.
+
+    A relative ``source_ref`` is relative to the project, the way setup records it
+    (``etc/requirements.txt``), never to the process's working directory: resolved
+    against the cwd it named another project's file, or none, and a match on the bare
+    file name then picked a different manifest that happened to share it. The lookup is
+    assess's (:func:`find_source`), so plan and assess read the same file. When
+    ``project_dir`` is not a directory it names the manifest itself (the target
+    manifest), and its folder is the root.
+    """
+    project_path = Path(project_dir).expanduser()
     ref = Path(source_ref).expanduser()
-    ref_name = ref.name
-    for src in sources:
-        try:
-            if src.path.resolve() == ref.resolve():
-                return src
-        except OSError:
-            pass
-    for src in sources:
-        if src.path.name == ref_name:
-            return src
-    return None
+    if not project_path.is_dir():
+        project_path, ref = project_path.parent, Path(project_path.name)
+    candidate = ref if ref.is_absolute() else project_path / ref
+    if candidate.is_dir():
+        # No manifest named: the project's default one.
+        if candidate.resolve() != project_path.resolve():
+            return None
+        sources = detect_sources(project_path)
+        return (project_path, resolve_chosen_source(sources, None)) if sources else None
+    # Pymolt's own generated target manifest is found only when it is the one named.
+    include_gen = ref.name.endswith(("-target.txt", "-target.yml"))
+    sources = detect_sources(project_path, include_generated=include_gen)
+    chosen = find_source(sources, ref.as_posix(), project_path)
+    return (project_path, chosen) if chosen is not None else None
 
 
 def _resolve_graph_for_source(
@@ -152,31 +166,9 @@ def _resolve_graph_for_source(
     ``assess.service._resolve_baseline_graph``) instead of raising, and returns a
     warning as the third tuple element (``None`` when no degrade happened).
     """
-    source_path = Path(source_ref).expanduser()
-    candidate_roots = []
-    if source_path.exists():
-        candidate_roots.append(source_path.parent)
-    candidate_roots.append(Path(project_dir))
-
-    tried: list[Path] = []
-    for root in candidate_roots:
-        root = Path(root)
-        if root in tried:
-            continue
-        tried.append(root)
-        # If source_path is specifically a generated target manifest (e.g. requirements-target.txt),
-        # include generated files; otherwise only scan real project source manifests.
-        include_gen = source_path.is_file() and (
-            source_path.name.endswith("-target.txt") or source_path.name.endswith("-target.yml")
-        )
-        sources = detect_sources(root, include_generated=include_gen)
-        chosen = _match_source(sources, source_path)
-        if chosen is None and source_path.is_dir() and root.resolve() == source_path.resolve():
-            # For project root, pick genuine non-generated project source
-            non_gen_sources = detect_sources(root, include_generated=False)
-            chosen = resolve_chosen_source(non_gen_sources, None) if non_gen_sources else None
-        if chosen is None:
-            continue
+    located = _locate_source(project_dir, source_ref)
+    if located is not None:
+        root, chosen = located
         try:
             graph, _report = orchestrate_ingestion(
                 str(root),
@@ -217,7 +209,7 @@ def _resolve_graph_for_source(
             log.warning(warning)
             return graph, root, warning
 
-    raise ValueError(f"Could not resolve dependency source {source_path} in {project_dir}")
+    raise ValueError(f"Could not resolve dependency source {source_ref} in {project_dir}")
 
 
 def _resolver_failure(side: str, manifest: str | Path, exc: subprocess.CalledProcessError):
