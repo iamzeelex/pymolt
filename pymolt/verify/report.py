@@ -1242,10 +1242,13 @@ def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
     if not traced:
         return
     if executed is None:
-        report.notes.append(
-            "the capture has no executed-code record (an older runtime, a watch-mode capture, "
-            "or PYMOLT_TRACE_EXECUTED=0): a contact counts as run when the trace recorded a "
-            "call site in its file (granularity file)")
+        # A trace without call sites is judged by symbol, and its own note says so: the file
+        # rule cannot apply where no file was recorded (QA V3: both notes, two granularities).
+        if sited or not events:
+            report.notes.append(
+                "the capture has no executed-code record (an older runtime, a watch-mode "
+                "capture, or PYMOLT_TRACE_EXECUTED=0): a contact counts as run when the trace "
+                "recorded a call site in its file (granularity file)")
     else:
         note = (f"executed-code record: granularity {executed.granularity}, from "
                 f"{executed.processes} process(es)")

@@ -201,6 +201,9 @@ def test_symbol_granularity_when_the_trace_has_no_call_sites(project, tmp_path):
     assert (by[_core("load")].status, by[_core("load")].matched_by) == ("recorded", "symbol")
     assert (by[_core("dump")].status, by[_core("dump")].granularity) == ("not-run", "symbol")
     assert rep.coverage_granularity == "symbol" and rep.recall == 1.0
+    # one granularity in the notes too: no file rule where no file was recorded (QA V3)
+    said = [n for n in rep.notes if "(granularity " in n]
+    assert len(said) == 1 and said[0].endswith("(granularity symbol)")
 
 
 def test_a_process_without_a_record_falls_back_to_the_file_rule(project, tmp_path):
