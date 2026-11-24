@@ -544,6 +544,16 @@ def _inconclusive_note(unified) -> str:
     return f"\n{escape(line)}" if line else ""
 
 
+def _fail_note(unified, project_dir: str = ".") -> str:
+    """The Verdict panel's lines for a FAIL: the plan steps whose sites failed, when known, and
+    a person's two options (empty for PASS and INCONCLUSIVE)."""
+    from pymolt.interfaces.views import fail_lines
+
+    if unified.verdict is not VerificationVerdict.FAIL:
+        return ""
+    return "".join(f"\n{escape(line)}" for line in fail_lines(unified, project_dir))
+
+
 def _step_lines(judged: dict) -> list[str]:
     """``verify --step``'s panel: the judgement, its entries by why, and what settles its
     evidence."""

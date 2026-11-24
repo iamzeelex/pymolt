@@ -13,7 +13,9 @@ Shows where the project stands, whether its environments exist, and the single n
 at any time. Options: `--json`, `--agent`. With no apply run in effect, a migration made by hand is
 recognised by a post-migration capture taken since the baseline, or, unless a valid plan waits for
 `apply`, by files or pins changed since the baseline. Its verdict completes it; a FAIL then has no
-rollback to point at.
+rollback to point at. After any FAIL that no single pymolt step in effect explains, `status` gives
+no command, never a whole-run rollback: it names the plan steps whose sites failed and a person's
+two options, fixing the code (and capturing again) or accepting an intended change.
 
 With a saved plan, a `steps` line counts the plan's steps by status: `planned`, `blocked` (a
 dependency not in effect), `stale` (a statement it rewrites is gone, or the plan itself is stale),
@@ -180,7 +182,8 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 
 ### `pymolt verify [dir]`
 Compares the baseline and post-migration captures and prints `PASS`, `FAIL` or `INCONCLUSIVE` with
-the evidence. Details are in [verify.md](verify.md).
+the evidence. Details are in [verify.md](verify.md). A FAIL names the plan steps whose sites
+failed, applied or not (`--agent`: `data.failing_steps`).
 
 | Option | Meaning |
 |---|---|

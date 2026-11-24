@@ -971,14 +971,24 @@ def _decide_next(
     if projection is not None and _decide_judged(status, projection, verification, replicate):
         return
     if verification is not None and verification.verdict.value == "fail":
-        if by_hand:
-            status.next_command = None
-            status.next_reason = (
-                "The verdict is FAIL. No apply run made this migration, so there is nothing to "
-                "roll back: fix the changes, then capture post-migration again.")
-            return
-        status.next_command = "pymolt rollback ."
-        status.next_reason = "The verdict is FAIL. Rollback restores the files apply changed."
+        # Not a whole-run rollback: it also undoes the steps verify verified. What follows a
+        # FAIL is a person's call: fix the code (bring back a rolled-back step whose sites
+        # failed), or accept an intended change. A pymolt step in effect that failed was
+        # handled above (``_decide_judged``: its own rollback).
+        steps = list(getattr(verification, "failing_steps", None) or ())
+        current = {s.id: s.status for s in projection.steps} if projection is not None else {}
+        named = ", ".join(f"{s['id']} ({current.get(s['id'], s['status'])})" for s in steps)
+        back = [s["id"] for s in steps if current.get(s["id"], s["status"]) == "rolled_back"]
+        status.next_command = None
+        status.next_reason = (
+            "The verdict is FAIL" + (f" at the sites of plan step(s) {named}" if named else "")
+            + (". No apply run made this migration, so there is nothing to roll back"
+               if by_hand else "")
+            + ". A person decides: fix the code"
+            + (f" (`pymolt apply --step {back[0]}` brings the rolled-back step back)"
+               if back else "")
+            + ", then capture post-migration again and verify; or accept an intended change "
+              "with `pymolt verify . --accept ID` on a terminal.")
         return
     if _noise_settles(verification) and replicate():
         return

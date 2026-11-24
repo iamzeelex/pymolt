@@ -1227,6 +1227,29 @@ def inconclusive_line(unified) -> str | None:
     return line
 
 
+def failing_steps_text(steps) -> str:
+    """``beh-1 (rolled_back), mech-1 (applied)``: the plan steps whose sites failed."""
+    return ", ".join(f"{s['id']} ({s['status']})" for s in steps)
+
+
+def fail_lines(unified, project_dir: str = ".") -> list[str]:
+    """What a FAIL leaves to a person: the plan steps whose sites failed, when known
+    (``unified.failing_steps``), then the two ways on: fix the code and capture again, or accept
+    an intended change, a person's attested act on a terminal."""
+    steps = list(getattr(unified, "failing_steps", None) or ())
+    lines = []
+    if steps:
+        lines.append(f"Failing at the sites of plan step(s) {failing_steps_text(steps)}.")
+        back = [s["id"] for s in steps if s["status"] == "rolled_back"]
+        if back:
+            lines.append("Rolled back: `pymolt apply --step " + back[0] + "` brings "
+                         + ("it" if len(back) == 1 else "each") + " back.")
+    lines.append("A person decides: fix the code, then capture post-migration again and verify; "
+                 f"or accept an intended change with `pymolt verify {project_dir} --accept ID` on "
+                 "a terminal (each finding prints its id).")
+    return lines
+
+
 def saved_verdict_note(compared, saved_path) -> str | None:
     """What saving a verdict meant, when it is not the usual verdict on the two captures.
 
@@ -1285,6 +1308,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "changes": {},
         "change_counts": {},
         "calibration": _calibration_data(lists, getattr(rep, "calibration", None)),
+        # FAIL: the plan steps whose sites failed, in effect or not (id, executor, status,
+        # findings).
+        "failing_steps": list(getattr(unified, "failing_steps", None) or ()),
     }
     lines = [f"VERDICT: {verdict.upper()}"
              + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]
@@ -1373,7 +1399,11 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         hint = ("Only one side is recorded, so nothing was compared: change the code, then "
                 "capture post-migration.")
     elif verdict == "fail":
-        hint = "Behaviour changed: fix the listed calls, capture post-migration again, verify."
+        steps = list(getattr(unified, "failing_steps", None) or ())
+        at = f" at the sites of plan step(s) {failing_steps_text(steps)}" if steps else ""
+        hint = (f"Behaviour changed{at}: fix the listed calls, capture post-migration again, "
+                "verify. Only a person accepts an intended change (`pymolt verify . --accept "
+                "ID` on a terminal; refused under --agent).")
     elif verdict == "inconclusive":
         hint = settles or ("Read the reasons: usually a fresh capture or more coverage (BLIND) "
                            "is needed.")
