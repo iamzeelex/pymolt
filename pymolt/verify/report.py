@@ -513,9 +513,13 @@ def _map_files(
 ) -> tuple[dict[str, str], str | None]:
     """Runtime file names (``where.file``, ``co_filename``) -> contact files, as the contact map
     spells them. A path under the root the capture was taken in (``taken_in``, its recorded
-    root: a checkout elsewhere) or under the project root maps by its relative path; when every
-    path lies outside both (a container capture, a capture that records no root) they map by
-    path suffix, the longest contact path first, rather than claim nothing ran."""
+    root: a checkout elsewhere) or under the project root maps by its relative path; when no
+    absolute path lies under either (a container capture, a capture that records no root) the
+    absolute ones map by path suffix, the longest contact path first, rather than claim nothing
+    ran. A relative path (a Cython module's ``co_filename``, a script run by a relative name)
+    maps when it is a contact file's own path; it never says where the capture ran, so it
+    never stops the suffix mapping (QA V2-4: one such path made every container path
+    unmapped, and coverage 0%)."""
     by_posix = {Path(f).as_posix(): f for f in contact_files}
     mapping: dict[str, str] = {}
     under_root = False
@@ -525,11 +529,11 @@ def _map_files(
         if raw.startswith("<"):  # <string>, <frozen ...>: no file to attribute
             continue
         path = Path(raw)
-        rel = None
         if not path.is_absolute():
-            rel = path.as_posix()
-        else:
-            rel = _relative_to_any((path, Path(os.path.realpath(raw))), bases)
+            if path.as_posix() in by_posix:
+                mapping[raw] = by_posix[path.as_posix()]
+            continue
+        rel = _relative_to_any((path, Path(os.path.realpath(raw))), bases)
         if rel is None:
             outside.append(raw)
             continue
