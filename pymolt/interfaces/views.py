@@ -780,16 +780,17 @@ def steps_summary(plan) -> str:
     return f"{len(plan.steps)} step(s)" + (f": {parts}" if parts else "")
 
 
-def _next_for(project_dir, plan) -> dict | None:
+def _next_for(project_dir, plan, shown: str = ".") -> dict | None:
     """``{command, step, brief}``: what `status` names next, with the step's brief when an agent
-    or a person does it (its text from dependencies and the project is under ``data``)."""
+    or a person does it (its text from dependencies and the project is under ``data``).
+    ``shown``: the project dir as the command names it (``status.shown_dir``)."""
     if project_dir is None:
         return None
     from pymolt.status import build_status
     from pymolt.workorder.render import brief_data
 
     try:
-        status = build_status(project_dir)
+        status = build_status(project_dir, shown=shown)
     except Exception:  # noqa: BLE001 - the view stands without the next command
         return None
     step = plan.step(status.next_step) if status.next_step else None
@@ -799,7 +800,7 @@ def _next_for(project_dir, plan) -> dict | None:
             "reason": status.next_reason, "brief": brief}
 
 
-def apply_view(result, plan, project_dir=None) -> dict:
+def apply_view(result, plan, project_dir=None, shown: str = ".") -> dict:
     """An ``apply`` invocation (``workorder.apply.ApplyResult``) -> view (design 3.6):
     ``applied`` (``rebased``: re-based onto another text), ``noop``, ``present``, ``refused``
     (none: a refused invocation is a failure), ``checks`` per step, ``remaining`` by status,
@@ -824,7 +825,7 @@ def apply_view(result, plan, project_dir=None) -> dict:
         "rebased": list(result.rebased), "noop": list(result.noop),
         "present": list(result.present), "skipped": list(result.skipped),
         "blocked": dict(result.blocked), "checks": dict(result.checks),
-        "refused": {}, "next": _next_for(project_dir, plan),
+        "refused": {}, "next": _next_for(project_dir, plan, shown),
         "recorded": list(result.recorded), "in_progress": list(result.in_progress),
         "unrecorded": lists.cap("unrecorded", list(result.unrecorded)),
         "attestation": result.attestation, "check_failed": result.check_failed,

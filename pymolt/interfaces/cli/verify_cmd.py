@@ -24,6 +24,8 @@ from pymolt.interfaces.cli.output import (
     next_step,
     require_project_dir,
 )
+from pymolt.status import capture_command, shown_dir
+from pymolt.status import command as pymolt_command  # `command` is capture's CMD argument
 from pymolt.verify import service
 from pymolt.verify.models import (
     CaptureMode,
@@ -145,6 +147,7 @@ def capture_cmd(
     """
     machine = json_output or agent
     require_project_dir(project_dir, json_output=machine)
+    shown = shown_dir(project_dir)
     if agent:
         from pathlib import Path
 
@@ -183,8 +186,8 @@ def capture_cmd(
         # tell whether it still describes the project, and `apply` rejects it.
         fail(
             "pymolt is not configured for this project",
-            hint="Run `pymolt setup .` first. A capture records the environment it was "
-                 "taken in.",
+            hint=f"Run `{pymolt_command(shown, 'setup')}` first. A capture records the "
+                 "environment it was taken in.",
             json_output=machine,
         )
 
@@ -193,7 +196,7 @@ def capture_cmd(
         if not out_path.is_file():
             fail(
                 f"no pending attach capture at {out_path}",
-                hint=f"Start one first: pymolt capture {when} --mode attach",
+                hint=f"Start one first: {capture_command(shown, when, '--mode', 'attach')}",
                 json_output=machine,
             )
         slot = service.finalize_attached_capture(
@@ -237,10 +240,9 @@ def capture_cmd(
             project_dir, when_key, target=target, backend=backend,
             privacy=effective_privacy, sample_rate=sample_rate,
         )
-        collect_cmd = (
-            f"pymolt capture {when} --mode attach --collect --privacy {effective_privacy}"
-            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}"
-        )
+        collect_cmd = capture_command(
+            shown, when, "--mode", "attach", "--collect", "--privacy", effective_privacy,
+            *(("--sample-rate", str(sample_rate)) if sample_rate is not None else ()))
         if machine:
             from pymolt.interfaces import views
 
@@ -249,9 +251,7 @@ def capture_cmd(
             return
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
-            f"  [white]pymolt capture {when} --mode attach --collect "
-            f"--privacy {effective_privacy}"
-            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}[/white]\n\n"
+            f"  [white]{escape(collect_cmd)}[/white]\n\n"
             f"  [white]{instr.command_hint}[/white]",
             title="capture (attach)", expand=False, border_style="cyan",
         ))
