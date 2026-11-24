@@ -98,6 +98,31 @@ def test_header_names_the_capture_and_survives_missing_data(tmp_path, monkeypatc
     assert capture_name("garbage", "abc") is None
 
 
+def test_the_header_says_once_which_api_changes_are_unknown_and_what_settles_it(tmp_path):
+    """Legacy QA P4: with zipline's container stopped, the CLI said "API changes unknown for
+    32 of 41 package(s)" while PLAN.md ended its header "Next: `pymolt apply .`"."""
+    from pymolt.verify.predict import DeltaSummary
+
+    _root, plan = _plan(tmp_path)
+    down = "container pymolt-qa-z is not running: `docker start pymolt-qa-z`"
+    deltas = [DeltaSummary(package="pandas", quality="complete"),
+              DeltaSummary(package="cython", quality="inconclusive",
+                           notes=["new: throwaway environment", f"no old interpreter: {down}"]),
+              DeltaSummary(package="lxml", quality="inconclusive",
+                           notes=[f"no old interpreter: {down}"]),
+              DeltaSummary(package="python", subject="python", quality="inconclusive")]
+    risks = plan.risks.model_copy(update={"deltas": deltas})
+    header = plan_markdown(plan.model_copy(update={"risks": risks}), "pymolt apply .")
+    lines = [ln for ln in header.splitlines() if "API changes unknown" in ln]
+    assert lines == [
+        "API changes unknown for 2 of 3 package(s) (cython, lxml): no old interpreter: "
+        f"{down}. Their steps are missing from this plan: start the container "
+        "(`docker start pymolt-qa-z`) and run `pymolt plan` again."]
+    assert header.index(lines[0]) < header.index("Next: `pymolt apply .`")
+    # Every delta computed: no such line.
+    assert "API changes unknown" not in plan_markdown(plan, "pymolt apply .")
+
+
 def test_plan_md_collapses_low_steps_the_baseline_never_ran(tmp_path):
     _root, plan = _plan(tmp_path)
     low = [s for s in plan.steps if collapsed(s)]
