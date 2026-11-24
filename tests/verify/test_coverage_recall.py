@@ -289,18 +289,19 @@ def test_an_unobserved_symbols_existence_contact_stays_out_even_when_its_line_ra
 def test_blind_symbols_no_capture_can_record_need_a_person(project, tmp_path):
     """QA V2b: dump ran at its line unrecorded and SETTING is unobservable: capturing again
     records the same, so no evidence settles them. They need a person's review, and the cause
-    lists them; they still keep the verdict from PASS (the owner's open decision)."""
+    lists them. The unobservable one (SETTING) does not keep the verdict from PASS (the owner's
+    decision): the verdict lists it instead (``unobservable_uses``)."""
     core = str(project / "app" / "core.py")
     ran = sorted(MODULE_LINES | TESTED_RAN)
     rep = _report(project, _trace(project, tmp_path, executed=_record(
         "line", {core: {"lines": ",".join(map(str, ran))}})))
     (why,) = service._blind_causes(rep)
-    assert why.reason == ("2 static dependency symbol(s) no capture can record "
-                          "(1 ran but not recorded; 1 unobservable): fakedep.SETTING, "
-                          "fakedep.dump")
+    assert why.reason == ("1 static dependency symbol(s) no capture can record "
+                          "(1 ran but not recorded): fakedep.dump")
     assert (why.kind, why.cause) == (NEEDS_REVIEW, "unobservable")
     assert why.settle == ("no capture can record them: a person reviews each use of "
-                          "fakedep.SETTING, fakedep.dump")
+                          "fakedep.dump")
+    assert [s.target for s in service._blind_held(rep)[1]] == ["fakedep.SETTING"]
 
 
 def test_ran_only_by_its_function_is_still_a_test_gap(project, tmp_path):
@@ -312,28 +313,50 @@ def test_ran_only_by_its_function_is_still_a_test_gap(project, tmp_path):
         "function", {core: {"functions": ",".join(map(str, sorted(tables)))}})))
     assert {(c.target, c.status, c.granularity) for c in rep.contacts
             if c.target == "fakedep.dump"} == {("fakedep.dump", "ran-not-recorded", "function")}
-    evidence, review = service._blind_causes(rep)
+    (evidence,) = service._blind_causes(rep)
     assert evidence.reason == ("1 static dependency symbol(s) were not exercised "
                                "(1 ran but not recorded at function granularity)")
     assert evidence.kind is NEEDS_EVIDENCE
     assert evidence.settle.startswith("add a test that reaches those statements")
     assert "only their function is known to have run" in evidence.settle
-    assert review.kind is NEEDS_REVIEW and review.reason.endswith(": fakedep.SETTING")
+    # The unobservable SETTING is no reason: the verdict lists it (the owner's decision).
+    assert [s.target for s in service._blind_held(rep)[1]] == ["fakedep.SETTING"]
 
 
 def test_whether_unobservable_blind_blocks_pass_is_one_switch(project, tmp_path, monkeypatch):
-    """The owner's open decision lives in one constant: off, an unobservable BLIND symbol is
-    noted, never a reason."""
+    """The owner's decision lives in one constant, off: an unobservable BLIND symbol is listed by
+    the verdict, never a reason. On, it would be a reason a person reviews."""
     from pymolt.verify import inconclusive
 
     core = str(project / "app" / "core.py")
     ran = sorted(MODULE_LINES | TESTED_RAN)
     rep = _report(project, _trace(project, tmp_path, executed=_record(
         "line", {core: {"lines": ",".join(map(str, ran))}})))
-    assert inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS is True
-    monkeypatch.setattr(inconclusive, "UNOBSERVABLE_BLIND_BLOCKS_PASS", False)
+    assert inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS is False
     (why,) = service._blind_causes(rep)
     assert why.reason.endswith("(1 ran but not recorded): fakedep.dump")
+    monkeypatch.setattr(inconclusive, "UNOBSERVABLE_BLIND_BLOCKS_PASS", True)
+    (why,) = service._blind_causes(rep)
+    assert why.reason.endswith("(1 ran but not recorded; 1 unobservable): fakedep.SETTING, "
+                               "fakedep.dump")
+
+
+def test_a_pass_lists_the_uses_no_capture_can_observe(project, tmp_path):
+    """The owner's decision (QA V2): uses no capture can observe do not keep a verdict from
+    PASS, and the verdict says it did not see them: the human panel and ``--agent`` name them."""
+    from types import SimpleNamespace
+
+    from pymolt.interfaces.cli.verify_cmd import _unobservable_note
+    from pymolt.interfaces.views import unobservable_line
+
+    rep = SimpleNamespace(unobservable_uses=[f"dep.C{i}" for i in range(7)])
+    line = unobservable_line(rep)
+    assert line == ("7 dependency use(s) cannot be observed by a capture, so this verdict does "
+                    "not cover them; a person may glance at: dep.C0, dep.C1, dep.C2, dep.C3, "
+                    "dep.C4, … (2 more)")
+    assert "cannot be observed by a capture" in _unobservable_note(rep)
+    assert unobservable_line(SimpleNamespace(unobservable_uses=[])) is None
+    assert _unobservable_note(SimpleNamespace(unobservable_uses=[])) == ""
 
 
 def test_no_trace_every_observable_contact_is_not_run(project):

@@ -431,12 +431,13 @@ def test_the_blind_table_says_what_settles_each_kind_and_the_verdict_agrees(tmp_
     assert "probe-python" not in text
     assert "unobservable: no capture can record them, a person reviews each use" in text
     assert "not run: a test that reaches them settles them" in text
-    assert ("Needs a person: no capture can record them: a person reviews each use of "
-            "fakedep.SETTING.") in text
+    # The unobservable SETTING keeps nothing from PASS (the owner's decision): the verdict
+    # lists it instead of making it a reason.
+    assert ("1 dependency use(s) cannot be observed by a capture, so this verdict does not "
+            "cover them; a person may glance at: fakedep.SETTING") in text
     view = json.loads(runner.invoke(cli, [*args, "--agent"]).output)
-    assert view["data"]["inconclusive_kind"] == "needs_review"
+    assert view["data"]["unobservable_uses"] == ["fakedep.SETTING"]
     kinds = {c["reason"]: c["kind"] for c in view["data"]["inconclusive_causes"]}
-    assert kinds["contract: 1 static dependency symbol(s) no capture can record "
-                 "(1 unobservable): fakedep.SETTING"] == "needs_review"
+    assert not any("fakedep.SETTING" in reason for reason in kinds)
     assert kinds["contract: 1 static dependency symbol(s) were not exercised (1 not run by "
                  "the workload)"] == "needs_evidence"
