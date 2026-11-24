@@ -1,0 +1,240 @@
+{
+  "name": "scikit-learn",
+  "ecosystem": "machine learning (Cython)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "scikit-learn==1.1.3",
+      "numpy==1.26.4",
+      "scipy==1.11.4",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "scikit-learn==1.6.1",
+      "numpy==2.3.5",
+      "scipy==1.15.3",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "scikit-learn",
+    "numpy"
+  ],
+  "target_manifest": [
+    "scikit-learn==1.6.1",
+    "numpy==2.3.5",
+    "scipy==1.15.3"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/features.py": "\"\"\"Customer features: one-hot encoding of plan and region.\"\"\"\nfrom sklearn.preprocessing import OneHotEncoder\n\nCOLUMNS = [\"plan\", \"region\"]\n\n\ndef fit_encoder(rows):\n    encoder = OneHotEncoder(sparse=False, handle_unknown=\"ignore\")\n    return encoder.fit(rows)\n\n\ndef encode(encoder, rows):\n    return encoder.transform(rows)\n\n\ndef feature_names(encoder):\n    return list(encoder.get_feature_names(COLUMNS))\n",
+    "app/models.py": "\"\"\"Churn and spend models with scikit-learn, plus the metrics the report prints.\"\"\"\nfrom sklearn.ensemble import BaggingClassifier, RandomForestClassifier\nfrom sklearn.linear_model import LinearRegression\nfrom sklearn.metrics import SCORERS, mean_squared_error\nfrom sklearn.tree import DecisionTreeClassifier\n\n\ndef churn_bagging(X, y, seed=0):\n    model = BaggingClassifier(base_estimator=DecisionTreeClassifier(max_depth=3),\n                              n_estimators=5, random_state=seed)\n    return model.fit(X, y)\n\n\ndef churn_forest(X, y, seed=0):\n    model = RandomForestClassifier(n_estimators=5, max_features=\"auto\", random_state=seed)\n    return model.fit(X, y)\n\n\ndef spend_model(X, y):\n    return LinearRegression(normalize=True).fit(X, y)\n\n\ndef rmse(y_true, y_pred):\n    return float(mean_squared_error(y_true, y_pred, squared=False))\n\n\ndef known_metric(name):\n    return name in SCORERS\n",
+    "tests/conftest.py": "import numpy as np\nimport pytest\n\n\n@pytest.fixture\ndef churn():\n    rng = np.random.RandomState(0)\n    X = rng.normal(size=(60, 3))\n    y = (X[:, 0] + 0.5 * X[:, 1] > 0).astype(int)\n    return X, y\n\n\n@pytest.fixture\ndef spend():\n    rng = np.random.RandomState(1)\n    X = rng.uniform(0, 10, size=(30, 2))\n    y = 3.0 * X[:, 0] - 2.0 * X[:, 1] + 5.0\n    return X, y\n",
+    "tests/test_features.py": "from app import features\n\nROWS = [[\"basic\", \"eu\"], [\"pro\", \"us\"], [\"basic\", \"us\"], [\"team\", \"eu\"]]\n\n\ndef test_encode_is_dense():\n    enc = features.fit_encoder(ROWS)\n    out = features.encode(enc, [[\"pro\", \"eu\"], [\"gold\", \"us\"]])\n    assert out.tolist() == [[0.0, 1.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0, 1.0]]\n\n\ndef test_feature_names():\n    enc = features.fit_encoder(ROWS)\n    assert features.feature_names(enc) == [\n        \"plan_basic\", \"plan_pro\", \"plan_team\", \"region_eu\", \"region_us\"]\n",
+    "tests/test_models.py": "from app import models\n\n\ndef test_churn_bagging(churn):\n    X, y = churn\n    model = models.churn_bagging(X, y)\n    assert (model.predict(X) == y).mean() > 0.85\n\n\ndef test_churn_forest(churn):\n    X, y = churn\n    model = models.churn_forest(X, y)\n    assert (model.predict(X) == y).mean() > 0.85\n\n\ndef test_spend_model(spend):\n    X, y = spend\n    model = models.spend_model(X, y)\n    assert abs(model.predict([[1.0, 1.0]])[0] - 6.0) < 1e-6\n\n\ndef test_rmse():\n    assert round(models.rmse([1.0, 2.0, 3.0], [1.0, 2.0, 4.0]), 6) == 0.57735\n\n\ndef test_known_metric():\n    assert models.known_metric(\"accuracy\")\n    assert not models.known_metric(\"no-such-metric\")\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/features.py",
+      "old": "OneHotEncoder(sparse=False,",
+      "new": "OneHotEncoder(sparse_output=False,"
+    },
+    {
+      "file": "app/features.py",
+      "old": "encoder.get_feature_names(COLUMNS)",
+      "new": "encoder.get_feature_names_out(COLUMNS)"
+    },
+    {
+      "file": "app/models.py",
+      "old": "from sklearn.metrics import SCORERS, mean_squared_error",
+      "new": "from sklearn.metrics import get_scorer_names, root_mean_squared_error"
+    },
+    {
+      "file": "app/models.py",
+      "old": "BaggingClassifier(base_estimator=",
+      "new": "BaggingClassifier(estimator="
+    },
+    {
+      "file": "app/models.py",
+      "old": "max_features=\"auto\"",
+      "new": "max_features=\"sqrt\""
+    },
+    {
+      "file": "app/models.py",
+      "old": "LinearRegression(normalize=True)",
+      "new": "LinearRegression()"
+    },
+    {
+      "file": "app/models.py",
+      "old": "mean_squared_error(y_true, y_pred, squared=False)",
+      "new": "root_mean_squared_error(y_true, y_pred)"
+    },
+    {
+      "file": "app/models.py",
+      "old": "name in SCORERS",
+      "new": "name in get_scorer_names()"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/models.py",
+          "append": "\n\ndef segment_quality(X, k=4):\n    \"\"\"How tight k customer segments are (KMeans score: minus the inertia).\"\"\"\n    from sklearn.cluster import KMeans\n\n    return float(KMeans(n_clusters=k, random_state=0).fit(X).score(X))\n"
+        },
+        {
+          "file": "tests/test_models.py",
+          "append": "\n\ndef test_segment_quality():\n    import numpy as np\n\n    rng = np.random.RandomState(0)\n    centers = np.array([[0, 0], [6, 0], [0, 6], [6, 6]])\n    X = np.repeat(centers, 15, axis=0) + rng.normal(scale=2.5, size=(60, 2))\n    # Only the sign is checked.\n    assert models.segment_quality(X) < 0\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "sklearn.cluster._kmeans._BaseKMeans.score"
+      ],
+      "behaviour": "KMeans' n_init default went from 10 to 'auto' (one k-means++ run) in 1.4, so KMeans(n_clusters=4, random_state=0).fit(X).score(X) is -462.807 on 1.1.3 and -475.177 on 1.6.1 for the test's points (the seeding changed too: n_init=10 gives -464.124 on 1.6.1); the test only checks the sign. The points come from the legacy RandomState stream, identical on both sides (make_blobs differs in the last digit between the versions)"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "sklearn.preprocessing.OneHotEncoder",
+      "kind": "SIGNATURE",
+      "param": "sparse",
+      "site": "app/features.py:8",
+      "breaks": "TypeError: OneHotEncoder.__init__() got an unexpected keyword argument 'sparse'",
+      "successor": "sparse_output",
+      "fixable": "auto",
+      "source": "scikit-learn 1.2 renamed sparse= to sparse_output=; removed in 1.4",
+      "verified": {
+        "old": "1.1.3: sparse=False works, no warning; sparse_output= raises TypeError",
+        "new": "1.6.1: TypeError on sparse=; sparse_output=False gives the same dense array"
+      }
+    },
+    {
+      "symbol": "sklearn.preprocessing.OneHotEncoder.get_feature_names",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/features.py:17",
+      "breaks": "AttributeError: 'OneHotEncoder' object has no attribute 'get_feature_names'",
+      "successor": "sklearn.preprocessing.OneHotEncoder.get_feature_names_out",
+      "fixable": "auto",
+      "source": "scikit-learn 1.0 deprecated get_feature_names; removed in 1.2",
+      "verified": {
+        "old": "1.1.3: works with FutureWarning 'Function get_feature_names is deprecated; get_feature_names is deprecated in 1.0 and will be removed in 1.2. Please use get_feature_names_out instead.'",
+        "new": "1.6.1: AttributeError; get_feature_names_out(COLUMNS) gives the same names"
+      }
+    },
+    {
+      "symbol": "sklearn.metrics.SCORERS",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/models.py:4",
+      "breaks": "ImportError: cannot import name 'SCORERS' from 'sklearn.metrics'",
+      "successor": "sklearn.metrics.get_scorer_names",
+      "fixable": "manual",
+      "source": "scikit-learn 1.1 deprecated SCORERS (FutureWarning on use); removed in 1.3",
+      "verified": {
+        "old": "1.1.3: 'accuracy' in SCORERS -> True",
+        "new": "1.6.1: AttributeError/ImportError; get_scorer_names() lists the same names"
+      }
+    },
+    {
+      "symbol": "sklearn.ensemble.BaggingClassifier",
+      "kind": "SIGNATURE",
+      "param": "base_estimator",
+      "site": "app/models.py:9",
+      "breaks": "TypeError: BaggingClassifier.__init__() got an unexpected keyword argument 'base_estimator'",
+      "successor": "estimator",
+      "fixable": "auto",
+      "source": "scikit-learn 1.2 renamed base_estimator= to estimator=; removed in 1.4",
+      "verified": {
+        "old": "1.1.3: base_estimator= works, no warning; estimator= raises TypeError",
+        "new": "1.6.1: TypeError on base_estimator="
+      }
+    },
+    {
+      "symbol": "sklearn.ensemble.RandomForestClassifier",
+      "kind": "BEHAVIOR",
+      "param": "max_features",
+      "site": "app/models.py:15",
+      "breaks": "sklearn.utils._param_validation.InvalidParameterError: The 'max_features' parameter of RandomForestClassifier must be an int in the range [1, inf), a float in the range (0.0, 1.0], a str among {'log2', 'sqrt'} or None. Got 'auto' instead. (raised by fit)",
+      "successor": "sqrt",
+      "fixable": "manual",
+      "source": "scikit-learn 1.1 deprecated max_features='auto'; removed in 1.3",
+      "verified": {
+        "old": "1.1.3: max_features='auto' works; fit warns FutureWarning '`max_features='auto'` has been deprecated in 1.1 and will be removed in 1.3. To keep the past behaviour, explicitly set `max_features='sqrt'`...'",
+        "new": "1.6.1: fit raises InvalidParameterError (the constructor accepts any value)"
+      }
+    },
+    {
+      "symbol": "sklearn.linear_model.LinearRegression",
+      "kind": "SIGNATURE",
+      "param": "normalize",
+      "site": "app/models.py:20",
+      "breaks": "TypeError: LinearRegression.__init__() got an unexpected keyword argument 'normalize'",
+      "successor": null,
+      "fixable": "manual",
+      "source": "scikit-learn 1.0 deprecated normalize=; removed in 1.2 (use a Pipeline with a scaler; plain OLS predictions do not depend on it)",
+      "verified": {
+        "old": "1.1.3: normalize=True works; fit warns FutureWarning \"'normalize' was deprecated in version 1.0 and will be removed in 1.2. If you wish to scale the data, use Pipeline with a StandardScaler...\"",
+        "new": "1.6.1: TypeError"
+      }
+    },
+    {
+      "symbol": "sklearn.metrics.mean_squared_error",
+      "kind": "SIGNATURE",
+      "param": "squared",
+      "site": "app/models.py:24",
+      "breaks": "TypeError: got an unexpected keyword argument 'squared'",
+      "successor": "sklearn.metrics.root_mean_squared_error",
+      "fixable": "manual",
+      "source": "scikit-learn 1.4 deprecated squared= for root_mean_squared_error; removed in 1.6",
+      "verified": {
+        "old": "1.1.3: squared=False works, no warning; root_mean_squared_error does not exist",
+        "new": "1.6.1: TypeError from the parameter validation wrapper; root_mean_squared_error gives 0.57735"
+      }
+    },
+    {
+      "symbol": "sklearn.cluster.KMeans",
+      "kind": "DEFAULT",
+      "param": "n_init",
+      "site": "app/models.py:35",
+      "scenario": "change",
+      "breaks": "no raise: one k-means++ initialisation instead of ten, a different clustering score",
+      "successor": null,
+      "fixable": "manual",
+      "source": "scikit-learn 1.4 changed the n_init default from 10 to 'auto' (FutureWarning in 1.2-1.3)",
+      "verified": {
+        "old": "1.1.3: KMeans(n_clusters=4, random_state=0).fit(X).score(X) -> -462.806833 (n_init=10)",
+        "new": "1.6.1: -475.177151 (n_init='auto': one k-means++ run); n_init=10 gives -464.124171"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "sklearn.preprocessing.OneHotEncoder.get_feature_names",
+      "category": "FutureWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "sklearn.ensemble.RandomForestClassifier.fit",
+      "category": "FutureWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "sklearn.linear_model.LinearRegression.fit",
+      "category": "FutureWarning",
+      "from_c": false,
+      "side": "old"
+    }
+  ],
+  "notes": "Old: scikit-learn 1.1.3 with numpy 1.26.4 and scipy 1.11.4 on Python 3.11 (1.1 is the last release before the 1.2 renames). New: 1.6.1 with numpy 2.3.5 and scipy 1.15.3 on Python 3.12 (the brief's 1.5/1.6 target; squared= is removed in 1.6). OneHotEncoder(sparse=) and BaggingClassifier(base_estimator=) give no warning on 1.1.3 (the renames came in 1.2). max_features='auto' and normalize= warn inside fit, not the constructor, and max_features='auto' fails inside fit on 1.6.1 (parameter validation), so the constructor call still works: BEHAVIOR. normalize= has no parameter successor: OLS predictions do not depend on it, so the manual migration drops it. The KMeans change is a DEFAULT (n_init 10 -> 'auto') plus changed seeding: even n_init=10 gives a different score on 1.6.1, so no KMeans call is in the equivalent scenario. Not covered: load_boston (ImportError, no successor), plot_confusion_matrix (needs matplotlib), cross_val_score(fit_params=), TSNE defaults, AdaBoost's algorithm default."
+}

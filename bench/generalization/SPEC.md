@@ -83,5 +83,11 @@ Plus wall time per phase. The scorecard has one row per toy, and adds pandas (`b
 | httpx | HTTP client (offline) | 0.23 → 0.28 | 3.11 | `Client(proxies=)`, `AsyncClient(app=)` (the FastAPI test pattern), `verify=<str>`; no deprecation runway (0.23 warns about none of them); compact JSON bodies |
 | aiohttp | async HTTP client + server | 3.8 → 3.14 | 3.11 | sessions/connectors built outside a running loop now raise; long-lived deprecations (`verify_ssl`, `read_timeout`, `has_body`, `.code`), new-only `BasicAuth`; charset fallback; compiled yarl/multidict; awaited results |
 | asyncio | Python itself (asyncio) | stdlib 3.8 → 3.12 | 3.8 | `@asyncio.coroutine`, `Task.all_tasks/current_task` (C-level warnings), `loop=` on Lock/Semaphore/gather/wait_for, `wait()` of coroutines, `get_event_loop()`; `asyncio.TimeoutError` becomes the builtin |
+| numpy | arrays (C extension) | 1.26 → 2.5 | 3.11 | a compiled public API (G1): `np.NaN`/`np.float_`/`row_stack` aliases, `in1d`, `trapz`, `ndarray.ptp`, `percentile(interpolation=)`, `reshape(newshape=)`, `array(copy=False)`, `numpy.core`; NEP 50 promotion |
+| polars | dataframes (Rust extension) | 0.19 → 1.x | 3.11 | method renames (`groupby`, `apply`, `cumsum`, `frame_equal`), `shift(periods=)`, `map_dict` → `replace_strict`, outer-join coalescing, `count` and nulls |
+| matplotlib | plotting (C++ Agg) | 3.6 → 3.10 | 3.11 | `cm.register_cmap`/`get_cmap`, `cbook.mplDeprecation`, `legendHandles`, `tostring_rgb`, `ContourSet.collections`, style names, `boxplot(labels=)` |
+| seaborn | statistical plotting | 0.11 → 0.13 | 3.11 | keyword-only data arguments, `ci=` → `errorbar=`, `distplot`, `factorplot`, `lmplot(size=)`; changes visible only through matplotlib artists |
+| plotly | interactive plotting | 5.24 → 6.x | 3.11 | `titlefont` (`**kwargs` validation), `Heatmapgl`, Mapbox → MapLibre, `make_subplots`/`append_trace`; base64 arrays in `to_dict` |
+| scikit-learn | machine learning (Cython) | 1.1 → 1.6 | 3.11 | parameter renames (`sparse`, `base_estimator`), `normalize=`, `get_feature_names`, `squared=` → `root_mean_squared_error`, `max_features='auto'`, `SCORERS`; KMeans `n_init` |
 
 Toy apps are small (one module, about 5–15 dependency calls, real usage patterns) with a pytest suite. Each runs in under 30 s.
