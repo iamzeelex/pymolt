@@ -339,11 +339,13 @@ share canonical identity confirms (what *confirmed* uses).
 Comparability is checked first. If either capture is invalid or stale, lacks event-loss counters
 or dropped events, skipped instrumentation, or ran partly untraced, or if the two used different
 commands, targets, modes, privacy profiles or sampling rates, the verdict is INCONCLUSIVE, even
-when facts changed. Sampled captures must also have complete call counts.
+when facts changed. Sampled captures must also have complete call counts. A recording passed with
+`--baseline` or `--post-migration` answers the same from its `<recording>.meta.json` sidecar: a
+hand-written trace, or JSONL merged with `cat` without its sidecars, has no event-loss counters.
 
 - **FAIL**: a compared fact failed anywhere in the recording, or a `--probe-python` replay failed.
   A replay compares with the recording it replays, so it fails the verdict even when only one
-  capture exists (that capture must be otherwise sound).
+  capture exists or the recording has no event-loss counters (it must be otherwise sound).
 - **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
   - at least one fact compared equal (or was accepted). Noise a replicate measured, a call

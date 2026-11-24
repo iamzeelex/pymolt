@@ -351,10 +351,75 @@ def test_a_changed_probe_replay_fails_with_one_capture(tmp_path):
     assert payload["contract"]["verdict_reasons"] == ["sandbox replay changed behavior"]
     assert any("FAIL rests on the probe replay alone" in n for n in payload["contract"]["notes"])
 
+    # The hand-written recording carries no event-loss counters (QA V2-1): that blocks a
+    # version diff, not the replay, which compares each call with its own recorded outcome.
+    assert any("trace.jsonl has no event-loss counters" in n
+               for n in payload["contract"]["notes"])
+
     stable, trace = _probe_project(tmp_path / "stable", {"__dict__": [["a", 1]]})
     result = runner.invoke(cli, ["verify", str(stable), "--post-migration", str(trace),
                                  "--probe-python", sys.executable, "--json"])
     assert result.exit_code == EXIT_INCONCLUSIVE    # a stable replay proves no PASS alone
+    assert json.loads(result.output)["contract"]["verdict_reasons"] == [
+        "no baseline trace is available for a version diff",
+        "the post-migration recording trace.jsonl has no event-loss counters"]
+
+
+_LOSSLESS = {"events_seen": 1, "events_written": 1, "sampling_dropped": 0,
+             "backpressure_dropped": 0, "write_failures": 0, "sink_failures": 0,
+             "shutdown_dropped": 0}
+
+
+def test_explicit_recordings_need_their_event_loss_counters(tmp_path):
+    """QA V2-1: two identical hand-written recordings passed PASS (and a changed pair FAIL)
+    with no counters to say they lost no event; a capture without them is INCONCLUSIVE. The
+    watcher's own sidecar, one process's or several gathered under ``processes``, carries
+    them; a recording that dropped events stays INCONCLUSIVE."""
+    project, old = _probe_project(tmp_path, {"__dict__": [["a", 1]]})
+    (project / "app" / "m.py").write_text(
+        "import yaml\ndef load():\n    return yaml.safe_load(\"a: 1\")\n")
+    old.write_text(old.read_text().replace(
+        '"t": "return"', '"t": "return", "where": {"file": "app/m.py", "line": 3}'))
+    new = tmp_path / "new.jsonl"
+    new.write_text(old.read_text())
+    changed = tmp_path / "changed.jsonl"
+    changed.write_text(old.read_text().replace('["a", 1]', '["a", 2]'))
+
+    def verify(after):
+        result = runner.invoke(cli, ["verify", str(project), "--baseline", str(old),
+                                     "--post-migration", str(after), "--json"])
+        return result.exit_code, json.loads(result.output)
+
+    for after in (new, changed):
+        code, payload = verify(after)
+        assert code == EXIT_INCONCLUSIVE, payload["contract"]["verdict_reasons"]
+        assert payload["contract"]["verdict_reasons"] == [
+            f"the post-migration recording {after.name} has no event-loss counters",
+            "the baseline recording trace.jsonl has no event-loss counters"]
+        assert all(c["kind"] == "needs_evidence" for c in payload["inconclusive_causes"])
+        assert "`.meta.json` sidecar" in payload["inconclusive_causes"][0]["settle"]
+
+    # one process's own sidecar, and a merged recording's sidecars gathered
+    (tmp_path / "trace.jsonl.meta.json").write_text(json.dumps({"counters": _LOSSLESS}))
+    for after in (new, changed):
+        (tmp_path / f"{after.name}.meta.json").write_text(json.dumps(
+            {"processes": [{"counters": _LOSSLESS}, {"counters": _LOSSLESS}]}))
+    code, payload = verify(new)
+    assert (code, payload["verdict"]) == (EXIT_OK, "pass"), payload["contract"]["verdict_reasons"]
+    code, payload = verify(changed)
+    assert (code, payload["verdict"]) == (EXIT_FINDING, "fail")
+
+    # a process without complete counters, or one that dropped events
+    (tmp_path / "new.jsonl.meta.json").write_text(json.dumps(
+        {"processes": [{"counters": _LOSSLESS}, {"pid": 7}]}))
+    assert verify(new)[1]["contract"]["verdict_reasons"] == [
+        "the post-migration recording new.jsonl has no event-loss counters"]
+    (tmp_path / "new.jsonl.meta.json").write_text(json.dumps(
+        {"counters": {**_LOSSLESS, "backpressure_dropped": 3}}))
+    code, payload = verify(new)
+    assert code == EXIT_INCONCLUSIVE
+    assert payload["contract"]["verdict_reasons"] == [
+        "the post-migration recording new.jsonl dropped 3 event(s)"]
 
 
 def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeypatch):
@@ -422,7 +487,7 @@ def test_the_blind_table_says_what_settles_each_kind_and_the_verdict_agrees(tmp_
     }) + "\n")
     (tmp_path / "trace.jsonl.meta.json").write_text(json.dumps({"processes": [{"executed": {
         "v": 1, "granularity": "line", "complete": True, "until": None,
-        "files": {str(project / "app.py"): {"lines": "1,2,4,5,7"}}}}]}))
+        "files": {str(project / "app.py"): {"lines": "1,2,4,5,7"}}}, "counters": _LOSSLESS}]}))
     args = ["verify", str(project), "--baseline", str(trace), "--post-migration", str(trace)]
 
     text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", runner.invoke(
