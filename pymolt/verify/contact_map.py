@@ -603,6 +603,8 @@ class _ContactVisitor(cst.CSTVisitor):
         self._emit(node, kind)
 
 
+#: Guard kinds that make a site a compatibility fallback, not a use on every Python.
+FALLBACK_GUARDS = frozenset({"fallback", "guarded-fallback", "version"})
 _GUARD_RANK = {"fallback": 0, "guarded-fallback": 1, "version": 2, "broad": 3}
 _FALLBACK_EXC = {"ImportError", "ModuleNotFoundError", "AttributeError"}
 _BROAD_EXC = {"Exception", "BaseException"}
@@ -804,7 +806,8 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
     our_top_levels = {_module_name(f, root).split(".")[0] for f in files if _module_name(f, root)}
     file_by_module = {_module_name(f, root): str(f.relative_to(root)) for f in files}
     by_dep: dict[str, set[str]] = {}
-    legacy_imports: set[str] = set()
+    legacy_imports: set[str] = set()   # unguarded: the code is not ported yet
+    legacy_guarded: set[str] = set()   # only behind a fallback or a version check
     sites: dict[tuple[str, int, str, str], StdlibSite] = {}
     interesting: dict[str, bool] = {}
 
@@ -819,11 +822,16 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
             dep_top = rec["top"]
             if dep_top in our_top_levels or dep_top in _IGNORE_DEPS:
                 continue  # internal, or pymolt's own tooling — not a contact
-            if is_py2_stdlib(dep_top):
+            if is_py2_stdlib(dep_top) and rec["skind"] in ("import", "from"):
                 # Python 2's standard library is absent from Python 3's stdlib list, so it
-                # reads as third-party. It is neither: it is evidence the code has not been
-                # ported yet, reported below.
-                legacy_imports.add(dep_top)
+                # reads as third-party. It is neither. An unguarded import is evidence the
+                # code has not been ported yet; one in a try/except ImportError or a version
+                # branch is the Python-3 code's fallback. Both are reported below.
+                guard = rec["guard"]
+                if guard and guard["kind"] in FALLBACK_GUARDS:
+                    legacy_guarded.add(dep_top)
+                else:
+                    legacy_imports.add(dep_top)
             if stdlib_data.is_stdlib(dep_top) or is_py2_stdlib(dep_top):
                 if rec["skind"]:
                     spelling = rec["target"]
@@ -876,6 +884,13 @@ def build_contact_map(project_dir: str | Path, dependencies: set[str] | None = N
         cmap.notes.append(
             f"Python-2 stdlib imported ({len(legacy_imports)}): {describe(legacy_imports)} "
             "— not dependencies; this code has not been ported to Python 3 yet."
+        )
+    fallbacks = legacy_guarded - legacy_imports
+    if fallbacks:
+        cmap.notes.append(
+            f"Python-2 stdlib imported only as a fallback ({len(fallbacks)}): "
+            f"{describe(fallbacks)} — behind an except ImportError or a version check; "
+            "not dependencies."
         )
     return cmap
 
