@@ -3005,7 +3005,7 @@ def _missing_side_settle(used_slots: list[tuple[str, object]]) -> str:
         return "capture post-migration"
     if names == {"post-migration"}:
         return "capture baseline (it records the code before the migration)"
-    return "capture baseline, then post-migration"
+    return "capture the baseline, then post-migration"
 
 
 def _stamp_verdict(
@@ -3045,7 +3045,10 @@ def _stamp_verdict(
     def unlike(reason: str, settle: str) -> None:
         comparability.setdefault(reason, cause(reason, NEEDS_EVIDENCE, "capture", settle))
 
-    if trace is None:
+    if trace is None and against is None:
+        # Nothing recorded at all: one reason, and it starts with the baseline (QA V7).
+        unlike("no captures", "capture the baseline, then post-migration")
+    elif trace is None:
         unlike("no current trace is available", "capture post-migration")
     else:
         quality = inspect_trace_artifact(trace)
