@@ -2242,7 +2242,9 @@ def assess(
         python_display = f"{detected_python} (CLI override)"
     elif config.get("base_python"):
         base_python_assumed = config.get("base_python_source") == "assumed"
-        origin = "assumed — pymolt's own" if base_python_assumed else "cached config"
+        # Without a saved setup the number was read from the project just now.
+        origin = ("assumed — pymolt's own" if base_python_assumed
+                  else "cached config" if config_file.is_file() else "project config")
         python_display = f"{detected_python} ({origin})"
     elif detected_python:
         python_display = f"{detected_python} (project config)"
@@ -2651,9 +2653,19 @@ def _render_inventory(inv) -> None:
         console.print(table)
         if any(e.name_inferred for e in non_pypi):
             console.print("[dim]? = name inferred from the URL, not declared[/dim]")
+        # One warning per package and cause: zipline names the same three git:// URLs
+        # in several manifests, and printed nine.
+        import re
+
+        blocked: dict[tuple[str, str], int] = {}
         for e in non_pypi:
             if e.blocker:
-                console.print(f"  [bold red]⚠ {e.name or e.raw}:[/bold red] {e.blocker}")
+                egg = re.search(r"#egg=([A-Za-z0-9][\w.-]*)", e.raw or "")
+                key = (e.name or (egg.group(1) if egg else e.raw), e.blocker)
+                blocked[key] = blocked.get(key, 0) + 1
+        for (label, blocker), count in blocked.items():
+            times = f" [dim]({count} lines)[/dim]" if count > 1 else ""
+            console.print(f"  [bold red]⚠ {escape(label)}:[/bold red] {blocker}{times}")
     else:
         console.print("[bold green]✔ All declared dependencies are ordinary PyPI edges.[/bold green]")
 

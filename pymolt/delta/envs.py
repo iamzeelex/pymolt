@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -92,6 +93,33 @@ def same_version(a: str | None, b: str | None) -> bool:
         return Version(a) == Version(b)
     except InvalidVersion:
         return a.strip() == b.strip()
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_UV_ENTRY = re.compile(r"^(?:×|error:|warning:|hint:|Caused by:|[├╰]─▶)")
+_UV_GLYPHS = re.compile(r"^(?:[│├╰─▶×\s]+)")
+
+
+def uv_failure(output: str, limit: int = 300) -> str:
+    """uv's failure as one readable line: its first error and its last cause, each with
+    the lines uv wrapped it over joined back (the last raw line is often a fragment such
+    as ``(v2.34.2) depends on ...``)."""
+    entries: list[str] = []
+    for line in _ANSI.sub("", output).splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if _UV_ENTRY.match(text) or not entries:
+            entries.append(_UV_GLYPHS.sub("", text))
+        else:
+            entries[-1] += " " + text.lstrip("│ ")
+    entries = [e.removeprefix("error:").removeprefix("Caused by:").strip() for e in entries
+               if not e.startswith(("warning:", "hint:"))]
+    if not entries:
+        return "uv gave no output"
+    head, cause = entries[0], entries[-1]
+    message = head if cause == head else f"{head.rstrip(':')}: {cause}"
+    return message if len(message) <= limit else message[: limit - 1] + "…"
 
 
 def _child_env() -> dict[str, str]:
@@ -256,13 +284,13 @@ def throwaway_env(
                                   cwd=str(root))
         except (OSError, subprocess.SubprocessError) as exc:
             shutil.rmtree(env_dir, ignore_errors=True)
-            return None, f"`{' '.join(cmd[:3])}` failed: {exc}", None
+            return None, f"`uv {' '.join(cmd[1:3])}` failed: {exc}", None
         if proc.returncode != 0:
             shutil.rmtree(env_dir, ignore_errors=True)
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
             hint = ("" if online else " (offline: only uv's cache was used; rerun with --online "
                     "to let uv download, or create the target environment yourself)")
-            return None, f"`{' '.join(cmd[:3])}` failed: {tail[0][:300]}{hint}", None
+            why = uv_failure(proc.stderr or proc.stdout or "")
+            return None, f"`uv {' '.join(cmd[1:3])}` failed: {why}{hint}", None
     exe = python_in(env_dir)
     if exe is None:
         return None, f"uv built {env_dir} but it has no interpreter", None
