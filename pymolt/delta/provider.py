@@ -75,6 +75,30 @@ def _impact(fact: DeltaFact, report: DeltaReport) -> ApiImpact:
     )
 
 
+def inconclusive_impact(report: DeltaReport) -> ApiImpact:
+    """The one INCONCLUSIVE entry of a package whose delta could not be computed."""
+    reason = "; ".join(report.notes[:2]) or "unknown reason"
+    return ApiImpact(
+        path=report.package, kind="INCONCLUSIVE", state="unknown", risk="unknown",
+        explanation=(f"API changes for {report.package} {report.from_version} → "
+                     f"{report.to_version} could not be computed: {reason}"),
+    )
+
+
+def unknown_base_report(package: str, to_version: str) -> DeltaReport:
+    """The delta of a move whose base version pymolt never observed: inconclusive, not
+    computed. Comparing against the manifest's floor or any other old release would rest
+    the plan on a version the app may never have run."""
+    return DeltaReport(
+        package=package, from_version="unknown", to_version=to_version,
+        quality="inconclusive",
+        notes=["base version unknown: no lock, base interpreter, container or exact pin "
+               f"says which {package} the project runs today",
+               "a lock, the base interpreter or container (pymolt setup --base-python or "
+               "--container), an exact pin, or a baseline capture settles it"],
+    )
+
+
 def _pattern(fact: DeltaFact) -> CodemodPattern | None:
     """A same-signature move/rename of an importable (module-level) spelling, else None.
 
@@ -197,12 +221,7 @@ class LocalDeltaProvider:
 
         impacts = [_impact(f, report) for f in report.changes()]
         if report.quality == "inconclusive":
-            reason = "; ".join(report.notes[:2]) or "unknown reason"
-            impacts.append(ApiImpact(
-                path=report.package, kind="INCONCLUSIVE", state="unknown", risk="unknown",
-                explanation=(f"API changes for {report.package} {report.from_version} → "
-                             f"{report.to_version} could not be computed: {reason}"),
-            ))
+            impacts.append(inconclusive_impact(report))
         patterns: list[CodemodPattern] = []
         seen: set[tuple[str, str]] = set()
         for fact in report.facts:

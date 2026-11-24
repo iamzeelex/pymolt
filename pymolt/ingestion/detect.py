@@ -61,6 +61,22 @@ def _spec_is_pinned(spec: str) -> bool | None:
     return operators <= {"==", "==="}
 
 
+def pinned_version(spec: str) -> str | None:
+    """The one version ``spec`` pins exactly (``name==1.2.3``, ``===``), else None.
+
+    A floor (``>=0.10``), a compatible release (``~=1.4``), a wildcard (``==1.*``) or no
+    version at all says what may be installed, not what is: no version can be read from it.
+    """
+    try:
+        specifier = Requirement(spec).specifier
+    except InvalidRequirement:
+        return None
+    specs = list(specifier)
+    if len(specs) != 1 or specs[0].operator not in ("==", "===") or "*" in specs[0].version:
+        return None
+    return specs[0].version
+
+
 def _classify_specs(specs: Iterable[str]) -> SourceFixation:
     """Aggregate per-spec pin classification into a source-level fixation tier."""
     total = 0

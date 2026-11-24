@@ -21,7 +21,10 @@ irrelevant changes.
 - **New side.** Your target environment, or a throwaway one built from uv's cache under
   `.pymolt/cache/envs/`.
 - **From-versions.** These are the versions the baseline capture actually ran, which it records,
-  not what an unpinned manifest resolves to today. The plan states every correction.
+  not what an unpinned manifest resolves to today. The plan states every correction. With no
+  capture, lock, base interpreter or exact pin, a base version is `unknown` (a floor such as
+  `flask>=0.10` is not what is installed): the move is listed from `unknown` and its API changes
+  are inconclusive, never computed from the floor.
 - **Successors.** Where a removed name went is taken from:
   - the warnings the baseline run recorded;
   - the old version's docstrings;
