@@ -718,9 +718,9 @@ class _Statements:
             self._trees[file] = found
         return self._trees[file]
 
-    def names(self, file: str, line: int | None, text: str | None) -> set[str]:
+    def names(self, file: str, line: int | None, text: str | None) -> set[str] | None:
         """Identifiers the statement at ``line`` spells; from the site's line text when the
-        file cannot be read."""
+        file cannot be read; None when neither is known."""
         stmts = self._stmts(file) if line is not None else None
         if stmts:
             covering = [n for n in stmts
@@ -728,7 +728,9 @@ class _Statements:
             if covering:
                 node = max(covering, key=lambda n: (n.lineno, -(n.end_lineno or n.lineno)))
                 return _header_names(node)
-        return set(re.findall(r"[A-Za-z_]\w*", text or ""))
+        if text is None:
+            return None
+        return set(re.findall(r"[A-Za-z_]\w*", text))
 
 
 class _StaticIndex:
@@ -792,7 +794,7 @@ class _SiteNames:
                     self.receiver += [f"{c}.{leaf}" for c in touched.public_candidates(cls)]
         self.own = [t for t in sorted(self.static) if t.rsplit(".", 1)[-1] == call] \
             + self.receiver
-        named = statements.names(group.file, group.line, group.text)
+        named = statements.names(group.file, group.line, group.text) or set()
         self.spelled = call in named or any(t.rsplit(".", 1)[-1] == call for t in self.static)
         # A call recorded at a statement that does not name it and has no receiver: a
         # generator's body runs where it is consumed (``max(parts)`` for ``parts =
@@ -884,6 +886,10 @@ def _rate(group: _SiteGroup, package: str, fact: dict, how: str
             return RiskTier.MEDIUM, f"the signature changes for {param}, which this site " \
                 "passes", evidence
         if fact.get("old") in _ABSENT and fact.get("new") not in _ABSENT:
+            if param in _RECEIVERS:
+                # ``update(*args, **kwds)`` -> ``update(self, other=(), /, **kwds)``: a bound
+                # method call passes its receiver; ``self`` is never a parameter it misses.
+                return None
             evidence.append(f"baseline: this site does not pass the new parameter {param}")
             return RiskTier.MEDIUM, f"a new required parameter {param} that this site does " \
                 "not pass", evidence
@@ -1625,11 +1631,16 @@ def python_runtime_facts(baseline: FactSet | Iterable[Fact], root: str | Path | 
     return out
 
 
-def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
+def _aliased_python_fact(index: dict[str, dict], group: Any,
+                         recorded: set[tuple] | None = None) -> dict | None:
     """A python fact for a spelling the site wrote but the runtime did not record
     (``self.assertEquals(...)`` is recorded as ``unittest.case.TestCase.assertEqual``): the
-    receiver's spelling plus an attribute the statement names, among the facts that are not
-    UNCHANGED."""
+    receiver's spelling plus an attribute the statement names. Only a fact about the name
+    (REMOVED, MOVED, DEPRECATED): the recorded call's arguments are another callee's, so they
+    say nothing about the parameters of the spelling the site wrote (uvloop's compiled
+    ``ensure_future(coro, loop=self)`` recorded at ``await asyncio.sleep(0)`` never passed
+    ``loop`` to ``sleep``). ``recorded``: the ``(symbol, file, line)`` of every call recorded
+    at a site; a spelling recorded there itself is another call, not an alias."""
     parent, _, leaf = group.symbol.rpartition(".")
     if not parent or not group.text:
         return None
@@ -1639,8 +1650,11 @@ def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
         if attr == leaf:
             continue
         for p in parents:
-            fact = index.get(f"{p}.{attr}")
-            if fact is not None and fact.get("kind") not in (None, "UNCHANGED"):
+            spelling = f"{p}.{attr}"
+            if recorded is not None and (spelling, group.file, group.line) in recorded:
+                continue
+            fact = index.get(spelling)
+            if fact is not None and fact.get("kind") in ("REMOVED", "MOVED", "DEPRECATED"):
                 return fact
     return None
 
@@ -1648,7 +1662,13 @@ def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
 def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: dict[str, dict],
                           target: str | None, target_version: Any, root: str | Path | None,
                           seen: set[tuple]) -> None:
-    """Rate every observed call site of a stdlib symbol against the python delta."""
+    """Rate every observed call site of a stdlib symbol against the python delta.
+
+    Only the calls the statement makes count: a callee it names (or a class it constructs).
+    A call recorded at the line that the line did not write (made from compiled code, like
+    uvloop's ``_set_running_loop``, or the body of a generator its ``for`` resumed, like
+    ``dis._get_instructions_bytes``) is rated only as an alias of a name the statement does
+    write, and then by facts about that name alone (``_aliased_python_fact``)."""
     groups: dict[tuple, _SiteGroup] = {}
     for fact in facts:
         file = _relative(fact.file, root)
@@ -1658,12 +1678,17 @@ def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: d
             group = groups[key] = _SiteGroup(fact.symbol, file, fact.func, fact.line, fact.text)
             group.spelling_site = True
         group.add(fact)
+    statements = _Statements(root)
+    recorded = {(g.symbol, g.file, g.line) for g in groups.values()}
     for group in groups.values():
         if (group.symbol, group.file, group.line) in seen:
             continue                              # the static pass rated this spelling here
         delta, how = _python_fact(index, group.symbol)
+        if delta is not None and delta.get("kind") != "UNCHANGED" and not _names_its_callee(
+                group, statements):
+            delta = None                          # not this statement's call
         if delta is None or delta.get("kind") == "UNCHANGED":
-            delta = _aliased_python_fact(index, group)
+            delta = _aliased_python_fact(index, group, recorded)
             if delta is None:
                 continue
             how = "symbol"
@@ -1703,6 +1728,22 @@ def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: d
             evidence=evidence, scope="python", reached_at="call", calls=group.calls,
             warnings=[CallWarning(category=c, message=m, count=n)
                       for (c, m), n in sorted(group.warnings.items())]))
+
+
+def _names_its_callee(group: _SiteGroup, statements: _Statements) -> bool:
+    """The statement names the call's callee: its last name, or for a constructor its class.
+    A protocol method on a public class (``Version.__ge__`` for ``a >= b``) is the statement's
+    own operation; one on a private class (``_AssertLogsContext.__enter__`` under ``with
+    self.assertLogs(...)``) is the implementation of a name the statement does write. True when
+    the statement is not known (no file to read, no line text): only evidence that the line did
+    not write the call drops it."""
+    parts = group.symbol.split(".")
+    leaf = parts[-1]
+    if leaf.startswith("__") and leaf.endswith("__") and leaf not in _CTOR:
+        return not any(p.startswith("_") and not p.startswith("__") for p in parts)
+    call = parts[-2] if len(parts) > 1 and leaf in _CTOR else leaf
+    named = statements.names(group.file, group.line, group.text)
+    return named is None or call in named
 
 
 def merge_python_risks(dependency: PredictionReport | None,

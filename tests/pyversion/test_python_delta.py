@@ -192,3 +192,108 @@ def test_an_observed_call_passing_the_removed_param_is_certain(tmp_path):
     out = predict_python_risks(delta, [], base="3.8", target="3.12", root=tmp_path,
                                runtime_facts=[call({"loop": "x"}, 7)])
     assert out.risks[0].tier is RiskTier.HIGH
+
+
+# ── a site's parameters are its callee's own (legacy QA P2) ─────────────────────────────
+
+
+def _runtime(symbol, line, text, bound, defaulted=None, file="tests.py"):
+    return SimpleNamespace(symbol=symbol, file=file, func="t", line=line, text=text, count=1,
+                           input={"bound": bound}, defaulted=defaulted, warnings=None,
+                           outcomes=[])
+
+
+def _python(*facts):
+    return {"package": "python", "quality": "complete", "notes": [],
+            "facts": [{"basis": {"old": "probe", "new": "probe"}, "evidence": [], **f}
+                      for f in facts]}
+
+
+def _rated(tmp_path, delta, *calls):
+    from pymolt.verify.predict import predict_python_risks
+
+    return predict_python_risks(delta, [], base="3.6", target="3.12", root=tmp_path,
+                                runtime_facts=list(calls)).risks
+
+
+SLEEP_LOOP = {"symbol": "asyncio.tasks.sleep", "kind": "SIGNATURE", "param": "loop",
+              "old": "KEYWORD_ONLY", "new": None}
+
+
+def test_another_callees_arguments_are_never_the_written_spellings(tmp_path):
+    """vibora: uvloop's compiled ``run_until_complete`` calls ``ensure_future(coro, loop=self)``,
+    recorded at the user's ``await asyncio.sleep(0)``; ``sleep`` itself never got ``loop``."""
+    text = "await asyncio.sleep(0)"
+    sleep = _runtime("asyncio.tasks.sleep", 10, text, {"delay": 0}, [["loop", "result"]])
+    ensure = _runtime("asyncio.tasks.ensure_future", 10, text, {"coro_or_future": "c",
+                                                               "loop": "uvloop"})
+    assert _rated(tmp_path, _python(SLEEP_LOOP), sleep, ensure) == []
+    # Without sleep's own record the other call is still no alias for a parameter fact.
+    assert _rated(tmp_path, _python(SLEEP_LOOP), ensure) == []
+
+
+def test_a_call_the_statement_does_not_name_is_not_its_call(tmp_path):
+    """vibora: a ``for`` resuming the stdlib's own generator (``dis``), and uvloop calling
+    ``_set_running_loop`` under ``loop.run_until_complete``."""
+    cells = _runtime("dis._get_instructions_bytes", 5,
+                     "for instr in dis.get_instructions(route_handler):", {"cells": ["x"]})
+    running = _runtime("asyncio.events._set_running_loop", 8,
+                       "loop.run_until_complete(main())", {"running_loop": "loop"})
+    delta = _python({"symbol": "dis._get_instructions_bytes", "kind": "SIGNATURE",
+                     "param": "cells", "old": "POSITIONAL_OR_KEYWORD", "new": None},
+                    {"symbol": "asyncio.events._set_running_loop", "kind": "SIGNATURE",
+                     "param": "running_loop", "old": "POSITIONAL_OR_KEYWORD",
+                     "new": "POSITIONAL_ONLY"})
+    assert _rated(tmp_path, delta, cells, running) == []
+    # The same calls written on the statement are rated.
+    cells.text = "dis._get_instructions_bytes(code, cells=cells)"
+    (risk,) = _rated(tmp_path, delta, cells)
+    assert risk.symbol == "dis._get_instructions_bytes"
+
+
+def test_self_is_never_a_parameter_a_bound_method_call_misses(tmp_path):
+    """hyper: ``MutableMapping.update(*args, **kwds)`` became ``update(self, other=(), /,
+    **kwds)``; ``headers.update(...)`` binds ``self``."""
+    update = _runtime("collections.abc.MutableMapping.update", 242, "headers.update(extra)",
+                      {"args": ["headers", {"a": 1}]})
+    delta = _python({"symbol": "collections.abc.MutableMapping.update", "kind": "SIGNATURE",
+                     "param": "self", "old": None, "new": "POSITIONAL_ONLY (required)"})
+    assert _rated(tmp_path, delta, update) == []
+
+
+def test_an_alias_the_statement_writes_still_carries_a_removal(tmp_path):
+    """``self.assertEquals(...)`` is recorded as ``assertEqual``: the removal of the name the
+    statement writes is the site's."""
+    from pymolt.verify.predict import RiskTier
+
+    call = _runtime("unittest.case.TestCase.assertEqual", 3, "self.assertEquals(1, 1)",
+                    {"first": 1, "second": 1})
+    gone = {"symbol": "unittest.case.TestCase.assertEquals", "kind": "REMOVED"}
+    (risk,) = _rated(tmp_path, _python(gone), call)
+    assert risk.symbol == "unittest.case.TestCase.assertEquals"
+    assert risk.tier is RiskTier.CERTAIN
+
+
+def test_a_private_class_the_statement_reaches_through_a_public_method_is_not_its_call(tmp_path):
+    """locust: ``with self.assertLogs(...)`` runs ``unittest.case._AssertLogsContext``, which
+    Python 3.9 moved to ``unittest._log``; ``TestCase.assertLogs`` is still there."""
+    text = "with self.assertLogs('locust', level='INFO') as logs:"
+    calls = [_runtime(f"unittest.case._AssertLogsContext.{m}", 12, text, {})
+             for m in ("__init__", "__enter__", "__exit__")]
+    calls.append(_runtime("unittest.case.TestCase.assertLogs", 12, text, {}))
+    gone = {"symbol": "unittest.case._AssertLogsContext", "kind": "REMOVED"}
+    kept = {"symbol": "unittest.case.TestCase.assertLogs", "kind": "UNCHANGED"}
+    assert _rated(tmp_path, _python(gone, kept), *calls) == []
+
+
+def test_a_protocol_method_of_a_public_class_is_the_statements_own_operation(tmp_path):
+    """``LooseVersion(a) >= LooseVersion(b)``: the comparison calls ``Version.__ge__``;
+    distutils is gone on 3.12, so the statement fails."""
+    from pymolt.verify.predict import RiskTier
+
+    ge = _runtime("distutils.version.Version.__ge__", 14,
+                  "return LooseVersion(version) >= LooseVersion(minimum)", {})
+    gone = {"symbol": "distutils", "kind": "REMOVED"}
+    (risk,) = _rated(tmp_path, _python(gone), ge)
+    assert risk.symbol == "distutils.version.Version.__ge__"
+    assert risk.tier is RiskTier.CERTAIN
