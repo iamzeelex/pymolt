@@ -640,22 +640,61 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 # ── capture ──────────────────────────────────────────────────────────────────
 
 
-def capture_refusal_hint(slot, static_contacts: int | None) -> str:
-    """The hint for a capture that was not accepted, by what went wrong. A failed run names
-    the failing tests the command log shows, and the log itself."""
-    from pymolt.verify.service import failed_tests, parse_failed_count
+#: What to do about failing tests, by the capture refused (``capture_refusal_hint``).
+_FAILING_TESTS_FIX = {
+    "baseline": "Fix or deselect them, or keep a red baseline with --accept-failing.",
+    "baseline-replicate": (
+        "They did not fail in the baseline, which ran the same code, so they may be flaky: fix "
+        "or deselect them, or keep a red replicate with --accept-failing."),
+    "post-migration": (
+        "Tests that fail after the migration may be what it broke: fix the code and capture "
+        "post-migration again, or keep this run with --accept-failing (stamped red) so verify "
+        "compares it; calls from failing tests are compared as usual."),
+}
+
+
+def capture_refusal_hint(slot, static_contacts: int | None, when: str = "baseline") -> str:
+    """The hint for a capture that was not accepted, by what went wrong and which capture it
+    was (``when``: baseline, baseline-replicate or post-migration). A failed run names the
+    failing tests the command log shows, and the log itself; a run stopped before any test
+    could fail (collection errors, a command line the runner rejected, no test selected)
+    says so by name (``service.command_failure``)."""
+    from pymolt.verify.service import command_failure, failed_tests, parse_failed_count
 
     rc = slot.returncode
     log = f" (see {slot.command_log})" if slot.command_log else ""
+
+    def named(names: list[str], total: int) -> str:
+        if not names:
+            return ""
+        more = f" and {total - len(names)} more" if total > len(names) else ""
+        return f": {', '.join(names)}{more}"
+
+    stopped = command_failure(slot.command_log, rc)
+    if stopped is not None and stopped.kind == "collection":
+        names, total = failed_tests(slot.command_log)
+        fix = ("After a migration this is often module-level code the target breaks (an "
+               "import of a removed module, a changed call): fix the error each one reports, or "
+               "deselect those files (pytest --ignore PATH), then capture post-migration again."
+               if when == "post-migration" else
+               "Fix the error each one reports, or deselect those files (pytest --ignore "
+               "PATH), then capture again.")
+        return (f"{stopped.count or total or 'Some'} test file(s) could not be collected "
+                f"(exit {rc}){named(names, total)}{log}: the test run stopped before any test "
+                f"ran. {fix}")
+    if stopped is not None and stopped.kind == "usage":
+        said = f": {stopped.detail}" if stopped.detail else ""
+        return (f"The command line was rejected (usage error, exit {rc}){said}{log}. Fix the "
+                "command and capture again; the slot is unchanged.")
+    if stopped is not None and stopped.kind == "no-tests":
+        return (f"The command selected no test (exit {rc}){log}. Fix the test selection and "
+                "capture again; the slot is unchanged.")
     if rc not in (None, 0) and slot.events > 0:
         failed, _ = parse_failed_count(slot.command_log)
         names, total = failed_tests(slot.command_log)
-        which = ""
-        if names:
-            more = f" and {total - len(names)} more" if total > len(names) else ""
-            which = f": {', '.join(names)}{more}"
-        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}){which}"
-                f"{log}. Fix or deselect them, or keep a red baseline with --accept-failing.")
+        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc})"
+                f"{named(names, total)}{log}. "
+                + _FAILING_TESTS_FIX.get(when, _FAILING_TESTS_FIX["baseline"]))
     if rc not in (None, 0):
         return (f"The command failed (exit {rc}) and recorded no dependency call"
                 f"{log}. Fix the command and capture again; the slot is unchanged.")
@@ -744,7 +783,7 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
             from pymolt.verify.service import static_contact_count
 
             static_contacts = static_contact_count(project_dir)
-        hint = capture_refusal_hint(slot, static_contacts)
+        hint = capture_refusal_hint(slot, static_contacts, when)
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
     view = ok("\n".join(lines), lists.finish(data, warnings),

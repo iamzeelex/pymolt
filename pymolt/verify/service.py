@@ -1610,6 +1610,55 @@ def failed_tests(command_log: str | Path | None, limit: int = 3) -> tuple[list[s
     return found[:limit], len(found)
 
 
+_COLLECTION_ERRORS = re.compile(r"(\d+) errors? during collection")
+_USAGE_LINE = re.compile(r"^(?:ERROR: )?usage: ", re.IGNORECASE)
+_USAGE_ERROR = re.compile(r"^(?:\S+: error: |ERROR: )(.+)$")
+_NOT_FOUND = re.compile(r"^ERROR: (file or directory not found: .+|not found: .+)$")
+_NO_TESTS = re.compile(r"\bno tests ran\b")
+_TESTS_RAN = re.compile(r"\b\d+ (?:failed|passed)\b")
+
+
+class CommandFailure(BaseModel):
+    """Why a test command stopped before its tests could fail (``command_failure``)."""
+
+    kind: str               # "collection" | "usage" | "no-tests"
+    count: int | None = None    # collection errors
+    detail: str | None = None   # the runner's own words for a usage error
+
+
+def command_failure(command_log: str | Path | None,
+                    returncode: int | None) -> CommandFailure | None:
+    """A failed run that is not failing tests, read from its command log: pytest stopped on
+    collection errors (``Interrupted: N errors during collection``, exit 2), the runner
+    rejected its command line (argparse's or pytest's ``usage:`` and its error line, a path
+    that does not exist), or it selected no test (pytest exit 5). None otherwise, when the
+    log is missing, or when tests ran (a ``N failed`` / ``N passed`` summary: a ``usage:``
+    line is then a test's own output)."""
+    if returncode in (None, 0) or not command_log:
+        return None
+    try:
+        text = Path(command_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if _TESTS_RAN.search(text):
+        return None
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if _USAGE_LINE.match(line):
+            detail = next((m.group(1).strip() for m in map(_USAGE_ERROR.match, lines[i + 1:])
+                           if m), None)
+            return CommandFailure(kind="usage", detail=detail)
+        found = _NOT_FOUND.match(line)
+        if found:
+            return CommandFailure(kind="usage", detail=found.group(1).strip())
+    collection = _COLLECTION_ERRORS.findall(text)
+    if collection:
+        return CommandFailure(kind="collection", count=int(collection[-1]))
+    if returncode == 5 and _NO_TESTS.search(text):
+        return CommandFailure(kind="no-tests")
+    return None
+
+
 def static_contact_count(project_dir: str | Path) -> int | None:
     """How many static contacts the project has (None when they cannot be counted)."""
     try:
