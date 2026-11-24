@@ -832,8 +832,11 @@ class TestMissingSideReason:
         assert "no baseline capture" in report.verdict_reasons
 
     def test_no_captures(self, tmp_path):
+        """QA V7: one reason, settled by capturing the baseline first."""
         report = self._reasons(tmp_path, None, [])
-        assert "no captures" in report.verdict_reasons
+        assert report.verdict_reasons == ["no captures"]
+        (why,) = report.inconclusive_causes
+        assert why.settle == "capture the baseline, then post-migration"
 
 
 class TestStdlibTracing:
