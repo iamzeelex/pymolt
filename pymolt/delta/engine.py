@@ -133,7 +133,9 @@ def _fact_warnings(fact: Any) -> list[RecordedWarning]:
 
 
 def derive_symbols(root: Path, trace: Path | None) -> tuple[dict[str, TouchedSymbol], list[str]]:
-    """Static contact-map targets plus the baseline trace's symbols (and its warnings)."""
+    """Static contact-map targets plus the baseline trace's symbols (and its warnings), the
+    spellings its call sites name that neither records (aliased and inherited attributes), and
+    the spellings its calls reach through their receivers (``touched.receiver_spellings``)."""
     notes: list[str] = []
     touched: dict[str, TouchedSymbol] = {}
     try:
@@ -147,28 +149,37 @@ def derive_symbols(root: Path, trace: Path | None) -> tuple[dict[str, TouchedSym
     for sym, warns in _trace_symbols(root, trace, notes).items():
         t = touched.setdefault(sym, TouchedSymbol(path=sym, origin="trace"))
         t.warnings.extend(warns)
-    for sym in _site_spellings(root, trace, notes):
+    spelled, receivers = _site_spellings(root, trace, notes)
+    for sym in spelled:
         touched.setdefault(sym, TouchedSymbol(path=sym, origin="contact"))
+    for sym, cls in receivers.items():
+        touched.setdefault(sym, TouchedSymbol(path=sym, origin="receiver", receiver=cls))
     return touched, notes
 
 
-def _site_spellings(root: Path, trace: Path | None, notes: list[str]) -> set[str]:
+def _site_spellings(root: Path, trace: Path | None,
+                    notes: list[str]) -> tuple[set[str], dict[str, str]]:
     """Spellings the runtime's code names and the contact map cannot see: aliased attributes
     (``G.node`` recorded as ``Graph.nodes``) and attributes inherited through project classes
-    (``User.__fields__`` on a ``BaseModel`` subclass). Dependency spellings only."""
+    (``User.__fields__`` on a ``BaseModel`` subclass); and the receiver spellings of the
+    baseline's calls (``{spelling: receiver class}``). Dependency spellings only."""
     from pymolt.delta import touched as touched_mod
 
     out: set[str] = set()
+    receivers: dict[str, str] = {}
     try:
         out |= touched_mod.inherited_spellings(root)
         if trace is not None and (trace.exists()
                                   or Path(str(trace) + ".facts.json").exists()):
             from pymolt.verify.facts import load_facts
 
-            out |= touched_mod.alias_spellings(load_facts(trace, root=root).facts, root)
+            facts = load_facts(trace, root=root).facts
+            out |= touched_mod.alias_spellings(facts, root)
+            receivers = touched_mod.receiver_spellings(facts, root)
     except Exception as exc:  # noqa: BLE001 — an enrichment, never a failure
         notes.append(f"site spellings unavailable: {type(exc).__name__}: {exc}")
-    return {s for s in out if not touched_mod.is_stdlib(s)}
+    return ({s for s in out if not touched_mod.is_stdlib(s)},
+            {s: c for s, c in receivers.items() if not touched_mod.is_stdlib(s)})
 
 
 def _trace_symbols(root: Path, trace: Path | None,
@@ -237,11 +248,9 @@ def relocation_candidates(name: str) -> list[str]:
     """The public spellings that may still name ``name``: its own dotted path, then each
     enclosing package's export of the same leaf, nearest first, the top-level package last
     (``sqlalchemy.engine.ResultProxy``, ``pydantic.ValidationError``)."""
-    parts = name.split(".")
-    out = [name]
-    for i in range(len(parts) - 2, 0, -1):
-        out.append(".".join(parts[:i]) + "." + parts[-1])
-    return out
+    from pymolt.delta.touched import public_candidates
+
+    return public_candidates(name)
 
 
 def _defined_as(result: Mapping[str, Any] | None) -> str | None:
@@ -693,14 +702,40 @@ class DiffInput:
     import_failed: frozenset[str] = frozenset()
 
 
+def _class_step(result: Mapping[str, Any] | None) -> dict | None:
+    """The step a receiver spelling (``<class>.<attr>``) reaches its class at: the one before
+    the last. None when the path did not resolve that far."""
+    steps = (result or {}).get("steps") or []
+    if len(steps) < 2 or not steps[-2].get("exists"):
+        return None
+    return steps[-2]
+
+
+def _receiver_paths_off(inp: DiffInput) -> set[str]:
+    """Receiver spellings that do not reach the recorded receiver class in the old version
+    (a candidate public spelling that names another class, or none): no spelling the project
+    uses, so they are compared on neither side."""
+    off: set[str] = set()
+    for path, t in inp.touched.items():
+        if t.origin != "receiver" or not t.receiver:
+            continue
+        step = _class_step(inp.old.get(path))
+        if step is None or step.get("kind") != "class" or step.get("defined_as") != t.receiver:
+            off.add(path)
+    return off
+
+
 def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
     """Classify every touched object; facts grouped by migration package name."""
     def expand(path: str) -> bool:
         t = inp.touched.get(path)
-        return t is None or t.origin != "trace"
+        return t is None or t.origin not in ("trace", "receiver")
 
-    sp_old = spellings(inp.old, expand)
-    sp_new = spellings(inp.new, expand)
+    off = _receiver_paths_off(inp)
+    old_results = {p: r for p, r in inp.old.items() if p not in off}
+    new_results = {p: r for p, r in inp.new.items() if p not in off}
+    sp_old = spellings(old_results, expand)
+    sp_new = spellings(new_results, expand)
 
     # baseline warnings, by the old spelling the touched path ends at
     baseline: dict[str, list[RecordedWarning]] = {}
@@ -762,6 +797,17 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
                 return None if s.exists else s.step.get("error")
         return None
 
+    def vanished_at(name: str) -> str | None:
+        """The first prefix of ``name`` that no longer resolves in the new version (None:
+        the new probe recorded no step of it, so it cannot say)."""
+        parts = name.split(".")
+        for i in range(2, len(parts) + 1):
+            prefix = ".".join(parts[:i])
+            s = sp_new.get(prefix) or extra.get(prefix)
+            if s is not None and not s.exists:
+                return prefix
+        return None
+
     facts: dict[str, list[DeltaFact]] = {}
 
     def add(fact: DeltaFact) -> None:
@@ -771,7 +817,7 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
 
     for canon, members in sorted(groups.items()):
         for fact in _group_facts(canon, sorted(members), sp_old, new_of, new_error, baseline,
-                                 hints.get(canon, (None, None))):
+                                 hints.get(canon, (None, None)), vanished_at):
             add(fact)
     for pkg in facts:
         facts[pkg] = _dedupe(facts[pkg])
@@ -854,6 +900,7 @@ def _group_facts(
     canon: str, members: list[str], sp_old: Mapping[str, Spell],
     new_of: Callable[[str], Spell | None], new_error: Callable[[str], str | None],
     baseline: Mapping[str, list[RecordedWarning]], hint: tuple[str | None, str | None],
+    vanished_at: Callable[[str], str | None] = lambda name: None,
 ) -> list[DeltaFact]:
     leaf = _leaf(canon)
     old_steps = {m: sp_old[m] for m in members}
@@ -910,6 +957,10 @@ def _group_facts(
         else:
             removed.append(m)
 
+    def where_vanished(spells: Iterable[str]) -> dict[str, str] | None:
+        found = {sp: at for sp in spells if (at := vanished_at(sp)) is not None}
+        return found or None
+
     for succ, spells in sorted(moved.items()):
         symbol = canon if canon in spells else spells[0]
         target = new_of(succ)
@@ -919,6 +970,7 @@ def _group_facts(
             deprecated_in_old=old_deprecated,
             evidence=["existence", f"same object reachable as {succ}", *ev.object_level,
                       *baseline_ev],
+            vanished_at=where_vanished(spells),
         )
         fact.detail.update(
             importable=[s for s in spells if old_steps[s].index == 0],
@@ -940,6 +992,7 @@ def _group_facts(
         fact = DeltaFact(
             symbol=symbol, aliases=[s for s in removed if s != symbol], kind="REMOVED",
             old=canon, successor=succ, deprecated_in_old=old_deprecated, evidence=evidence,
+            vanished_at=where_vanished(removed),
         )
         resolved = None
         if succ:
@@ -1064,6 +1117,16 @@ def _group_facts(
         symbol = canon
         out.append(DeltaFact(symbol=symbol, aliases=[s for s in members if s != symbol],
                              kind="UNCHANGED", evidence=["existence", "signature"]))
+    elif surviving:
+        # Spellings that still resolve and changed in nothing, beside facts about the group's
+        # other spellings: named, so a reader can tell "checked, unchanged" from "never probed".
+        named = {sp for f in out for sp in f.spellings()}
+        quiet = [m for m in surviving if m not in named]
+        if quiet:
+            fact = DeltaFact(symbol=quiet[0], aliases=quiet[1:], kind="UNCHANGED",
+                             evidence=["existence", "signature"])
+            fact.detail["canonical"] = canon
+            out.append(fact)
     return out
 
 
@@ -1152,6 +1215,7 @@ def _static_facts(facts: list[DeltaFact], old_results: Mapping[str, dict]) -> li
     out = []
     for fact in facts:
         if fact.kind == "UNCHANGED" and (fact.symbol in unreadable
+                                         or fact.detail.get("canonical") in unreadable
                                          or any(s in unreadable for s in fact.aliases)):
             continue
         fact.basis = {"old": "static", "new": "probe"}
@@ -1176,6 +1240,8 @@ def _dedupe(facts: list[DeltaFact]) -> list[DeltaFact]:
             prev.aliases = sorted(set(prev.aliases) | set(f.aliases))
             prev.evidence = _unique(prev.evidence + f.evidence)
             prev.deprecated_in_old = prev.deprecated_in_old or f.deprecated_in_old
+            if f.vanished_at:
+                prev.vanished_at = {**(prev.vanished_at or {}), **f.vanished_at}
             prev.detail.update({k: v for k, v in f.detail.items() if k not in prev.detail})
         else:
             seen[key] = f

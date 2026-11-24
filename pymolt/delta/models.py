@@ -37,7 +37,11 @@ Fact kinds:
 
 ``symbol`` is the canonical old name (the spelling a baseline trace records) when the fact is
 about the object, and the dropped or rebound spelling when it is about a spelling; ``aliases``
-are the other touched spellings that exhibit the fact.
+are the other touched spellings that exhibit the fact. Every touched spelling the engine
+compared is named by at least one fact: a spelling that still resolves and changed in nothing
+is named by an UNCHANGED fact, even beside a REMOVED or MOVED fact about another spelling of
+the same old object (``NDFrame.groupby`` gone, ``DataFrame.groupby`` still there). A reader can
+so tell a spelling that was checked and found unchanged from one that was never probed.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ SCHEMA = "pymolt.delta/1"
 FactKind = Literal["REMOVED", "MOVED", "SIGNATURE", "DEFAULT", "DEPRECATED", "BEHAVIOR",
                    "UNCHANGED"]
 Quality = Literal["complete", "partial", "inconclusive"]
-Origin = Literal["contact", "trace", "given"]
+Origin = Literal["contact", "trace", "given", "receiver"]
 
 KIND_ORDER = {"REMOVED": 0, "MOVED": 1, "SIGNATURE": 2, "DEFAULT": 3, "DEPRECATED": 4,
               "BEHAVIOR": 5, "UNCHANGED": 6}
@@ -71,15 +75,21 @@ class RecordedWarning(BaseModel):
 
 
 class TouchedSymbol(BaseModel):
-    """One symbol the project touches, with where that knowledge came from."""
+    """One symbol the project touches, with where that knowledge came from.
+
+    ``origin="receiver"``: a spelling a call site reaches through its receiver (``df.groupby``
+    is ``<type(df)>.groupby``, see ``touched.receiver_spellings``); ``receiver`` is the class
+    the baseline recorded, and the spelling counts only where it resolves to that class in the
+    old version."""
 
     path: str
     origin: Origin = "given"
     warnings: list[RecordedWarning] = Field(default_factory=list)
+    receiver: str | None = None
 
 
 _FACT_ADDITIONS = ("basis", "removed_in", "deprecated_in", "warns_since", "origin", "changed_in",
-                   "behavior")
+                   "behavior", "vanished_at")
 
 
 class DeltaFact(BaseModel):
@@ -105,6 +115,10 @@ class DeltaFact(BaseModel):
     # BEHAVIOR facts: the release that changed the behaviour, and the structured cause.
     changed_in: str | None = None
     behavior: dict[str, Any] | None = None
+    # REMOVED / MOVED: for each of its spellings, the first dotted prefix that no longer
+    # resolves in the new version. The spelling itself when only its last name is gone (its
+    # class or module is still there); a shorter prefix when the owner went too.
+    vanished_at: dict[str, str] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_additions(self, handler: Any) -> dict[str, Any]:

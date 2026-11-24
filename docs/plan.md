@@ -33,6 +33,9 @@ irrelevant changes.
     machine.
 - **Same object, new name.** A name that now points to the same object under another spelling is
   followed, not reported as removed.
+- **Receivers.** A method call is also compared under its receiver's class, and under that class's
+  public spellings, not only under the class that defined the method in the old version:
+  `df.groupby(...)`, recorded as `NDFrame.groupby`, is probed as `DataFrame.groupby` too.
 - **Inconclusive, never "no change".** A package pymolt cannot build or probe offline is reported as
   inconclusive.
 
