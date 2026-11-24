@@ -518,6 +518,59 @@ def _with_marker(raw: str, marker: str | None) -> str:
     return f"{head.strip()}; ({own.strip()}) and ({marker})" if sep else f"{raw}; {marker}"
 
 
+_INLINE_COMMENT = re.compile(r"\s+#")
+_VIA = re.compile(r"^\s*#\s*via\b(.*)$")
+_VIA_ITEM = re.compile(r"^\s*#\s{2,}(\S.*)$")
+
+
+def compiled_transitive(manifest_path: Path) -> set[str]:
+    """The packages a pip-compile / ``uv pip compile`` output lists only ``# via`` other
+    packages: transitive, not declared by the project (``certifi==2018.8.24  # via
+    requests``). Entries ``# via -r``/``-c`` a project file, and every entry of a file
+    with no ``# via`` comments at all, stay direct. Normalised names."""
+    try:
+        lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    vias: dict[str, list[str]] = {}
+    current: str | None = None
+    in_block = False
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            spec, _, comment = raw.partition(" #")
+            spec = spec.strip()
+            if spec.startswith("--hash"):
+                continue                    # a continuation line of the current entry
+            current, in_block = None, False
+            if spec.startswith("-") and "#egg=" not in spec:
+                continue
+            name = re.match(r"^([A-Za-z0-9][\w.\-]*)", spec.split("#egg=")[-1])
+            if name is None:
+                continue
+            current = normalize_pkg_name(name.group(1))
+            via = _VIA.match("#" + comment) if comment else None
+            if via is not None:
+                vias.setdefault(current, []).extend(
+                    v.strip() for v in via.group(1).split(",") if v.strip())
+            continue
+        if current is None:
+            continue
+        via = _VIA.match(raw)
+        if via is not None:
+            in_block = True
+            vias.setdefault(current, []).extend(
+                v.strip() for v in via.group(1).split(",") if v.strip())
+            continue
+        item = _VIA_ITEM.match(raw)
+        if in_block and item is not None:
+            vias.setdefault(current, []).append(item.group(1).strip())
+    return {name for name, sources in vias.items()
+            if sources and not any(s.startswith(("-r", "-c")) for s in sources)}
+
+
 def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
     """Parse direct dependency requirements/constraints from the source manifest."""
     from packaging.requirements import Requirement
@@ -532,7 +585,9 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
         try:
             lines = manifest_path.read_text(encoding="utf-8").splitlines()
             for line in lines:
-                line = line.strip()
+                # An inline comment (pip-compile's `# via -r etc/requirements.in`) is not
+                # part of the requirement; pip's grammar needs whitespace before the `#`.
+                line = _INLINE_COMMENT.split(line, 1)[0].strip()
                 if not line or line.startswith("#") or line.startswith("-"):
                     continue
                 try:
