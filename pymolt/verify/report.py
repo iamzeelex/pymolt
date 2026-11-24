@@ -57,6 +57,7 @@ from pymolt.verify.facts import (
     OrderCause,
     diff_facts,
     load_facts,
+    recorded_root,
 )
 from pymolt.verify.identity_resolver import ResolvedIdentity
 from pymolt.verify.models import BoundaryDiff, InconclusiveCause, VerificationVerdict
@@ -507,16 +508,19 @@ class _IdentityIndex:
 
 
 def _map_files(
-    raw_files: Iterable[str], root: Path, contact_files: Iterable[str]
+    raw_files: Iterable[str], root: Path, contact_files: Iterable[str],
+    taken_in: str | None = None,
 ) -> tuple[dict[str, str], str | None]:
     """Runtime file names (``where.file``, ``co_filename``) -> contact files, as the contact map
-    spells them. A path under the project root maps by its relative path; when every path
-    lies outside the root (a container capture, a moved checkout) they map by path suffix,
-    the longest contact path first, rather than claim nothing ran."""
+    spells them. A path under the root the capture was taken in (``taken_in``, its recorded
+    root: a checkout elsewhere) or under the project root maps by its relative path; when every
+    path lies outside both (a container capture, a capture that records no root) they map by
+    path suffix, the longest contact path first, rather than claim nothing ran."""
     by_posix = {Path(f).as_posix(): f for f in contact_files}
     mapping: dict[str, str] = {}
     under_root = False
     outside: list[str] = []
+    bases = [Path(b) for b in dict.fromkeys((taken_in, str(root))) if b]
     for raw in raw_files:
         if raw.startswith("<"):  # <string>, <frozen ...>: no file to attribute
             continue
@@ -525,12 +529,7 @@ def _map_files(
         if not path.is_absolute():
             rel = path.as_posix()
         else:
-            for candidate in (path, Path(os.path.realpath(raw))):
-                try:
-                    rel = candidate.relative_to(root).as_posix()
-                    break
-                except ValueError:
-                    continue
+            rel = _relative_to_any((path, Path(os.path.realpath(raw))), bases)
         if rel is None:
             outside.append(raw)
             continue
@@ -552,20 +551,32 @@ def _map_files(
     )
 
 
-def _site_label(site: str, root: Path, file_map: Mapping[str, str]) -> str:
+def _relative_to_any(candidates: Iterable[Path], bases: Iterable[Path]) -> str | None:
+    """The first candidate path relative to the first base it lies under (each base as given,
+    then its real path); None when none does."""
+    candidates = list(candidates)
+    for base in bases:
+        for b in dict.fromkeys((base, Path(os.path.realpath(base)))):
+            for candidate in candidates:
+                try:
+                    return candidate.relative_to(b).as_posix()
+                except ValueError:
+                    continue
+    return None
+
+
+def _site_label(site: str, root: Path, file_map: Mapping[str, str],
+                taken_in: str | None = None) -> str:
     """A trace's ``file:line`` as the report prints it: project-relative when the file is the
-    project's (by the file map, else under the root), as recorded otherwise."""
+    project's (by the file map, else under the root the capture was taken in or the project
+    root), as recorded otherwise."""
     file, sep, line = site.rpartition(":")
     if not sep or not line.isdigit():
         return site
     rel = file_map.get(file)
     if rel is None and Path(file).is_absolute():
-        for candidate in (Path(file), Path(os.path.realpath(file))):
-            try:
-                rel = candidate.relative_to(root).as_posix()
-                break
-            except ValueError:
-                continue
+        rel = _relative_to_any((Path(file), Path(os.path.realpath(file))),
+                               [Path(b) for b in dict.fromkeys((taken_in, str(root))) if b])
     return f"{rel}:{line}" if rel else site
 
 
@@ -782,7 +793,8 @@ def build_contract_report(
     raw_files = set(view.files)
     if executed is not None:
         raw_files |= set(executed.lines) | set(executed.functions)
-    file_map, scope_note = _map_files(raw_files, root, contact_files)
+    taken_in = recorded_root(trace) if trace else None
+    file_map, scope_note = _map_files(raw_files, root, contact_files, taken_in)
     if scope_note and (view.events or executed is not None):
         report.notes.append(_container_path_note(scope_note, trace, root))
     executed_files: set[str] = set()
@@ -853,7 +865,7 @@ def build_contract_report(
                 status="confirmed" if hits else "blind",
                 callers=sorted(s["callers"]),
                 files=sorted(s["files"]),
-                observed_at=[_site_label(site, root, file_map) for site in sites],
+                observed_at=[_site_label(site, root, file_map, taken_in) for site in sites],
                 contact_kinds=sorted(s["kinds"]),
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
@@ -877,7 +889,8 @@ def build_contract_report(
                 target=obs.name,
                 dep=dep,
                 status="dynamic-only",
-                observed_at=[_site_label(site, root, file_map) for site in obs.sites],
+                observed_at=[_site_label(site, root, file_map, taken_in)
+                             for site in obs.sites],
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
             )

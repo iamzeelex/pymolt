@@ -85,6 +85,7 @@ type level on both sides.
 import ast
 import datetime as _dt
 import difflib
+import gzip
 import io
 import json
 import logging
@@ -290,7 +291,11 @@ class FactSet(BaseModel):
     """All facts of one trace, plus what the trace could and could not tell us."""
 
     source: str | None = None
-    root: str | None = None
+    root: str | None = None          # the project as checked out where verify runs
+    # The project root the capture was taken in (its source snapshot's ``root``): call sites
+    # are made relative to it first, so a capture compares across checkout paths (a copy, a
+    # second worktree, a CI workspace). None: the capture records none (an older capture).
+    capture_root: str | None = Field(default=None, exclude=True)
     aggregated: bool = False         # MemorySink JSON: no distribution, no call order
     events: int = 0                  # events (or aggregated records) folded
     invalid_lines: int = 0
@@ -703,6 +708,8 @@ class FactDiff(BaseModel):
                     reason = "c-site-capped"
                 elif any(n.startswith(CALL_SHAPE) for n in e.notes):
                     reason = "call-shape"
+                elif any(n.startswith(SITE_UNPLACED) for n in e.notes):
+                    reason = "site-unplaced"
                 elif e.comparison is Comparison.MISSING:
                     reason = "rewritten-unpaired"
                 elif any(n.startswith(CONTENT_UNSEEN) for n in e.notes):
@@ -791,6 +798,38 @@ _LINE_ORDER = "\x00order"
 
 def metadata_path(trace_path: str | Path) -> Path:
     return Path(str(trace_path) + ".meta.json")
+
+
+def sources_snapshot_path(trace_path: str | Path) -> Path:
+    """Where a capture keeps its source snapshot (``verify.service.record_sources``):
+    ``<trace>.sources.json.gz``."""
+    return Path(str(trace_path) + ".sources.json.gz")
+
+
+_ROOT_HEAD = 1 << 16   # the snapshot's ``root`` is written second, after its ``schema``
+
+
+def recorded_root(trace_path: str | Path) -> str | None:
+    """The project root a capture was taken in: its source snapshot's ``root``, the real path
+    of the project directory when the capture ran (host side; a container capture's too). None
+    when the capture keeps no snapshot (one older than snapshots, or one that could not be
+    written) or the snapshot names none: then nothing says where the project was. Reads the
+    head of the snapshot only; never raises."""
+    try:
+        with gzip.open(sources_snapshot_path(trace_path), "rt", encoding="utf-8") as fh:
+            head = fh.read(_ROOT_HEAD)
+            found = re.search(r'"root"\s*:\s*', head)
+            if found is not None:
+                try:
+                    value = json.JSONDecoder().raw_decode(head, found.end())[0]
+                except ValueError:
+                    value = None
+            else:
+                data = json.loads(head + fh.read())
+                value = data.get("root") if isinstance(data, dict) else None
+    except (OSError, EOFError, ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, str) and os.path.isabs(value) else None
 
 
 # ── facts snapshots ───────────────────────────────────────────────────────────────────────
@@ -1440,18 +1479,22 @@ def fold_facts(
     source: str | None = None,
     runner: RunnerSpec | None = None,
     runner_source: str | None = None,
+    capture_root: str | None = None,
 ) -> FactSet:
     """Fold v1/v2 JSONL events and/or aggregated MemorySink records into a FactSet.
 
     Facts are kept at line granularity (file, func, line, input); ``FactSet.keyed()`` and
-    ``diff_facts`` merge lines that share a line text.
+    ``diff_facts`` merge lines that share a line text. A call site is made relative to
+    ``capture_root`` (the root the capture was taken in, ``recorded_root``), else to ``root``
+    (the project as checked out now).
     """
     root_s = os.path.abspath(str(root)) if root is not None else None
     site_text = site_text or {}
     rel_cache: dict[str, str] = {}
     acc: dict[tuple, _Acc] = {}
     fs = FactSet(source=source, root=root_s, site_text_entries=len(site_text),
-                 runner=runner, path_map_source=runner_source if runner else None)
+                 runner=runner, path_map_source=runner_source if runner else None,
+                 capture_root=capture_root)
     versions: set[int] = set()
     # Identical inputs / outcomes / call sites recur across facts (one result shared by many
     # inputs, one input at many sites): keep ONE object per canonical form. Decoded JSON is
@@ -1579,7 +1622,8 @@ def load_facts(
     if runner == "auto":
         runner, runner_source = runner_for_trace(base, root)
     fs = fold_facts(records, root=root, site_text=site_text, source=str(trace_path),
-                    runner=runner, runner_source=runner_source)
+                    runner=runner, runner_source=runner_source,
+                    capture_root=recorded_root(base))
     fs.invalid_lines = stats.invalid_lines
     fs.aggregated = fs.aggregated or stats.aggregated
     meta = _read_json(metadata_path(base))
@@ -1612,11 +1656,13 @@ def annotate_capture_meta(fs: FactSet, meta: Mapping[str, Any]) -> FactSet:
         if isinstance(start, int | float) and isinstance(end, int | float) and end >= start:
             windows.append((float(start), float(end)))
     fs.run_windows = windows
-    roots = [fs.root] if fs.root else []
-    if fs.runner is not None and fs.root:
-        seen = to_container(fs.runner, fs.root)
-        if seen:
-            roots.append(seen)
+    roots = []
+    for root in dict.fromkeys(r for r in (fs.root, fs.capture_root) if r):
+        roots.append(root)     # the project as checked out now, and where the capture ran
+        if fs.runner is not None:
+            seen = to_container(fs.runner, root)
+            if seen:
+                roots.append(seen)
     fs.env_roots = sorted({r.rstrip("/") for r in roots if r and r.rstrip("/")},
                           key=lambda r: -len(r))
     fs.host_capture = not fs.paths_mapped
@@ -4467,6 +4513,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
     _soften_capped(entries, old, new, ov, nv, modes)
+    _soften_unplaced(entries, old, new)
     if not sampled:
         _judge_input_variants(entries, ov, nv, modes)
     _review_masked_input(entries)
@@ -4789,6 +4836,64 @@ def _soften_evicted(entries: list[FactEntry], old: FactSet, new: FactSet) -> Non
         if fs.tally_sites is None or (e.symbol, site.file, site.func) in fs.tally_sites:
             e.category = FactCategory.UNCOMPARABLE
             e.notes.append(f"possibly-evicted:{side}")
+
+
+#: Note on an entry whose call site one capture cannot place in the project (``_soften_unplaced``).
+SITE_UNPLACED = "site-unplaced"
+
+
+def _unplaced_files(fs: FactSet, other: FactSet) -> set[str]:
+    """Call-site files ``fs`` cannot place in the project: absolute and outside the project as
+    checked out, on a capture that records no root (``FactSet.capture_root``), and named by no
+    fact of the other capture (a file both captures name by one absolute path lies where it
+    lies, and is compared as recorded)."""
+    if fs.root is None or fs.capture_root is not None:
+        return set()
+    theirs = {f.file for f in other.facts}
+    return {f.file for f in fs.facts if os.path.isabs(f.file) and f.file not in theirs}
+
+
+def _soften_unplaced(entries: list[FactEntry], old: FactSet, new: FactSet) -> None:
+    """A capture that records no root (an older one, without a source snapshot) and was taken
+    in another checkout names its project files by paths this checkout does not have: its calls
+    cannot be placed in the project (no edit provenance, no contact map), and the values that
+    carry its project root cannot be masked. A failing entry it leaves is UNCOMPARABLE
+    (inconclusive: capture that side again), never a FAIL: a call present on one side only at
+    an unplaced file or at a project file an unplaced path may be (it ends in it), and a paired
+    call that differs where one side's site is unplaced. Entries the unplaced files cannot
+    explain keep their category."""
+    unplaced = (_unplaced_files(old, new), _unplaced_files(new, old))
+    if not (unplaced[0] or unplaced[1]):
+        return
+    names = ("old", "new")
+
+    def placed_by(side: int, file: str) -> int | None:
+        if file in unplaced[side]:
+            return side
+        if not os.path.isabs(file) and any(
+                u.replace("\\", "/").endswith("/" + file) for u in unplaced[1 - side]):
+            return 1 - side
+        return None
+
+    for e in entries:
+        if not e.fails:
+            continue
+        by = None
+        if e.category is FactCategory.DISAPPEARED and e.old_site is not None:
+            by = placed_by(0, e.old_site.file)
+        elif e.category is FactCategory.APPEARED and e.new_site is not None:
+            by = placed_by(1, e.new_site.file)
+        else:
+            for side, site in enumerate((e.old_site, e.new_site)):
+                if site is not None and site.file in unplaced[side]:
+                    by = side
+                    break
+            if by is not None:
+                e.comparison = Comparison.UNCOMPARABLE
+        if by is None:
+            continue
+        e.category = FactCategory.UNCOMPARABLE
+        e.notes.append(f"{SITE_UNPLACED}:{names[by]}")
 
 
 _PSEUDO_SCOPES = ("<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>", "<lambda>")
@@ -7218,22 +7323,30 @@ def _within(path: str, root: str) -> bool:
 
 
 def _site_path(fs: FactSet, file: str, *, count: bool = True) -> str:
-    """A call-site file as a project-relative path; a container path goes through the
-    runner's mounts first (``/work/p/a.py`` -> ``<host>/a.py``). ``count``: add the mapping to
+    """A call-site file as a project-relative path: relative to the root the capture was taken
+    in (``FactSet.capture_root``), else to the project as checked out now, so the same project
+    at another path is the same project. A container path goes through the runner's mounts
+    first (``/work/p/a.py`` -> ``<host>/a.py``). ``count``: add the mapping to
     ``paths_mapped`` (the call sites of facts, not those of a capture's accounts)."""
-    if fs.runner is not None and os.path.isabs(file) and not _under_root(file, fs.root):
+    roots = _site_roots(fs)
+    if fs.runner is not None and os.path.isabs(file) and not _under_root(file, *roots):
         host = to_host(fs.runner, file)
         if host is not None:
             if count:
                 fs.paths_mapped += 1
-            return _relativize(host, fs.root)
-    return _relativize(file, fs.root)
+            return _relativize(host, *roots)
+    return _relativize(file, *roots)
 
 
-def _under_root(file: str, root: str | None) -> bool:
-    if root is None:
-        return False
-    return any(_within(f, b) for b in dict.fromkeys((root, os.path.realpath(root)))
+def _site_roots(fs: FactSet) -> tuple[str, ...]:
+    """Where a capture's project files lie, in the order they are tried: the root the capture
+    was taken in, then the project as checked out now."""
+    return tuple(dict.fromkeys(r for r in (fs.capture_root, fs.root) if r))
+
+
+def _under_root(file: str, *roots: str | None) -> bool:
+    return any(_within(f, b) for root in roots if root
+               for b in dict.fromkeys((root, os.path.realpath(root)))
                for f in dict.fromkeys((file, os.path.realpath(file))))
 
 
@@ -7245,7 +7358,13 @@ def _note_foreign_paths(fs: FactSet) -> None:
     fs.paths_foreign = len(foreign)
     if not foreign:
         return
-    if fs.runner is None:
+    if fs.runner is None and fs.capture_root is None:
+        fs.notes.append(
+            f"container paths not mapped: {len(foreign)} call-site file(s) lie outside the "
+            "project root, and the capture records neither the root it was taken in (it keeps "
+            "no source snapshot) nor a container (re-capture, or set the container with "
+            "`pymolt setup`)")
+    elif fs.runner is None:
         fs.notes.append(
             f"container paths not mapped: {len(foreign)} call-site file(s) lie outside the "
             "project root and no runner is recorded for this capture (re-capture, or "
@@ -7303,16 +7422,19 @@ def _canon_path(path: str | Path, project: Path) -> str:
     return os.path.realpath(str(p))
 
 
-def _relativize(file: str, root: str | None) -> str:
-    if root is None:
-        return Path(file).as_posix()
+def _relativize(file: str, *roots: str | None) -> str:
+    """``file`` relative to the first of ``roots`` it lies under (each as given, then its real
+    path); as given when it lies under none."""
     candidates = [file]
     if os.path.isabs(file):
         candidates.append(os.path.realpath(file))
-    for base in dict.fromkeys((root, os.path.realpath(root))):
-        for f in candidates:
-            if os.path.isabs(f) and _within(f, base):
-                return Path(os.path.relpath(f, base)).as_posix()
+    for root in roots:
+        if not root:
+            continue
+        for base in dict.fromkeys((root, os.path.realpath(root))):
+            for f in candidates:
+                if os.path.isabs(f) and _within(f, base):
+                    return Path(os.path.relpath(f, base)).as_posix()
     return Path(file).as_posix()
 
 

@@ -78,7 +78,9 @@ from pymolt.verify.facts import (
     project_snapshot,
     read_snapshot_header,
     record_site_text,
+    recorded_root,
     snapshot_path,
+    sources_snapshot_path,
 )
 from pymolt.verify.inconclusive import (
     NEEDS_EVIDENCE,
@@ -411,6 +413,16 @@ def _changed_lines(old: str, new: str) -> set[int]:
     return changed
 
 
+def _project_relative(file: str, *roots: str | None) -> str | None:
+    """An absolute ``file`` relative to the first of ``roots`` it lies under; None if none."""
+    for root in roots:
+        if root:
+            rel = os.path.relpath(file, root)
+            if not rel.startswith(".."):
+                return Path(rel).as_posix()
+    return None
+
+
 def _read_project_text(root: Path, rel: str) -> str | None:
     try:
         return (root / rel).read_text(encoding="utf-8")
@@ -448,12 +460,15 @@ def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
     if baseline is None:
         return found
     wanted: dict[str, set[int]] = {}
+    # The site text names files as the capture recorded them: relative to the root it was
+    # taken in (a checkout elsewhere), else to this one.
+    taken_in = recorded_root(baseline.trace_path)
     for key, text in load_site_text(baseline.trace_path).items():
         file, _, line = key.rpartition(":")
         if not line.isdigit():
             continue
-        rel = os.path.relpath(file, root) if os.path.isabs(file) else file
-        if rel in covered or rel.startswith(".."):
+        rel = _project_relative(file, taken_in, str(root)) if os.path.isabs(file) else file
+        if rel is None or rel in covered:
             continue
         current = _read_project_text(root, rel)
         if current is None:
@@ -2286,7 +2301,7 @@ def _existing(path: Path) -> str | None:
 
 def sources_path(trace_path: str | Path) -> Path:
     """Where a capture keeps its source snapshot: ``<trace>.sources.json.gz``."""
-    return Path(str(trace_path) + ".sources.json.gz")
+    return sources_snapshot_path(trace_path)
 
 
 def _move_sources(source: str | Path, destination: str | Path) -> None:
