@@ -167,6 +167,12 @@ class TestExitCodes:
                 json.dumps({"t": "return", "q": "dep.f", "in": {"bound": {}},
                             "result": result_value}) + "\n"
             )
+            # the watcher's sidecar: without its event-loss counters a recording is never
+            # compared to a verdict (QA V2-1)
+            (path.parent / (path.name + ".meta.json")).write_text(json.dumps({"counters": {
+                name: 0 for name in ("events_seen", "events_written", "sampling_dropped",
+                                     "backpressure_dropped", "write_failures",
+                                     "sink_failures", "shutdown_dropped")}}))
             return str(path)
 
         old = rec(tmp_path / "old.jsonl", 1)

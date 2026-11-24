@@ -1060,6 +1060,14 @@ def _read_trace_metadata(trace_path: str | Path) -> dict:
 
 
 def _aggregate_runtime_metadata(produced: list[str]) -> dict:
+    """The per-process sidecars of the traces a capture produced, summed."""
+    return _aggregate_process_metadata([_read_trace_metadata(path) for path in produced])
+
+
+def _aggregate_process_metadata(metadatas: list[dict]) -> dict:
+    """Processes' own sidecars (the watcher's ``<trace>.meta.json``, ``{}`` for a process that
+    left none) summed: counters, backpressure, backends, skipped instrumentation, and whether
+    every process reported complete counters (``metadata_complete``)."""
     counters = {
         "events_seen": 0,
         "events_written": 0,
@@ -1076,8 +1084,7 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
     backends: list[str] = []
     skipped: list[dict[str, str]] = []
     metadata_complete = True
-    for trace_path in produced:
-        metadata = _read_trace_metadata(trace_path)
+    for metadata in metadatas:
         if not metadata:
             metadata_complete = False
             continue
@@ -1109,7 +1116,7 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
                 backpressure[key] += value
                 backpressure["reported"] = True
         metadata_complete = metadata_complete and process_counters_complete
-    if len(processes) != len(produced):
+    if len(processes) != len(metadatas):
         metadata_complete = False
     counters["dropped_events"] = sum(counters[name] for name in _DROP_COUNTERS)
     return {
@@ -1120,6 +1127,46 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
         "backends": backends,
         "instrumentation_skipped": skipped,
     }
+
+
+class RecordingLoss(BaseModel):
+    """What a recording's metadata sidecar says about what it may have missed: a recording
+    named on the command line (``verify --baseline/--post-migration``) has no capture slot to
+    carry it, so ``_stamp_verdict`` reads it from the file next to the recording."""
+
+    dropped_events: int | None = None   # None: no complete event-loss counters
+    instrumentation_skipped: list[dict] = Field(default_factory=list)
+    activation_failures: list[dict] = Field(default_factory=list)
+
+
+def recording_loss(trace_path: str | Path) -> RecordingLoss:
+    """The event-loss evidence of a recording, from its ``<trace>.meta.json``: the merged
+    sidecar ``pymolt capture`` writes, or the watcher's own, one process's or several gathered
+    under ``processes``. A facts snapshot reads the sidecar of the trace it stands in for. No
+    sidecar, or one without complete counters for every process: ``dropped_events`` None."""
+    from pymolt.verify.facts import is_facts_snapshot, snapshot_trace_path
+
+    base = snapshot_trace_path(trace_path) if is_facts_snapshot(trace_path) else trace_path
+    meta = _read_trace_metadata(base)
+    if not meta:
+        return RecordingLoss()
+    if "runtime_metadata_complete" in meta:     # a pymolt capture's merged sidecar
+        counters = meta.get("counters")
+        dropped = counters.get("dropped_events") if isinstance(counters, dict) else None
+        return RecordingLoss(
+            dropped_events=dropped if meta["runtime_metadata_complete"] is True
+            and isinstance(dropped, int) and not isinstance(dropped, bool) else None,
+            instrumentation_skipped=[i for i in meta.get("instrumentation_skipped") or ()
+                                     if isinstance(i, dict)],
+            activation_failures=[i for i in meta.get("activation_failures") or ()
+                                 if isinstance(i, dict)])
+    processes = [p for p in meta.get("processes") or () if isinstance(p, dict)] \
+        if isinstance(meta.get("processes"), list) else [meta]
+    runtime = _aggregate_process_metadata(processes or [{}])
+    return RecordingLoss(
+        dropped_events=runtime["counters"]["dropped_events"] if runtime["metadata_complete"]
+        else None,
+        instrumentation_skipped=runtime["instrumentation_skipped"])
 
 
 def _backpressure_wait_seconds(backpressure: dict) -> float | None:
@@ -2779,8 +2826,15 @@ def build_contract_report_from_state(
     report.compared = _compared_recordings(project_dir, state, trace, against)
     _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
     _stamp_source_staleness(project_dir, report, state)
+    # The recordings no capture slot stands for (``--baseline``/``--post-migration`` naming
+    # another file): their own sidecars carry their event-loss evidence (QA V2-1).
+    slot_traces = [slot.trace_path for _, slot in used_slots if getattr(slot, "trace_path", None)]
+    recordings = [(side, path) for side, path in (("post-migration", trace), ("baseline", against))
+                  if path and not any(same_slot_path(project_dir, path, captured)
+                                      for captured in slot_traces)]
     _stamp_verdict(report, trace, against, used_slots,
-                   set_aside=set_aside_capture(state) if trace_override is None else None)
+                   set_aside=set_aside_capture(state) if trace_override is None else None,
+                   recordings=recordings)
     return report
 
 
@@ -3038,6 +3092,7 @@ def _stamp_verdict(
     used_slots: list[tuple[str, object]],
     *,
     set_aside: ContractSlot | None = None,
+    recordings: Iterable[tuple[str, str]] = (),
 ) -> None:
     """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty.
 
@@ -3046,7 +3101,9 @@ def _stamp_verdict(
     unmeasured noise need evidence; review items need a person.
 
     ``set_aside``: the post-migration capture a rollback set aside (see
-    ``_missing_side_reason``)."""
+    ``_missing_side_reason``). ``recordings``: ``(side, path)`` of the compared recordings no
+    capture slot stands for; their sidecars answer what a slot answers for a capture (lost
+    events, skipped instrumentation, untraced processes)."""
     # The verdict reads the WHOLE surface: an impact filter (an applied plan's paths) is a focus
     # for the report, not a limit on what can fail it or on what PASS must cover. FAIL takes
     # the whole diff (``all_*``), or a change nobody predicted could never be found; coverage
@@ -3064,9 +3121,15 @@ def _stamp_verdict(
                 report.notes.append(str(warning))
     # A comparability reason is settled by capturing again (needs evidence), never by a person.
     comparability: dict[str, InconclusiveCause] = {}
+    # The reasons a ``--probe-python`` replay does not depend on: the side that is missing,
+    # and events a recording may have lost. A replay compares each call it replays with that
+    # call's own recorded outcome, so neither touches what a CHANGED replay shows.
+    replay_safe: set[str] = set()
 
-    def unlike(reason: str, settle: str) -> None:
+    def unlike(reason: str, settle: str, *, replay: bool = False) -> None:
         comparability.setdefault(reason, cause(reason, NEEDS_EVIDENCE, "capture", settle))
+        if replay:
+            replay_safe.add(reason)
 
     if trace is None and against is None:
         # Nothing recorded at all: one reason, and it starts with the baseline (QA V7).
@@ -3080,7 +3143,7 @@ def _stamp_verdict(
                    "capture that side again")
     if against is None:
         unlike(_missing_side_reason(trace, used_slots, set_aside),
-               _missing_side_settle(used_slots))
+               _missing_side_settle(used_slots), replay=True)
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
@@ -3103,9 +3166,10 @@ def _stamp_verdict(
         dropped = getattr(slot, "dropped_events", None)
         if dropped is None:
             unlike(f"{name} capture has no event-loss counters",
-                   f"capture {name} again with this pymolt")
+                   f"capture {name} again with this pymolt", replay=True)
         elif dropped:
-            unlike(f"{name} capture dropped {dropped} event(s)", f"capture {name} again")
+            unlike(f"{name} capture dropped {dropped} event(s)", f"capture {name} again",
+                   replay=True)
         skipped = getattr(slot, "instrumentation_skipped", [])
         if skipped:
             unlike(f"{name} capture skipped {len(skipped)} instrumentation target(s)",
@@ -3116,6 +3180,30 @@ def _stamp_verdict(
             unlike(f"{name} capture: the watcher failed to activate in {len(failed)} "
                    "process(es), which ran untraced",
                    f"capture {name} again with the watcher active in every process")
+    # A recording named on the command line answers the same questions from its own sidecar:
+    # without one (a hand-written trace, JSONL merged with `cat`) nothing says it lost no
+    # event, so it can neither PASS nor FAIL a version diff (docs/verify.md, QA V2-1).
+    for side, path in recordings:
+        loss = recording_loss(path)
+        what = f"the {side} recording {Path(path).name}"
+        if loss.dropped_events is None:
+            unlike(f"{what} has no event-loss counters",
+                   f"record the {side} side with `pymolt capture`, or keep the watcher's "
+                   f"`.meta.json` sidecar next to {Path(path).name} (for JSONL merged from "
+                   "several processes, their sidecars gathered as `{\"processes\": [...]}`)",
+                   replay=True)
+        elif loss.dropped_events:
+            unlike(f"{what} dropped {loss.dropped_events} event(s)",
+                   f"record the {side} side again", replay=True)
+        if loss.instrumentation_skipped:
+            unlike(f"{what} skipped {len(loss.instrumentation_skipped)} instrumentation "
+                   "target(s)",
+                   f"record the {side} side again once those targets can be instrumented "
+                   "(its sidecar lists them)")
+        if loss.activation_failures:
+            unlike(f"{what}: the watcher failed to activate in "
+                   f"{len(loss.activation_failures)} process(es), which ran untraced",
+                   f"record the {side} side again with the watcher active in every process")
     baseline = slots.get("baseline")
     post = slots.get("post-migration")
     if baseline is not None and post is not None:
@@ -3167,16 +3255,18 @@ def _stamp_verdict(
     # Changed output from stale or mismatched workloads is evidence to inspect,
     # but it cannot honestly describe the current migration.
     if comparability:
-        if (report.probe_changed and trace is not None and against is None
-                and len(comparability) == 1):
-            # The one capture is otherwise sound, and a probe compares its replay under the
-            # target with that capture's own recording, not with the missing side: a CHANGED
-            # replay is a behaviour change on its own (docs/verify.md: a replay failure FAILs).
+        if report.probe_changed and trace is not None and replay_safe >= set(comparability):
+            # The capture is otherwise sound, and a probe compares its replay under the target
+            # with that capture's own recording, not with the missing side nor with calls it
+            # may have lost: a CHANGED replay is a behaviour change on its own (docs/verify.md:
+            # a replay failure FAILs).
             report.verdict = VerificationVerdict.FAIL
             report.verdict_reasons = ["sandbox replay changed behavior"]
             report.notes.append(
-                f"{next(iter(comparability))}: no version diff ran, so this FAIL rests on the "
-                "probe replay alone")
+                "; ".join(comparability)
+                + (": no version diff ran" if against is None
+                   else ": the version diff is not counted")
+                + ", so this FAIL rests on the probe replay alone")
             return
         report.verdict = VerificationVerdict.INCONCLUSIVE
         report.verdict_reasons = list(comparability)
