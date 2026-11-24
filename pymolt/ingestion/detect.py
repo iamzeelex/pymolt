@@ -122,6 +122,14 @@ def _classify_pyproject_fixation(path: Path) -> SourceFixation:
 # file). The predicate lives in pymolt.core.generated, shared with discovery.
 
 
+def _setup_cfg_declares(path: Path) -> bool:
+    """Whether a setup.cfg declares dependencies (read or computed), i.e. is a manifest."""
+    from pymolt.ingestion.setup_reqs import parse_setup_cfg
+
+    deps = parse_setup_cfg(path)
+    return bool(deps.requirements) or any(n.startswith("computed") for n in deps.notes)
+
+
 def _classify_manifest(path: Path) -> DiscoveredSource | None:
     name = path.name.lower()
     if name == "conda-lock.yml":
@@ -134,6 +142,8 @@ def _classify_manifest(path: Path) -> DiscoveredSource | None:
         return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=_classify_pyproject_fixation(path))
     if name == "pipfile":
         return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=SourceFixation.INTENT)
+    if name == "setup.cfg" and not _setup_cfg_declares(path):
+        return None  # a [flake8]/[tool:pytest] file: no dependencies to offer
     if name in ("setup.py", "setup.cfg"):
         return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=SourceFixation.INTENT)
     if (name.startswith("requirements") and (name.endswith(".txt") or name.endswith(".in"))) or name == "pip-packages.txt":
@@ -152,6 +162,73 @@ def _source_priority(s: DiscoveredSource) -> tuple[int, int, str]:
     if name == "setup.cfg":
         return (1, 2, name)
     return (1, 3, name)
+
+
+#: Manifest stems that describe a *variant* of the project rather than the
+#: project: a docs build, a test extra, one row of a CI matrix. Picking one of
+#: these as the source of truth answers the wrong question — which is what
+#: taking whatever sorted first used to do (six manifests, `requirements-310.txt`
+#: wins on the alphabet, and the whole assess runs on the Python-3.10 row).
+_VARIANT_MARKERS = ("dev", "test", "tests", "doc", "docs", "rtd", "ci", "lint",
+                    "typing", "build", "bench", "example", "examples", "optional")
+
+
+#: Names that state the project's dependencies outright.
+_CANONICAL_MANIFESTS = {"requirements.txt", "requirements.in", "pyproject.toml",
+                        "pipfile", "environment.yml", "environment.yaml"}
+#: Packaging metadata: its dependencies are only partly readable (computed
+#: values are not executed) — a last resort, never the assumed source of truth.
+_UNCLASSIFIED_MANIFESTS = {"setup.py", "setup.cfg"}
+
+
+def _manifest_rank(source) -> tuple:
+    """Sort key for "which of these is the project's real dependency set?".
+
+    Lower sorts first, in tiers: a lock (the exact world that was installed),
+    then a canonical manifest, then a decorated one, then a variant — a docs
+    build, a test extra, one row of a Python matrix — and finally setup.py,
+    whose edges pymolt does not parse yet. Taking whatever sorted first
+    alphabetically is how a six-manifest project got assessed on the
+    Python-3.10 row of its CI matrix.
+    """
+    name = source.path.name
+    lowered = name.lower()
+    stem = lowered.rsplit(".", 1)[0]
+    tail = stem.replace("requirements", "").strip("-_.")
+    words = [w for w in tail.replace("_", "-").split("-") if w]
+    variant = any(w in _VARIANT_MARKERS for w in words)
+    # "310" / "39" / "py38" — a per-interpreter row, not the project.
+    version_specific = any(w.replace("py", "").replace(".", "").isdigit() for w in words)
+
+    if source.subroot:
+        # A part of the repo, not the project at its top: never assumed.
+        tier = 5
+    elif source.is_lock:
+        tier = 0
+    elif lowered in _UNCLASSIFIED_MANIFESTS:
+        tier = 4
+    elif variant or version_specific:
+        tier = 3
+    elif lowered in _CANONICAL_MANIFESTS:
+        tier = 1
+    else:
+        tier = 2
+    return (tier, len(name), lowered)
+
+
+def pick_default_source(sources):
+    """The manifest to assume when the engineer does not choose one: the one rule setup,
+    assess, plan, ingestion and scan's ``chosen_manifest`` share (by :func:`_manifest_rank`)."""
+    return min(sources, key=_manifest_rank) if sources else None
+
+
+def pick_default_name(folder: str | Path, names: Iterable[str]) -> str | None:
+    """Of the manifest file ``names`` in ``folder``, the one :func:`pick_default_source`
+    picks (scan's ``chosen_manifest``); None when none of them is a supported manifest."""
+    classified = [(name, _classify_manifest(Path(folder) / name)) for name in names]
+    classified = [(name, src) for name, src in classified if src is not None]
+    best = pick_default_source([src for _, src in classified])
+    return next((name for name, src in classified if src is best), None)
 
 
 def _subroot_sources(project_path: Path, include_generated: bool) -> list[DiscoveredSource]:

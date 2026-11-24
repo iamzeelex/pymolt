@@ -8,8 +8,9 @@ the information and threw it away, or asserted a guess as a fact.
 from __future__ import annotations
 
 from pymolt.core.legacy_stdlib import describe, is_py2_stdlib, py3_replacement
+from pymolt.ingestion.detect import pick_default_source as _pick_default_manifest
 from pymolt.inventory.edges import build_inventory
-from pymolt.setup.service import _pick_default_manifest, gather_setup_options
+from pymolt.setup.service import gather_setup_options
 
 # ── Python-2 stdlib is evidence, not a dependency ─────────────────────────────
 

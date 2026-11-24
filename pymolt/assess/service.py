@@ -20,7 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from pymolt.core.graph import DependencyGraph
-from pymolt.ingestion.detect import detect_sources, find_source
+from pymolt.ingestion.detect import detect_sources, find_source, pick_default_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 from pymolt.risk.models import RiskReport
 from pymolt.state_io import atomic_write_text
@@ -181,6 +181,31 @@ def describe_resolver_failure(exc: BaseException) -> TargetResolveError:
     )
 
 
+class BaseResolveError(ValueError):
+    """The base manifest does not resolve: the resolver's first error line, its stderr
+    tail (``detail``), the packages it names (``culprits``) and what to do (``hint``)."""
+
+    def __init__(self, message: str, detail: str | None, culprits: list[str], hint: str):
+        super().__init__(message)
+        self.detail = detail
+        self.culprits = list(culprits)
+        self.hint = hint
+
+
+def base_resolve_failure(exc: BaseException, chosen, sources, project_dir) -> BaseResolveError:
+    """``exc`` from resolving the base manifest ``chosen``, as a :class:`BaseResolveError`:
+    never a bare ``Command [...] returned non-zero exit status 2``."""
+    found = describe_resolver_failure(exc)
+    name = chosen.ref(project_dir)
+    others = [s.ref(project_dir) for s in sources if s.path != chosen.path]
+    culprits = f"Culprit(s): {', '.join(found.culprits)}. " if found.culprits else ""
+    another = (f", or assess another manifest: `pymolt setup . --manifest {others[0]}`"
+               if others else "")
+    return BaseResolveError(
+        f"the base manifest {name} does not resolve: {found}", found.detail, found.culprits,
+        f"{culprits}Fix {name}{another}; then assess again.")
+
+
 def manifest_fixation(source) -> str:
     """How firmly the *manifest* pins its versions (``pinned`` / ``intent`` / ...).
 
@@ -197,7 +222,8 @@ def failure_evidence(target_error) -> tuple[str | None, list[str]]:
 
 
 def resolve_chosen_source(sources, manifest_name: str | None, project_dir=None):
-    """Pick the source manifest by name or relative path, or default to the first lock/manifest.
+    """Pick the source manifest by name or relative path, or the default one setup would
+    assume (:func:`pick_default_source`).
 
     Raises ``ValueError`` when a named manifest is not found (the caller decides
     how to surface it).
@@ -208,8 +234,7 @@ def resolve_chosen_source(sources, manifest_name: str | None, project_dir=None):
             return found
         discovered = [s.path.name for s in sources]
         raise ValueError(f"Manifest '{manifest_name}' not found. Discovered: {discovered}")
-    lock_sources = [s for s in sources if s.is_lock]
-    return lock_sources[0] if lock_sources else sources[0]
+    return pick_default_source(sources)
 
 
 def write_constraints_file(project_path: Path, upgrade_constraint, overrides) -> Path | None:
@@ -707,15 +732,20 @@ def run_assess(
     overrides = overrides if overrides is not None else config.get("target_overrides", {})
 
     _p("baseline", 0.1)
-    baseline_graph, report, _degrade_warning = _resolve_baseline_graph(
-        project_dir=str(project_dir),
-        chosen=chosen,
-        target_python=target_python,
-        container_id=container_id,
-        base_python=base_python,
-        use_cache=use_cache,
-        tool=tool,
-    )
+    try:
+        baseline_graph, report, _degrade_warning = _resolve_baseline_graph(
+            project_dir=str(project_dir),
+            chosen=chosen,
+            target_python=target_python,
+            container_id=container_id,
+            base_python=base_python,
+            use_cache=use_cache,
+            tool=tool,
+        )
+    except Exception as exc:
+        if _process_error(exc) is None:
+            raise
+        raise base_resolve_failure(exc, chosen, sources, project_path) from exc
     _p("target", 0.45)
     # The container/legacy interpreter is the *baseline* environment. The TARGET
     # graph is resolved fresh for the new Python via uv's `--python-version`
