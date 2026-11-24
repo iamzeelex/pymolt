@@ -532,6 +532,23 @@ def _map_files(
     )
 
 
+def _site_label(site: str, root: Path, file_map: Mapping[str, str]) -> str:
+    """A trace's ``file:line`` as the report prints it: project-relative when the file is the
+    project's (by the file map, else under the root), as recorded otherwise."""
+    file, sep, line = site.rpartition(":")
+    if not sep or not line.isdigit():
+        return site
+    rel = file_map.get(file)
+    if rel is None and Path(file).is_absolute():
+        for candidate in (Path(file), Path(os.path.realpath(file))):
+            try:
+                rel = candidate.relative_to(root).as_posix()
+                break
+            except ValueError:
+                continue
+    return f"{rel}:{line}" if rel else site
+
+
 @dataclass
 class _Executed:
     """The capture's executed record (``executed`` in each process's sidecar), merged."""
@@ -814,7 +831,7 @@ def build_contract_report(
                 status="confirmed" if hits else "blind",
                 callers=sorted(s["callers"]),
                 files=sorted(s["files"]),
-                observed_at=list(sites),
+                observed_at=[_site_label(site, root, file_map) for site in sites],
                 contact_kinds=sorted(s["kinds"]),
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
@@ -838,7 +855,7 @@ def build_contract_report(
                 target=obs.name,
                 dep=dep,
                 status="dynamic-only",
-                observed_at=list(obs.sites),
+                observed_at=[_site_label(site, root, file_map) for site in obs.sites],
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
             )

@@ -651,3 +651,20 @@ def test_the_report_and_the_runtime_agree_on_the_test_runner_packages():
     from pymolt.verify import _backend, report
 
     assert report.TEST_RUNNER_PACKAGES == _backend.TEST_RUNNER_PACKAGES
+
+
+def test_observed_sites_are_printed_relative_to_the_project(tmp_path):
+    """QA V9: the DYNAMIC-ONLY table printed absolute paths, wrapping each row over three
+    lines; sites in the project are now project-relative, like the BLIND table's."""
+    (tmp_path / "proj").mkdir()
+    root = _project(tmp_path / "proj")
+    views = str(root / "myapp" / "views.py")
+    trace = _trace(tmp_path, [
+        {"q": "flask.Flask", "where": {"file": views, "line": 5}},
+        {"q": "flask.helpers.url_for", "where": {"file": views, "line": 5}},
+        {"q": "flask.helpers.url_for", "where": {"file": "/elsewhere/lib/x.py", "line": 7}}])
+    rep = build_contract_report(root, trace=trace, resolve_identities=False)
+    by = {s.target: s for s in rep.symbols}
+    assert by["flask.Flask"].observed_at == ["myapp/views.py:5"]
+    assert by["flask.helpers.url_for"].status == "dynamic-only"
+    assert by["flask.helpers.url_for"].observed_at == ["myapp/views.py:5", "/elsewhere/lib/x.py:7"]
