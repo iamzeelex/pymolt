@@ -89,5 +89,10 @@ Plus wall time per phase. The scorecard has one row per toy, and adds pandas (`b
 | seaborn | statistical plotting | 0.11 → 0.13 | 3.11 | keyword-only data arguments, `ci=` → `errorbar=`, `distplot`, `factorplot`, `lmplot(size=)`; changes visible only through matplotlib artists |
 | plotly | interactive plotting | 5.24 → 6.x | 3.11 | `titlefont` (`**kwargs` validation), `Heatmapgl`, Mapbox → MapLibre, `make_subplots`/`append_trace`; base64 arrays in `to_dict` |
 | scikit-learn | machine learning (Cython) | 1.1 → 1.6 | 3.11 | parameter renames (`sparse`, `base_estimator`), `normalize=`, `get_feature_names`, `squared=` → `root_mean_squared_error`, `max_features='auto'`, `SCORERS`; KMeans `n_init` |
+| fastapi | web API | FastAPI 0.95 + pydantic 1.10 → FastAPI 0.165 + pydantic 2.14 | 3.11 | `BaseSettings` moved to pydantic-settings, `Field(regex=)`, `conlist(min_items=)`, `root_validator`, `orm_mode`/`from_orm`, `Query(regex=)`, `on_event`; OpenAPI 3.0.2 → 3.1.0 |
+| starlette | ASGI framework | 0.27 → 1.10 | 3.11 | `on_startup`, the `route`/`middleware`/`exception_handler` decorators, `Jinja2Templates(**env_options)`, `TemplateResponse(name, context)`; FileResponse ranges |
+| flask | WSGI framework | Flask 2.0 + Werkzeug 2.0 → Flask 3.1 + Werkzeug 3.1 | 3.10 | `before_first_request`, `JSONEncoder`/`json_encoder`, `_app_ctx_stack`, `Markup`/`escape`, `send_file(attachment_filename=)`, `safe_join`, `safe_str_cmp`, `url_parse`; `get_json()` 415 |
+| djangorestframework | REST on Django | DRF 3.12 + Django 3.2 → DRF 3.18 + Django 5.2 | 3.9 | `NullBooleanField`, `url()`, `ugettext_lazy`, `is_safe_url`, `timezone.utc`, pytz dropped, `USE_TZ` default (S3: DRF reads settings at import) |
+| streamlit | data apps | 1.28 → 1.67 | 3.11 | `st.cache`, `experimental_memo`/`singleton`/`rerun`/`get_query_params`/`set_query_params`; AppTest path resolution; script run by `exec` in a thread |
 
 Toy apps are small (one module, about 5–15 dependency calls, real usage patterns) with a pytest suite. Each runs in under 30 s.

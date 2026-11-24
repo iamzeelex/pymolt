@@ -1,0 +1,350 @@
+{
+ "name": "fastapi",
+ "ecosystem": "web API (pydantic v1 -> v2)",
+ "old": {
+  "python": "3.11",
+  "requirements": [
+   "fastapi==0.95.2",
+   "pydantic==1.10.27",
+   "starlette==0.27.0",
+   "httpx==0.24.1",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "fastapi==0.165.0",
+   "pydantic==2.14.4",
+   "pydantic-settings==2.16.3",
+   "httpx==0.28.1",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "fastapi",
+  "pydantic",
+  "httpx"
+ ],
+ "target_manifest": [
+  "fastapi==0.165.0",
+  "pydantic==2.14.4",
+  "pydantic-settings==2.16.3",
+  "httpx==0.28.1"
+ ],
+ "files": {
+  "app/__init__.py": "",
+  "app/main.py": "from typing import Optional\n\nfrom fastapi import Body, Depends, FastAPI, HTTPException, Query\nfrom fastapi.encoders import jsonable_encoder\n\nfrom app.models import ItemIn, ItemOut, Page\nfrom app.settings import load_settings\nfrom app.store import Store\n\nsettings = load_settings()\napp = FastAPI(title=settings.app_name)\nstore = Store()\n\nSEED = [\n    {\"sku\": \"ABC-001\", \"name\": \"blue mug\", \"price\": 7.5, \"tags\": [\"kitchen\"], \"note\": None},\n    {\"sku\": \"ABC-002\", \"name\": \"red  mug\", \"price\": 8.0, \"discount\": 1.0,\n     \"tags\": [\"kitchen\", \"sale\"], \"note\": \"last ones\"},\n]\nEXAMPLE = {\"sku\": \"XYZ-123\", \"name\": \"pen\", \"price\": 1.2, \"tags\": [\"office\"]}\n\n\n@app.on_event(\"startup\")\ndef seed_store():\n    store.clear()\n    for row in SEED:\n        store.add(ItemIn(**row).dict())\n\n\ndef get_store():\n    return store\n\n\n@app.get(\"/items\", response_model=Page)\ndef list_items(tag: Optional[str] = Query(None, regex=r\"^[a-z]+$\"),\n               s: Store = Depends(get_store)):\n    rows = s.find(tag)\n    return Page(items=[ItemOut.from_orm(r) for r in rows], total=len(rows))\n\n\n@app.get(\"/items/{sku}\", response_model=ItemOut)\ndef read_item(sku: str, s: Store = Depends(get_store)):\n    rec = s.get(sku)\n    if rec is None:\n        raise HTTPException(status_code=404, detail=\"no such item\")\n    return ItemOut.from_orm(rec)\n\n\n@app.post(\"/items\", response_model=ItemOut, status_code=201)\ndef create_item(item: ItemIn = Body(..., example=EXAMPLE), s: Store = Depends(get_store)):\n    if s.get(item.sku):\n        raise HTTPException(status_code=409, detail=\"exists\")\n    rec = s.add(item.dict())\n    return ItemOut.from_orm(rec)\n\n\n@app.get(\"/summary\")\ndef summary(s: Store = Depends(get_store)):\n    rows = s.find()\n    value = round(sum(r.net for r in rows), 2)\n    return jsonable_encoder({\"count\": len(rows), \"value\": value, \"currency\": settings.currency})\n",
+  "app/models.py": "from typing import List, Optional\n\nfrom pydantic import BaseModel, Field, conlist, root_validator, validator\n\nSKU = r\"^[A-Z]{3}-\\d{3}$\"\n\n\nclass ItemIn(BaseModel):\n    sku: str = Field(..., regex=SKU)\n    name: str\n    price: float = Field(..., gt=0)\n    discount: float = 0.0\n    tags: conlist(str, min_items=1)\n    note: Optional[str]\n\n    @validator(\"name\")\n    def tidy_name(cls, v):\n        return \" \".join(v.split()).title()\n\n    @root_validator\n    def discount_below_price(cls, values):\n        price, discount = values.get(\"price\"), values.get(\"discount\")\n        if price is not None and discount >= price:\n            raise ValueError(\"discount must be below price\")\n        return values\n\n\nclass ItemOut(BaseModel):\n    sku: str\n    name: str\n    price: float\n    discount: float\n    tags: List[str]\n    note: Optional[str] = None\n\n    class Config:\n        orm_mode = True\n\n\nclass Page(BaseModel):\n    items: List[ItemOut]\n    total: int\n",
+  "app/settings.py": "from pydantic import BaseSettings\n\n\nclass Settings(BaseSettings):\n    app_name: str = \"inventory\"\n    currency: str = \"EUR\"\n    page_size: int = 50\n\n    class Config:\n        env_prefix = \"INV_\"\n\n\ndef load_settings(**overrides):\n    return Settings(**overrides)\n",
+  "app/store.py": "\"\"\"In-memory storage: plain project code, no dependency calls.\"\"\"\nfrom dataclasses import dataclass, field\nfrom typing import Dict, List, Optional\n\n\n@dataclass\nclass Record:\n    sku: str\n    name: str\n    price: float\n    discount: float = 0.0\n    tags: List[str] = field(default_factory=list)\n    note: Optional[str] = None\n\n    @property\n    def net(self):\n        return round(self.price - self.discount, 2)\n\n\nclass Store:\n    def __init__(self):\n        self._rows: Dict[str, Record] = {}\n\n    def add(self, data):\n        rec = Record(**data)\n        self._rows[rec.sku] = rec\n        return rec\n\n    def get(self, sku):\n        return self._rows.get(sku)\n\n    def find(self, tag=None):\n        rows = sorted(self._rows.values(), key=lambda r: r.sku)\n        return [r for r in rows if tag is None or tag in r.tags]\n\n    def clear(self):\n        self._rows.clear()\n",
+  "tests/test_api.py": "import pytest\nfrom fastapi.testclient import TestClient\n\nfrom app.main import app\nfrom app.settings import load_settings\n\n\n@pytest.fixture()\ndef client():\n    with TestClient(app) as c:\n        yield c\n\n\ndef test_list_items(client):\n    r = client.get(\"/items\")\n    assert r.status_code == 200\n    body = r.json()\n    assert body[\"total\"] == 2\n    assert [i[\"sku\"] for i in body[\"items\"]] == [\"ABC-001\", \"ABC-002\"]\n    assert body[\"items\"][1][\"name\"] == \"Red Mug\"\n\n\ndef test_filter_by_tag(client):\n    r = client.get(\"/items\", params={\"tag\": \"sale\"})\n    assert [i[\"sku\"] for i in r.json()[\"items\"]] == [\"ABC-002\"]\n    assert client.get(\"/items\", params={\"tag\": \"Sale!\"}).status_code == 422\n\n\ndef test_read_item(client):\n    assert client.get(\"/items/ABC-001\").json()[\"name\"] == \"Blue Mug\"\n    assert client.get(\"/items/NOP-000\").status_code == 404\n\n\ndef test_create_item(client):\n    r = client.post(\"/items\", json={\"sku\": \"XYZ-123\", \"name\": \"  fancy   pen \",\n                                    \"price\": 1.25, \"tags\": [\"office\"]})\n    assert r.status_code == 201\n    assert r.json() == {\"sku\": \"XYZ-123\", \"name\": \"Fancy Pen\", \"price\": 1.25, \"discount\": 0.0,\n                        \"tags\": [\"office\"], \"note\": None}\n    assert client.post(\"/items\", json={\"sku\": \"XYZ-123\", \"name\": \"pen\", \"price\": 1,\n                                       \"tags\": [\"office\"]}).status_code == 409\n\n\ndef test_create_item_rejects_bad_input(client):\n    bad = [\n        {\"sku\": \"bad\", \"name\": \"x\", \"price\": 1, \"tags\": [\"a\"]},\n        {\"sku\": \"QQQ-001\", \"name\": \"x\", \"price\": 1, \"tags\": []},\n        {\"sku\": \"QQQ-002\", \"name\": \"x\", \"price\": 1, \"discount\": 2, \"tags\": [\"a\"]},\n    ]\n    assert [client.post(\"/items\", json=b).status_code for b in bad] == [422, 422, 422]\n\n\ndef test_summary(client):\n    assert client.get(\"/summary\").json() == {\"count\": 2, \"value\": 14.5, \"currency\": \"EUR\"}\n\n\ndef test_settings_from_env(monkeypatch):\n    monkeypatch.setenv(\"INV_CURRENCY\", \"USD\")\n    assert load_settings().currency == \"USD\"\n    assert load_settings(page_size=10).page_size == 10\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/settings.py",
+   "old": "from pydantic import BaseSettings\n",
+   "new": "from pydantic_settings import BaseSettings, SettingsConfigDict\n",
+   "if_present": true
+  },
+  {
+   "file": "app/settings.py",
+   "old": "from pydantic.v1 import BaseSettings\n",
+   "new": "from pydantic_settings import BaseSettings, SettingsConfigDict\n",
+   "if_present": true,
+   "why": "pymolt 0.2 rewrites pydantic.BaseSettings to the pydantic.v1 compat shim; the person finishing the move to v2 replaces it with pydantic-settings"
+  },
+  {
+   "file": "app/settings.py",
+   "old": "    class Config:\n        env_prefix = \"INV_\"",
+   "new": "    model_config = SettingsConfigDict(env_prefix=\"INV_\")"
+  },
+  {
+   "file": "app/models.py",
+   "old": "from pydantic import BaseModel, Field, conlist, root_validator, validator\n",
+   "new": "from pydantic import BaseModel, ConfigDict, Field, conlist, field_validator, model_validator\n"
+  },
+  {
+   "file": "app/models.py",
+   "old": "regex=SKU",
+   "new": "pattern=SKU",
+   "if_present": true
+  },
+  {
+   "file": "app/models.py",
+   "old": "min_items=1",
+   "new": "min_length=1",
+   "if_present": true
+  },
+  {
+   "file": "app/models.py",
+   "old": "    note: Optional[str]\n",
+   "new": "    note: Optional[str] = None\n"
+  },
+  {
+   "file": "app/models.py",
+   "old": "    @validator(\"name\")\n    def tidy_name",
+   "new": "    @field_validator(\"name\")\n    @classmethod\n    def tidy_name"
+  },
+  {
+   "file": "app/models.py",
+   "old": "    @root_validator\n    def discount_below_price(cls, values):\n        price, discount = values.get(\"price\"), values.get(\"discount\")\n        if price is not None and discount >= price:\n            raise ValueError(\"discount must be below price\")\n        return values\n",
+   "new": "    @model_validator(mode=\"after\")\n    def discount_below_price(self):\n        if self.discount >= self.price:\n            raise ValueError(\"discount must be below price\")\n        return self\n"
+  },
+  {
+   "file": "app/models.py",
+   "old": "    class Config:\n        orm_mode = True",
+   "new": "    model_config = ConfigDict(from_attributes=True)"
+  },
+  {
+   "file": "app/main.py",
+   "old": "ItemOut.from_orm(",
+   "new": "ItemOut.model_validate(",
+   "replace_all": true,
+   "if_present": true
+  },
+  {
+   "file": "app/main.py",
+   "old": ".dict())",
+   "new": ".model_dump())",
+   "replace_all": true,
+   "if_present": true
+  },
+  {
+   "file": "app/main.py",
+   "old": "Query(None, regex=",
+   "new": "Query(None, pattern=",
+   "if_present": true
+  },
+  {
+   "file": "app/main.py",
+   "old": "Body(..., example=EXAMPLE)",
+   "new": "Body(..., examples=[EXAMPLE])",
+   "if_present": true
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "app/main.py",
+     "append": "\n\ndef api_schema():\n    return app.openapi()\n"
+    },
+    {
+     "file": "tests/test_api.py",
+     "append": "\n\ndef test_api_schema_lists_paths():\n    from app.main import api_schema\n    schema = api_schema()\n    assert schema[\"openapi\"].startswith(\"3.\")\n    assert \"/items/{sku}\" in schema[\"paths\"]\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "fastapi.applications.FastAPI.openapi"
+   ],
+   "behaviour": "FastAPI.openapi() returns {'openapi': '3.0.2', ...} on 0.95.2 with pydantic 1.10 and {'openapi': '3.1.0', ...} on 0.165.0 with pydantic 2 (FastAPI moved to OpenAPI 3.1 in 0.99); Optional fields also become anyOf [..., {'type': 'null'}]. The test only checks the version starts with '3.' and that a path is listed."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "pydantic.BaseSettings",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/settings.py:1",
+   "breaks": "pydantic.errors.PydanticImportError: `BaseSettings` has been moved to the `pydantic-settings` package. See https://pydantic.dev/docs/validation/2.14/migration/#basesettings-has-moved-to-pydantic-settings for more details.",
+   "successor": "pydantic_settings.BaseSettings",
+   "fixable": "manual",
+   "source": "pydantic 2.0 migration guide (BaseSettings has moved to pydantic-settings)",
+   "verified": {
+    "old": "pydantic 1.10.27: pydantic.BaseSettings is pydantic.env_settings.BaseSettings; Settings() reads INV_* from the environment",
+    "new": "pydantic 2.14.4: `from pydantic import BaseSettings` raises PydanticImportError; even hasattr(pydantic, 'BaseSettings') raises it (module __getattr__ migration shim), not AttributeError. pydantic_settings.BaseSettings (pydantic-settings 2.16.3, another distribution) is a different class with the same use; a nested `class Config: env_prefix` still works there (PydanticDeprecatedSince20 only)"
+   }
+  },
+  {
+   "symbol": "pydantic.Field",
+   "kind": "SIGNATURE",
+   "param": "regex",
+   "site": "app/models.py:9",
+   "breaks": "pydantic.errors.PydanticUserError: `regex` is removed. use `pattern` instead",
+   "successor": "pattern",
+   "fixable": "codemod",
+   "source": "pydantic 2.0 migration guide (Field: regex -> pattern)",
+   "verified": {
+    "old": "1.10.27: Field(..., regex=SKU) validates the pattern",
+    "new": "2.14.4: the class body raises PydanticUserError at import (removed-kwargs); Field(..., pattern=SKU) works and rejects 'bad' with 422 in the app"
+   }
+  },
+  {
+   "symbol": "pydantic.conlist",
+   "kind": "SIGNATURE",
+   "param": "min_items",
+   "site": "app/models.py:13",
+   "breaks": "TypeError: conlist() got an unexpected keyword argument 'min_items'",
+   "successor": "min_length",
+   "fixable": "codemod",
+   "source": "pydantic 2.0 migration guide (conlist min_items/max_items -> min_length/max_length)",
+   "verified": {
+    "old": "1.10.27: signature (item_type, *, min_items=None, max_items=None, unique_items=None)",
+    "new": "2.14.4: signature (item_type, *, min_length=None, max_length=None, unique_items=None); min_items raises TypeError at import"
+   }
+  },
+  {
+   "symbol": "pydantic.validator",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/models.py:16",
+   "breaks": "no break: PydanticDeprecatedSince20 'Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators'",
+   "successor": "pydantic.field_validator",
+   "fixable": "manual",
+   "source": "pydantic 2.0 migration guide",
+   "verified": {
+    "old": "1.10.27: no warning",
+    "new": "2.14.4: works, warns at class definition; __deprecated__ is set on pydantic.validator (now in pydantic.deprecated.class_validators)"
+   }
+  },
+  {
+   "symbol": "pydantic.root_validator",
+   "kind": "DEPRECATED",
+   "param": "skip_on_failure",
+   "site": "app/models.py:20",
+   "breaks": "pydantic.errors.PydanticUserError: If you use `@root_validator` with pre=False (the default) you MUST specify `skip_on_failure=True`. Note that `@root_validator` is deprecated and should be replaced with `@model_validator`.",
+   "successor": "pydantic.model_validator",
+   "fixable": "manual",
+   "source": "pydantic 2.0 migration guide (root_validator -> model_validator)",
+   "verified": {
+    "old": "1.10.27: bare @root_validator works, no warning",
+    "new": "2.14.4: still resolves and is marked deprecated (__deprecated__, PydanticDeprecatedSince20), but the bare decorator raises PydanticUserError at class definition: the call as written fails although the spelling and its parameters still exist (signature _func=None -> *__args). Labelled DEPRECATED, the kind its probe shows; the break is the raise"
+   }
+  },
+  {
+   "symbol": "pydantic.BaseModel.from_orm",
+   "kind": "DEPRECATED",
+   "param": null,
+   "sites": [
+    "app/main.py:37",
+    "app/main.py:45",
+    "app/main.py:53"
+   ],
+   "breaks": "pydantic.errors.PydanticUserError: You must set the config attribute `from_attributes=True` to use from_orm (orm_mode in a class Config is only renamed with a UserWarning, not honoured)",
+   "successor": "pydantic.BaseModel.model_validate",
+   "fixable": "codemod",
+   "source": "pydantic 2.0 migration guide",
+   "verified": {
+    "old": "1.10.27: ItemOut.from_orm(record) with Config.orm_mode works",
+    "new": "2.14.4: from_orm is deprecated (warns) and raises unless model_config from_attributes=True; with from_attributes, from_orm still works (warns) and model_validate(record) gives the same model; model_validate without from_attributes raises ValidationError"
+   }
+  },
+  {
+   "symbol": "pydantic.BaseModel.dict",
+   "kind": "DEPRECATED",
+   "param": null,
+   "sites": [
+    "app/main.py:26",
+    "app/main.py:52"
+   ],
+   "breaks": "no break: PydanticDeprecatedSince20 'The `dict` method is deprecated; use `model_dump` instead.'",
+   "successor": "pydantic.BaseModel.model_dump",
+   "fixable": "codemod",
+   "source": "pydantic 2.0 migration guide",
+   "verified": {
+    "old": "1.10.27: .dict() no warning",
+    "new": "2.14.4: same dict, warns; model_dump() gives the same dict"
+   }
+  },
+  {
+   "symbol": "pydantic.BaseModel.Config",
+   "kind": "BEHAVIOR",
+   "param": "orm_mode",
+   "site": "app/models.py:36",
+   "breaks": "UserWarning: Valid config keys have changed in V2: * 'orm_mode' has been renamed to 'from_attributes'; the old key is not honoured by from_orm (PydanticUserError above) nor model_validate (ValidationError: Input should be a valid dictionary or instance of ItemOut)",
+   "successor": "model_config = ConfigDict(from_attributes=True)",
+   "fixable": "manual",
+   "source": "pydantic 2.0 migration guide (config keys renamed)",
+   "verified": {
+    "old": "1.10.27: orm_mode honoured",
+    "new": "2.14.4: renamed key warned, not honoured"
+   }
+  },
+  {
+   "symbol": "pydantic.BaseModel",
+   "kind": "BEHAVIOR",
+   "param": "note",
+   "site": "app/models.py:14",
+   "breaks": "`note: Optional[str]` without a default is now required: POST /items without note answers 422 instead of 201 (test_create_item: assert 422 == 201)",
+   "successor": "note: Optional[str] = None",
+   "fixable": "manual",
+   "source": "pydantic 2.0 migration guide (required, optional and nullable fields)",
+   "verified": {
+    "old": "1.10.27: M() with a: Optional[str] -> M(a=None)",
+    "new": "2.14.4: ValidationError Field required [type=missing]"
+   }
+  },
+  {
+   "symbol": "fastapi.Query",
+   "kind": "DEPRECATED",
+   "param": "regex",
+   "site": "app/main.py:34",
+   "breaks": "no break: FastAPIDeprecationWarning '`regex` has been deprecated, please use `pattern` instead'",
+   "successor": "pattern",
+   "fixable": "codemod",
+   "source": "FastAPI 0.100.0 release notes (pydantic v2; regex -> pattern)",
+   "verified": {
+    "old": "0.95.2: Query(None, regex=...) works, no warning, no pattern parameter",
+    "new": "0.165.0: both regex and pattern in the signature; regex warns and still validates (422 for 'Sale!')"
+   }
+  },
+  {
+   "symbol": "fastapi.Body",
+   "kind": "DEPRECATED",
+   "param": "example",
+   "site": "app/main.py:49",
+   "breaks": "no break: FastAPIDeprecationWarning '`example` has been deprecated, please use `examples` instead'",
+   "successor": "examples",
+   "fixable": "manual",
+   "source": "FastAPI 0.99.0 release notes (OpenAPI 3.1 examples)",
+   "verified": {
+    "old": "0.95.2: Body(..., example=EXAMPLE) no warning",
+    "new": "0.165.0: warns; examples takes a list, so the value changes shape ([EXAMPLE])"
+   }
+  },
+  {
+   "symbol": "fastapi.FastAPI.on_event",
+   "kind": "DEPRECATED",
+   "param": null,
+   "site": "app/main.py:22",
+   "breaks": "no break: DeprecationWarning 'on_event is deprecated, use lifespan event handlers instead.'",
+   "successor": "FastAPI(lifespan=...) (an async context manager; no drop-in symbol)",
+   "fixable": "manual",
+   "source": "FastAPI 0.93+ lifespan docs; deprecated in 0.103",
+   "verified": {
+    "old": "0.95.2: no warning",
+    "new": "0.165.0: works (TestClient context runs the startup handler), warns; __deprecated__ set. The manual migration leaves it: an ordinary deferred deprecation"
+   }
+  },
+  {
+   "symbol": "fastapi.applications.FastAPI.openapi",
+   "kind": "BEHAVIOR",
+   "param": null,
+   "site": "app/main.py:64",
+   "scenario": "change",
+   "breaks": "Only the change scenario: openapi() returns 'openapi': '3.0.2' on 0.95.2 and '3.1.0' on 0.165.0; Optional fields become anyOf [string, null]",
+   "successor": null,
+   "fixable": "manual",
+   "source": "FastAPI 0.99.0 release notes (OpenAPI 3.1.0)",
+   "verified": {
+    "old": "app.openapi()['openapi'] == '3.0.2'; note: {'title': 'Note', 'type': 'string'}",
+    "new": "'3.1.0'; note: {'anyOf': [{'type': 'string'}, {'type': 'null'}], 'title': 'Note'}"
+   }
+  }
+ ],
+ "expected_warnings": [
+  {
+   "symbol": "fastapi.FastAPI.on_event",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "new"
+  }
+ ],
+ "notes": "FastAPI 0.95.2 + pydantic 1.10.27 (+ starlette 0.27.0, httpx 0.24.1) on 3.11 -> FastAPI 0.165.0 + pydantic 2.14.4 + pydantic-settings 2.16.3 (+ starlette 1.10.0, httpx 0.28.1) on 3.12: the pydantic v1 -> v2 move people make through FastAPI 0.100. Old side emits NO deprecation warning from the app's calls (pydantic v1 never warns; FastAPI 0.95 has no regex/example/on_event deprecation); the only old-side warning is anyio's BlockingPortal alias from starlette.testclient's import (library internal, not an app call). So expected_warnings holds only the new-side on_event DeprecationWarning, which survives the manual migration (on_event is deliberately left: it still works). Unmigrated on the new side the first failure is the import of app.models (Field regex= raises PydanticUserError at class definition), so every test errors at collection; the per-entry 'breaks' were recorded by leaving one manual edit out at a time (and with direct calls for root_validator). pydantic 1.10.27 is the compiled (Cython) build on 3.11 (G1 territory); pydantic 2 has pydantic-core (Rust). Tests use FastAPI's TestClient (httpx) offline; 422 bodies are only checked by status code because their JSON shape changes in v2 (type 'value_error.missing' -> 'missing', plus 'input'/'url'), which would make the equivalent scenario differ. starlette 1.10 warns 'Using httpx with starlette.testclient is deprecated; install httpx2' at TestClient import (StarletteDeprecationWarning): library internal. manual_migration edits apply to the original text in order; 'if_present' skips a site pymolt already rewrote."
+}
