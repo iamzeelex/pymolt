@@ -25,6 +25,7 @@ from pathlib import Path
 
 from pymolt.assess import AssessResult
 from pymolt.assess.service import (
+    UNKNOWN_VERSION,
     _is_missing_container_error,
     build_comparison_rows,
     resolve_chosen_source,
@@ -55,15 +56,18 @@ log = logging.getLogger(__name__)
 
 def migrations_from_rows(rows: list[dict]) -> list[DependencyMigration]:
     """
-    Convert assess comparison rows into dependency migrations — only the
-    packages that actually changed version (status == 'upgrade', both versions
-    concrete). 'added'/'removed'/'unchanged' rows yield no codemods.
+    Convert assess comparison rows into dependency migrations: the packages that
+    changed version (status == 'upgrade', both versions concrete), and the ones whose
+    base version is unknown ('base-unknown'), with ``from_version`` "unknown" — the plan
+    states those as moves it could not compute (see :func:`known_migrations`), never as
+    a move from a guessed release. 'added'/'removed'/'unchanged' rows yield no codemods.
     """
     migrations: list[DependencyMigration] = []
     for row in rows:
-        if row.get("status") != "upgrade":
+        status = row.get("status")
+        if status not in ("upgrade", "base-unknown"):
             continue
-        old = row.get("baseline_version")
+        old = UNKNOWN_VERSION if status == "base-unknown" else row.get("baseline_version")
         new = row.get("target_version")
         name = row.get("name")
         if not (name and old and new) or old in ("unpinned", None) or new in ("unpinned", None):
@@ -72,7 +76,18 @@ def migrations_from_rows(rows: list[dict]) -> list[DependencyMigration]:
     return migrations
 
 
-_WITNESSABLE = ("upgrade", "unchanged", "added")
+def known_migrations(
+    migrations: list[DependencyMigration],
+) -> tuple[list[DependencyMigration], list[DependencyMigration]]:
+    """``(known, unknown)``: the moves with a base version, and those without one.
+
+    Only the known ones go to the delta engine: for an unknown base it would have to pick
+    an old release (the manifest's floor, a 2013 sdist), which is a guess."""
+    known = [m for m in migrations if m.from_version != UNKNOWN_VERSION]
+    return known, [m for m in migrations if m.from_version == UNKNOWN_VERSION]
+
+
+_WITNESSABLE = ("upgrade", "unchanged", "added", "base-unknown")
 
 
 def witness_rows(
@@ -103,11 +118,13 @@ def witness_rows(
         resolved = row.get("baseline_version")
         status = "upgrade" if ran != target else "unchanged"
         out.append({**row, "baseline_version": ran, "status": status})
-        if "upgrade" not in (status, row.get("status")):
+        if "upgrade" not in (status, row.get("status")) and row.get("status") != "base-unknown":
             continue                        # the correction changes no migration
         notes.append(f"{name}: the baseline capture ran {ran}"
                      + (f" (the baseline manifest resolves to {resolved} today)"
-                        if resolved not in (None, "unpinned") else ""))
+                        if resolved not in (None, "unpinned", UNKNOWN_VERSION)
+                        else " (the base version was unknown)"
+                        if resolved == UNKNOWN_VERSION else ""))
     return out, notes
 
 
@@ -581,16 +598,25 @@ def build_migration_plan(
     previews: list[FilePreview] = []
     downgraded: list[str] = []
     provider = codemod_provider(root, online=online)
-    if migrations:
+    known, unknown = known_migrations(migrations)
+    if known:
         by_pkg, previews = preview_codemods(
-            root, migrations, client=provider, progress=progress,
+            root, known, client=provider, progress=progress,
             on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
             auto_apply_only=True, on_downgraded=downgraded.extend, on_step=recorder.record,
         )
         recorder.note_packages(by_pkg)
     # The provider's delta reports feed the plan's risk prediction as-is, so the facts are
-    # computed once.
-    delta_reports = getattr(provider, "reports", None) or None
+    # computed once. A move from an unknown base is never computed: its delta is
+    # inconclusive, with what settles it.
+    from pymolt.delta.provider import inconclusive_impact, unknown_base_report
+
+    reports = list(getattr(provider, "reports", None) or ())
+    for move in unknown:
+        report = unknown_base_report(move.name, move.to_version)
+        reports.append(report)
+        impacts[move.name] = [inconclusive_impact(report)]
+    delta_reports = reports or None
     python_move = None
     if config.base_python and config.target_python:
         from pymolt.pyversion.plan import same_python_minor

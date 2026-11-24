@@ -260,6 +260,12 @@ def extract_constraint(declared: str | None) -> str | None:
         return text or "any"
 
 
+#: A base version pymolt did not observe: the base graph names the package but no lock,
+#: interpreter, container or exact pin said which version is installed (a ``declared-only``
+#: base). Never a version to compute API changes from.
+UNKNOWN_VERSION = "unknown"
+
+
 def build_comparison_rows(
     baseline_graph, target_graph, target_python, target_error, target_culprits=None,
 ) -> list[dict]:
@@ -267,7 +273,9 @@ def build_comparison_rows(
 
     When the target did not resolve, only the packages the resolver named
     (``target_culprits``, else the ones ``target_error`` carries) are ``conflict``;
-    every other row is ``unresolved``: the resolver never judged it.
+    every other row is ``unresolved``: the resolver never judged it. A base package
+    whose version is unknown is ``base-unknown`` with ``baseline_version`` "unknown",
+    never an ``upgrade``: nothing says it moves.
 
     Shared by the CLI table renderer and ``--json``. One row per package
     in the union; visibility filtering is the renderer's concern.
@@ -291,7 +299,7 @@ def build_comparison_rows(
         elif t and t.declared_requirement:
             declared = t.declared_requirement
 
-        baseline_version = b.version if (b and b.version) else ("unpinned" if b else None)
+        baseline_version = (b.version or UNKNOWN_VERSION) if b else None
 
         if target_python:
             if target_error:
@@ -301,6 +309,8 @@ def build_comparison_rows(
                 target_version = t.version or "unpinned"
                 if not b:
                     status = "added"
+                elif not b.version:
+                    status = "base-unknown"
                 elif b.version != t.version:
                     status = "upgrade"
                 else:

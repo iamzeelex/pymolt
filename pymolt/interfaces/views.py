@@ -459,7 +459,8 @@ def setup_view(options, project_dir: str | Path, *, config=None,
 
 # ── assess ───────────────────────────────────────────────────────────────────
 
-_ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3, "added": 4}
+_ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3,
+                 "base-unknown": 3, "added": 4}
 _VERDICT_LEVEL = {"red": "blocked", "yellow": "unproven", "green": "resolves"}
 
 
@@ -597,6 +598,8 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         f"added: {counts.get('added', 0)}, removed: {counts.get('removed', 0)}, "
         f"conflicts: {counts.get('conflict', 0)}, "
         + (f"unresolved: {counts['unresolved']}, " if counts.get("unresolved") else "")
+        + (f"base version unknown: {counts['base-unknown']}, "
+           if counts.get("base-unknown") else "")
         + f"manual-zone: {len(manual_zone)}."
     )
     lines.append(f"{len(moved)} package(s) differ, {counts.get('unchanged', 0)} unchanged. "

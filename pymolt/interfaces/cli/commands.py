@@ -1952,6 +1952,7 @@ _PROVENANCE_LABELS = {
 #: column, so this only has to say what kind of move it is.
 _STATUS_MARK = {
     "upgrade": ("▲ upgrade", "bold blue"),
+    "base-unknown": ("? base unknown", "yellow"),
     "added": ("✚ added", "cyan"),
     "conflict": ("⚠ conflict", "bold red"),
     "unresolved": ("? unresolved", "yellow"),
@@ -2092,7 +2093,7 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
         console.print("\n[bold yellow]Customize Target Version Overrides:[/bold yellow]")
         for idx, pkg_name in enumerate(all_packages, 1):
             b_node = baseline_graph.nodes.get(pkg_name)
-            b_ver = b_node.version if (b_node and b_node.version) else "unpinned"
+            b_ver = b_node.version if (b_node and b_node.version) else "unknown"
             t_node = target_graph.nodes.get(pkg_name) if target_graph else None
             t_ver = t_node.version if t_node else "-"
             override = config.get("target_overrides", {}).get(pkg_name, "")

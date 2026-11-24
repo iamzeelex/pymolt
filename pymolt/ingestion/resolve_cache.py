@@ -34,6 +34,12 @@ def _hash_file(h: "hashlib._Hash", path: Path | None) -> None:
         pass
 
 
+#: Bumped when what a resolve stores changes, so a graph an older pymolt cached is never
+#: read back as current. 2: a declared-only base keeps unknown versions unknown, where 1
+#: stored the manifest's floor (or 0.0.0) as the installed version.
+GRAPH_FORMAT = "2"
+
+
 def compute_key(
     source_path: Path,
     base_python: str | None,
@@ -45,6 +51,7 @@ def compute_key(
 ) -> str:
     """Derive a stable cache key from everything that affects the resolution."""
     h = hashlib.sha256()
+    h.update(f"graph-format={GRAPH_FORMAT};".encode())
     h.update(Path(source_path).name.encode())
     _hash_file(h, source_path)
     _hash_file(h, extra_path)  # e.g. the conda-lock alongside an environment.yml
