@@ -92,6 +92,17 @@ def orchestrate_ingestion(
         if use_cache:
             resolve_cache.store(project_path, cache_key, graph)
 
+    if selected_source.mode == Mode.PYPI and not selected_source.is_lock:
+        # A pip-compile output read as a manifest lists every package; its `# via`
+        # comments say which ones only other packages pulled in.
+        from pymolt.ingestion.detect import compiled_transitive, normalize_pkg_name
+
+        transitive = compiled_transitive(selected_source.path)
+        for key, node in graph.nodes.items():
+            if node.direct and normalize_pkg_name(key) in transitive:
+                node.direct = False
+        graph.roots = [r for r in graph.roots if normalize_pkg_name(r) not in transitive]
+
     how = _how_resolved(graph, selected_source, detected_python, container_id)
     if how:
         warnings.append(how)

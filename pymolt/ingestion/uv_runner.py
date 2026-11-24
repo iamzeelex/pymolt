@@ -11,6 +11,7 @@ from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixatio
 from pymolt.core.graph import DependencyGraph, Edge, Node
 from pymolt.ingestion.detect import (
     DiscoveredSource,
+    _classify_specs,
     extract_declared_requirements,
     normalize_pkg_name,
     pinned_version,
@@ -96,7 +97,8 @@ def graph_from_declared_requirements(
         edges=[],
         roots=roots,
         resolution_quality=ResolutionQuality.DECLARED_ONLY,
-        source_fixation=SourceFixation.INTENT,
+        # What the declarations pin: a fully pinned manifest read as declared is pinned.
+        source_fixation=_classify_specs(declared_reqs.values()),
     )
 
 
