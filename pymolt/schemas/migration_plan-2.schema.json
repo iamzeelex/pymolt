@@ -1348,6 +1348,18 @@
         "site": {
           "$ref": "#/$defs/RiskSite"
         },
+        "spelling": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spelling"
+        },
         "step_id": {
           "anyOf": [
             {
@@ -1366,6 +1378,11 @@
         },
         "tier": {
           "$ref": "#/$defs/RiskTier"
+        },
+        "unverified": {
+          "default": false,
+          "title": "Unverified",
+          "type": "boolean"
         },
         "warnings": {
           "items": {
