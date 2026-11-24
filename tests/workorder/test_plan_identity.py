@@ -9,6 +9,7 @@ import pytest
 from _stepwise import APP, RECIPES, plan_for, project
 from pydantic import ValidationError
 
+from pymolt.machine_paths import PathScrubber
 from pymolt.migration_plan import (
     DIGEST_EXCLUDED_FIELDS,
     NAME_RE,
@@ -311,7 +312,10 @@ def test_a_plan_binds_its_baseline_as_a_capture_ref(tmp_path):
     assert plan.baseline == CaptureRef(
         capture_id=slot.capture_id, captured_at=slot.captured_at,
         trace_sha256=plan.baseline_trace_sha256, env_fingerprint=slot.env_fingerprint,
-        env_setup_fingerprint=slot.env_setup_fingerprint, command=slot.command)
+        env_setup_fingerprint=slot.env_setup_fingerprint,
+        command=PathScrubber(tmp_path)(list(slot.command)))
+    # The capture's command names no folder of the machine: its script is the project's.
+    assert plan.baseline.command[-1] == "baseline_run.py"
     assert plan.baseline.capture_id == capture_id(slot.captured_at, slot.trace_sha256)
     assert plan.baseline_warning is None
 

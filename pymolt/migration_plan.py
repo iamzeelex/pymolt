@@ -31,6 +31,7 @@ from pydantic import (
 
 from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
+from pymolt.machine_paths import PathScrubber, scrub_prose
 from pymolt.state_io import (
     MIGRATION_LOCK,
     FileLock,
@@ -821,6 +822,9 @@ def create_migration_plan(
         compile_findings=compile_findings,
         steps=steps,
     )
+    # A plan can be committed: what pymolt writes about the machine (probed interpreters, the
+    # target environment, the baseline's command) names no folder of it (``machine_paths``).
+    scrub_prose(plan, PathScrubber(project_dir))
     plan._baseline_warning = baseline_warning
     return plan
 

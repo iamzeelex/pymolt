@@ -202,6 +202,12 @@ All notable changes to pymolt. The format follows
   pointer, or one that names a plan the store does not hold, refuses `plan`, `apply` and
   `verify`, and `status` reports it. A checkout with saved plans and no pointer makes none of
   them current: `status` and `apply` name the newest and how to choose one.
+- A plan names no folder of the machine it was made on, so its folder can be committed: in what
+  pymolt writes about the machine (the interpreters the delta engine probed, the target
+  environment setup names, the baseline's command and each step's check command) a path inside
+  the project is relative to it and a path under the home folder is `~/...`. The project's own
+  text (sources, anchors, manifest lines) is kept as written. `status` shows the baseline's
+  command the same way.
 - `apply --plan` takes `current` (the default), a plan name, a plan id prefix (4 to 32 hex) or a
   path. A reference that matches no plan, or several, exits 2. An `apply` that writes (a step,
   `--skip`, `--record`) makes its plan the current plan; a plan file written with `plan -o` is
