@@ -307,7 +307,9 @@ Whether a statement ran comes from the capture. The numbers say how (**granulari
 The record is in each process's capture metadata (`executed`). Below 3.12, a long-run capture
 records functions only until it switches from discovery to the targeted wrappers, and the report
 notes it. When contacts were judged at different granularities, the headline gives the coarsest
-and the count for each.
+and the count for each. When a contact counts as ran only because its function or file ran, the
+report, `--agent` (`coverage_bounded`) and `status` give coverage as "at most" (an upper bound)
+and recall as "at least" (a lower bound): such a miss may be a branch not taken, not a tracer gap.
 
 **Unobservable** contacts are left out of both numbers and counted on their own line:
 - attribute reads, base classes and constants (`Loader=yaml.SafeLoader`, `class V(dep.Base)`,

@@ -1133,8 +1133,11 @@ def coverage_lines(rep) -> list[str]:
     counts = rep.granularity_counts or {}
     if len(counts) > 1:
         granularity += " (" + ", ".join(f"{n} by {g}" for g, n in counts.items()) + ")"
-    lines = [f"Coverage: {_pct(rep.coverage)} ({reached} of {observable} contacts ran; "
-             f"granularity {granularity})   Recall: {_pct(rep.recall)} "
+    # Ran only by its function or file: coverage an upper bound, recall a lower bound.
+    bounded = getattr(rep, "coverage_bounded", False)
+    lines = [f"Coverage: {'at most ' if bounded else ''}{_pct(rep.coverage)} ({reached} of "
+             f"{observable} contacts ran; granularity {granularity})   Recall: "
+             f"{'at least ' if bounded else ''}{_pct(rep.recall)} "
              f"({rep.contacts_recorded} of {reached} recorded)"]
     if rep.blind:
         lines.append(f"BLIND symbols: not run {rep.blind_not_run}, ran but not recorded "
@@ -1300,6 +1303,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "coverage_pct": None if rep.coverage is None else round(rep.coverage * 100),
         "recall_pct": None if rep.recall is None else round(rep.recall * 100),
         "granularity": rep.coverage_granularity,
+        # True: a contact counts as ran only by its function or file, so coverage_pct is an
+        # upper bound and recall_pct a lower bound.
+        "coverage_bounded": getattr(rep, "coverage_bounded", False),
         "blind_split": {"not_run": rep.blind_not_run,
                         "ran_not_recorded": rep.blind_ran_not_recorded,
                         "unobservable": rep.blind_unobservable},

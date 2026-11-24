@@ -585,3 +585,22 @@ class TestEnvironmentChecks:
         assert result.exit_code == 0
         assert "target environment" in result.stdout
 
+
+
+def test_the_report_phase_labels_coverage_and_recall_as_bounds(tmp_path):
+    """QA V6: a verdict whose coverage counts contacts as ran only by their function or file
+    shows coverage as an upper and recall as a lower bound."""
+    _manifest(tmp_path)
+    _configure(tmp_path)
+    (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+    baseline = _capture(tmp_path, "baseline")
+    receipt = _receipt(tmp_path, baseline)
+    _capture(tmp_path, "post_migration")
+    build_unified_verification(
+        ContractReport(root=str(tmp_path), verdict=VerificationVerdict.INCONCLUSIVE,
+                       coverage=0.66, recall=0.77, coverage_granularity="function",
+                       coverage_bounded=True),
+        run_id=receipt.run_id,
+    ).save(tmp_path)
+    detail = build_status(tmp_path).phase("report").detail
+    assert "coverage at most 66%, recall at least 77% (granularity function)" in detail

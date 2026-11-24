@@ -193,6 +193,10 @@ class ContractReport(BaseModel):
     recall: float | None = None
     coverage_granularity: str | None = None
     granularity_counts: dict[str, int] = Field(default_factory=dict)
+    # Some contact counts as ran only because its function or file ran (ran-not-recorded at
+    # function or file granularity): its statement may not have run (a branch not taken), so
+    # coverage is an upper bound and recall a lower bound.
+    coverage_bounded: bool = False
     contacts_total: int = 0
     contacts_recorded: int = 0
     contacts_ran_not_recorded: int = 0
@@ -1231,6 +1235,16 @@ def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
     elif traced:
         report.coverage_granularity = "file" if sited or not events else "symbol"
     report.executed_complete = executed.complete if executed is not None else None
+    coarse = Counter(c.granularity for c in counted
+                     if c.status == RAN_NOT_RECORDED and c.granularity in ("function", "file"))
+    report.coverage_bounded = bool(coarse)
+    if coarse:
+        how = " and ".join(f"{n} by their {g}" for g, n in sorted(coarse.items()))
+        report.notes.append(
+            f"{sum(coarse.values())} contact(s) count as ran only because their function or "
+            f"file ran ({how}): a statement in a branch not taken counts as ran, so coverage is "
+            "an upper bound and recall a lower bound (the recall misses are not all tracer "
+            "gaps)")
 
     by_target: dict[str, list[ContactStatus]] = {}
     for c in contacts:

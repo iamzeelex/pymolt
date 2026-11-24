@@ -760,8 +760,11 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
         judged = verification.contract
         coverage = ""
         if judged.coverage is not None:
-            coverage = (f"; coverage {round(judged.coverage * 100)}%"
-                        + (f", recall {round(judged.recall * 100)}%"
+            bounded = getattr(judged, "coverage_bounded", False)
+            coverage = (f"; coverage {'at most ' if bounded else ''}"
+                        f"{round(judged.coverage * 100)}%"
+                        + (f", recall {'at least ' if bounded else ''}"
+                           f"{round(judged.recall * 100)}%"
                            if judged.recall is not None else "")
                         + f" (granularity {judged.coverage_granularity})")
         kind = verification.inconclusive_kind
