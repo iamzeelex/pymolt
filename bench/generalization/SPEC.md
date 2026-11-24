@@ -79,5 +79,9 @@ Plus wall time per phase. The scorecard has one row per toy, and adds pandas (`b
 | urllib3 | HTTP (no network) | 1.26 → 2.x | 3.11 | `Retry(method_whitelist=)`, `HTTPResponse.getheaders`, objects with attributes (S1) |
 | networkx | graphs | 2.x → 3.x | 3.9 | `G.node`, `to_numpy_matrix`, `nx.info` removed |
 | stdlib | Python itself | stdlib 3.8 → 3.12 | 3.8 | asyncio `loop=` removal (stdlib SIGNATURE), `imp`, `distutils.version`, collections ABCs, `unittest` aliases; plus a **C-level** deprecation (S2) |
+| requests | HTTP client (offline) | requests 2.28 + urllib3 1.26 → requests 2.34 + urllib3 2.8 | 3.11 | what breaks a requests user is urllib3 2: `Retry(method_whitelist=)`, `Retry.BACKOFF_MAX`, `ssl_.DEFAULT_CIPHERS`, `SubjectAltNameWarning` (via `requests.packages.urllib3`); a custom adapter's `get_connection` override silently bypassed (2.32) |
+| httpx | HTTP client (offline) | 0.23 → 0.28 | 3.11 | `Client(proxies=)`, `AsyncClient(app=)` (the FastAPI test pattern), `verify=<str>`; no deprecation runway (0.23 warns about none of them); compact JSON bodies |
+| aiohttp | async HTTP client + server | 3.8 → 3.14 | 3.11 | sessions/connectors built outside a running loop now raise; long-lived deprecations (`verify_ssl`, `read_timeout`, `has_body`, `.code`), new-only `BasicAuth`; charset fallback; compiled yarl/multidict; awaited results |
+| asyncio | Python itself (asyncio) | stdlib 3.8 → 3.12 | 3.8 | `@asyncio.coroutine`, `Task.all_tasks/current_task` (C-level warnings), `loop=` on Lock/Semaphore/gather/wait_for, `wait()` of coroutines, `get_event_loop()`; `asyncio.TimeoutError` becomes the builtin |
 
 Toy apps are small (one module, about 5–15 dependency calls, real usage patterns) with a pytest suite. Each runs in under 30 s.
