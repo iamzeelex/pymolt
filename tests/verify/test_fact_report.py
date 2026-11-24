@@ -55,6 +55,22 @@ def test_a_replicate_is_not_asked_for_again_once_one_was_measured():
     assert "--replicate" not in r["action"] and "--accept" in r["action"]
 
 
+def test_no_replicate_is_asked_for_when_none_can_apply():
+    """QA V2-3: against a recording other than the baseline capture (``verify --baseline``) a
+    baseline replicate measures nothing, and with no baseline captured it cannot even run."""
+    from pymolt.verify.fact_report import NO_REPLICATE
+
+    diff = mixed_diff()
+    diff.replicate_applies = False
+    s = summarize(diff)
+    (r,) = s["review"]
+    assert r["reason"] == "input changed" and r["action"] == NO_REPLICATE
+    assert "capture baseline --replicate" not in r["action"]
+    assert "--baseline RUN1 --post-migration RUN2" in r["action"]
+    assert s["quality"]["noise"].startswith("not measured (the before side is not the baseline")
+    assert diff.to_json_dict()["replicate_applies"] is False
+
+
 def test_review_findings_carry_their_reason_and_action():
     s = summarize(mixed_diff())
     (r,) = s["review"]

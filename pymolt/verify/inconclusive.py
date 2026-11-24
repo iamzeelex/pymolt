@@ -56,6 +56,13 @@ SETTLE_REVIEW = ("a person reviews each finding (`pymolt verify .` names its id)
                  "intended change with `pymolt verify . --accept ID`, or fix the code")
 SETTLE_NOISE = ("capture a baseline replicate (`pymolt capture baseline --replicate`), then "
                 "verify again")
+#: What settles possible run-to-run noise when the before side is not the baseline capture (a
+#: recording named with ``verify --baseline``): a replicate measures the baseline capture's noise
+#: only, so it cannot apply there; a second run of that side, compared with the first, can.
+SETTLE_NOISE_RECORDING = ("record the before side a second time and verify the two runs against "
+                          "each other (`pymolt verify . --baseline RUN1 --post-migration RUN2`): "
+                          "what differs there is run-to-run noise. A baseline replicate measures "
+                          "the baseline capture's noise only, not another recording's")
 SETTLE_ENVIRONMENT = ("capture post-migration again in the baseline's environment (its "
                       "container or host, with the target Python)")
 SETTLE_NOT_EXERCISED = "add a test that reaches those sites, then capture post-migration again"
@@ -223,7 +230,8 @@ def first_settle(causes: Iterable[InconclusiveCause], kind: InconclusiveKind | N
 
 __all__ = [
     "NEEDS_EVIDENCE", "NEEDS_REVIEW", "REPLICATE_REVIEWS", "SETTLE_ENVIRONMENT",
-    "SETTLE_NO_EQUAL", "SETTLE_NOISE", "SETTLE_NOT_EXERCISED", "SETTLE_REVIEW",
+    "SETTLE_NO_EQUAL", "SETTLE_NOISE", "SETTLE_NOISE_RECORDING", "SETTLE_NOT_EXERCISED",
+    "SETTLE_REVIEW",
     "SETTLE_UNCOMPARABLE", "UNOBSERVABLE_BLIND_BLOCKS_PASS", "blind_blocks_pass", "blind_kind",
     "cause", "coarse_ran", "entry_cause", "first_settle", "is_inconclusive", "kind_of",
     "settle_uncomparable", "uncomparable_mechanism",

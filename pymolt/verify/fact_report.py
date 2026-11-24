@@ -77,10 +77,20 @@ AFTER_REPLICATE = ("a measured baseline replicate did not explain it: review it 
                    "or accept an intended change with `pymolt verify . --accept ID`)")
 
 
-def review_action(reason: str, noise_measured: bool) -> str:
-    """The one action that settles a review reason, given whether a replicate was measured."""
+#: The action for those reasons when no replicate can apply: the diff's "before" side is a
+#: recording other than the baseline capture (``FactDiff.replicate_applies``).
+NO_REPLICATE = ("record the before side a second time and verify the two runs against each "
+                "other (pymolt verify . --baseline RUN1 --post-migration RUN2): a baseline "
+                "replicate does not apply to another recording")
+
+
+def review_action(reason: str, noise_measured: bool, replicate_applies: bool = True) -> str:
+    """The one action that settles a review reason, given whether a replicate was measured,
+    and whether one could be (QA V2-3: never suggest a replicate that cannot apply)."""
     if noise_measured and reason in _REPLICATE_SETTLES:
         return AFTER_REPLICATE
+    if not replicate_applies and reason in _REPLICATE_SETTLES:
+        return NO_REPLICATE
     return ACTIONS.get(reason, _DEFAULT_ACTION)
 
 
@@ -345,7 +355,8 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                           key=lambda f: (-f["entries"], f["symbol"], f["site"]))
         review.append({
             "reason": reason, "entries": len(group), "findings_total": len(findings),
-            "action": review_action(reason, bool(diff.noise_measured)),
+            "action": review_action(reason, bool(diff.noise_measured),
+                                    diff.replicate_applies),
             "findings": findings[:FINDINGS_CAP],
         })
 
@@ -366,7 +377,10 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
     levels = Counter(e.level.value for e in compared)
     total = sum(levels.values()) or 1
     quality = {
-        "noise": diff.noise_measured or "not measured (no baseline replicate)",
+        "noise": diff.noise_measured or ("not measured (no baseline replicate)"
+                                         if diff.replicate_applies else
+                                         "not measured (the before side is not the baseline "
+                                         "capture: no replicate applies)"),
         "dropped": {"old": diff.old_summary.dropped_events,
                     "new": diff.new_summary.dropped_events},
         "backends": {"old": diff.old_summary.backends, "new": diff.new_summary.backends},

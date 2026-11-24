@@ -565,6 +565,9 @@ class FactDiff(BaseModel):
     no_ledger: bool = False  # edits were judged as hand edits: no apply ledger was available
     # Run-to-run noise measured by a baseline replicate: what it covered (None: not measured).
     noise_measured: dict[str, Any] | None = None
+    # Whether a baseline replicate could measure this diff's noise: its "before" side is the
+    # baseline capture's recording. False for another recording (``verify --baseline``).
+    replicate_applies: bool = True
     # Whether dict key order was compared, and why not (``"compared"`` | ``"not recorded
     # (old)"`` ...); the two captures' runtime environments compared (``environment.stamp``).
     dict_order: str | None = Field(default=None, exclude=True)
@@ -665,6 +668,7 @@ class FactDiff(BaseModel):
             "old": self.old_summary.model_dump(mode="json"),
             "new": self.new_summary.model_dump(mode="json"),
             "noise_measured": self.noise_measured,
+            "replicate_applies": self.replicate_applies,
             "entries": entries,
         }
 

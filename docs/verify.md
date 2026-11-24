@@ -235,6 +235,9 @@ project root or the Python version, or when an input carried such a value into a
     tracer, their per-call overhead differs. An input or presence difference the replicate
     repeats exactly then still fails, but is called reproducible in the replicate, not
     deterministic.
+  - The replicate measures the baseline capture only. Against another recording
+    (`verify --baseline`), record that side a second time and verify the two runs against each
+    other: what differs there is run-to-run noise.
 - **Dict key order.** A different order is a review item. It fails only with proof that the order
   is deterministic: a replicate with random hash seeds that agreed on 5 or more keys, a pinned hash
   seed, or a known cause, such as the field order Python 3.9 gives a TypedDict.

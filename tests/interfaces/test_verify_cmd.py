@@ -441,3 +441,37 @@ def test_the_blind_table_says_what_settles_each_kind_and_the_verdict_agrees(tmp_
     assert not any("fakedep.SETTING" in reason for reason in kinds)
     assert kinds["contract: 1 static dependency symbol(s) were not exercised (1 not run by "
                  "the workload)"] == "needs_evidence"
+
+
+def test_noise_against_another_recording_is_not_settled_by_a_replicate(tmp_path):
+    """QA V2-3 (TESTING §F): verify suggested `pymolt capture baseline --replicate` for an input
+    change between two recordings named on the command line, where there is no baseline
+    capture to replicate (it fails: "no valid baseline to replicate"), and a replicate of one
+    would not measure another recording's noise. It suggests what works instead."""
+    project = tmp_path / "proj"
+    (project / "app").mkdir(parents=True)
+    (project / "app" / "__init__.py").write_text("")
+    (project / "app" / "m.py").write_text(
+        "import yaml\ndef load(s):\n    return yaml.safe_load(s)\n")
+    counters = {name: 0 for name in ("events_seen", "events_written", "sampling_dropped",
+                                     "backpressure_dropped", "write_failures", "sink_failures",
+                                     "shutdown_dropped")}
+    for name, value in (("old", 1), ("new", 2)):
+        (tmp_path / f"{name}.jsonl").write_text(json.dumps({
+            "q": "yaml.safe_load", "in": {"bound": {"stream": f"a: {value}"}},
+            "result": {"__dict__": [["a", value]]}, "t": "return",
+            "where": {"file": "app/m.py", "line": 3, "func": "load"}}) + "\n")
+        (tmp_path / f"{name}.jsonl.meta.json").write_text(json.dumps({"counters": counters}))
+    args = ["verify", str(project), "--baseline", str(tmp_path / "old.jsonl"),
+            "--post-migration", str(tmp_path / "new.jsonl")]
+
+    view = json.loads(runner.invoke(cli, [*args, "--agent"]).output)
+    (found,) = view["data"]["inconclusive_causes"]
+    assert found["cause"] == "noise" and "input changed" in found["reason"]
+    assert "--replicate" not in found["reason"] + found["settle"]
+    assert "--baseline RUN1 --post-migration RUN2" in found["settle"]
+
+    text = " ".join(runner.invoke(cli, args, env={"COLUMNS": "200"}).output.split())
+    assert "pymolt capture baseline --replicate" not in text
+    assert "Review — input changed: 1 entry at 1 site(s). Action: record the before side" in text
+    assert "noise not measured (the before side is not the baseline capture" in text
