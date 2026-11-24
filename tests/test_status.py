@@ -309,7 +309,11 @@ class TestManualMigration:
         assert _state(status, "migration") == "done"
         assert "1 file(s) changed since the baseline" in status.phase("migration").detail
         assert "optional" in status.phase("plan").detail
-        assert status.next_command.startswith("pymolt capture post-migration")
+        # The baseline's mode and workload (its script), by the target Python (QA H2).
+        assert status.next_command == (
+            "pymolt capture post-migration --mode command --target json -- <target-python> "
+            f"{tmp_path / 'baseline.py'}")
+        assert "Replace <target-python>" in status.next_reason
 
     def test_pins_bumped_with_no_code_change_are_a_migration_too(self, tmp_path):
         self._hand_project(tmp_path)

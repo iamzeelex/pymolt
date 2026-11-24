@@ -3090,11 +3090,13 @@ def _stamp_verdict(
     post = slots.get("post-migration")
     if baseline is not None and post is not None:
         def _workload(command: list[str]) -> list[str]:
+            # The interpreter is what a migration changes (``python3.11`` -> the target
+            # env's ``python``): the workload is what it runs.
             if not command:
                 return []
             executable = Path(command[0]).name
-            if executable.lower().startswith("python") and command[1:2] == ["-m"]:
-                return command[2:]
+            if executable.lower().startswith("python"):
+                return command[2:] if command[1:2] == ["-m"] else ["python", *command[1:]]
             return [executable, *command[1:]]
 
         for differs, reason, what in (
@@ -3110,7 +3112,9 @@ def _stamp_verdict(
                 (baseline.sample_rate != post.sample_rate,
                  "baseline and post-migration used different sample rates", "sample rate")):
             if differs:
-                unlike(reason, f"capture post-migration again with the baseline's {what}")
+                unlike(reason, f"capture post-migration again with the baseline's {what}" + (
+                    f" (`{shlex.join(baseline.command)}`, in the target environment; "
+                    "`pymolt status` prints the command)" if what == "command" else ""))
         if (baseline.sample_rate < 1 or post.sample_rate < 1) and not _tallies_complete(
                 whole_diff):
             unlike("sampled captures cannot prove that unmatched interactions disappeared",

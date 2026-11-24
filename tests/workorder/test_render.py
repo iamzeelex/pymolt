@@ -161,7 +161,13 @@ def test_a_brief_keeps_hostile_text_as_capped_clean_data(tmp_path):
     (where,) = data["where"]
     assert (where["status"], where["line"]) == ("match", 13)
     assert step.where[0].line == 11
-    assert data["commands"] == ["pymolt capture post-migration", "pymolt verify ."]
+    # The record around the edit; the capture's command is status's (never a bare one).
+    assert data["commands"] == [f"pymolt apply . --step {step.id} --record",
+                                f"pymolt apply . --step {step.id} --record --done"]
+    assert "`pymolt capture post-migration`" not in data["expected"]
+    assert "`pymolt status .`" in data["expected"]
+    shown = brief_data(plan, step, root, "proj")
+    assert shown["commands"][0] == f"pymolt apply proj --step {step.id} --record"
 
 
 def test_a_markdown_brief_fences_hostile_text(tmp_path):

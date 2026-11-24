@@ -170,8 +170,9 @@ def _note(lists: _Lists, name: str, shown: int, full_report_path: str | None) ->
 # ── status ───────────────────────────────────────────────────────────────────
 
 
-def status_view(report) -> dict:
-    """``FunnelStatus`` -> view. Everything fits, so there is no full report."""
+def status_view(report, shown: str = ".") -> dict:
+    """``FunnelStatus`` -> view. Everything fits, so there is no full report. ``shown``: the
+    project dir as the next brief's commands name it (``status.shown_dir``)."""
     lists = _Lists()
     phases = [
         {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker,
@@ -213,12 +214,12 @@ def status_view(report) -> dict:
         data["steps"] = lists.cap("steps", list(report.steps))
         data["steps_total"] = len(report.steps)
         data["next_step"] = report.next_step
-        data["next_brief"] = _next_brief(report)
+        data["next_brief"] = _next_brief(report, shown)
     return ok("\n".join(lines), lists.finish(data, warnings),
               hint=report.next_reason or None)
 
 
-def _next_brief(report) -> dict | None:
+def _next_brief(report, shown: str = ".") -> dict | None:
     """The brief of the step the next command is about (untrusted text under ``data``)."""
     if not report.next_step:
         return None
@@ -227,7 +228,7 @@ def _next_brief(report) -> dict | None:
 
     plan = MigrationPlan.load(report.project_dir)
     step = plan.step(report.next_step) if plan is not None else None
-    return brief_data(plan, step, report.project_dir) if step is not None else None
+    return brief_data(plan, step, report.project_dir, shown) if step is not None else None
 
 
 # ── scan ─────────────────────────────────────────────────────────────────────
@@ -794,7 +795,7 @@ def _next_for(project_dir, plan, shown: str = ".") -> dict | None:
     except Exception:  # noqa: BLE001 - the view stands without the next command
         return None
     step = plan.step(status.next_step) if status.next_step else None
-    brief = brief_data(plan, step, project_dir) if step is not None \
+    brief = brief_data(plan, step, project_dir, shown) if step is not None \
         and step.executor != "pymolt" else None
     return {"command": status.next_command, "step": status.next_step,
             "reason": status.next_reason, "brief": brief}
