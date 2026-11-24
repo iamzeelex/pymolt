@@ -310,7 +310,9 @@ def test_plan_saves_the_plan_and_writes_no_source(tmp_path, monkeypatch, tools):
     assert result["data"]["files_to_change"] == ["app.py"]
     assert "requests.api.get" in result["data"]["diffs"][0]["diff"]
     assert (project / "app.py").read_text(encoding="utf-8") == source
-    assert "pymolt apply" in result["hint"]
+    # No baseline: apply would refuse the plan, so the next command is the capture (QA H3).
+    assert result["data"]["next"]["command"].startswith("pymolt capture baseline")
+    assert "Record the calls your code makes" in result["hint"]
 
 
 # ── parity: MCP tool == `pymolt <command> --agent` ────────────────────────────
