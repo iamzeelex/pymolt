@@ -289,7 +289,8 @@ def capture_cmd(
             f"{slot.validity_reason or slot.validity.value}\n"
             f"diagnostic artifact: {slot.trace_path}\n"
             + escape(views.capture_refusal_hint(
-                slot, service.static_contact_count(project_dir) if slot.events == 0 else None))
+                slot, service.static_contact_count(project_dir) if slot.events == 0 else None,
+                when))
         )
         code = (
             EXIT_FINDING
@@ -352,9 +353,12 @@ def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bo
                       invalid_code=EXIT_INCONCLUSIVE)
         return
     if slot.validity is not CaptureValidity.VALID:
+        from pymolt.interfaces import views
+
         err.print(f"[bold yellow]replicate not accepted[/bold yellow]: "
                   f"{slot.validity_reason or slot.validity.value}\n"
-                  f"diagnostic artifact: {slot.trace_path}")
+                  f"diagnostic artifact: {slot.trace_path}\n"
+                  + escape(views.capture_refusal_hint(slot, None, "baseline-replicate")))
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
     err.print(f"[green]captured[/green] baseline replicate: {slot.events} events -> "
               f"{slot.trace_path}")
