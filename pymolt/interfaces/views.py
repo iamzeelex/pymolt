@@ -463,7 +463,7 @@ def setup_view(options, project_dir: str | Path, *, config=None,
 # ── assess ───────────────────────────────────────────────────────────────────
 
 _ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3,
-                 "base-unknown": 3, "added": 4}
+                 "base-unknown": 3, "added": 4, "excluded": 5}
 _VERDICT_LEVEL = {"red": "blocked", "yellow": "unproven", "green": "resolves"}
 
 

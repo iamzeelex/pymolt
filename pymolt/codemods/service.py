@@ -47,6 +47,7 @@ from pymolt.codemods.models import (
 )
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory
 from pymolt.core.graph import DependencyGraph
+from pymolt.core.versions import same_version
 from pymolt.ingestion.config import EnvConfig
 from pymolt.ingestion.detect import DiscoveredSource, detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
@@ -112,11 +113,11 @@ def witness_rows(
         ran = witnessed.get(canonicalize_name(name)) if isinstance(name, str) else None
         target = row.get("target_version")
         if (ran is None or row.get("status") not in _WITNESSABLE
-                or target in (None, "unpinned") or ran == row.get("baseline_version")):
+                or target in (None, "unpinned") or same_version(ran, row.get("baseline_version"))):
             out.append(row)
             continue
         resolved = row.get("baseline_version")
-        status = "upgrade" if ran != target else "unchanged"
+        status = "unchanged" if same_version(ran, target) else "upgrade"
         out.append({**row, "baseline_version": ran, "status": status})
         if "upgrade" not in (status, row.get("status")) and row.get("status") != "base-unknown":
             continue                        # the correction changes no migration

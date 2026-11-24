@@ -24,6 +24,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from pymolt.core.versions import same_version
 from pymolt.workorder.edits import hunks_of, sha256, split_lines
 from pymolt.workorder.models import (
     Effect,
@@ -117,8 +118,8 @@ def manifest_pins(source: str, pins: dict[str, str]
         to = pins[normalize(name)]
         m = _PIN.match(line)
         if m and "--hash" not in line and not continued:
-            if m.group("version") == to:
-                continue
+            if same_version(m.group("version"), to):
+                continue                   # `==3.2` already pins 3.2.0
             new = (f"{m.group('lead')}{name}{m.group('extras') or ''}=={to}"
                    f"{m.group('tail') or ''}{m.group('end') or ''}")
             rewrite.append(ManifestPin(name=name, from_version=m.group("version"),

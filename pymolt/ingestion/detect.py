@@ -510,6 +510,14 @@ def normalize_pkg_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _with_marker(raw: str, marker: str | None) -> str:
+    """``raw`` with the marker of the ``extras_require`` key that gates it, if any."""
+    if not marker:
+        return raw
+    head, sep, own = raw.partition(";")
+    return f"{head.strip()}; ({own.strip()}) and ({marker})" if sep else f"{raw}; {marker}"
+
+
 def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
     """Parse direct dependency requirements/constraints from the source manifest."""
     from packaging.requirements import Requirement
@@ -565,6 +573,9 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
         for req in parse_setup_file(manifest_path).requirements:
             if req.group != MAIN_GROUP:
                 continue  # extras are not part of the base dependency set
+            # ``':python_full_version < "2.7.9"': [...]`` gates these: keep the gate, or a
+            # PyPy/2.7-only dependency reads as unconditional (and then "removed").
+            spec = _with_marker(req.raw, req.marker)
             try:
                 key = normalize_pkg_name(Requirement(req.raw).name)
             except Exception:
@@ -572,7 +583,7 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
                 if not pkg_match:
                     continue
                 key = normalize_pkg_name(pkg_match.group(1))
-            requirements[key] = req.raw
+            requirements[key] = spec
 
     if not requirements and name == "setup.cfg" and (manifest_path.parent / "setup.py").is_file():
         return extract_declared_requirements(manifest_path.parent / "setup.py")
