@@ -1,0 +1,287 @@
+{
+  "name": "asyncio",
+  "ecosystem": "python-stdlib (asyncio)",
+  "old": {
+    "python": "3.8",
+    "requirements": [
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "pytest"
+  ],
+  "target_manifest": [
+    "pytest"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/legacy.py": "\"\"\"Config loader written before async/await: a generator-based coroutine.\"\"\"\nimport asyncio\n\n\n@asyncio.coroutine\ndef load_config(sources):\n    merged = {}\n    for source in sources:\n        yield from asyncio.sleep(0)\n        merged.update(source)\n    return merged\n",
+    "app/pool.py": "\"\"\"A bounded worker pool on an explicit event loop (the pre-3.10 style: the loop is passed around).\"\"\"\nimport asyncio\n\n\nclass WorkerPool:\n    def __init__(self, loop, limit=2):\n        self.loop = loop\n        self._slots = asyncio.Semaphore(limit, loop=loop)\n        self._lock = asyncio.Lock(loop=loop)\n        self.finished = []\n\n    async def _run_one(self, job, arg):\n        async with self._slots:\n            result = await job(arg)\n            async with self._lock:\n                self.finished.append(arg)\n            return result\n\n    async def _batch(self, job, args, timeout):\n        batch = asyncio.gather(*(self._run_one(job, a) for a in args), loop=self.loop)\n        return await asyncio.wait_for(batch, timeout, loop=self.loop)\n\n    def map(self, job, args, timeout=5.0):\n        \"\"\"Results in argument order; the whole batch must finish within `timeout` seconds.\"\"\"\n        return self.loop.run_until_complete(self._batch(job, args, timeout))\n\n    def submit(self, job, arg):\n        return asyncio.ensure_future(self._run_one(job, arg), loop=self.loop)\n\n    def first_wave(self, jobs):\n        \"\"\"Run zero-argument coroutine functions together; their results, sorted.\"\"\"\n        done, _ = self.loop.run_until_complete(asyncio.wait([job() for job in jobs]))\n        return sorted(task.result() for task in done)\n",
+    "app/runner.py": "\"\"\"Command-line entry point: load the config, then square the inputs on the default event loop.\"\"\"\nimport asyncio\n\nfrom app.legacy import load_config\nfrom app.pool import WorkerPool\n\n\nasync def square(x):\n    await asyncio.sleep(0)\n    return x * x\n\n\ndef main(values, sources=()):\n    loop = asyncio.get_event_loop()\n    config = loop.run_until_complete(load_config(sources))\n    pool = WorkerPool(loop, limit=config.get(\"workers\", 2))\n    return {\"config\": config, \"squares\": pool.map(square, values)}\n",
+    "app/shutdown.py": "\"\"\"Graceful shutdown: cancel every other pending task and report how many there were.\"\"\"\nimport asyncio\n\n\nasync def cancel_pending():\n    current = asyncio.Task.current_task()\n    pending = [t for t in asyncio.Task.all_tasks() if t is not current and not t.done()]\n    for task in pending:\n        task.cancel()\n    if pending:\n        await asyncio.wait(pending)\n    return len(pending)\n",
+    "tests/test_app.py": "import asyncio\n\nimport pytest\n\nfrom app import pool, runner, shutdown\n\n\n@pytest.fixture\ndef loop():\n    loop = asyncio.new_event_loop()\n    yield loop\n    loop.close()\n\n\nasync def triple(x):\n    await asyncio.sleep(0)\n    return 3 * x\n\n\ndef test_map_keeps_order(loop):\n    workers = pool.WorkerPool(loop, limit=2)\n    assert workers.map(triple, [4, 1, 3]) == [12, 3, 9]\n    assert sorted(workers.finished) == [1, 3, 4]\n\n\ndef test_submit(loop):\n    workers = pool.WorkerPool(loop)\n    task = workers.submit(triple, 5)\n    assert loop.run_until_complete(task) == 15\n\n\ndef test_first_wave(loop):\n    workers = pool.WorkerPool(loop)\n\n    async def one():\n        return 1\n\n    async def two():\n        await asyncio.sleep(0)\n        return 2\n\n    assert workers.first_wave([two, one]) == [1, 2]\n\n\ndef test_cancel_pending(loop):\n    async def scenario():\n        sleepers = [asyncio.ensure_future(asyncio.sleep(10)) for _ in range(3)]\n        await asyncio.sleep(0)\n        cancelled = await shutdown.cancel_pending()\n        return cancelled, all(s.cancelled() for s in sleepers)\n\n    assert loop.run_until_complete(scenario()) == (3, True)\n\n\ndef test_main():\n    out = runner.main([1, 2, 3], sources=[{\"workers\": 1}, {\"name\": \"demo\"}])\n    assert out == {\"config\": {\"workers\": 1, \"name\": \"demo\"}, \"squares\": [1, 4, 9]}\n    assert runner.main([5])[\"squares\"] == [25]\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/legacy.py",
+      "old": "@asyncio.coroutine\ndef load_config(sources):",
+      "new": "async def load_config(sources):"
+    },
+    {
+      "file": "app/legacy.py",
+      "old": "yield from asyncio.sleep(0)",
+      "new": "await asyncio.sleep(0)"
+    },
+    {
+      "file": "app/pool.py",
+      "old": "asyncio.Semaphore(limit, loop=loop)",
+      "new": "asyncio.Semaphore(limit)"
+    },
+    {
+      "file": "app/pool.py",
+      "old": "asyncio.Lock(loop=loop)",
+      "new": "asyncio.Lock()"
+    },
+    {
+      "file": "app/pool.py",
+      "old": "for a in args), loop=self.loop)",
+      "new": "for a in args))"
+    },
+    {
+      "file": "app/pool.py",
+      "old": "await asyncio.wait_for(batch, timeout, loop=self.loop)",
+      "new": "await asyncio.wait_for(batch, timeout)"
+    },
+    {
+      "file": "app/pool.py",
+      "old": "asyncio.wait([job() for job in jobs])",
+      "new": "asyncio.wait([self.loop.create_task(job()) for job in jobs])"
+    },
+    {
+      "file": "app/shutdown.py",
+      "old": "asyncio.Task.current_task()",
+      "new": "asyncio.current_task()"
+    },
+    {
+      "file": "app/shutdown.py",
+      "old": "asyncio.Task.all_tasks()",
+      "new": "asyncio.all_tasks()"
+    },
+    {
+      "file": "app/runner.py",
+      "old": "    loop = asyncio.get_event_loop()\n    config = loop.run_until_complete(load_config(sources))\n    pool = WorkerPool(loop, limit=config.get(\"workers\", 2))\n    return {\"config\": config, \"squares\": pool.map(square, values)}\n",
+      "new": "    loop = asyncio.new_event_loop()\n    try:\n        config = loop.run_until_complete(load_config(sources))\n        pool = WorkerPool(loop, limit=config.get(\"workers\", 2))\n        return {\"config\": config, \"squares\": pool.map(square, values)}\n    finally:\n        loop.close()\n"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/runner.py",
+          "append": "\n\nasync def first_result(coro, seconds):\n    \"\"\"The coroutine's result, or None when it takes longer than `seconds`.\"\"\"\n    try:\n        return await asyncio.wait_for(coro, seconds)\n    except TimeoutError:\n        return None\n"
+        },
+        {
+          "file": "tests/test_app.py",
+          "append": "\n\ndef test_first_result_does_not_hang(loop):\n    try:\n        outcome = loop.run_until_complete(runner.first_result(asyncio.sleep(1, \"late\"), 0.01))\n    except asyncio.TimeoutError:\n        outcome = \"escaped\"\n    # A weak test, as real suites often are: it only checks that the call came back.\n    assert outcome in (None, \"escaped\")\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "asyncio.wait_for"
+      ],
+      "behaviour": "first_result(asyncio.sleep(1), 0.01) catches the BUILTIN TimeoutError around asyncio.wait_for. On 3.8 wait_for raises asyncio.exceptions.TimeoutError, a different class, so it escapes (the test sees 'escaped'); on 3.11+ asyncio.TimeoutError IS the builtin TimeoutError, so it is caught and the function returns None. The test accepts either."
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "asyncio.coroutine",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/legacy.py:5",
+      "breaks": "AttributeError: module 'asyncio' has no attribute 'coroutine'. Did you mean: 'coroutines'? (at import of app.legacy, which app.runner imports, so the whole test module fails to collect)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "What's New in Python 3.11 (Removed: @asyncio.coroutine, deprecated since 3.8; use async def)",
+      "verified": {
+        "old": "3.8.20: works, DeprecationWarning '\"@coroutine\" decorator is deprecated since Python 3.8, use \"async def\" instead' (Python-level, at decoration)",
+        "new": "3.12.11: AttributeError. The replacement is syntax (async def + await instead of yield from), not an API"
+      }
+    },
+    {
+      "symbol": "asyncio.Semaphore",
+      "kind": "SIGNATURE",
+      "param": "loop",
+      "site": "app/pool.py:8",
+      "breaks": "TypeError: Semaphore.__init__() got an unexpected keyword argument 'loop'",
+      "successor": null,
+      "fixable": "auto",
+      "source": "What's New in Python 3.10 (Removed: the loop parameter of the asyncio synchronisation primitives)",
+      "verified": {
+        "old": "3.8.20: works, DeprecationWarning 'The loop argument is deprecated since Python 3.8, and scheduled for removal in Python 3.10.'",
+        "new": "3.12.11: TypeError; without loop= the primitive binds to the running loop at first use"
+      }
+    },
+    {
+      "symbol": "asyncio.Lock",
+      "kind": "SIGNATURE",
+      "param": "loop",
+      "site": "app/pool.py:9",
+      "breaks": "TypeError: Lock.__init__() got an unexpected keyword argument 'loop'",
+      "successor": null,
+      "fixable": "auto",
+      "source": "What's New in Python 3.10",
+      "verified": {
+        "old": "3.8.20: works, same DeprecationWarning",
+        "new": "3.12.11: TypeError"
+      }
+    },
+    {
+      "symbol": "asyncio.gather",
+      "kind": "SIGNATURE",
+      "param": "loop",
+      "site": "app/pool.py:20",
+      "breaks": "TypeError: gather() got an unexpected keyword argument 'loop'",
+      "successor": null,
+      "fixable": "auto",
+      "source": "What's New in Python 3.10",
+      "verified": {
+        "old": "3.8.20: works and does NOT warn (3.8 warns only when gather() is given no awaitables)",
+        "new": "3.12.11: TypeError"
+      }
+    },
+    {
+      "symbol": "asyncio.wait_for",
+      "kind": "SIGNATURE",
+      "param": "loop",
+      "site": "app/pool.py:21",
+      "breaks": "TypeError: wait_for() got an unexpected keyword argument 'loop'",
+      "successor": null,
+      "fixable": "auto",
+      "source": "What's New in Python 3.10",
+      "verified": {
+        "old": "3.8.20: works; the DeprecationWarning is raised when the wait_for coroutine is awaited, not when it is called",
+        "new": "3.12.11: TypeError at the call"
+      }
+    },
+    {
+      "symbol": "asyncio.Task.current_task",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/shutdown.py:6",
+      "breaks": "AttributeError: type object '_asyncio.Task' has no attribute 'current_task'",
+      "successor": "asyncio.current_task",
+      "fixable": "auto",
+      "source": "What's New in Python 3.9 (Removed: Task.current_task() and Task.all_tasks())",
+      "verified": {
+        "old": "3.8.20: a classmethod of the C _asyncio.Task; DeprecationWarning 'Task.current_task() is deprecated, use asyncio.current_task() instead' raised from C; identity `asyncio.Task.current_task is asyncio.current_task` -> False, so REMOVED with a successor",
+        "new": "3.12.11: AttributeError; asyncio.current_task() returns the same task"
+      }
+    },
+    {
+      "symbol": "asyncio.Task.all_tasks",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/shutdown.py:7",
+      "breaks": "AttributeError: type object '_asyncio.Task' has no attribute 'all_tasks'",
+      "successor": "asyncio.all_tasks",
+      "fixable": "manual",
+      "source": "What's New in Python 3.9",
+      "verified": {
+        "old": "3.8.20: C classmethod, DeprecationWarning from C 'Task.all_tasks() is deprecated, use asyncio.all_tasks() instead'; identity with asyncio.all_tasks -> False",
+        "new": "3.12.11: AttributeError. The successor is not equivalent: Task.all_tasks() also returns finished tasks (6 vs 1 in a probe), asyncio.all_tasks() only pending ones; the toy filters `not t.done()`, so the swap preserves its result"
+      }
+    },
+    {
+      "symbol": "asyncio.wait",
+      "kind": "BEHAVIOR",
+      "param": "fs",
+      "site": "app/pool.py:32",
+      "breaks": "TypeError: Passing coroutines is forbidden, use tasks explicitly.",
+      "successor": null,
+      "fixable": "manual",
+      "source": "What's New in Python 3.11 (asyncio.wait() no longer accepts coroutines)",
+      "verified": {
+        "old": "3.8.20: wraps the coroutines in tasks, NO warning",
+        "new": "3.12.11: TypeError; the signature is unchanged, the accepted argument type is not"
+      }
+    },
+    {
+      "symbol": "asyncio.get_event_loop",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/runner.py:14",
+      "breaks": "no break on 3.12: DeprecationWarning 'There is no current event loop' (Python-level, from the event loop policy) when no loop is set; raises RuntimeError on 3.14",
+      "successor": "asyncio.new_event_loop",
+      "fixable": "manual",
+      "source": "What's New in Python 3.12 (get_event_loop() warns when it would create a loop)",
+      "verified": {
+        "old": "3.8.20: returns (and creates) the main thread's loop, no warning",
+        "new": "3.12.11: same loop, DeprecationWarning on the first call of the test session only (later calls find the loop it set)"
+      }
+    },
+    {
+      "symbol": "asyncio.wait_for",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/runner.py:23",
+      "scenario": "change",
+      "breaks": "no break; the timeout raise is a different class: asyncio.exceptions.TimeoutError (3.8) vs builtins.TimeoutError (3.11+), so `except TimeoutError:` now catches it",
+      "successor": null,
+      "fixable": "manual",
+      "source": "What's New in Python 3.11 (asyncio.TimeoutError is now an alias of TimeoutError)",
+      "verified": {
+        "old": "3.8.20: first_result(...) raises asyncio.exceptions.TimeoutError",
+        "new": "3.12.11: first_result(...) returns None"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "asyncio.coroutine",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old (at decoration, module import)"
+    },
+    {
+      "symbol": "asyncio.Semaphore",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "asyncio.Lock",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "asyncio.wait_for",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old (raised when the coroutine is awaited)"
+    },
+    {
+      "symbol": "asyncio.Task.current_task",
+      "category": "DeprecationWarning",
+      "from_c": true,
+      "side": "old (C _asyncio.Task classmethod)"
+    },
+    {
+      "symbol": "asyncio.Task.all_tasks",
+      "category": "DeprecationWarning",
+      "from_c": true,
+      "side": "old (C _asyncio.Task classmethod)"
+    }
+  ],
+  "notes": "Python 3.8 -> 3.12 with only pytest installed, as the stdlib toy does (setup gets --target-python 3.12). This toy holds asyncio APIs the stdlib toy does not (that one has asyncio.sleep/Queue(loop=)). Everything is offline and in-process: explicit loops from asyncio.new_event_loop() in the tests, and the app's main() on the default loop (get_event_loop()). asyncio.run() is never called: it unsets the current loop, after which get_event_loop() raises on both versions, so test order would matter. Checked and deliberately NOT ground truth: asyncio.ensure_future(..., loop=) still works on 3.12 without a warning (app/pool.py:28, a trap for a rule that drops every loop=); StreamReader(loop=) also still works; gather(return_exceptions=True), Event/Lock/Queue semantics and task cancellation behave the same. C-level code: asyncio.Task, current_task and get_event_loop are the C _asyncio versions on both sides; the Task.current_task/all_tasks DeprecationWarnings come from C (PyErr_WarnEx) on 3.8 (S2). The equiv scenario never lets a wait_for time out, because the timeout exception class itself changed (the change scenario's subject). manual_migration[0] and [1] go together (the generator coroutine becomes async def); [9] rewrites main() to an explicit new_event_loop() that it closes; leaving [9] out passes with the 3.12 DeprecationWarning, which is what DEPRECATED means here."
+}

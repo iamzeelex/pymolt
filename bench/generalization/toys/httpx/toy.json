@@ -1,0 +1,158 @@
+{
+  "name": "httpx",
+  "ecosystem": "http-client (httpx, offline: MockTransport and in-process ASGI)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "httpx==0.23.3",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "httpx==0.28.1",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "httpx",
+    "certifi"
+  ],
+  "target_manifest": [
+    "httpx==0.28.1",
+    "certifi"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/rates.py": "\"\"\"Exchange rates from the remote rates API, over httpx.\"\"\"\nimport certifi\nimport httpx\n\nTIMEOUT = httpx.Timeout(5.0, connect=2.0)\n\n\ndef rates_client(transport=None, proxy_url=None):\n    \"\"\"The legacy rates mirror is only reachable through the corporate proxy.\"\"\"\n    proxies = {\"all://legacy-rates.internal\": proxy_url} if proxy_url else None\n    return httpx.Client(\n        base_url=\"https://rates.example.test\",\n        timeout=TIMEOUT,\n        verify=certifi.where(),\n        proxies=proxies,\n        transport=transport,\n        headers={\"User-Agent\": \"pricing-gateway/2.1\"},\n    )\n\n\ndef latest(client, base, symbols):\n    resp = client.get(\"/latest\", params={\"base\": base, \"symbols\": \",\".join(symbols)})\n    resp.raise_for_status()\n    return resp.json()[\"rates\"]\n\n\ndef convert(client, cents, currency):\n    rate = latest(client, \"USD\", [currency])[currency]\n    return round(cents * rate / 100, 2)\n\n\ndef lookup_error(client, base):\n    try:\n        latest(client, base, [\"EUR\"])\n    except httpx.HTTPStatusError as exc:\n        return exc.response.status_code, exc.response.json()[\"error\"]\n    return None\n",
+    "app/service.py": "\"\"\"Pricing service: a plain ASGI app (the gateway and the tests call it in-process).\"\"\"\nimport json\n\nPRICES = {\"apple\": 120, \"pear\": 95, \"fig\": 310}\n\n\ndef route(method, path):\n    if path == \"/health\":\n        return 200, {\"ok\": True}\n    if path == \"/prices\" and method == \"GET\":\n        return 200, {\"items\": sorted(PRICES)}\n    if path.startswith(\"/price/\"):\n        name = path.rsplit(\"/\", 1)[-1]\n        if name in PRICES:\n            return 200, {\"item\": name, \"cents\": PRICES[name]}\n        return 404, {\"error\": \"unknown item\"}\n    return 404, {\"error\": \"no route\"}\n\n\nasync def app(scope, receive, send):\n    assert scope[\"type\"] == \"http\"\n    status, payload = route(scope[\"method\"], scope[\"path\"])\n    body = json.dumps(payload).encode()\n    await send({\"type\": \"http.response.start\", \"status\": status,\n                \"headers\": [(b\"content-type\", b\"application/json\"),\n                            (b\"content-length\", str(len(body)).encode())]})\n    await send({\"type\": \"http.response.body\", \"body\": body})\n",
+    "tests/test_rates.py": "import json\n\nimport httpx\n\nfrom app import rates\n\nRATES = {\"EUR\": 0.9, \"GBP\": 0.8, \"JPY\": 150.0}\n\n\ndef _json(status, payload):\n    return httpx.Response(status, content=json.dumps(payload).encode(),\n                          headers={\"Content-Type\": \"application/json\"})\n\n\ndef handler(request):\n    if request.url.path != \"/latest\":\n        return _json(404, {\"error\": \"no route\"})\n    base = request.url.params[\"base\"]\n    if base != \"USD\":\n        return _json(422, {\"error\": f\"unsupported base {base}\"})\n    wanted = request.url.params[\"symbols\"].split(\",\")\n    return _json(200, {\"base\": base, \"rates\": {s: RATES[s] for s in wanted}})\n\n\ndef client():\n    return rates.rates_client(transport=httpx.MockTransport(handler),\n                              proxy_url=\"http://proxy.internal:3128\")\n\n\ndef test_latest():\n    with client() as c:\n        assert rates.latest(c, \"USD\", [\"EUR\", \"GBP\"]) == {\"EUR\": 0.9, \"GBP\": 0.8}\n\n\ndef test_convert():\n    with client() as c:\n        assert rates.convert(c, 1999, \"JPY\") == 2998.5\n\n\ndef test_lookup_error():\n    with client() as c:\n        assert rates.lookup_error(c, \"CHF\") == (422, \"unsupported base CHF\")\n        assert rates.lookup_error(c, \"USD\") is None\n\n\ndef test_client_defaults():\n    with rates.rates_client() as c:\n        assert str(c.base_url) == \"https://rates.example.test\"\n        assert c.headers[\"User-Agent\"] == \"pricing-gateway/2.1\"\n        assert c.timeout.connect == 2.0 and c.timeout.read == 5.0\n",
+    "tests/test_service.py": "import asyncio\n\nimport httpx\n\nfrom app import service\n\n\nasync def _get(path):\n    async with httpx.AsyncClient(app=service.app, base_url=\"http://test\") as client:\n        resp = await client.get(path)\n        return resp.status_code, resp.json()\n\n\ndef test_health():\n    assert asyncio.run(_get(\"/health\")) == (200, {\"ok\": True})\n\n\ndef test_price_lookup():\n    assert asyncio.run(_get(\"/price/pear\")) == (200, {\"item\": \"pear\", \"cents\": 95})\n    assert asyncio.run(_get(\"/price/kiwi\")) == (404, {\"error\": \"unknown item\"})\n\n\ndef test_price_list():\n    status, body = asyncio.run(_get(\"/prices\"))\n    assert status == 200 and body[\"items\"] == [\"apple\", \"fig\", \"pear\"]\n"
+  },
+  "manual_migration": [
+    {
+      "file": "tests/test_service.py",
+      "old": "httpx.AsyncClient(app=service.app, base_url=\"http://test\")",
+      "new": "httpx.AsyncClient(transport=httpx.ASGITransport(app=service.app), base_url=\"http://test\")"
+    },
+    {
+      "file": "app/rates.py",
+      "old": "import certifi\n",
+      "new": "import ssl\n\nimport certifi\n"
+    },
+    {
+      "file": "app/rates.py",
+      "old": "    proxies = {\"all://legacy-rates.internal\": proxy_url} if proxy_url else None\n",
+      "new": "    mounts = {\"all://legacy-rates.internal\": httpx.HTTPTransport(proxy=proxy_url)} if proxy_url else None\n"
+    },
+    {
+      "file": "app/rates.py",
+      "old": "        proxies=proxies,\n",
+      "new": "        mounts=mounts,\n"
+    },
+    {
+      "file": "app/rates.py",
+      "old": "verify=certifi.where(),",
+      "new": "verify=ssl.create_default_context(cafile=certifi.where()),"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/rates.py",
+          "append": "\n\nSIGNING_KEY = b\"demo-signing-key\"\n\n\ndef signed_order(client, order):\n    \"\"\"Build the order request and sign its exact body, as the rates API's order endpoint requires.\"\"\"\n    import hashlib\n    import hmac\n\n    request = client.build_request(\"POST\", \"/orders\", json=order)\n    body = request.read()\n    request.headers[\"X-Signature\"] = hmac.new(SIGNING_KEY, body, hashlib.sha256).hexdigest()\n    return request\n"
+        },
+        {
+          "file": "tests/test_rates.py",
+          "append": "\n\ndef test_signed_order_signature_matches_body():\n    import hashlib\n    import hmac\n\n    with client() as c:\n        req = rates.signed_order(c, {\"sku\": \"A-1\", \"qty\": 2})\n    # A weak test, as real suites often are: it checks the signature against whatever body was sent.\n    expected = hmac.new(rates.SIGNING_KEY, req.content, hashlib.sha256).hexdigest()\n    assert req.headers[\"X-Signature\"] == expected\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "httpx.Request.read"
+      ],
+      "behaviour": "signed_order(): client.build_request('POST', '/orders', json=order).read(). httpx 0.23.3 serialises json= with json.dumps defaults: b'{\"sku\": \"A-1\", \"qty\": 2}' (24 bytes); 0.28.1 uses compact separators and ensure_ascii=False: b'{\"sku\":\"A-1\",\"qty\":2}' (21 bytes), so the HMAC signature (and Content-Length) differ. The test only checks the signature against whatever body was built."
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "httpx.AsyncClient",
+      "kind": "SIGNATURE",
+      "param": "app",
+      "site": "tests/test_service.py:9",
+      "breaks": "TypeError: AsyncClient.__init__() got an unexpected keyword argument 'app'",
+      "successor": "httpx.ASGITransport",
+      "fixable": "manual",
+      "source": "httpx 0.28.0 changelog (removed the app= shortcut, deprecated in 0.27.0; use transport=httpx.ASGITransport(app=...)). The FastAPI-docs testing pattern",
+      "verified": {
+        "old": "httpx 0.23.3: AsyncClient(app=asgi_app, base_url=...) works, NO warning (the deprecation only started in 0.27)",
+        "new": "0.28.1: TypeError; AsyncClient(transport=httpx.ASGITransport(app=...)) works and gives the same responses. ASGITransport exists on both"
+      }
+    },
+    {
+      "symbol": "httpx.Client",
+      "kind": "SIGNATURE",
+      "param": "proxies",
+      "site": "app/rates.py:15",
+      "breaks": "TypeError: Client.__init__() got an unexpected keyword argument 'proxies'",
+      "successor": "mounts",
+      "fixable": "manual",
+      "source": "httpx 0.28.0 changelog (removed proxies=, deprecated in 0.26.0; use proxy= for one proxy or mounts={pattern: HTTPTransport(proxy=...)})",
+      "verified": {
+        "old": "0.23.3: Client(proxies={'all://legacy-rates.internal': url}) works, no warning; proxy= does not exist (TypeError)",
+        "new": "0.28.1: TypeError; mounts={'all://legacy-rates.internal': httpx.HTTPTransport(proxy=url)} works (on 0.23.3 HTTPTransport(proxy=str) raises AttributeError: 'str' object has no attribute 'url', so the successor only works on the new side)"
+      }
+    },
+    {
+      "symbol": "httpx.Client",
+      "kind": "DEPRECATED",
+      "param": "verify",
+      "site": "app/rates.py:14",
+      "breaks": "no break; DeprecationWarning '`verify=<str>` is deprecated. Use `verify=ssl.create_default_context(cafile=...)` or `verify=ssl.create_default_context(capath=...)` instead.' (only when the client builds its own transport)",
+      "successor": "ssl.create_default_context",
+      "fixable": "manual",
+      "source": "httpx 0.28.0 changelog (verify=<str> and cert= deprecated)",
+      "verified": {
+        "old": "0.23.3: verify=certifi.where() loads that CA bundle, no warning",
+        "new": "0.28.1: works, DeprecationWarning from httpx/_config.py (Python-level) in test_client_defaults; not raised when transport= is given, because then no SSL context is built"
+      }
+    },
+    {
+      "symbol": "httpx.Response.raise_for_status",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/rates.py:23",
+      "breaks": "no break for this app: on success it returns the Response instead of None; the app calls it as a statement and discards the value",
+      "successor": null,
+      "fixable": "none",
+      "source": "httpx 0.25.0 changelog (raise_for_status() returns the response, for chaining)",
+      "verified": {
+        "old": "0.23.3 and 0.24.1: returns None",
+        "new": "0.25.2 and 0.28.1: returns the Response"
+      }
+    },
+    {
+      "symbol": "httpx.Request.read",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/rates.py:49",
+      "scenario": "change",
+      "breaks": "no raise: the bytes of a json= body differ (compact separators, ensure_ascii=False)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "httpx 0.28.0 changelog (JSON request bodies use a compact representation)",
+      "verified": {
+        "old": "0.23.3: b'{\"sku\": \"A-1\", \"qty\": 2}', Content-Length 24",
+        "new": "0.28.1: b'{\"sku\":\"A-1\",\"qty\":2}', Content-Length 21"
+      }
+    }
+  ],
+  "expected_warnings": [],
+  "notes": "httpx 0.23.3 (Python 3.11) -> 0.28.1 (Python 3.12), the newest release. A public-API diff (every signature in httpx.*) finds only proxies=/app= removed from Client/AsyncClient, proxies=/cert= removed from the top-level helpers, and create_ssl_context(http2=) removed; everything else that changes is behaviour. Jumping 0.23 -> 0.28 skips the whole deprecation runway: 0.23.3 emits NO warning for proxies=, app= or verify=<str> (they were deprecated in 0.26, 0.27 and 0.28), so expected_warnings is empty and old-side warnings cannot help. The new-side verify=<str> DeprecationWarning is removed by manual_migration, so the post-migration capture does not see it. Offline: httpx.MockTransport for the remote rates API, AsyncClient over the in-process ASGI app for the service (the FastAPI test pattern). The mock answers with content=json.dumps(...) rather than httpx.Response(json=...): Response(json=) is compact in 0.28 too, so a json= mock would change the response bytes in the equiv scenario as well; the change scenario keeps that behaviour change to itself. Checked and deliberately NOT ground truth: charset fallback (0.23.3 already defaults to utf-8 when charset_normalizer is absent, which it is: httpx 0.23 does not depend on it), query-param encoding (None, bools, floats, lists, non-ASCII: identical), URL joining, Timeout repr, HTTPStatusError text (its help link moved from httpstatuses.com to developer.mozilla.org; the app reads status and body only). manual_migration edits 1-3 are one change (proxies -> mounts plus the ssl import used by edit 4); leaving out edit 4 alone passes with the verify DeprecationWarning, which is what DEPRECATED means here. raise_for_status() is listed as BEHAVIOR because its return value really changed (None -> the Response, from 0.25), but every call in the app discards it, so the equiv scenario still expects PASS: a verify FAIL on it is a false alarm for this app."
+}

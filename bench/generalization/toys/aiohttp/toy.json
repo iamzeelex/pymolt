@@ -1,0 +1,287 @@
+{
+  "name": "aiohttp",
+  "ecosystem": "async http client + server (aiohttp, offline: aiohttp.test_utils on 127.0.0.1)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "aiohttp==3.8.6",
+      "yarl==1.9.4",
+      "multidict==6.0.5",
+      "frozenlist==1.4.1",
+      "aiosignal==1.3.1",
+      "async-timeout==4.0.3",
+      "charset-normalizer==3.3.2",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "aiohttp==3.14.5",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "aiohttp"
+  ],
+  "target_manifest": [
+    "aiohttp==3.14.5"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/client.py": "\"\"\"Client for the inventory API, on aiohttp (sync entry points drive the event loop).\"\"\"\nimport aiohttp\n\n\ndef open_client(base_url, user=\"svc\", password=\"s3cret\", verify_ssl=False):\n    connector = aiohttp.TCPConnector(limit=8, verify_ssl=verify_ssl)\n    session = aiohttp.ClientSession(\n        connector=connector,\n        auth=aiohttp.BasicAuth(user, password),\n        read_timeout=10,\n        conn_timeout=3,\n        headers={\"User-Agent\": \"inventory-cli/0.9\"},\n    )\n    return InventoryClient(base_url, session)\n\n\nclass InventoryClient:\n    def __init__(self, base_url, session):\n        self.base_url = base_url.rstrip(\"/\")\n        self.session = session\n\n    async def items(self, kind=None):\n        params = {\"kind\": kind} if kind else {}\n        async with self.session.get(self.base_url + \"/items\", params=params) as resp:\n            resp.raise_for_status()\n            return (await resp.json())[\"items\"]\n\n    async def item(self, sku):\n        try:\n            async with self.session.get(f\"{self.base_url}/items/{sku}\") as resp:\n                resp.raise_for_status()\n                return await resp.json()\n        except aiohttp.ClientResponseError as exc:\n            if exc.code == 404:\n                return None\n            raise\n\n    async def add(self, item):\n        async with self.session.post(self.base_url + \"/items\", json=item) as resp:\n            return resp.status, await resp.json()\n\n    async def whoami(self):\n        async with self.session.get(self.base_url + \"/whoami\") as resp:\n            return (await resp.json())[\"user\"]\n\n    async def close(self):\n        await self.session.close()\n",
+    "app/server.py": "\"\"\"Inventory web API on aiohttp.web.\"\"\"\nimport aiohttp\nfrom aiohttp import web\n\nroutes = web.RouteTableDef()\n\n\n@routes.get(\"/items\")\nasync def list_items(request):\n    kind = request.query.get(\"kind\")\n    items = [i for i in request.app[\"db\"].values() if kind is None or i[\"kind\"] == kind]\n    return web.json_response({\"items\": sorted(items, key=lambda i: i[\"sku\"])})\n\n\n@routes.get(\"/items/{sku}\")\nasync def get_item(request):\n    item = request.app[\"db\"].get(request.match_info[\"sku\"])\n    if item is None:\n        raise web.HTTPNotFound(text=\"no such item\")\n    return web.json_response(item)\n\n\n@routes.post(\"/items\")\nasync def create_item(request):\n    if not request.has_body:\n        raise web.HTTPBadRequest(text=\"empty body\")\n    item = await request.json()\n    request.app[\"db\"][item[\"sku\"]] = item\n    return web.json_response(item, status=201)\n\n\n@routes.get(\"/whoami\")\nasync def whoami(request):\n    header = request.headers.get(\"Authorization\")\n    if not header:\n        raise web.HTTPUnauthorized(text=\"login required\")\n    return web.json_response({\"user\": aiohttp.BasicAuth.decode(header).login})\n\n\ndef make_app(items=()):\n    app = web.Application()\n    app[\"db\"] = {i[\"sku\"]: dict(i) for i in items}\n    app.add_routes(routes)\n    return app\n",
+    "tests/test_inventory.py": "import os\nimport zlib\n\nimport pytest\nfrom aiohttp.test_utils import TestClient, TestServer, loop_context\n\nfrom app.client import open_client\nfrom app.server import make_app\n\nITEMS = [{\"sku\": \"A-1\", \"name\": \"hammer\", \"kind\": \"tool\"},\n         {\"sku\": \"B-7\", \"name\": \"saw\", \"kind\": \"tool\"},\n         {\"sku\": \"C-3\", \"name\": \"glue\", \"kind\": \"supply\"}]\n# A port derived from the checkout path: parallel checkouts do not collide, and a rerun in the same\n# checkout calls the same URLs.\nPORT = 20000 + zlib.crc32(os.getcwd().encode()) % 20000\n\n\n@pytest.fixture\ndef loop():\n    with loop_context() as loop:\n        yield loop\n\n\n@pytest.fixture\ndef server(loop):\n    server = TestServer(make_app(ITEMS), port=PORT)\n    loop.run_until_complete(server.start_server())\n    yield server\n    loop.run_until_complete(server.close())\n\n\n@pytest.fixture\ndef client(loop, server):\n    client = open_client(str(server.make_url(\"/\")))\n    yield client\n    loop.run_until_complete(client.close())\n\n\ndef test_items_by_kind(loop, client):\n    assert [i[\"sku\"] for i in loop.run_until_complete(client.items(kind=\"tool\"))] == [\"A-1\", \"B-7\"]\n    assert len(loop.run_until_complete(client.items())) == 3\n\n\ndef test_missing_item_is_none(loop, client):\n    assert loop.run_until_complete(client.item(\"Z-9\")) is None\n    assert loop.run_until_complete(client.item(\"C-3\"))[\"name\"] == \"glue\"\n\n\ndef test_add_item(loop, client):\n    status, body = loop.run_until_complete(client.add({\"sku\": \"D-4\", \"name\": \"tape\", \"kind\": \"supply\"}))\n    assert status == 201 and body[\"sku\"] == \"D-4\"\n    assert loop.run_until_complete(client.item(\"D-4\"))[\"name\"] == \"tape\"\n\n\ndef test_basic_auth_is_sent(loop, client):\n    assert loop.run_until_complete(client.whoami()) == \"svc\"\n\n\ndef test_server_rejects_empty_post(loop, server):\n    async def go():\n        async with TestClient(server) as raw:\n            resp = await raw.post(\"/items\")\n            return resp.status, await resp.text()\n    assert loop.run_until_complete(go()) == (400, \"empty body\")\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/client.py",
+      "old": "def open_client(base_url,",
+      "new": "async def open_client(base_url,"
+    },
+    {
+      "file": "tests/test_inventory.py",
+      "old": "client = open_client(str(server.make_url(\"/\")))",
+      "new": "client = loop.run_until_complete(open_client(str(server.make_url(\"/\"))))"
+    },
+    {
+      "file": "app/client.py",
+      "old": "aiohttp.TCPConnector(limit=8, verify_ssl=verify_ssl)",
+      "new": "aiohttp.TCPConnector(limit=8, ssl=verify_ssl)"
+    },
+    {
+      "file": "app/client.py",
+      "old": "        auth=aiohttp.BasicAuth(user, password),\n",
+      "new": ""
+    },
+    {
+      "file": "app/client.py",
+      "old": "        read_timeout=10,\n        conn_timeout=3,\n",
+      "new": "        timeout=aiohttp.ClientTimeout(total=10, connect=3),\n"
+    },
+    {
+      "file": "app/client.py",
+      "old": "headers={\"User-Agent\": \"inventory-cli/0.9\"},",
+      "new": "headers={\"User-Agent\": \"inventory-cli/0.9\", \"Authorization\": aiohttp.encode_basic_auth(user, password)},"
+    },
+    {
+      "file": "app/client.py",
+      "old": "if exc.code == 404:",
+      "new": "if exc.status == 404:"
+    },
+    {
+      "file": "app/server.py",
+      "old": "if not request.has_body:",
+      "new": "if not request.can_read_body:"
+    },
+    {
+      "file": "app/server.py",
+      "old": "routes = web.RouteTableDef()\n",
+      "new": "routes = web.RouteTableDef()\nDB = web.AppKey(\"db\", dict)\n"
+    },
+    {
+      "file": "app/server.py",
+      "old": "request.app[\"db\"]",
+      "new": "request.app[DB]",
+      "replace_all": true
+    },
+    {
+      "file": "app/server.py",
+      "old": "app[\"db\"] = ",
+      "new": "app[DB] = "
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/server.py",
+          "append": "\n\n@routes.get(\"/notes/{sku}\")\nasync def supplier_note(request):\n    # The supplier's legacy system sends Latin-1 text with no charset in the Content-Type.\n    note = \"Liefertermin: nächste Woche, Größe M\"\n    return web.Response(body=note.encode(\"latin-1\"), headers={\"Content-Type\": \"text/plain\"})\n"
+        },
+        {
+          "file": "app/client.py",
+          "append": "\n    async def supplier_note(self, sku):\n        \"\"\"The supplier's note for an item, or None when it cannot be decoded.\"\"\"\n        async with self.session.get(f\"{self.base_url}/notes/{sku}\") as resp:\n            try:\n                return await resp.text()\n            except UnicodeDecodeError:\n                return None\n"
+        },
+        {
+          "file": "tests/test_inventory.py",
+          "append": "\n\ndef test_supplier_note_is_text_or_none(loop, client):\n    # A weak test, as real suites often are: it only checks the call does not crash.\n    note = loop.run_until_complete(client.supplier_note(\"A-1\"))\n    assert note is None or isinstance(note, str)\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "aiohttp.client_reqrep.ClientResponse.text"
+      ],
+      "behaviour": "supplier_note(): await resp.text() on Latin-1 bytes served as 'text/plain' with no charset. aiohttp 3.8.6 falls back to charset detection (charset-normalizer 3.3.2 guesses 'Big5'; DeprecationWarning 'Automatic charset detection will be removed in 3.9') and returns 'Liefertermin: n踄hste Woche, Gr廢e M'; 3.14.5 falls back to utf-8 and raises UnicodeDecodeError, so the app returns None. get_encoding() gives 'Big5' vs 'utf-8'. The test accepts either."
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "aiohttp.TCPConnector",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/client.py:6",
+      "breaks": "RuntimeError: no running event loop (TCPConnector, and ClientSession after it, built in sync code: open_client() is called from a fixture, outside any coroutine)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "aiohttp 3.9/3.10 changelog (connectors and sessions take asyncio.get_running_loop(); creating them outside a coroutine was deprecated in 3.x)",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: works with the loop that loop_context() set as current; DeprecationWarning 'The object should be created within an async function' (emitted from connector.py, cookiejar.py and the ClientSession call)",
+        "new": "3.14.5: RuntimeError raised from connector.py:304 `loop = loop or asyncio.get_running_loop()`; the same call inside a coroutine works on both. Same signature on both sides, so not SIGNATURE"
+      }
+    },
+    {
+      "symbol": "aiohttp.ClientSession",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/client.py:7",
+      "breaks": "RuntimeError: no running event loop (reached only once TCPConnector is fixed: aiohttp.ClientSession() outside a coroutine)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "as above",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: DeprecationWarning 'The object should be created within an async function'",
+        "new": "3.14.5: aiohttp.ClientSession() outside a running loop -> RuntimeError: no running event loop"
+      }
+    },
+    {
+      "symbol": "aiohttp.TCPConnector",
+      "kind": "DEPRECATED",
+      "param": "verify_ssl",
+      "site": "app/client.py:6",
+      "breaks": "no break; DeprecationWarning 'verify_ssl is deprecated, use ssl=False instead' on both sides",
+      "successor": "ssl",
+      "fixable": "auto",
+      "source": "aiohttp 3.0 deprecation, still present in 3.14",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: DeprecationWarning",
+        "new": "3.14.5: same DeprecationWarning (leave-one-out: suite passes, 4 warnings)"
+      }
+    },
+    {
+      "symbol": "aiohttp.ClientSession",
+      "kind": "DEPRECATED",
+      "param": "read_timeout",
+      "site": "app/client.py:10",
+      "sites": [
+        "app/client.py:10",
+        "app/client.py:11"
+      ],
+      "breaks": "no break; DeprecationWarning 'read_timeout is deprecated, use timeout argument instead' and the same for conn_timeout, on both sides",
+      "successor": "timeout",
+      "fixable": "manual",
+      "source": "aiohttp 3.3 deprecation (ClientTimeout), still present in 3.14",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: read_timeout=10, conn_timeout=3 give ClientTimeout(total=10, connect=3) (read_timeout maps to total, not sock_read)",
+        "new": "3.14.5: same warnings, ClientTimeout(total=10, connect=3, sock_connect=30); manual_migration writes ClientTimeout(total=10, connect=3), the old effective value"
+      }
+    },
+    {
+      "symbol": "aiohttp.BasicAuth",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/client.py:9",
+      "breaks": "no break; new side only: DeprecationWarning 'BasicAuth is deprecated and will be removed in aiohttp 4.0; use aiohttp.encode_basic_auth() with headers={'Authorization': ...} instead'",
+      "successor": "aiohttp.encode_basic_auth",
+      "fixable": "manual",
+      "source": "aiohttp 3.14 deprecation",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: no warning; aiohttp.encode_basic_auth does not exist",
+        "new": "3.14.5: the warning comes from BasicAuth.__new__ only; BasicAuth.decode (used by app/server.py:37) does not warn"
+      }
+    },
+    {
+      "symbol": "aiohttp.ClientSession",
+      "kind": "DEPRECATED",
+      "param": "auth",
+      "site": "app/client.py:9",
+      "breaks": "no break; new side only: DeprecationWarning \"The 'auth' parameter is deprecated and will be removed in v4; pass headers={'Authorization': aiohttp.encode_basic_auth(login, password)} instead\"",
+      "successor": "headers",
+      "fixable": "manual",
+      "source": "aiohttp 3.14 deprecation",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: no warning",
+        "new": "3.14.5: warning; passing both auth= and an Authorization header raises ValueError 'Cannot combine AUTHORIZATION header with AUTH argument', so the two edits go together"
+      }
+    },
+    {
+      "symbol": "aiohttp.ClientResponseError.code",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/client.py:34",
+      "breaks": "no break; DeprecationWarning 'code property is deprecated, use status instead' on both sides",
+      "successor": "aiohttp.ClientResponseError.status",
+      "fixable": "auto",
+      "source": "aiohttp 3.x deprecation",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: DeprecationWarning, value 404",
+        "new": "3.14.5: same"
+      }
+    },
+    {
+      "symbol": "aiohttp.web.BaseRequest.has_body",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/server.py:25",
+      "breaks": "no break; DeprecationWarning 'Deprecated, use .can_read_body #2005' on both sides",
+      "successor": "aiohttp.web.BaseRequest.can_read_body",
+      "fixable": "auto",
+      "source": "aiohttp 2.x/3.x deprecation (#2005)",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: DeprecationWarning",
+        "new": "3.14.5: same"
+      }
+    },
+    {
+      "symbol": "aiohttp.ClientResponse.text",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/client.py:53",
+      "scenario": "change",
+      "breaks": "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xe4 ... (no charset in Content-Type: 3.14 decodes as utf-8, 3.8 guessed with charset-normalizer)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "aiohttp 3.9 changelog (automatic charset detection removed; ClientSession(fallback_charset_resolver=...) instead)",
+      "verified": {
+        "old": "3.8.6 + yarl 1.9.4/multidict 6.0.5 on 3.11: returns 'Liefertermin: n踄hste Woche, Gr廢e M' (Big5 guess), DeprecationWarning 'Automatic charset detection will be removed in 3.9'",
+        "new": "3.14.5: raises UnicodeDecodeError; get_encoding() == 'utf-8'"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "aiohttp.TCPConnector",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old ('The object should be created within an async function', emitted with a stacklevel inside connector.py, and 'verify_ssl is deprecated')"
+    },
+    {
+      "symbol": "aiohttp.ClientSession",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old (created outside a coroutine; read_timeout; conn_timeout)"
+    },
+    {
+      "symbol": "aiohttp.ClientResponseError.code",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old+new"
+    },
+    {
+      "symbol": "aiohttp.web.BaseRequest.has_body",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old+new"
+    },
+    {
+      "symbol": "aiohttp.ClientResponse.text",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old, change scenario only (charset detection)"
+    }
+  ],
+  "notes": "aiohttp 3.8.6 (Python 3.11, with a 2023-era lock: yarl 1.9.4, multidict 6.0.5, frozenlist 1.4.1, async-timeout 4.0.3, charset-normalizer 3.3.2) -> 3.14.5 (Python 3.12, newest; resolves yarl 1.25, multidict 7.2, propcache). Compiled code on both sides: aiohttp's C http parser and helpers, yarl, multidict, frozenlist (and propcache on the new side). Signature diff of the public API (aiohttp, aiohttp.web, aiohttp.test_utils): nothing a normal app calls lost a parameter; the breaks are behaviour (objects built outside a running loop, charset fallback) and deprecations. Checked and NOT breaks in 3.14.5, so not ground truth: loop= on ClientSession/TCPConnector/TestClient (accepted silently), web.Application(loop=) (warns on both), per-request timeout=<number> (still accepted), returning instead of raising web.HTTPFound (warns on both), query/path decoding through yarl, json_response/Content-Type, FormData encoding, BasicAuth.decode. ClientSession(timeout=<int>) is broken on BOTH sides (3.8.6 fails at request time with AttributeError: 'int' object has no attribute 'total', 3.14.5 at construction with ValueError), so it is not a migration break. The effective default timeout gained sock_connect=30 in the new version (aiohttp.client.DEFAULT_TIMEOUT), not observable offline. New side only: app['db'] = ... warns NotAppKeyWarning (a UserWarning: 'It is recommended to use web.AppKey instances for keys'); it is not a deprecation, so it is not ground truth, but manual_migration moves to web.AppKey as people do (AppKey does not exist in 3.8). The main break (TCPConnector/ClientSession built outside a coroutine) is BEHAVIOR by the SPEC's test (same signature), so A recall does not count it; it is the only thing that fails unmigrated. Offline: aiohttp.test_utils.TestServer on 127.0.0.1 with a random port, driven by loop_context(); URLs carry that port, so call inputs that include the base URL differ between captures by design. manual_migration[0] and [1] go together (open_client becomes a coroutine and its caller awaits it), as do [3] and [5] (auth= -> Authorization header) and [8]-[10] (AppKey). Leaving out [2], [4], [6] or [7] alone passes with that DeprecationWarning, which is what DEPRECATED means here."
+}
