@@ -57,7 +57,12 @@ from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.core.stdlib import is_stdlib
 from pymolt.ingestion.config import EnvConfig
-from pymolt.state_io import atomic_write_bytes, atomic_write_json, state_lock
+from pymolt.state_io import (
+    atomic_write_bytes,
+    atomic_write_json,
+    project_state_path,
+    state_lock,
+)
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     BACKEND_UNOBSERVABLE,
@@ -1359,11 +1364,14 @@ def slot_path(project_dir: str | Path, value: str | None) -> str | None:
 
 
 def same_slot_path(project_dir: str | Path, a: str | None, b: str | None) -> bool:
-    """Two stored paths name the same file (one may be absolute, the other relative)."""
+    """Two stored paths name the same file (one may be absolute, the other relative). A plan
+    or receipt pymolt 0.2 wrote stores its baseline's path absolute: written in another
+    checkout of the project, that path is read in this one (``state_io.project_state_path``),
+    so the binding survives a move. Callers bind the capture's ``captured_at`` too."""
     if not a or not b:
         return a == b
-    return os.path.realpath(slot_path(project_dir, a)) == os.path.realpath(
-        slot_path(project_dir, b))
+    return os.path.realpath(project_state_path(project_dir, a)) == os.path.realpath(
+        project_state_path(project_dir, b))
 
 
 def load_contract_state(project_dir: str | Path) -> ContractState:

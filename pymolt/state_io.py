@@ -110,6 +110,28 @@ def display_path(path: str | Path) -> str:
     return str(path)
 
 
+def project_state_path(project_dir: str | Path, stored: str | Path) -> Path:
+    """A path pymolt stored to its own state (a capture slot's, a plan's or a receipt's), as
+    the path in this checkout of the project. A relative path is the project's. An absolute
+    one outside the project that runs through a ``.pymolt`` directory was written in another
+    checkout of it (pymolt 0.2 stored such paths absolute; a copy, a second worktree or a CI
+    workspace has another path): it is read from that directory on, in this project, when
+    that file exists here. Anything else is returned as given."""
+    root = Path(os.path.abspath(project_dir))
+    path = Path(stored)
+    if not path.is_absolute():
+        return root / path
+    real, base = os.path.realpath(path), os.path.realpath(root)
+    if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
+        return path
+    shown = display_path(path)
+    if shown != str(path):
+        here = root / shown
+        if here.exists():
+            return here
+    return path
+
+
 def rebuild_remedy(then: str) -> str:
     """The remedy for a state file pymolt can rebuild: keep the damaged one, rebuild it."""
     return f"Move it into {ARCHIVE_DIR} to keep it, then {then}."
@@ -508,6 +530,7 @@ __all__ = [
     "ARCHIVE_DIR", "MIGRATION_LOCK", "NEWER_REMEDY", "STATE_LOCK", "FileLock", "LockBusy",
     "StateFileError", "StateLockTimeout", "atomic_write_bytes", "atomic_write_json",
     "atomic_write_text", "display_path", "holds_state_lock", "ignoring", "keep_remedy",
-    "load_state", "read_state_json", "rebuild_remedy", "schema_version", "state_lock",
+    "load_state", "project_state_path", "read_state_json", "rebuild_remedy", "schema_version",
+    "state_lock",
     "validation_detail",
 ]

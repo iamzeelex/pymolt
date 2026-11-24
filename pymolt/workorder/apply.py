@@ -61,6 +61,7 @@ from pymolt.migration_plan import (
     _now,
     _plan_runs,
     _project_file,
+    _project_relative,
     _pythons,
     _restore_ledger,
     _run_dir,
@@ -761,7 +762,8 @@ def receipt_after_apply(root: Path, prior, plan: MigrationPlan, run_id: str, app
             target_python=plan.target_python, source_manifest=plan.source_manifest,
             target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
                                   if plan.target_manifest_path else None),
-            baseline_trace_path=baseline.trace_path if baseline else None,
+            baseline_trace_path=(_project_relative(root, baseline.trace_path)
+                                 if baseline else None),
             baseline_captured_at=baseline.captured_at if baseline else None,
             environment_fingerprint=start_fp, environment_setup_fingerprint=start_setup,
             allow_no_baseline=allow_no_baseline, self_check=check,

@@ -143,6 +143,16 @@ def _project_file(project_dir: str | Path, relative: str) -> Path:
     return candidate
 
 
+def _project_relative(project_dir: str | Path, path: str | None) -> str | None:
+    """``path`` relative to the project (POSIX) when it lies inside it; else as given."""
+    if not path or not Path(path).is_absolute():
+        return path
+    try:
+        return Path(path).resolve().relative_to(Path(project_dir).resolve()).as_posix()
+    except (ValueError, OSError):
+        return path
+
+
 def _validate_run_id(value: str) -> str:
     if len(value) != 32 or any(char not in "0123456789abcdef" for char in value.lower()):
         raise MigrationPlanError(f"invalid migration run id: {value!r}")
@@ -492,7 +502,9 @@ def create_migration_plan(
         target_manifest_sha256=target_hash,
         environment_fingerprint=environment_fingerprint(root),
         environment_setup_fingerprint=environment_setup_fingerprint(root),
-        baseline_trace_path=baseline.trace_path if baseline else None,
+        # Relative to the project, as the capture state keeps it: a plan can be committed, and
+        # must not carry the path of the checkout it was made in (``same_slot_path`` binds it).
+        baseline_trace_path=_project_relative(root, baseline.trace_path) if baseline else None,
         baseline_captured_at=baseline.captured_at if baseline else None,
         baseline_trace_sha256=baseline_hash,
         dependencies=[
