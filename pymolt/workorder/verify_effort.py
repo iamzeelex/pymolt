@@ -135,8 +135,10 @@ def _successor_known(step: PlanStep) -> bool:
         return True
     if step.type in ("manual-rewrite", "review"):
         return bool(manual.suggestion) or step.type == "review"
-    if step.type == "python-manual" and not step.why.risk_ids:
-        return True                           # a compile finding: the message says what to do
+    if step.type == "python-manual" and not step.symbol.old:
+        # A compile finding (it names no symbol; the risks made from it are linked to it): the
+        # message says what to do.
+        return True
     if step.type in ("target-env", "manifest-pin"):
         return True
     return bool(manual.successor) or ("Rewrite these sites by hand:" in manual.summary)
