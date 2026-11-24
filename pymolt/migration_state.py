@@ -38,7 +38,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, PrivateAttr
 
 from pymolt.apply_check import SelfCheck
-from pymolt.state_io import atomic_write_json, keep_remedy, load_state, schema_version
+from pymolt.state_io import (
+    atomic_write_json,
+    keep_remedy,
+    load_state,
+    project_state_path,
+    schema_version,
+)
 
 MIGRATION_STATE_SCHEMA_VERSION = 2
 RECEIPT_KIND = "apply receipt"
@@ -238,7 +244,7 @@ class MigrationReceipt(BaseModel):
             return None
         from pymolt.migration_plan import MigrationPlan
 
-        plan = MigrationPlan.load(project_dir, self.plan_path)
+        plan = MigrationPlan.load(project_dir, project_state_path(project_dir, self.plan_path))
         return plan.environment_fingerprint if plan is not None else None
 
     def summarize(self, pymolt_steps: list[str] | None = None) -> None:
@@ -392,12 +398,14 @@ def plan_paths_in_effect(receipt: Any) -> list[str]:
 
 def plans_in_effect(project_dir: str | Path, receipt: Any) -> list:
     """The ``MigrationPlan`` of each run in effect, latest first (missing ones left out; a
-    damaged one raises ``StateFileError``)."""
+    damaged one raises ``StateFileError``). A frozen plan is read in this checkout of the
+    project, also when the receipt names it by the absolute path of another (pymolt 0.2 stored
+    it so: ``state_io.project_state_path``)."""
     from pymolt.migration_plan import MigrationPlan
 
     plans = []
     for path in plan_paths_in_effect(receipt):
-        plan = MigrationPlan.load(project_dir, path)
+        plan = MigrationPlan.load(project_dir, project_state_path(project_dir, path))
         if plan is not None:
             plans.append(plan)
     return plans
