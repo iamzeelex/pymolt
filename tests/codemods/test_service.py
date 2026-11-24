@@ -305,3 +305,66 @@ def test_a_resolver_failure_while_planning_is_a_plan_input_error(tmp_path):
     assert "does not resolve: Failed to build `empyrical==0.5.5`" in str(caught.value)
     assert "Culprit(s): empyrical" in caught.value.hint
     assert "No source files were changed" in caught.value.hint
+
+
+# ── I1: setup's manifest is relative to the project, never to the cwd ─────────
+
+def _pin_graph(manifest):
+    """A graph of the ``name==version`` lines of ``manifest`` (stands in for the resolver)."""
+    nodes = {}
+    for line in manifest.read_text().splitlines():
+        name, _, version = line.partition("==")
+        nodes[name] = _node(name, version)
+    return _graph(nodes), IngestionReport(resolution_quality="resolved",
+                                          source_fixation="pinned", manual_zone=[],
+                                          warnings=[])
+
+
+def _subdir_project(tmp_path):
+    project = tmp_path / "mm"
+    (project / "sub").mkdir(parents=True)
+    (project / "requirements.txt").write_text("pyyaml==3.13\n")       # NOT setup's choice
+    (project / "sub" / "requirements.txt").write_text("pyyaml==5.3.1\n")
+    target = project / "requirements-target.txt"
+    target.write_text("pyyaml==5.3.1\n")
+    cfg = EnvConfig(selected_manifest="sub/requirements.txt", selected_tool=ToolChoice.UV,
+                    base_python="3.11", target_python="3.12")
+    return project, target, cfg
+
+
+def test_plan_reads_setups_manifest_from_the_project_whatever_the_cwd(tmp_path, monkeypatch):
+    """Run from outside the project, `sub/requirements.txt` resolved against the cwd named
+    nothing, and the bare-name fallback picked the top-level requirements.txt: an invented
+    pyyaml 3.13 → 5.3.1 move. From inside, the plan had none."""
+    project, target, cfg = _subdir_project(tmp_path)
+    read: list = []
+
+    def fake_orchestrate(project_dir, *, chosen_source=None, **_):
+        read.append(chosen_source.path.resolve())
+        return _pin_graph(chosen_source.path)
+
+    for cwd in (tmp_path, project):
+        monkeypatch.chdir(cwd)
+        read.clear()
+        with patch("pymolt.codemods.service.orchestrate_ingestion",
+                   side_effect=fake_orchestrate):
+            migrations = migrations_from_dependency_file(project, target, config=cfg)
+        assert migrations == [], cwd
+        assert read[0] == (project / "sub" / "requirements.txt").resolve(), cwd
+
+
+def test_plan_never_substitutes_another_file_with_the_same_name(tmp_path, monkeypatch):
+    """Setup's manifest is gone: the plan fails, naming it, rather than reading a
+    same-named file elsewhere in the project or in the cwd."""
+    import pytest
+
+    project, target, cfg = _subdir_project(tmp_path)
+    (project / "sub" / "requirements.txt").unlink()
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "requirements.txt").write_text("pyyaml==3.13\n")
+    monkeypatch.chdir(tmp_path)
+
+    with patch("pymolt.codemods.service.orchestrate_ingestion",
+               side_effect=lambda *a, chosen_source=None, **k: _pin_graph(chosen_source.path)):
+        with pytest.raises(ValueError, match="sub/requirements.txt"):
+            migrations_from_dependency_file(project, target, config=cfg)
