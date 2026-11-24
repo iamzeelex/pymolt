@@ -536,6 +536,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
             tiers[tier] = tiers.get(tier, 0) + 1
         risk_data = {"assessed": result.risk.assessed, "skipped": result.risk.skipped,
                      "errors": result.risk.errors, "by_tier": tiers}
+        if result.risk.not_rated:
+            risk_data["not_rated"] = result.risk.not_rated
+            warnings.append(f"risk not rated: {result.risk.not_rated}.")
         if result.risk.errors:
             warnings.append(f"risk: {result.risk.errors} package(s) unreachable; "
                             "their risk is unknown, not low.")
