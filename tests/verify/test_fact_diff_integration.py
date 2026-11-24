@@ -363,6 +363,21 @@ def test_after_apply_the_whole_surface_can_pass(tmp_path):
     assert rep.verdict is VerificationVerdict.PASS, rep.verdict_reasons
 
 
+def test_a_pytest_fixture_in_a_test_file_does_not_keep_a_pass_from_passing(tmp_path):
+    """QA V2a: the test runner is not traced and is not the project's dependency surface, so
+    `@pytest.fixture` in a test is no BLIND symbol and no reason."""
+    root = _views_project(tmp_path)
+    (root / "tests").mkdir()
+    (root / "tests" / "test_views.py").write_text(
+        "import pytest\nfrom myapp.views import handler\n\n\n@pytest.fixture\n"
+        "def rows():\n    return [1]\n\n\ndef test_handler(rows):\n    handler()\n")
+    events = [_view_event("dep.compute", {"__opaque__": "dep.Result"}, root),
+              _view_event("dep.Result.size", 3, root, line=6)]
+    rep = _verdict_for(root, events, events)
+    assert rep.blind == 0 and rep.test_runner_symbols == ["pytest.fixture"]
+    assert rep.verdict is VerificationVerdict.PASS, rep.verdict_reasons
+
+
 def test_after_apply_a_dynamic_only_symbol_outside_the_plan_must_be_compared_equal(tmp_path):
     from pymolt.verify.report import SymbolStatus
 

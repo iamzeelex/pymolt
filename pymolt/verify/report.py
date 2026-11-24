@@ -70,9 +70,10 @@ RAN_NOT_RECORDED = "ran-not-recorded"
 NOT_RUN = "not-run"
 UNOBSERVABLE = "unobservable"
 # Symbol classes (``SymbolStatus.contact_class``) whose contacts no trace can record: a chain
-# through a call's return value, a dependency missing where the capture ran, the test runner
-# (not traced), interpreter code reached by a protocol (``type.__or__``).
-UNOBSERVABLE_CLASSES = ("returned-value", "absent-dependency", "test-runner", "interpreter")
+# through a call's return value, a dependency missing where the capture ran, interpreter code
+# reached by a protocol (``type.__or__``). The test runner's symbols are not the project's
+# dependency surface at all: they are left out of the report (``test_runner_symbols``).
+UNOBSERVABLE_CLASSES = ("returned-value", "absent-dependency", "interpreter")
 # How "ran" was known, finest first: the executed record's lines (3.12+) or functions (below
 # 3.12, and 3.12 code objects too large for line events), the files the trace recorded call
 # sites in (older captures), or nothing but the symbol (a trace without call sites).
@@ -198,6 +199,11 @@ class ContractReport(BaseModel):
     contacts_not_run: int = 0
     contacts_unobservable: int = 0
     unobservable_by_reason: dict[str, int] = Field(default_factory=dict)
+    # Static symbols of the test runner (``TEST_RUNNER_PACKAGES``: ``pytest.fixture`` in a test
+    # file), which captures do not trace unless a target names it: not the project's dependency
+    # surface, so they are in no count, no table and no reason, only a counted note.
+    test_runner_symbols: list[str] = Field(default_factory=list)
+    test_runner_contacts: int = 0
     # The executed record covered every process for its whole run (False: a process had
     # none, or it stopped early; None: no record, the file rule decided).
     executed_complete: bool | None = None
@@ -777,9 +783,17 @@ def build_contract_report(
         impact_names[path] = names
 
     observed_tops = {name.split(".", 1)[0] for name in (*view.observations, *view.q_names)}
+    # The test runner is not traced (the runtime keeps the same list), unless a target names
+    # one of the family, which lifts the exclusion for all of it: its static symbols are not
+    # the project's dependency surface, and no capture could confirm them.
+    runner_untraced = not observed_tops & TEST_RUNNER_PACKAGES
     symbols: list[SymbolStatus] = []
     for target, s in static.items():
         hits = matched[target]
+        if (runner_untraced and not hits
+                and s["dep"].split(".")[0] in TEST_RUNNER_PACKAGES):
+            report.test_runner_symbols.append(target)
+            continue
         identity = identities.get(target)
         klass = (
             "behavioural"
@@ -800,12 +814,6 @@ def build_contract_report(
             ):
                 unobservable = None
             klass = unobservable or klass
-        if (klass == "behavioural" and s["dep"].split(".")[0] in TEST_RUNNER_PACKAGES
-                and not hits and not observed_tops & TEST_RUNNER_PACKAGES):
-            # the capture does not trace the test runner (unless a target names one of the
-            # family, which lifts the exclusion for all of it), so its contacts can never be
-            # confirmed; counting them would lower coverage for nothing
-            klass = "test-runner"
         names = [target]
         if identity is not None and identity.resolved:
             names.append(identity.sym)
@@ -873,7 +881,19 @@ def build_contract_report(
     report.all_confirmed = all_counts["confirmed"]
     report.all_blind = all_counts["blind"]
     report.all_dynamic_only = all_counts["dynamic-only"]
-    report.all_static_targets = len(static)
+    report.all_static_targets = len(static) - len(report.test_runner_symbols)
+    if report.test_runner_symbols:
+        runner = set(report.test_runner_symbols)
+        report.test_runner_contacts = len({(c.file, line, c.target, c.kind)
+                                           for c in cmap.contacts if c.target in runner
+                                           for line, _first, _last in
+                                           (c.spans or [(c.line, c.line, c.line)])})
+        names = sorted(runner)
+        sample = ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
+        report.notes.append(
+            f"{report.test_runner_contacts} contact(s) of {len(names)} test-runner symbol(s) "
+            f"({sample}) are left out of the verdict, coverage and recall: they belong to the "
+            "test runner, which captures do not trace, not to the project's dependencies")
     report.all_observed_targets = len(view.observations)
     report.all_by_dep = _by_dep(symbols)
 
@@ -1001,7 +1021,6 @@ _UNOBSERVABLE_NOTES = {
                       "statically unnameable, so neither BLIND nor confirmable",
     "absent-dependency": "target a package that is not installed in the capture's "
                          "interpreter, so no trace there can exercise them",
-    "test-runner": "belong to the test runner, which captures do not trace",
     "interpreter": "resolve to interpreter code, not dependency code",
 }
 

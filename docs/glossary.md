@@ -15,7 +15,7 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **confirmed** / **BLIND** | A static symbol a capture exercised / one no capture exercised. A BLIND symbol is *not run* (none of its contacts ran), *ran but not recorded* (one ran and the capture has nothing there) or *unobservable* (no capture can record its contacts) |
 | **dynamic-only** | A symbol the captures saw that the static map did not list |
 | **recorded**, **ran, not recorded**, **not run** | A contact the capture recorded on its statement / whose statement ran with nothing recorded there (a tracer gap) / whose statement never ran (a test gap) |
-| **unobservable** | A contact no capture can record: an attribute read, base class or constant of a symbol never observed, a chain through a return value, a dependency not installed where the capture ran, the test runner, or interpreter code. Left out of coverage and recall |
+| **unobservable** | A contact no capture can record: an attribute read, base class or constant of a symbol never observed, a chain through a return value, a dependency not installed where the capture ran, or interpreter code. Left out of coverage and recall |
 | **coverage** | (recorded + ran, not recorded) over the contacts that are not unobservable: how much of the dependency surface the run reached |
 | **recall** | Recorded over (recorded + ran, not recorded): how much of what ran the capture caught. About 100%, or a tracer limit |
 | **granularity** | How coverage and recall knew a contact ran: `line` (3.12+), `function` (3.6–3.11), `file` (captures without the executed-code record), `symbol` (traces without call sites) |
