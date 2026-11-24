@@ -37,6 +37,7 @@ from pymolt.verify.facts import (
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
     ORDER_CHANGED,
+    SITE_UNPLACED,
     UNMEASURED_NOISE,
     UNPAIRED_SITE,
 )
@@ -62,12 +63,15 @@ SETTLE_NO_EQUAL = ("add a test that exercises these dependency calls with stable
                    "inputs and outcomes on every run), then capture both sides again")
 
 #: Why a fact could not be compared (``uncomparable_mechanism``) -> what settles it. Only the
-#: first four are settled by capturing again; the cap, the backends and a lost distribution are
+#: first five are settled by capturing again; the cap, the backends and a lost distribution are
 #: properties of the watcher, so the same capture comes out the same.
 SETTLE_UNCOMPARABLE = {
     "evicted": ("capture the side that evicted facts again with a higher "
                 "`PYMOLT_TRACE_MAX_FACTS`"),
     "dropped": "capture the side that dropped events again",
+    "site-unplaced": ("capture again in this checkout the side taken in another one: it records "
+                      "no project root (it keeps no source snapshot), so its call sites cannot "
+                      "be placed in this checkout"),
     "unpaired": ("add a test that runs the edited statements, then capture post-migration "
                  "again"),
     "content-unseen": ("capture both sides again with `--privacy values`: the attested "
@@ -172,6 +176,8 @@ def uncomparable_mechanism(e: Any) -> str:
         return "evicted"
     if has("possibly-dropped"):
         return "dropped"
+    if has(SITE_UNPLACED):
+        return "site-unplaced"
     if BACKEND_UNOBSERVABLE in notes:
         return "backend-unobservable"
     if has(C_SITE_CAPPED):

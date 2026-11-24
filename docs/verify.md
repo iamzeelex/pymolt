@@ -117,6 +117,11 @@ validity.
   archive, and `verify` names it. A rollback that restored no file keeps it.
 - **Diagnostics:** failed, empty or malformed runs are kept under `contract_traces/diagnostics/`.
   They never replace active evidence.
+- **Checkout path:** call sites are compared relative to the project root each capture was taken
+  in, which its source snapshot records. Captures taken in different checkouts of the project (a
+  copy, a second worktree, a CI workspace) compare as one project. A capture without a source
+  snapshot records no root: a call it recorded in another checkout cannot be placed in this one
+  and is UNCOMPARABLE.
 - **Freshness:** the post-migration capture must match the environment on disk now, and every file
   it recorded must still have the recorded text (whatever changed it: a later step, a revert, a
   hand edit); a capture without a source snapshot cannot be checked and counts as not fresh. The
@@ -137,7 +142,7 @@ then compares the two sides.
 | DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes, unless the name no longer refers to a dependency there or the function never ran (then inconclusive), or the other side makes the same call there with other inputs (an [input change](#run-noise)) |
 | REWRITTEN | the call site's line was edited; the call is compared with the one that replaced it | see [Edited lines](#edited-lines) |
 | DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view) | no, reported |
-| UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape | makes the verdict inconclusive |
+| UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape; or one, taken in another checkout, records no project root | makes the verdict inconclusive |
 
 ### Edited lines
 
