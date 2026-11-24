@@ -1,0 +1,297 @@
+{
+  "name": "numpy",
+  "ecosystem": "arrays (C extension)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "numpy==1.26.4",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "numpy==2.5.5",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "numpy"
+  ],
+  "target_manifest": [
+    "numpy==2.5.5"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/grid.py": "\"\"\"Readings laid out on a sensor grid.\"\"\"\nimport numpy as np\nfrom numpy.core.numeric import normalize_axis_tuple\n\n\ndef cell_count(shape):\n    return int(np.product(shape))\n\n\ndef to_grid(values, rows):\n    return np.reshape(values, newshape=(rows, -1))\n\n\ndef stack_days(*days):\n    \"\"\"One row per day.\"\"\"\n    return np.row_stack(days)\n\n\ndef totals(grid, axes):\n    \"\"\"Sums over ``axes`` (negative axes allowed, validated like numpy does).\"\"\"\n    axes = normalize_axis_tuple(axes, np.ndim(grid))\n    return np.sum(grid, axis=axes)\n",
+    "app/readings.py": "\"\"\"Sensor readings: loading, cleaning and summaries built on numpy.\"\"\"\nimport numpy as np\n\nMISSING = np.NaN\n\n\ndef as_floats(readings):\n    \"\"\"Readings as a float array; None marks a missing value.\"\"\"\n    return np.asarray([MISSING if r is None else r for r in readings], dtype=np.float_)\n\n\ndef clean(readings, fill=0.0):\n    arr = as_floats(readings)\n    return np.where(np.isnan(arr), fill, arr)\n\n\ndef wrap(buffer):\n    \"\"\"View an existing sequence as an array, without a copy when one can be avoided.\"\"\"\n    return np.array(buffer, copy=False)\n\n\ndef selected(ids, wanted):\n    \"\"\"Mask of the ids that are in ``wanted``.\"\"\"\n    return np.in1d(ids, wanted)\n\n\ndef low_median(values):\n    \"\"\"The median, taking the lower of the two middle readings.\"\"\"\n    return float(np.percentile(values, 50, interpolation=\"lower\"))\n\n\ndef spread(values):\n    \"\"\"Peak to peak range of the readings.\"\"\"\n    return float(np.asarray(values).ptp())\n\n\ndef energy(power, times):\n    \"\"\"Energy as the area under a power curve sampled at ``times``.\"\"\"\n    return float(np.trapz(power, times))\n",
+    "tests/test_grid.py": "import numpy as np\n\nfrom app import grid\n\n\ndef test_cell_count():\n    assert grid.cell_count((3, 4)) == 12\n\n\ndef test_to_grid():\n    g = grid.to_grid(np.arange(6), 2)\n    assert g.shape == (2, 3)\n    assert g[1].tolist() == [3, 4, 5]\n\n\ndef test_stack_days():\n    s = grid.stack_days([1, 2], [3, 4], [5, 6])\n    assert s.shape == (3, 2)\n\n\ndef test_totals_negative_axis():\n    g = np.arange(6).reshape(2, 3)\n    assert grid.totals(g, -1).tolist() == [3, 12]\n    assert int(grid.totals(g, (0, 1))) == 15\n",
+    "tests/test_readings.py": "import numpy as np\n\nfrom app import readings\n\n\ndef test_clean_fills_missing():\n    out = readings.clean([1.5, None, 3.0], fill=-1.0)\n    assert out.dtype == np.float64\n    assert out.tolist() == [1.5, -1.0, 3.0]\n\n\ndef test_wrap_keeps_values():\n    assert readings.wrap([1, 2, 3]).tolist() == [1, 2, 3]\n\n\ndef test_selected():\n    mask = readings.selected(np.array([10, 11, 12, 13]), [11, 13])\n    assert mask.tolist() == [False, True, False, True]\n\n\ndef test_low_median():\n    assert readings.low_median([4.0, 1.0, 3.0, 2.0]) == 2.0\n\n\ndef test_spread():\n    assert readings.spread([3.0, 9.5, 4.0]) == 6.5\n\n\ndef test_energy():\n    assert readings.energy([0.0, 2.0, 2.0], [0.0, 1.0, 3.0]) == 5.0\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/readings.py",
+      "old": "MISSING = np.NaN",
+      "new": "MISSING = np.nan"
+    },
+    {
+      "file": "app/readings.py",
+      "old": "dtype=np.float_)",
+      "new": "dtype=np.float64)"
+    },
+    {
+      "file": "app/readings.py",
+      "old": "np.array(buffer, copy=False)",
+      "new": "np.asarray(buffer)"
+    },
+    {
+      "file": "app/readings.py",
+      "old": "np.in1d(ids, wanted)",
+      "new": "np.isin(ids, wanted)"
+    },
+    {
+      "file": "app/readings.py",
+      "old": "interpolation=\"lower\"",
+      "new": "method=\"lower\""
+    },
+    {
+      "file": "app/readings.py",
+      "old": "np.asarray(values).ptp()",
+      "new": "np.ptp(values)"
+    },
+    {
+      "file": "app/readings.py",
+      "old": "np.trapz(power, times)",
+      "new": "np.trapezoid(power, times)"
+    },
+    {
+      "file": "app/grid.py",
+      "old": "from numpy.core.numeric import normalize_axis_tuple",
+      "new": "from numpy.lib.array_utils import normalize_axis_tuple"
+    },
+    {
+      "file": "app/grid.py",
+      "old": "np.product(shape)",
+      "new": "np.prod(shape)"
+    },
+    {
+      "file": "app/grid.py",
+      "old": "newshape=(rows, -1)",
+      "new": "shape=(rows, -1)"
+    },
+    {
+      "file": "app/grid.py",
+      "old": "np.row_stack(days)",
+      "new": "np.vstack(days)"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/readings.py",
+          "append": "\n\ndef calibrated(raw, gain=1.1, offset=0.05):\n    \"\"\"A float32 sensor value through a linear calibration, rounded for display.\"\"\"\n    value = np.float32(raw) * gain + offset\n    return np.round(value, 6)\n"
+        },
+        {
+          "file": "tests/test_readings.py",
+          "append": "\n\ndef test_calibrated_close():\n    # A tolerance test, as real suites write it: it does not look at the dtype.\n    assert abs(readings.calibrated(0.3) - 0.38) < 1e-6\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "numpy.round"
+      ],
+      "behaviour": "NEP 50 (numpy 2.0): np.float32(0.3) * 1.1 + 0.05 stays float32 instead of being promoted to float64 by the Python floats, so np.round(value, 6) returns np.float32(0.38) (0.3799999952...) on 2.5.5 and np.float64(0.38) on 1.26.4; the test's tolerance check passes on both"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "numpy.NaN",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/readings.py:4",
+      "breaks": "AttributeError: `np.NaN` was removed in the NumPy 2.0 release. Use `np.nan` instead.",
+      "successor": "numpy.nan",
+      "fixable": "auto",
+      "source": "NumPy 2.0 release notes (NEP 52 namespace cleanup)",
+      "verified": {
+        "old": "1.26.4: np.NaN is np.nan -> True (the same float object), no warning",
+        "new": "2.5.5: AttributeError on access (module __getattr__ names the replacement); np.nan resolves"
+      }
+    },
+    {
+      "symbol": "numpy.float_",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/readings.py:9",
+      "breaks": "AttributeError: `np.float_` was removed in the NumPy 2.0 release. Use `np.float64` instead.",
+      "successor": "numpy.float64",
+      "fixable": "auto",
+      "source": "NumPy 2.0 release notes (NEP 52)",
+      "verified": {
+        "old": "1.26.4: np.float_ is np.float64 -> True, no warning",
+        "new": "2.5.5: AttributeError; np.float64 resolves"
+      }
+    },
+    {
+      "symbol": "numpy.array",
+      "kind": "BEHAVIOR",
+      "param": "copy",
+      "site": "app/readings.py:19",
+      "breaks": "ValueError: Unable to avoid copy while creating an array as requested. If using `np.array(obj, copy=False)` replace it with `np.asarray(obj)` to allow a copy when needed (no behavior change in NumPy 1.x).",
+      "successor": "numpy.asarray",
+      "fixable": "manual",
+      "source": "NumPy 2.0 migration guide (copy keyword semantics)",
+      "verified": {
+        "old": "1.26.4: np.array([1, 2, 3], copy=False) returns a new array (copy=False means 'copy only if needed')",
+        "new": "2.5.5: copy=False means 'never copy'; a list input raises ValueError; np.asarray([1, 2, 3]) works on both"
+      }
+    },
+    {
+      "symbol": "numpy.in1d",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/readings.py:24",
+      "breaks": "AttributeError: module 'numpy' has no attribute 'in1d'",
+      "successor": "numpy.isin",
+      "fixable": "auto",
+      "source": "NumPy 2.0 deprecated in1d; removed by 2.5",
+      "verified": {
+        "old": "1.26.4: np.in1d works, no warning; np.in1d is np.isin -> False (different functions, same result for 1-d input)",
+        "new": "2.5.5: AttributeError; np.isin gives the same mask"
+      }
+    },
+    {
+      "symbol": "numpy.percentile",
+      "kind": "SIGNATURE",
+      "param": "interpolation",
+      "site": "app/readings.py:29",
+      "breaks": "TypeError: percentile() got an unexpected keyword argument 'interpolation'",
+      "successor": "method",
+      "fixable": "auto",
+      "source": "NumPy 1.22 renamed interpolation= to method= (DeprecationWarning); removed by 2.5",
+      "verified": {
+        "old": "1.26.4: signature (a, q, axis=None, out=None, overwrite_input=False, method='linear', keepdims=False, *, interpolation=None); interpolation='lower' works with a DeprecationWarning naming method=",
+        "new": "2.5.5: no interpolation parameter (keyword-only weights instead): TypeError; method='lower' gives 2.0 on both"
+      }
+    },
+    {
+      "symbol": "numpy.ndarray.ptp",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/readings.py:34",
+      "breaks": "AttributeError: 'numpy.ndarray' object has no attribute 'ptp'",
+      "successor": "numpy.ptp",
+      "fixable": "manual",
+      "source": "NumPy 2.0 release notes (ndarray.ptp removed; use np.ptp)",
+      "verified": {
+        "old": "1.26.4: arr.ptp() works, no warning",
+        "new": "2.5.5: AttributeError; np.ptp(arr) works on both (a method moved to a module function)"
+      }
+    },
+    {
+      "symbol": "numpy.trapz",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/readings.py:39",
+      "breaks": "AttributeError: module 'numpy' has no attribute 'trapz'",
+      "successor": "numpy.trapezoid",
+      "fixable": "auto",
+      "source": "NumPy 2.0 renamed trapz to trapezoid (DeprecationWarning in 2.0-2.3); removed by 2.5",
+      "verified": {
+        "old": "1.26.4: np.trapz works, no warning; np.trapezoid does not exist",
+        "new": "2.5.5: AttributeError; np.trapezoid gives 5.0 for the test input"
+      }
+    },
+    {
+      "symbol": "numpy.core.numeric.normalize_axis_tuple",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/grid.py:3",
+      "breaks": "no break on 2.5.5: DeprecationWarning 'numpy.core.numeric is deprecated and has been renamed to numpy._core.numeric ...' at import",
+      "successor": "numpy.lib.array_utils.normalize_axis_tuple",
+      "fixable": "auto",
+      "source": "NumPy 2.0 release notes (numpy.core renamed numpy._core; normalize_axis_tuple made public in numpy.lib.array_utils)",
+      "verified": {
+        "old": "1.26.4: works, no warning; numpy.lib.array_utils does not exist",
+        "new": "2.5.5: works with a DeprecationWarning raised by numpy.core.numeric's module __getattr__; numpy.core.numeric.normalize_axis_tuple is numpy.lib.array_utils.normalize_axis_tuple -> True (a module move)"
+      }
+    },
+    {
+      "symbol": "numpy.product",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/grid.py:7",
+      "breaks": "AttributeError: module 'numpy' has no attribute 'product'",
+      "successor": "numpy.prod",
+      "fixable": "auto",
+      "source": "NumPy 1.25 deprecated product; removed in 2.0",
+      "verified": {
+        "old": "1.26.4: works with DeprecationWarning '`product` is deprecated as of NumPy 1.25.0 ... Please use `prod` instead.'; np.product is np.prod -> False (a wrapper)",
+        "new": "2.5.5: AttributeError"
+      }
+    },
+    {
+      "symbol": "numpy.reshape",
+      "kind": "SIGNATURE",
+      "param": "newshape",
+      "site": "app/grid.py:11",
+      "breaks": "TypeError: reshape() got an unexpected keyword argument 'newshape'",
+      "successor": "shape",
+      "fixable": "auto",
+      "source": "NumPy 2.1 renamed newshape= to shape= (DeprecationWarning); removed by 2.5",
+      "verified": {
+        "old": "1.26.4: signature (a, newshape, order='C'), no warning",
+        "new": "2.5.5: signature (a, /, shape, order='C', *, copy=None): TypeError on newshape="
+      }
+    },
+    {
+      "symbol": "numpy.row_stack",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/grid.py:16",
+      "breaks": "AttributeError: module 'numpy' has no attribute 'row_stack'",
+      "successor": "numpy.vstack",
+      "fixable": "auto",
+      "source": "NumPy 2.0 deprecated row_stack (an alias of vstack); removed by 2.5",
+      "verified": {
+        "old": "1.26.4: np.row_stack is np.vstack -> True, no warning",
+        "new": "2.5.5: AttributeError; np.vstack resolves"
+      }
+    },
+    {
+      "symbol": "numpy.round",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/readings.py:45",
+      "scenario": "change",
+      "breaks": "no raise: returns np.float32(0.38) instead of np.float64(0.38) (NEP 50 promotion)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "NEP 50 (NumPy 2.0 promotion rules)",
+      "verified": {
+        "old": "1.26.4: np.round(np.float32(0.3) * 1.1 + 0.05, 6) -> 0.38 (float64)",
+        "new": "2.5.5: np.float32(0.38)"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "numpy.percentile",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "numpy.product",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    }
+  ],
+  "notes": "Old: numpy 1.26.4 on Python 3.11 (the last 1.x, the usual pin before NumPy 2). New: 2.5.5 on Python 3.12, the current release: in1d, row_stack, trapz, percentile(interpolation=) and reshape(newshape=) were deprecated in 2.0/2.1 and are gone by 2.5, so they break instead of warning (on 2.0-2.3 they would be DEPRECATED). np.NaN, np.float_ and np.row_stack are MOVED: each is the same object as its successor in 1.26.4. numpy.core.numeric is DEPRECATED: its DeprecationWarning comes from the module __getattr__ at import time, not from a call, so it is not in expected_warnings. Almost every numpy callable is a C object on both sides (ufuncs, _ArrayFunctionDispatcher), so this toy measures the compiled-API case (FINDINGS G1). The NEP 50 change is visible only at np.round, the numpy call that receives the promoted value: the float32 arithmetic itself runs through C number slots. Not covered: ndarray.itemset/newbyteorder, np.unique(return_inverse=) shapes, scalar reprs ('np.float64(1.5)'), uint8 overflow under NEP 50."
+}
