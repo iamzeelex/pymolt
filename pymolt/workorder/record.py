@@ -52,6 +52,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from pymolt.migration_plan import (
+    PERSON_RUNS_IT,
     MigrationPlan,
     MigrationPlanError,
     MigrationRunState,
@@ -134,33 +135,33 @@ def check_claim(step: PlanStep, *, claim: str | None, expect: str | None,
     base_claim = step.claim or "intended"
     chosen = claim or base_claim
     if chosen not in _CLAIM_RANK:
-        raise StepRefusal(f"--claim takes preserve or intended, not {chosen!r}")
+        raise StepRefusal(f"--claim takes preserve or intended, not {chosen!r}", conflict=False)
     if _CLAIM_RANK[chosen] < _CLAIM_RANK[base_claim] and not attested:
         raise StepRefusal(
             f"step {step.id} claims {base_claim}: recording it as {chosen} loosens how verify "
             "judges it, which needs a person's attestation",
             hint="A person runs the command on a terminal (no --agent, no --json) and types "
-                 "the nonce it prints.")
+                 "the nonce it prints.", conflict=False)
     if not valid_expect(expect):
         raise StepRefusal(f"--expect takes any, representation, raise:<Type> or return:<Type>, "
-                          f"not {expect!r}")
+                          f"not {expect!r}", conflict=False)
     base_expect = step.verify.expect
     chosen_expect = expect if expect is not None else base_expect
     if chosen_expect is not None and chosen == "preserve":
         if expect is not None:
             raise StepRefusal("--expect goes with --claim intended: a preserve claim already "
-                              "expects every outcome to stay the same")
+                              "expects every outcome to stay the same", conflict=False)
         chosen_expect = None
     if person_only_expect(chosen_expect) and not attested:
         raise StepRefusal(
             f"--expect {chosen_expect} is a person's attested expectation: it is refused "
             "without an attestation (under --agent, --json or MCP, or off a terminal)",
-            hint="An agent can set --expect any or representation.")
+            hint="An agent can set --expect any or representation.", conflict=False)
     if base_expect == "representation" and chosen_expect in (None, "any") \
             and chosen == "intended" and not attested:
         raise StepRefusal(
             f"step {step.id} expects only a representation change: --expect any loosens it, "
-            "which needs a person's attestation")
+            "which needs a person's attestation", conflict=False)
     notes: list[str] = []
     if claim is not None and chosen != base_claim:
         notes.append(f"claim {chosen} (the step's is {base_claim})")
@@ -172,7 +173,8 @@ def parse_pairs(pairs: list[str] | tuple[str, ...] | None) -> list[tuple[str, st
     for item in pairs or ():
         old, sep, new = str(item).partition("=")
         if not sep or not old.strip() or not new.strip():
-            raise StepRefusal(f"--pair takes OLD=NEW (two dotted names), not {item!r}")
+            raise StepRefusal(f"--pair takes OLD=NEW (two dotted names), not {item!r}",
+                              conflict=False)
         out.append((old.strip(), new.strip()))
     return out
 
@@ -190,13 +192,15 @@ def record_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, *,
     attested). Raises ``StepRefusal`` (exit 2) or ``MigrationPlanError`` / ``OSError`` (exit
     3)."""
     if done and abort:
-        raise StepRefusal("--done and --abort cannot be combined")
+        raise StepRefusal("--done and --abort cannot be combined", conflict=False)
     if by not in (None, "agent", "person"):
-        raise StepRefusal(f"--by takes agent or person, not {by!r}")
+        raise StepRefusal(f"--by takes agent or person, not {by!r}", conflict=False)
     if agent and by == "person":
-        raise StepRefusal("--by person is refused under --agent: an agent records as an agent")
+        raise StepRefusal("--by person is refused under --agent: an agent records as an agent",
+                          hint=PERSON_RUNS_IT, conflict=False)
     if (claim or expect or pairs) and not done:
-        raise StepRefusal("--claim, --expect and --pair go with --record --done")
+        raise StepRefusal("--claim, --expect and --pair go with --record --done",
+                          conflict=False)
     pair_list = parse_pairs(pairs)
     with _migration_lock(project_dir, "record"):
         root = Path(project_dir).resolve()

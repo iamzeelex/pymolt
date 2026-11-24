@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from pymolt.apply_check import SelfCheck, SmokeCheck
 from pymolt.migration_plan import (
+    PERSON_RUNS_IT,
     Invocation,
     InvocationFile,
     MigrationCheckError,
@@ -93,8 +94,8 @@ class StepRefusal(MigrationConflictError):
     """The invocation is refused (exit 2) before any write. ``refused``: step id -> reasons."""
 
     def __init__(self, message: str, *, refused: dict[str, list[str]] | None = None,
-                 hint: str | None = None) -> None:
-        super().__init__(message, hint=hint)
+                 hint: str | None = None, conflict: bool = True) -> None:
+        super().__init__(message, hint=hint, conflict=conflict)
         self.refused = dict(refused or {})
 
 
@@ -152,10 +153,10 @@ def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | Non
     ``MigrationEvidenceError`` (exit 4), ``MigrationCheckError`` (exit 1) or
     ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if step and through:
-        raise StepRefusal("--step and --through cannot be combined")
+        raise StepRefusal("--step and --through cannot be combined", conflict=False)
     if agent and allow_no_baseline:
         raise StepRefusal("--allow-no-baseline is refused under --agent: a person decides to "
-                          "apply without a baseline")
+                          "apply without a baseline", hint=PERSON_RUNS_IT, conflict=False)
     with _migration_lock(project_dir, "apply"):
         return _apply(Path(project_dir).resolve(), plan, step=step, through=through,
                       dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke,
@@ -167,9 +168,11 @@ def skip_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, reason
     """Mark a step ``skipped`` (design 4.1 row 16): a ``skip`` event, no file written. Allowed
     while it is planned, rolled back or stale, never in effect; its dependents stay blocked."""
     if agent:
-        raise StepRefusal("--skip is refused under --agent: a person declines a step")
+        raise StepRefusal("--skip is refused under --agent: a person declines a step",
+                          hint=PERSON_RUNS_IT, conflict=False)
     if not (reason or "").strip():
-        raise StepRefusal("--skip needs --reason TEXT: why the step is declined")
+        raise StepRefusal("--skip needs --reason TEXT: why the step is declined",
+                          conflict=False)
     with _migration_lock(project_dir, "skip"):
         return _skip(Path(project_dir).resolve(), plan, step_id, reason.strip())
 

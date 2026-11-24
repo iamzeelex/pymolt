@@ -184,3 +184,24 @@ def test_the_apply_view_names_the_next_command_and_brief(tmp_path):
     # The smoke import is on by default; this project names no target environment.
     assert data["checks"]["mech-1"]["smoke_import"].startswith(
         "not checked: setup names no target environment")
+
+
+def test_a_refusal_of_what_a_person_does_says_so_and_is_no_conflict(tmp_path):
+    """QA H5: `--skip --agent` is refused by policy, not by the project's state: no "conflicts
+    with current state" prefix, and the hint says a person runs it, not "regenerate the plan"."""
+    _plan(tmp_path)
+    out = runner.invoke(app, ["apply", str(tmp_path), "--step", "sig-1", "--skip",
+                              "--reason", "not needed", "--agent"])
+    payload = json.loads(out.stdout)
+    assert out.exit_code == 2 and payload["ok"] is False
+    assert payload["error"] == "--skip is refused under --agent: a person declines a step"
+    assert payload["hint"] == "A person runs the same command on a terminal, without --agent."
+    whole = runner.invoke(app, ["rollback", str(tmp_path), "--agent"])
+    assert not json.loads(whole.stdout)["error"].startswith("migration rollback conflicts")
+    usage = runner.invoke(app, ["apply", str(tmp_path), "--step", "mech-1", "--through",
+                                "mech-2", "--json"])
+    assert json.loads(usage.stdout)["error"] == "--step and --through cannot be combined"
+    # A real conflict keeps its prefix: an unknown step is the plan's state.
+    unknown = runner.invoke(app, ["apply", str(tmp_path), "--step", "nope", "--json"])
+    assert json.loads(unknown.stdout)["error"].startswith(
+        "migration plan conflicts with current state: unknown step nope")

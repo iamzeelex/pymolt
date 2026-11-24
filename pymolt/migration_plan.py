@@ -53,7 +53,17 @@ class MigrationPlanError(RuntimeError):
 
 
 class MigrationConflictError(MigrationPlanError):
-    """The requested mutation conflicts with current project/run state."""
+    """The requested mutation conflicts with current project/run state. ``conflict``: False
+    when it is refused by who asks or how (a policy, such as an agent's limits, or a usage
+    rule), not by the project's state: the CLI names only a real conflict as one."""
+
+    def __init__(self, message: str, *, hint: str | None = None, conflict: bool = True) -> None:
+        super().__init__(message, hint=hint)
+        self.conflict = conflict
+
+
+#: The hint of a refusal under ``--agent`` of what a person may do.
+PERSON_RUNS_IT = "A person runs the same command on a terminal, without --agent."
 
 
 class MigrationEvidenceError(MigrationPlanError):
