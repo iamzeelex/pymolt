@@ -193,12 +193,18 @@ class Tools:
                 raise views.AgentInputError(
                     "No target_python given and none configured.",
                     "Pass target_python (e.g. '3.13') or run setup first.")
-            result = run_assess(
-                str(p), target_python=target, config=config,
-                base_python=config.get("base_python"), container_id=config.get("container_id"),
-                use_cache=not no_cache, tool=config.get("selected_tool") or "uv",
-                with_risk=risk,
-            )
+            from pymolt.assess.service import BaseResolveError
+
+            try:
+                result = run_assess(
+                    str(p), target_python=target, config=config,
+                    base_python=config.get("base_python"),
+                    container_id=config.get("container_id"),
+                    use_cache=not no_cache, tool=config.get("selected_tool") or "uv",
+                    with_risk=risk,
+                )
+            except BaseResolveError as exc:
+                raise views.AgentInputError(str(exc), exc.hint) from exc
             return views.assess_view(result, p, risk_requested=risk,
                                      **views.assess_hints(p, result))
 

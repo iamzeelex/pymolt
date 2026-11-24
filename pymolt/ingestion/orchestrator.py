@@ -4,7 +4,12 @@ from pymolt.core.enums import Mode, Provenance, ResolutionQuality
 from pymolt.core.graph import DependencyGraph, NameMapping
 from pymolt.core.layers import IngestionReport
 from pymolt.ingestion import conda_ingest, resolve_cache, uv_runner
-from pymolt.ingestion.detect import DiscoveredSource, detect_project_python_version, detect_sources
+from pymolt.ingestion.detect import (
+    DiscoveredSource,
+    detect_project_python_version,
+    detect_sources,
+    pick_default_source,
+)
 from pymolt.ingestion.name_mapping import NameMapper
 
 
@@ -46,14 +51,8 @@ def orchestrate_ingestion(
     selected_source = chosen_source
     if not selected_source:
         if len(sources) > 1:
-            # Auto-select the first lock file, or pyproject.toml, or requirements.txt
-            # Add warnings about competing/complementary sources
-            lock_sources = [s for s in sources if s.is_lock]
-            if lock_sources:
-                selected_source = lock_sources[0]
-            else:
-                selected_source = sources[0]
-                
+            # The default setup would assume; the others are named in a warning.
+            selected_source = pick_default_source(sources)
             warnings.append(
                 f"Multiple dependency sources detected: {[s.path.name for s in sources]}. "
                 f"Auto-selected {selected_source.path.name}. Consider explicit selection to resolve ambiguity."

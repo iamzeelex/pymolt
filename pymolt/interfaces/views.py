@@ -255,6 +255,8 @@ def exposure_summary(exposure: dict) -> str | None:
 
 def scan_view(report, project_dir: str | Path) -> dict:
     """``ScanReport`` -> view. The full report is the ``scan --json`` payload."""
+    from pymolt.ingestion.detect import pick_default_name
+
     full_path = write_full_report(project_dir, "scan", report.model_dump(mode="json"))
     lists = _Lists()
     surfaces = report.surfaces
@@ -266,7 +268,8 @@ def scan_view(report, project_dir: str | Path) -> dict:
             divergences.append(f"{root.path}: {', '.join(root.runtime_versions()) or '?'}")
         roots.append({
             "path": root.path,
-            "chosen_manifest": root.manifests[0] if root.manifests else None,
+            # The manifest setup would assume here, by the one shared rule.
+            "chosen_manifest": pick_default_name(Path(project_dir) / root.path, root.manifests),
             "manifests": list(root.manifests),
             "python_version_evidence": [
                 {"source": e.source, "version": e.version, "kind": e.kind}

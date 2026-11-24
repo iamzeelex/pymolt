@@ -1823,6 +1823,7 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
         detect_project_python_version,
         detect_sources,
         detect_system_tools,
+        pick_default_source,
     )
 
     config_file = project_path / ".pymolt" / "env_config.json"
@@ -1838,17 +1839,15 @@ def _load_or_autodetect_assess_config(project_path: Path, quiet: bool = False) -
             hint="Run 'pymolt setup' to pin the manifest, toolset and base/target Python.",
         )
     try:
-        sources = detect_sources(project_path)
+        sources = detect_sources(project_path, include_subroots=True)
     except Exception:
         sources = []
-    if sources:
-        lock_sources = [s for s in sources if s.is_lock]
-        selected_manifest = lock_sources[0].path.name if lock_sources else sources[0].path.name
-    else:
-        selected_manifest = None
+    # The manifest setup would assume, by the same rule (a docs or dev variant never wins).
+    default = pick_default_source(sources)
+    selected_manifest = default.ref(project_path) if default is not None else None
 
     sys_tools = detect_system_tools()
-    if sources and sources[0].mode == "conda":
+    if default is not None and default.mode == "conda":
         selected_tool = ToolChoice.CONDA
     elif sys_tools.get("uv"):
         selected_tool = ToolChoice.UV
@@ -2327,7 +2326,16 @@ def assess(
             use_cache=not no_cache, tool=selected_tool,
         )
     except Exception as e:
-        fail(f"ingestion failed: {e}", code=EXIT_ENVIRONMENT, json_output=json_output)
+        from pymolt.assess.service import _process_error, base_resolve_failure
+
+        if _process_error(e) is None:
+            fail(f"ingestion failed: {e}", code=EXIT_ENVIRONMENT, json_output=json_output)
+        found = base_resolve_failure(e, chosen_source, sources, project_path)
+        if found.detail and not json_output:
+            err.print(Panel(escape(found.detail), title="Resolver output (tail)",
+                            border_style="dim"))
+        fail(str(found), hint=found.hint, code=EXIT_ENVIRONMENT, json_output=json_output,
+             extra={"detail": found.detail, "culprits": found.culprits})
 
     # Baseline could not be resolved (no legacy interpreter) — degrade honestly
     # instead of crashing: keep the target side, emit a build-it hint, and let the
