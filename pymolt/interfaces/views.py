@@ -477,6 +477,8 @@ def assess_payload(result, *, baseline_hint=None, target_hint=None) -> dict:
         "target_error": result.target_error,
         "target_error_detail": result.target_error_detail,
         "target_culprits": list(result.target_culprits),
+        "target_hint": result.target_hint,
+        "target_basis": result.target_basis,
         "baseline_unresolved": result.baseline_unresolved,
         "baseline_tier": result.baseline_tier,
         "target_manifest_path": result.target_manifest_path,
@@ -569,6 +571,7 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         "target_error": result.target_error,
         "target_error_detail": result.target_error_detail,
         "target_culprits": list(result.target_culprits),
+        "target_basis": result.target_basis,
         "changes_format": "name base>target status" + (" risk=tier" if risk_by_pkg else ""),
         "changes": changes,
         "changes_total": len(moved),
@@ -613,7 +616,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
     lines.append("A resolve is not evidence the code still works: capture and verify decide.")
 
-    if result.target_error:
+    if result.target_error and result.target_hint:
+        hint = f"The target does not resolve: {result.target_error}. {result.target_hint}"
+    elif result.target_error:
         culprits = ", ".join(result.target_culprits) or "none named by the resolver"
         hint = (f"The target does not resolve: {result.target_error}. Culprit(s): {culprits}. "
                 "Fix or loosen them, then assess again.")

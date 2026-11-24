@@ -193,7 +193,8 @@ def test_setup_view_says_what_saving_changed_besides_the_config(tmp_path):
 _ASSESS_KEYS = {
     "target_python", "verdict", "baseline_tier", "baseline_unresolved", "source_manifest",
     "source_fixation", "resolution_quality", "target_resolved", "target_error",
-    "target_error_detail", "target_culprits", "changes_format", "changes", "changes_total",
+    "target_error_detail", "target_culprits", "target_basis", "changes_format", "changes",
+    "changes_total",
     "unchanged", "status_counts",
     "manual_zone", "manual_zone_count", "risk", "target_manifest_path", "target_env",
     "baseline_env",
