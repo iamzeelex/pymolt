@@ -1077,9 +1077,13 @@ def apply_plan_cmd(
         )
     except MigrationConflictError as exc:
         refused = getattr(exc, "refused", None) if isinstance(exc, StepRefusal) else None
+        # A policy or usage refusal (an agent's limits, options that do not go together) is not
+        # a conflict with the project's state: no conflict prefix, no re-plan hint.
+        conflict = getattr(exc, "conflict", True)
         fail(
-            f"migration plan conflicts with current state: {exc}",
-            hint=exc.hint or "Review current files/run state and regenerate the plan if needed.",
+            f"migration plan conflicts with current state: {exc}" if conflict else str(exc),
+            hint=exc.hint or ("Review current files/run state and regenerate the plan if "
+                              "needed." if conflict else None),
             code=EXIT_USAGE,
             json_output=json_output,
             extra={"refused": refused} if refused else None,
@@ -1345,9 +1349,11 @@ def rollback(
         migration_plan, rolled_back_at, rolled_run = (result.plan, result.rolled_back_at,
                                                       result.run_id)
     except MigrationConflictError as exc:
+        conflict = getattr(exc, "conflict", True)
         fail(
-            f"migration rollback conflicts with current state: {exc}",
-            hint=exc.hint or "Post-apply edits are preserved unless you explicitly pass --force.",
+            f"migration rollback conflicts with current state: {exc}" if conflict else str(exc),
+            hint=exc.hint or ("Post-apply edits are preserved unless you explicitly pass "
+                              "--force." if conflict else None),
             code=EXIT_USAGE,
             json_output=json_output,
         )

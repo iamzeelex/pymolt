@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from pymolt.migration_plan import (
+    PERSON_RUNS_IT,
     Invocation,
     InvocationFile,
     MigrationConflictError,
@@ -101,13 +102,14 @@ def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
     if agent and (force or cascade):
         raise MigrationConflictError(
             f"--{'force' if force else 'cascade'} is refused under --agent: a person discards "
-            "edits or rolls back dependent steps")
+            "edits or rolls back dependent steps", hint=PERSON_RUNS_IT, conflict=False)
     if agent and step is None:
-        raise MigrationConflictError(AGENT_REFUSAL)
+        raise MigrationConflictError(AGENT_REFUSAL, hint=PERSON_RUNS_IT, conflict=False)
     if step is not None and force:
-        raise MigrationConflictError("--force rolls back a whole run: it does not go with --step")
+        raise MigrationConflictError("--force rolls back a whole run: it does not go with --step",
+                                     conflict=False)
     if cascade and step is None:
-        raise MigrationConflictError("--cascade goes with --step")
+        raise MigrationConflictError("--cascade goes with --step", conflict=False)
     with _migration_lock(project_dir, "rollback"):
         root = Path(project_dir).resolve()
         _refuse_open_record(root)
