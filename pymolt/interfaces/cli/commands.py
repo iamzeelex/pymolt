@@ -124,9 +124,20 @@ def _default(
     ),
 ) -> None:
     """Bare `pymolt` (no subcommand) displays help and usage."""
+    _quiet_source_parsing()
     if ctx.invoked_subcommand is not None:
         return
     console.print(ctx.get_help())
+
+
+def _quiet_source_parsing() -> None:
+    """pymolt parses the project's (and its dependencies') source in its own process, never runs
+    it there: a ``SyntaxWarning`` from that parse (``ast.parse`` names the source ``<unknown>``)
+    is noise on stderr, and the compile check on the target already reports each one as a
+    finding. Warnings from anything else keep their default handling."""
+    import warnings
+
+    warnings.filterwarnings("ignore", category=SyntaxWarning, module="<unknown>")
 
 
 def _looks_like_python_version(value: str) -> bool:

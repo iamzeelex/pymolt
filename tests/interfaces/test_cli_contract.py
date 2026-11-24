@@ -349,3 +349,21 @@ class TestOptionNames:
         plan_help = _ANSI.sub("", runner.invoke(app, ["plan", "--help"]).output)
         assert "--patch" in plan_help
         assert "--target-file" not in plan_help
+
+
+
+def test_parsing_project_source_prints_no_syntax_warning(tmp_path):
+    """QA H6: `plan` printed `<unknown>:78: SyntaxWarning: invalid escape sequence` from parsing
+    the project's files; the compile check already reports each one as a finding."""
+    import ast
+    import warnings
+
+    (tmp_path / "requirements.txt").write_text("flask==2.0.3\n", encoding="utf-8")
+    runner.invoke(app, ["status", str(tmp_path)])
+    source = "pattern = '" + "\\" + "s'\n"
+    with warnings.catch_warnings(record=True) as caught:
+        ast.parse(source)
+        compile(source, "app.py", "exec")
+    shown = [w.filename for w in caught if issubclass(w.category, SyntaxWarning)]
+    # The parse in pymolt's process is quiet; a compile that names a file keeps its warning.
+    assert shown == ["app.py"]
