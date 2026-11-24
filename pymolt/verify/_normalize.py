@@ -74,6 +74,7 @@ import json
 import os
 import sys
 import types
+import weakref
 
 
 class OutcomeMarker(object):
@@ -216,7 +217,7 @@ def _exact_scalar(value, t):
 _CONTAINER_BASES = (list, tuple, dict, set, frozenset)
 _RAW = ("raw",)
 _AS_OBJECT = ("object",)
-_MODES = {}            # id(type) -> (type, mode): a container subclass's read mode, once per type
+_MODES = {}            # id(type) -> (_held_type(type), mode): a container subclass's read mode
 # Builtin-container subclasses that keep no items in the builtin storage but whose own iteration
 # is known to be pure: (top-level package, class name) of the class that defines ``__len__``.
 # Its ``__iter__`` (from that class's namespace, never a subclass's) is iterated.
@@ -301,15 +302,19 @@ def _render_dict(value, t, depth, seen, privacy, objects):
 
 def _container_mode(t, base):
     ent = _MODES.get(id(t))
-    if ent is not None and ent[0] is t:
-        return ent[1]
+    if ent is not None:
+        ref = ent[0]
+        if ref is t or (type(ref) is _WEAKREF and ref() is t):
+            return ent[1]
     try:
         mode = _classify_container(t, base)
     except Exception:
         mode = _AS_OBJECT
-    if len(_MODES) >= _KINDS_MAX:
-        _MODES.clear()
-    _MODES[id(t)] = (t, mode)   # holds the type: its id cannot be recycled while cached
+    ref = _held_type(t)
+    if ref is not None:
+        if len(_MODES) >= _KINDS_MAX:
+            _MODES.clear()
+        _MODES[id(t)] = (ref, mode)
     return mode
 
 
@@ -340,7 +345,7 @@ def _classify_container(t, base):
             it = ns.get("__iter__")
             if ((top, _TYPE_NAME.__get__(cls, type)) in _PURE_VIEWS and base is not dict
                     and type(it) is types.FunctionType):
-                return ("iter", it)
+                return ("iter", it)     # a module-level class's own function (allow-listed)
             return _AS_OBJECT
     return _RAW
 
@@ -412,8 +417,30 @@ _STATUS_PROPERTY_PACKAGES = frozenset(("werkzeug",))
 
 _MISSING = object()
 _OPAQUE = ("opaque",)
-_KINDS = {}            # id(type) -> (type, kind): classification is once per type
+_KINDS = {}            # id(type) -> (_held_type(type), kind): classification is once per type
 _KINDS_MAX = 4096
+_WEAKREF = weakref.ref
+_GETSET = types.GetSetDescriptorType
+
+
+def _held_type(t):
+    """What a per-class cache keeps of class ``t`` to know it again: ``t`` itself when it is a
+    static (C) type, which lives as long as the interpreter, else a weak reference (None if
+    ``t`` takes none: it is then not cached). A class defined in Python may be made at run
+    time and dropped again (Flask's debug helper makes one per request, ``unittest.mock`` one
+    per mock, any ``class`` statement in a function). A cache that held it kept everything its
+    namespace holds alive (its methods, their closures, its class attributes), so the
+    program's weak references, finalizers and ``gc.get_objects()`` saw objects it had dropped.
+
+    For the same reason a cached kind or mode keeps nothing taken from a class namespace that
+    could hold the class: no MRO, no ``__dict__`` slot or member descriptor (each holds its
+    class); they are read from the live class when a value is rendered."""
+    try:
+        if _TYPE_FLAGS.__get__(t, type) & _HEAPTYPE:
+            return _WEAKREF(t)
+    except TypeError:
+        return None
+    return t
 
 
 def _class_dict(cls):
@@ -497,7 +524,7 @@ def _classify(t):
                 if getattr(ftype, "name", "_FIELD") in ("_FIELD_CLASSVAR", "_FIELD_INITVAR"):
                     continue
                 names.append(name)
-            return ("dataclass", tuple(names[:MAX_SEQ]), _dict_slot(mro), mro)
+            return ("dataclass", tuple(names[:MAX_SEQ]), _slot_index(mro))
     for cls in mro:
         owner = _TYPE_MODULE.__get__(cls, type)
         top = owner.split(".", 1)[0] if isinstance(owner, str) else None
@@ -515,15 +542,24 @@ def _classify(t):
                         and owner.split(".", 1)[0] in _STATUS_PROPERTY_PACKAGES):
                     return ("status_prop", fget)
                 return _OPAQUE
-            slot = _dict_slot(mro)
-            if slot is not None:
-                return ("status_attr", attr, slot, _object_info(t, mro))
+            slot = _slot_index(mro)
+            if slot >= 0:
+                return ("status_attr", _int_or_missing(attr), slot, _object_info(t, mro))
             break
     info = _object_info(t, mro)
     if info is None:
         return _OPAQUE
     slot = info[1]
-    return ("status_attr", _MISSING, slot, info) if slot is not None else info
+    return ("status_attr", _MISSING, slot, info) if slot >= 0 else info
+
+
+def _int_or_missing(value):
+    """A class-level ``status_code`` default as the plain int it renders as, else ``_MISSING``
+    (the kind keeps no object of the class namespace)."""
+    t = type(value)
+    if t is bool or not issubclass(t, int):
+        return _MISSING
+    return int.__int__(value)
 
 
 def _field_names(ns):
@@ -544,12 +580,13 @@ def _field_names(ns):
 def _object_info(t, mro):
     """``("object", dict_slot, fields, members)`` for a generic instance, or None.
 
-    ``fields`` is the declared field list (attrs / pydantic) or None; ``members`` maps public
-    ``__slots__`` names to their C member descriptors."""
+    ``dict_slot`` is ``_slot_index``; ``fields`` the declared field list (attrs / pydantic) or
+    None; ``members`` the names of the ``__slots__`` member descriptors (``_member`` finds each
+    on the rendered value's class: a descriptor holds its class)."""
     if not (t.__flags__ & _HEAPTYPE):  # Python-defined classes only; a static C type
         return None                    # (generator, code, frame, ...) stays opaque
     fields = None
-    members = {}
+    members = []
     for cls in mro:
         ns = _class_dict(cls)
         if fields is None:
@@ -557,13 +594,44 @@ def _object_info(t, mro):
         for name, desc in list(ns.items()):
             if (type(desc) is types.MemberDescriptorType and type(name) is str
                     and name not in members):
-                members[name] = desc
-    slot = _dict_slot(mro)
-    if slot is None and not members:
+                members.append(name)
+    slot = _slot_index(mro)
+    if slot < 0 and not members:
         return None
     if fields is not None:
         fields = tuple(fields[:MAX_SEQ])
-    return ("object", slot, fields, members)
+    return ("object", slot, fields, tuple(members))
+
+
+def _member(mro, name):
+    """The first ``__slots__`` member descriptor named ``name`` in ``mro``, or None."""
+    for cls in mro:
+        desc = _class_dict(cls).get(name)
+        if type(desc) is types.MemberDescriptorType:
+            return desc
+    return None
+
+
+def _slot_index(mro):
+    """Where ``_dict_slot`` finds the ``__dict__`` getset: its class's index in ``mro``, or -1.
+    A cached kind keeps this index, never the descriptor (a descriptor holds its class)."""
+    for i, cls in enumerate(mro):
+        if "__dict__" in _class_dict(cls):
+            return i if _dict_slot((cls,)) is not None else -1
+    return -1
+
+
+def _state_slot(t, index):
+    """The ``__dict__`` getset of ``t``'s instances, read from the live class at ``index`` of its
+    MRO (``_slot_index``), or None."""
+    if index < 0:
+        return None
+    mro = _TYPE_MRO.__get__(t, type)
+    if index < len(mro):
+        desc = _class_dict(mro[index]).get("__dict__")
+        if type(desc) is _GETSET:
+            return desc
+    return _dict_slot(mro)          # the MRO changed (``__bases__`` assigned) since
 
 
 def _dict_slot(mro):
@@ -581,15 +649,19 @@ def _dict_slot(mro):
 
 def _kind_of(t):
     ent = _KINDS.get(id(t))
-    if ent is not None and ent[0] is t:
-        return ent[1]
+    if ent is not None:
+        ref = ent[0]
+        if ref is t or (type(ref) is _WEAKREF and ref() is t):
+            return ent[1]
     try:
         kind = _classify(t)
     except Exception:
         kind = _OPAQUE
-    if len(_KINDS) >= _KINDS_MAX:
-        _KINDS.clear()
-    _KINDS[id(t)] = (t, kind)   # holds the type: its id cannot be recycled while cached
+    ref = _held_type(t)
+    if ref is not None:
+        if len(_KINDS) >= _KINDS_MAX:
+            _KINDS.clear()
+        _KINDS[id(t)] = (ref, kind)
     return kind
 
 
@@ -644,14 +716,14 @@ def _render_enum(value):
 
 def _render_dataclass(value, kind, depth, seen, privacy, objects=True):
     t = type(value)
-    slot, mro = kind[2], kind[3]
+    slot = _state_slot(t, kind[2])
     state = slot.__get__(value, t) if slot is not None else None
     fields = []
     for name in kind[1]:
         if type(state) is dict and name in state:
             item = state[name]
         else:
-            item = _class_level_attr(value, t, mro, name)
+            item = _class_level_attr(value, t, _TYPE_MRO.__get__(t, type), name)
             if item is _MISSING:
                 fields.append([name, {"__opaque__": "unset"}])
                 continue
@@ -724,7 +796,8 @@ def _render_object(value, kind, depth, seen, privacy, objects=True):
         out["__truncated__"] = True
         return out
     _BUDGET[0] -= 1
-    slot, fields, members = kind[1], kind[2], kind[3]
+    fields, members = kind[2], kind[3]
+    slot = _state_slot(t, kind[1])
     state = slot.__get__(value, t) if slot is not None else None
     if type(state) is not dict:
         state = {}
@@ -742,7 +815,7 @@ def _render_object(value, kind, depth, seen, privacy, objects=True):
         if name in state:
             item = state[name]
         else:
-            desc = members.get(name)
+            desc = _member(_TYPE_MRO.__get__(t, type), name) if name in members else None
             if desc is None:
                 continue
             try:
@@ -778,7 +851,9 @@ def _render_status(value, kind):
     if kind[0] == "status_prop":
         code = kind[1](value)
     else:
-        state = kind[2].__get__(value, type(value))
+        t = type(value)
+        slot = _state_slot(t, kind[2])
+        state = slot.__get__(value, t) if slot is not None else None
         code = state.get("status_code", _MISSING) if type(state) is dict else _MISSING
         if code is _MISSING:
             code = kind[1]

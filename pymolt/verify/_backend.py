@@ -1437,11 +1437,12 @@ class FrameBackend(TraceBackend):
         self._dedupe_until = 0.0
         self._last_start = {}       # tid -> frame of the last recorded start
         self._ccache = {}           # id(callable) -> (held(callable), sym | None): compiled
-        self._cmeth = {}            # (id(owner class), name) -> (owner, sym | None): bound builtins
+        self._cmeth = {}            # (id(owner class), name) -> (held(owner), sym | None): bound
         self._reset_c_cap()         # _ccount: cap key -> compiled calls recorded there
         self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
         self._bind_kw = sink_binding(sink)
-        self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
+        # (id(callable | code), id(receiver class)) -> (obj, held(receiver class), sym)
+        self._inh = {}
         self._inh_codes = {}        # id(code) -> code: stdlib code armed for inherited-method calls
         # Executed project code (``executed_metadata``): id(code) -> code of ours that started
         # (held: its id cannot be reused). Off without a near side (nothing is "ours").
@@ -1689,7 +1690,7 @@ class FrameBackend(TraceBackend):
         t = recv if isinstance(recv, type) else type(recv)
         key = (id(code), id(t))
         ent = self._inh.get(key)
-        if ent is not None and ent[0] is code and ent[1] is t:
+        if ent is not None and ent[0] is code and is_held(ent[1], t):
             return ent[2]
         sym = None
         try:
@@ -1706,7 +1707,7 @@ class FrameBackend(TraceBackend):
             sym = None
         if len(self._inh) >= _CODE_CACHE_MAX:
             self._inh.clear()
-        self._inh[key] = (code, t, sym)
+        self._inh[key] = (code, held(t), sym)   # a class only weakly: it may be made at run time
         return sym
 
     def _inherited_descriptor_sym(self, desc, recv):
@@ -1715,7 +1716,7 @@ class FrameBackend(TraceBackend):
         t = type(recv)
         key = (id(desc), id(t))
         ent = self._inh.get(key)
-        if ent is not None and ent[0] is desc and ent[1] is t:
+        if ent is not None and ent[0] is desc and is_held(ent[1], t):
             return ent[2]
         sym = None
         try:
@@ -1728,7 +1729,7 @@ class FrameBackend(TraceBackend):
             sym = None
         if len(self._inh) >= _CODE_CACHE_MAX:
             self._inh.clear()
-        self._inh[key] = (desc, t, sym)
+        self._inh[key] = (desc, held(t), sym)
         return sym
 
     # ── compiled calls ─────────────────────────────────────────────────────────
@@ -1746,12 +1747,12 @@ class FrameBackend(TraceBackend):
         if owner is not None:
             key = (id(owner), getattr(obj, "__name__", None))
             ment = self._cmeth.get(key)
-            if ment is not None and ment[0] is owner:
+            if ment is not None and is_held(ment[0], owner):
                 return ment[1]
             sym = self._c_decide(obj)
             if len(self._cmeth) >= _CODE_CACHE_MAX:
                 self._cmeth.clear()
-            self._cmeth[key] = (owner, sym)
+            self._cmeth[key] = (held(owner), sym)   # the class only weakly (``held``)
             return sym
         sym = self._c_decide(obj)
         ref = held(obj)         # never the callable itself unless its module or class holds it
