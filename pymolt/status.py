@@ -434,7 +434,9 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
         f"{receipt.patterns_applied} rewrite(s)"
     )
     check = getattr(receipt, "self_check", None)
-    detail += f" · self-check: {check.summary()}" if check is not None else \
+    by_step = _run_checks(receipt)
+    detail += f" · self-check: {by_step}" if by_step else \
+        f" · self-check: {check.summary()}" if check is not None else \
         " · self-check: not recorded (applied before it existed)"
     if receipt.allow_no_baseline:
         return PhaseState(
@@ -458,6 +460,45 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
             detail=f"{detail} — baseline was replaced after this migration",
         )
     return PhaseState(phase="migration", state=DONE, detail=detail)
+
+
+_CHECK_LABELS = (("compile_target", "compile on the target"),
+                 ("compile_base", "compile on the base"), ("smoke_import", "smoke import"))
+
+
+def _run_checks(receipt) -> str | None:
+    """The run's self-check, by step: each step in effect keeps the checks of the invocation
+    that applied or recorded it, while the receipt's ``self_check`` is only the latest
+    invocation's (after `apply --step mech-1` then `apply --step env-1`, env-1's "no file
+    changed" is not the run's). None when no step in effect records its checks."""
+    steps_of = getattr(receipt, "steps_of", None)
+    if steps_of is None:
+        return None
+    steps = {sid: st for sid, st in steps_of(receipt.run_id).items()
+             if st.in_effect and st.checks}
+    if not steps:
+        return None
+    # A step that changed no Python file (a manifest pin) has nothing to compile or import: its
+    # checks are the invocation's, not its own.
+    code = {sid: st for sid, st in steps.items() if any(f.endswith(".py") for f in st.files)}
+    parts = []
+    for key, label in _CHECK_LABELS:
+        by: dict[str, list[str]] = {}
+        for sid, st in code.items():
+            value = st.checks.get(key) or ""
+            if not value or value == "not checked: no base claim":
+                continue
+            state = ("ok" if value == "ok" else "failed" if value.startswith("failed")
+                     else "not checked")
+            by.setdefault(state, []).append(sid)
+        if by:
+            parts.append(f"{label} " + ", ".join(
+                f"{state} ({', '.join(by[state])})" for state in ("failed", "ok", "not checked")
+                if state in by))
+    rest = [sid for sid in steps if sid not in code]
+    if rest:
+        parts.append(f"no Python file to check ({', '.join(rest)})")
+    return "; ".join(parts) or None
 
 
 def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
