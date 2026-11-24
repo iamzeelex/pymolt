@@ -2018,6 +2018,9 @@ def _render_risk(risk_report):
     """Render the migration-risk summary panel and a HIGH/MEDIUM findings table."""
     from pymolt.core.enums import RiskTier
 
+    if risk_report.not_rated:
+        console.print(f"[yellow]Migration risk not rated: {risk_report.not_rated}.[/yellow]")
+        return
     high = risk_report.by_tier(RiskTier.HIGH)
     medium = risk_report.by_tier(RiskTier.MEDIUM)
     low = risk_report.by_tier(RiskTier.LOW)
@@ -2028,7 +2031,7 @@ def _render_risk(risk_report):
 
     summary = f"Assessed {risk_report.assessed} package(s)"
     if risk_report.skipped:
-        summary += f", {risk_report.skipped} unpinned (skipped)"
+        summary += f", {risk_report.skipped} not assessed (unpinned, or not in the target)"
     if risk_report.errors:
         summary += f", {risk_report.errors} unreachable"
     console.print(Panel(

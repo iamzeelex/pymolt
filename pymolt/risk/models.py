@@ -34,6 +34,9 @@ class RiskReport(BaseModel):
     skipped: int = 0          # nodes without a pinned version (not assessable)
     errors: int = 0           # packages where a data source could not be reached
     target_python: str | None = None
+    # Why nothing was rated, when nothing could be: the target did not resolve, so there
+    # is no target version to rate (the base pins are not one).
+    not_rated: str | None = None
 
     def by_tier(self, tier: RiskTier) -> list[PackageRisk]:
         return [p for p in self.packages if p.tier == tier]
