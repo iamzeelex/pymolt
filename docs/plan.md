@@ -189,6 +189,11 @@ Every plan `plan` saves gets a folder of its own, `.pymolt/plans/<name>/`, with 
   plan; `apply --plan` takes `current`, a name, an id prefix or a path. The pointer is this
   checkout's own state, so a fresh clone of a repository that commits its plan folders has no
   current plan: `status` names the newest saved plan and how to choose one.
+- **No machine folders.** A plan can be committed, so the text pymolt writes about the machine
+  (probed interpreters, the target environment, the baseline's command and each step's check
+  command) writes a path inside the project relative to it and a path under the home folder as
+  `~/...`; a shell expands `~` when you run such a command. The project's own text (sources,
+  anchors, manifest lines) is kept as written.
 - **Unchanged.** A plan whose content (its steps, changes, risks and the rest, without its id,
   time, name and provenance) and inputs (the baseline capture, the baseline recording's path,
   the setup and the target manifest) equal the current plan's is not saved: the current plan

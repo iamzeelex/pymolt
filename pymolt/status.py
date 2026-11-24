@@ -26,6 +26,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from pymolt.machine_paths import PathScrubber
+
 #: Phase states. `stale` is deliberately distinct from `todo`: work that was
 #: done but no longer describes this project is worse than work not done,
 #: because it still looks like an answer.
@@ -188,13 +190,15 @@ def _age(iso_timestamp: str | None) -> str:
 
 def _capture_phase(
     name: str, slot, current_fingerprint: str | None, *, world: str = "",
-    capture_id: str | None = None,
+    capture_id: str | None = None, project_path: Path | None = None,
 ) -> PhaseState:
     """Project one capture slot, including whether its evidence still applies.
 
     ``current_fingerprint`` is the environment the capture must describe;
     ``world`` names it in the stale detail when it is not the project as it is now;
-    ``capture_id`` (``verify.service.slot_capture_id``) begins the detail.
+    ``capture_id`` (``verify.service.slot_capture_id``) begins the detail. The command names
+    no folder of the machine (``machine_paths``): its paths are relative to ``project_path``
+    or under ``~``.
     """
     label = "baseline" if name == "baseline" else "post-migration"
     if slot is None:
@@ -208,7 +212,7 @@ def _capture_phase(
     if age := _age(slot.captured_at):
         bits.append(age)
     if slot.command:
-        bits.append(" ".join(slot.command))
+        bits.append(" ".join(PathScrubber(project_path)(list(slot.command))))
     red = getattr(slot, "red", None)
     if red:
         failed = red.get("failed")
@@ -260,18 +264,21 @@ def _baseline_phase(
     then would record the migrated world, not the starting point.
     """
     if receipt is None or receipt.status != "applied":
-        phase = _capture_phase("baseline", slot, current_fingerprint, capture_id=capture_id)
+        phase = _capture_phase("baseline", slot, current_fingerprint, capture_id=capture_id,
+                               project_path=project_path)
         return _content_only_move(phase, slot, current_setup)
     run = receipt.run_id[:8]
     start = receipt.starting_fingerprint(project_path)
     if start is not None:
         world = f"the one migration run {run} started from"
-        phase = _capture_phase("baseline", slot, start, world=world, capture_id=capture_id)
+        phase = _capture_phase("baseline", slot, start, world=world, capture_id=capture_id,
+                               project_path=project_path)
         # Pins bumped in the same manifest before the apply are part of the migration.
         return _content_only_move(
             phase, slot, getattr(receipt, "environment_setup_fingerprint", None),
             than=f" than {world}")
-    phase = _capture_phase("baseline", slot, None, capture_id=capture_id)
+    phase = _capture_phase("baseline", slot, None, capture_id=capture_id,
+                           project_path=project_path)
     if (
         phase.state == DONE
         and current_fingerprint is not None
@@ -735,7 +742,7 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
         plan = plan.model_copy(update={"detail": plan.detail + " (optional: the migration was "
                                                                "made by hand)"})
     post = _capture_phase("post_migration", post_slot, fingerprint,
-                          capture_id=status.captures["post_migration"])
+                          capture_id=status.captures["post_migration"], project_path=project_path)
     if post_slot is not None and hand and _precedes_start(post_slot, baseline_slot, receipt):
         post = PhaseState(
             phase="post-migration", state=STALE,
