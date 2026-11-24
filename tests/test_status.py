@@ -178,6 +178,32 @@ class TestProgression:
         assert status.next_command is None
         assert "PASS" in status.next_reason
 
+    def test_a_saved_verdict_on_a_capture_whose_code_changed_since_is_stale(self, tmp_path):
+        """QA V1: a PASS saved on a post-migration capture stands as history once a file the
+        capture recorded changed (here: reverted by hand), not as the verdict on the code."""
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(tmp_path, "baseline")
+        receipt = _receipt(tmp_path, baseline)
+        _capture(tmp_path, "post_migration")
+        build_unified_verification(
+            ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS),
+            run_id=receipt.run_id,
+        ).save(tmp_path)
+        assert _state(build_status(tmp_path), "report") == "done"
+
+        (tmp_path / "post_migration.py").write_text("import json\njson.loads('[]')\n",
+                                                    encoding="utf-8")
+        status = build_status(tmp_path)
+
+        assert _state(status, "post-migration") == "stale"
+        report = status.phase("report")
+        assert report.state == "stale"
+        assert report.detail.startswith("verdict: pass")
+        assert "stale now: capture post-migration again, then verify" in report.detail
+        assert "capture post-migration" in status.next_command
+
     def test_a_verdict_on_another_post_migration_recording_is_not_the_migrations(self,
                                                                                  tmp_path):
         """`verify --post-migration OTHER` saves its verdict, naming what it compared; status
@@ -355,6 +381,25 @@ class TestManualMigration:
         failed = verdict(VerificationVerdict.FAIL)
         assert failed.next_command is None             # no apply run to roll back
         assert "nothing to roll back" in failed.next_reason
+
+    def test_a_hand_edit_after_the_post_capture_makes_it_stale(self, tmp_path):
+        """By hand as after `apply`: the capture is stale once a file it recorded changed."""
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+        _capture(tmp_path, "post_migration")
+        build_unified_verification(
+            ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS), run_id=None,
+        ).save(tmp_path)
+        (tmp_path / "post_migration.py").write_text("import json\njson.loads('[]')\n",
+                                                    encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "post-migration") == "stale"
+        assert "post_migration.py changed since it was captured" in \
+            status.phase("post-migration").detail
+        assert _state(status, "report") == "stale"
+        assert "capture post-migration" in status.next_command
 
     def test_an_inconclusive_verdict_says_who_settles_it(self, tmp_path):
         """Decision 7: the next reason, the report phase and the agent view say whether the

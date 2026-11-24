@@ -562,6 +562,17 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
         ))
         border = "yellow"
+    post_moved = (getattr(rep, "stale_sources", None) or {}).get("post-migration")
+    if post_moved:
+        shown = ", ".join(post_moved[:3]) + (f" and {len(post_moved) - 3} more"
+                                             if len(post_moved) > 3 else "")
+        console.print(Panel(
+            "[bold yellow]The evidence below does not describe the code on disk.[/bold yellow]\n"
+            f"The post-migration capture recorded code that has changed since: {escape(shown)}.\n"
+            "[dim]Capture post-migration again to judge the current code.[/dim]",
+            title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
+        ))
+        border = "yellow"
     head = (
         f"Static symbols: [bold]{rep.static_targets}[/bold]   "
         f"[green]confirmed: {rep.confirmed}[/green]   "

@@ -229,6 +229,12 @@ class ContractReport(BaseModel):
     # one on disk now: the verdict below still describes the old world. False
     # means checked-and-current; None means there was nothing to check against.
     baseline_stale: bool | None = None
+    # The current-side capture's source staleness (post-migration, or a lone baseline): the
+    # files it recorded whose text differs on disk now, by capture. Its evidence describes
+    # code that is no longer there. ``sources_unchecked``: a current-side capture that keeps
+    # no source snapshot, so this cannot be checked (never read as fresh).
+    stale_sources: dict[str, list[str]] = Field(default_factory=dict)
+    sources_unchecked: list[str] = Field(default_factory=list)
     verdict: VerificationVerdict = VerificationVerdict.INCONCLUSIVE
     verdict_reasons: list[str] = Field(default_factory=list)
     # An INCONCLUSIVE verdict's reasons, each with its kind (needs_review / needs_evidence) and
