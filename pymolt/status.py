@@ -704,13 +704,15 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
             phase="post-migration", state=STALE,
             detail=f"{post.detail} — no recorded migration precedes this capture",
         )
-    elif not hand and post_slot is not None and receipt is not None and post.state == DONE:
+    elif post_slot is not None and post.state == DONE:
         # Stale when a file the capture recorded no longer has the recorded text, whatever
-        # changed it (a later step, a rollback, a re-record, a hand edit).
+        # changed it (a later step, a rollback, a re-record, a hand edit), after `apply` or by
+        # hand: `verify` holds the same rule (``service._stamp_source_staleness``).
         from pymolt.workorder.anchor_cache import changed_since
 
         moved = changed_since(project_path, post_slot.sources_path)
-        if moved is None and _capture_precedes(post_slot.captured_at, receipt.applied_at):
+        if (not hand and moved is None
+                and _capture_precedes(post_slot.captured_at, receipt.applied_at)):
             post = PhaseState(
                 phase="post-migration", state=STALE,
                 detail=f"{post.detail} — captured before migration run {receipt.run_id[:8]}",
@@ -770,6 +772,13 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
             detail=f"verdict: {verification.verdict.value}"
                    + (f" ({_KIND_LABEL[kind.value]})" if kind is not None else "") + coverage,
         )
+    if report.state == DONE and post.state == STALE:
+        # The saved verdict judged a capture that no longer describes the project: it stands
+        # as history, not as the verdict on the code on disk.
+        report = report.model_copy(update={
+            "state": STALE,
+            "detail": f"{report.detail} — on a post-migration capture that is stale now: "
+                      "capture post-migration again, then verify"})
     status.phases.append(report)
 
     if check_environments:

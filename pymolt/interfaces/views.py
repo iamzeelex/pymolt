@@ -1252,6 +1252,8 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "compared_recordings": (rep.compared.model_dump(mode="json")
                                 if getattr(rep, "compared", None) is not None else None),
         "baseline_stale": rep.baseline_stale,
+        # The current-side capture recorded code that has changed since: {capture: files}.
+        "stale_sources": dict(getattr(rep, "stale_sources", None) or {}),
         "static_targets": rep.static_targets,
         "confirmed": rep.confirmed,
         "blind": rep.blind,
@@ -1279,6 +1281,12 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
                      "trusting this verdict.")
+    moved = (getattr(rep, "stale_sources", None) or {}).get("post-migration")
+    if moved:
+        lines.append(f"STALE EVIDENCE: the post-migration capture recorded code that has "
+                     f"changed since ({', '.join(moved[:3])}"
+                     + (f" and {len(moved) - 3} more" if len(moved) > 3 else "")
+                     + "). Capture post-migration again before trusting this verdict.")
     lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
                  f"dynamic-only {rep.dynamic_only}.")
     lines.extend(coverage_lines(rep))

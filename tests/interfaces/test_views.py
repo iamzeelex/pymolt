@@ -445,7 +445,7 @@ def test_plan_shows_manual_review_and_an_unbound_baseline():
 
 _VERIFY_KEYS = {
     "verdict", "reasons", "inconclusive_kind", "inconclusive_causes", "saved_path",
-    "compared_recordings", "baseline_stale",
+    "compared_recordings", "baseline_stale", "stale_sources",
     "static_targets", "confirmed",
     "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "blind_split",
     "unobservable_contacts", "compared", "changes", "change_counts", "calibration",

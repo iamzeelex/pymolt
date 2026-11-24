@@ -117,7 +117,11 @@ validity.
   archive, and `verify` names it. A rollback that restored no file keeps it.
 - **Diagnostics:** failed, empty or malformed runs are kept under `contract_traces/diagnostics/`.
   They never replace active evidence.
-- **Freshness:** the post-migration capture must match the environment on disk now. The baseline
+- **Freshness:** the post-migration capture must match the environment on disk now, and every file
+  it recorded must still have the recorded text (whatever changed it: a later step, a revert, a
+  hand edit); a capture without a source snapshot cannot be checked and counts as not fresh. The
+  verdict names the changed files, and `status` shows a saved verdict on such a capture as stale.
+  The baseline
   must match the environment the migration started from. `pymolt apply` records that starting
   point. A baseline still counts as the starting point when only the *contents* of the same manifest
   changed between it and the apply, or, for a migration done by hand, since it (bumped pins).

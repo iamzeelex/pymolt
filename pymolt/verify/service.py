@@ -2752,6 +2752,7 @@ def build_contract_report_from_state(
             "reads that run's plan")
     report.compared = _compared_recordings(project_dir, state, trace, against)
     _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
+    _stamp_source_staleness(project_dir, report, state)
     _stamp_verdict(report, trace, against, used_slots,
                    set_aside=set_aside_capture(state) if trace_override is None else None)
     return report
@@ -3121,6 +3122,13 @@ def _stamp_verdict(
     elif used_slots and report.baseline_stale is None:
         unlike("capture freshness could not be established",
                "capture again: the capture records no environment to check it against")
+    # The current-side capture recorded code no longer on disk (``_stamp_source_staleness``).
+    for name, files in report.stale_sources.items():
+        unlike(*_stale_sources_cause(name, files))
+    for name in report.sources_unchecked:
+        unlike(f"the {name} capture keeps no source snapshot: whether its code is still on disk "
+               "cannot be checked",
+               f"capture {name} again with this pymolt (it records the source it ran)")
 
     # A negative oracle is authoritative only over a valid, comparable pair.
     # Changed output from stale or mismatched workloads is evidence to inspect,
@@ -3487,6 +3495,68 @@ def _applied_migration(project_dir: str | Path):
     if receipt is None or not receipt.in_effect:
         return None
     return receipt
+
+
+def _stamp_source_staleness(project_dir: str | Path, report: ContractReport,
+                            state: ContractState) -> None:
+    """Mark the report when the current-side capture recorded code that is no longer on disk.
+
+    The current side is the post-migration capture (from its slot, or its own file passed as
+    ``--post-migration``), or a lone baseline. It is stale when a file of its source snapshot
+    no longer has the recorded text (``sources_changed``), whatever changed it: a hand edit, a
+    later step, a revert. Its verdict would describe the code it recorded, not the code on
+    disk, so the files land in ``report.stale_sources`` and ``_stamp_verdict`` makes them a
+    reason. The "before" side of a diff is never judged this way: the migration moves the code
+    away from the baseline by design. A post-migration capture with no snapshot cannot be
+    checked (``report.sources_unchecked``): unknown, never fresh."""
+    compared = report.compared
+    name = compared.after_capture if compared is not None else None
+    if name == "post-migration":
+        slot = state.post_migration
+    elif name == "baseline" and compared is not None and compared.before is None:
+        slot = state.baseline
+    else:
+        return
+    if slot is None:
+        return
+    changed = sources_changed(project_dir, slot.sources_path)
+    if changed is None:
+        if name == "post-migration":
+            report.sources_unchecked.append(name)
+            report.notes.append(
+                "source freshness unknown for the post-migration capture: it keeps no source "
+                "snapshot (taken before pymolt recorded one, or the snapshot could not be "
+                "written), so whether its code is still on disk cannot be checked.")
+        return
+    if not changed:
+        return
+    report.stale_sources[name] = changed
+    if name == "post-migration":
+        report.notes.append(
+            f"STALE EVIDENCE: the post-migration capture recorded code that has changed since "
+            f"({_files_shown(changed)}): this verdict would describe the code it recorded, not "
+            "the code on disk now. Capture post-migration again to judge the current code.")
+    else:
+        report.notes.append(
+            f"the baseline capture recorded code that has changed since ({_files_shown(changed)}):"
+            " its coverage describes the code before those changes.")
+
+
+def _files_shown(files: list[str], limit: int = 3) -> str:
+    shown = ", ".join(files[:limit])
+    return shown + (f" and {len(files) - limit} more" if len(files) > limit else "")
+
+
+def _stale_sources_cause(name: str, files: list[str]) -> tuple[str, str]:
+    """The reason and what settles it, for a current-side capture whose recorded code changed
+    (``report.stale_sources``)."""
+    if name == "post-migration":
+        return (f"the post-migration capture is stale: {_files_shown(files)} changed since it "
+                "was captured",
+                "capture post-migration again: it recorded code that is no longer on disk")
+    return (f"the baseline capture recorded code that changed since: {_files_shown(files)}",
+            "capture post-migration to record the code on disk now (capture the baseline again "
+            "first if those changes are not the migration)")
 
 
 def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots, *,
