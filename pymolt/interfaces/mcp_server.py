@@ -326,6 +326,7 @@ class Tools:
 
         def build(p: Path) -> dict:
             from pymolt.migration_plan import MigrationPlan
+            from pymolt.status import shown_dir
             from pymolt.workorder.apply import apply_steps
             from pymolt.workorder.record import record_step
             from pymolt.workorder.render import brief_data
@@ -338,8 +339,6 @@ class Tools:
             if brief:
                 if plan.step(step) is None:
                     raise views.AgentInputError(f"unknown step {step}", "status lists the steps.")
-                from pymolt.status import shown_dir
-
                 return brief_data(plan, plan.step(step), p, shown_dir(p))
             if record:
                 result = record_step(p, plan, step, done=done, abort=abort, agent=True)
@@ -348,8 +347,6 @@ class Tools:
                                      agent=True, smoke=allow_run,
                                      smoke_reason=None if allow_run else NO_RUN_SMOKE,
                                      shown=shown_dir(p))
-            from pymolt.status import shown_dir
-
             return views.apply_view(result, plan, p, shown_dir(p))
 
         return self._run("apply", project_dir, build, "status names the next step and command.")
