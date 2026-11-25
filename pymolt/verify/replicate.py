@@ -149,6 +149,8 @@ def evidence(e: FactEntry) -> tuple[set[str], set[str]]:
     changed = e.category in (FactCategory.CHANGED, FactCategory.REWRITTEN)
     if changed and not _kinds_match(e.old, e.new):
         return {"kind"}, set()  # a new raise is never the same class as a varying value or input
+    if changed and "call-count-changed" in e.notes:
+        return {"count"}, set()  # as many calls more or fewer: the replicate may show it vary
     cls = _input_class(e)
     if cls == "changed":
         return {"input"}, set()

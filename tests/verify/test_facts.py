@@ -626,8 +626,10 @@ def test_diff_of_snapshots_equals_diff_of_the_equivalent_jsonl(tmp_path):
     assert {c for c, *_ in categories(from_facts)} == {
         "equal", "changed", "disappeared", "appeared", "drift"}
     assert from_facts.verdict is from_jsonl.verdict is VerificationVerdict.FAIL
-    equal = {e.symbol: e for e in _by_category(from_facts, "equal")}
-    assert (equal["m.a"].old_count, equal["m.a"].new_count) == (2, 1)  # counts survive
+    # counts survive, and every call counted: one call fewer is a change
+    changed = {e.symbol: e for e in _by_category(from_facts, "changed")}
+    assert (changed["m.a"].old_count, changed["m.a"].new_count) == (2, 1)
+    assert "call-count-changed" in changed["m.a"].notes
 
 
 def test_load_facts_reads_a_snapshot_directly_or_behind_an_empty_trace(tmp_path):
