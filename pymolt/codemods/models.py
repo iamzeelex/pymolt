@@ -50,6 +50,21 @@ class CodemodPattern(BaseModel):
     """``"dependency"`` (a package's API) or ``"python"`` (a stdlib fix for the Python move)."""
     runs_on_base: bool | None = None
     """Whether the rewritten code also runs on the base Python (None: not known/applicable)."""
+    # Successor kinds (``rename-keyword``, ``rename-member``, ``forward-template``: made only from
+    # a proof in the library's own code, ``pymolt.codemods.successors``):
+    params: dict[str, str] | None = None
+    """``rename-keyword``: old keyword -> new keyword."""
+    receivers: list[str] | None = None
+    """The receiver classes the baseline recorded at the sites (a member's rewrite is gated on
+    them)."""
+    template: dict[str, Any] | None = None
+    """What the rewrite needs from its proof: the old and new signatures, the forward's
+    arguments (``forward-template``), the member name, the other changed parameters."""
+    sites: list[Any] | None = None
+    """The statements the pattern may rewrite, as anchors (``pymolt.anchors.Anchor``), re-resolved
+    on the text it runs on; None: wherever its binding holds."""
+    aliases: list[str] = Field(default_factory=list)
+    """Other spellings of the old callee (the binding check accepts any of them)."""
 
     def summary(self) -> str:
         return f"[{self.kind}] {self.old_qualname} → {self.new_qualname}  ({self.confidence})"
@@ -134,6 +149,9 @@ def recipe_key(item: CodemodPattern | CodemodRule) -> str:
     kind = getattr(item, "kind", None) or "template"
     old = getattr(item, "old_qualname", None)
     new = getattr(item, "new_qualname", None)
+    params = getattr(item, "params", None)
+    if params:                         # rename-keyword: one recipe per renamed keyword set
+        kind += "[" + ",".join(f"{a}={b}" for a, b in sorted(params.items())) + "]"
     if old and new:
         return f"{kind}:{old}→{new}"
     match = getattr(item, "match", "") or ""

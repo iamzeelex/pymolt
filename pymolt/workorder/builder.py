@@ -35,6 +35,7 @@ from pymolt.workorder.models import (
     StepEdit,
     StepEffort,
     StepRecipe,
+    StepSuccessor,
     StepSymbol,
     StepVerify,
     StepWhy,
@@ -196,7 +197,9 @@ def _symbol(r: _Recipe) -> StepSymbol:
     if r.rule is not None:
         return StepSymbol(old=r.rule.old_qualname, new=r.rule.new_qualname)
     if len(r.patterns) == 1:
-        return StepSymbol(old=r.patterns[0].old_qualname, new=r.patterns[0].new_qualname)
+        p = r.patterns[0]
+        return StepSymbol(old=p.old_qualname, new=p.new_qualname,
+                          params=dict(p.params) if p.params else None)
     old, new = r.move or (None, None)
     return StepSymbol(old=old, new=new)
 
@@ -209,6 +212,15 @@ def _evidence(members: list[Any]) -> list[str]:
             if text not in out:
                 out.append(text)
     return out[:10]
+
+
+def _successor(members: list[Any]) -> StepSuccessor | None:
+    """The successor provenance a successor pattern carries (``provider.succession_summary``)."""
+    for m in members:
+        summary = (getattr(m, "template", None) or {}).get("succession")
+        if summary:
+            return StepSuccessor.model_validate(summary)
+    return None
 
 
 def _runs_on_base(members: list[Any]) -> bool | None:
@@ -361,7 +373,7 @@ def _step(r: _Recipe, n: int, texts: _Texts, t0_of: Mapping[str, str],
         scope="python" if r.python else "dependency",
         package=package, from_=from_, to=to, symbol=_symbol(r),
         where=where,
-        why=StepWhy(evidence=_evidence(members)),
+        why=StepWhy(evidence=_evidence(members), successor=_successor(members)),
         do=StepDo(recipe=StepRecipe(kind=r.kind, keys=keys, rule=r.rule,
                                     patterns=[] if r.rule is not None else r.patterns,
                                     move=r.move)),

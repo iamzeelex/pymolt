@@ -157,12 +157,17 @@ class RenameCallCodemod(cst.CSTTransformer):
 
     METADATA_DEPENDENCIES = (ScopeProvider,)
 
-    def __init__(self, old_qualname: str, new_qualname: str) -> None:
+    def __init__(self, old_qualname: str, new_qualname: str,
+                 forbid: frozenset[str] = frozenset()) -> None:
         self.old_leaf = _leaf(old_qualname)
         self.new_leaf = _leaf(new_qualname)
         self.old_module = _module(old_qualname)
         self.new_module = _module(new_qualname)
         self.sites = 0
+        # keywords the new callable names otherwise (``url(regex=)`` -> ``re_path(route=)``):
+        # a call passing one makes the whole rewrite unsafe (``unsafe``)
+        self.forbid = forbid
+        self.unsafe = False
 
     def _import_binding(self, name_node: cst.Name) -> str | None:
         """'direct' | 'aliased' | None — is `name` bound to OUR imported symbol?"""
@@ -215,16 +220,24 @@ class RenameCallCodemod(cst.CSTTransformer):
         except KeyError:
             return None
 
+    def _passes_forbidden(self, call: cst.Call) -> bool:
+        return any(a.star == "**" or (a.keyword is not None and a.keyword.value in self.forbid)
+                   for a in call.args) if self.forbid else False
+
     def leave_Call(self, original: cst.Call, updated: cst.Call) -> cst.BaseExpression:
         ofunc, ufunc = original.func, updated.func
         if isinstance(ufunc, cst.Name):
             if self._import_binding(ofunc) == "direct":
+                self.unsafe |= self._passes_forbidden(original)
                 self.sites += 1
                 return updated.with_changes(func=cst.Name(self.new_leaf))
+            if self._import_binding(ofunc) == "aliased":
+                self.unsafe |= self._passes_forbidden(original)
             return updated
         if isinstance(ufunc, cst.Attribute) and ufunc.attr.value == self.old_leaf:
             base = ofunc.value
             if isinstance(base, cst.Name) and self._module_binding(base):
+                self.unsafe |= self._passes_forbidden(original)
                 self.sites += 1
                 return updated.with_changes(
                     func=ufunc.with_changes(attr=cst.Name(self.new_leaf))
@@ -773,10 +786,18 @@ def _move_renames(patterns: list[CodemodPattern]) -> dict[tuple[str, str], dict[
 
 
 def apply_pattern(source: str, pattern: CodemodPattern, *,
-                  lines: frozenset[int] | None = None) -> tuple[str, int]:
+                  lines: frozenset[int] | None = None,
+                  path: str | None = None) -> tuple[str, int]:
     """Apply one pattern to source. Returns (new_source, sites_changed).
 
-    ``lines`` (python fixes) restricts the rewrite to nodes covering those source lines."""
+    ``lines`` (python fixes) restricts the rewrite to nodes covering those source lines.
+    ``path``: the project-relative file ``source`` is, which a successor pattern's ``sites``
+    (anchors) are matched against."""
+    from pymolt.codemods.successors import KINDS as SUCCESSOR_KINDS
+    from pymolt.codemods.successors import apply_successor_pattern
+
+    if pattern.kind in SUCCESSOR_KINDS:
+        return apply_successor_pattern(source, pattern, path=path)
     module = cst.parse_module(source)
     if pattern.kind == "rewrite-attr":
         # Attribute-path insertion (m.OLD_TAIL → m.NEW_TAIL); binding-aware.
@@ -810,8 +831,11 @@ def apply_pattern(source: str, pattern: CodemodPattern, *,
 
     # rename-call is binding-aware → run through a MetadataWrapper so the
     # ScopeProvider is resolved and only true bindings are rewritten.
-    rename = RenameCallCodemod(pattern.old_qualname, pattern.new_qualname)
+    forbid = frozenset((pattern.template or {}).get("forbid_keywords") or ())
+    rename = RenameCallCodemod(pattern.old_qualname, pattern.new_qualname, forbid)
     new_module = MetadataWrapper(module).visit(rename)
+    if rename.unsafe:            # a call names a keyword the successor does not take
+        return source, 0
     return new_module.code, rename.sites
 
 
@@ -853,6 +877,7 @@ def apply_patterns(
     source: str, patterns: list[CodemodPattern], *,
     lines_for: Callable[[CodemodPattern], frozenset[int] | None] | None = None,
     on_step: StepObserver = None,
+    path: str | None = None,
 ) -> tuple[str, list[tuple[CodemodPattern, int]]]:
     """Apply a sequence of patterns. Returns (new_source, [(pattern, sites)…]).
 
@@ -901,7 +926,7 @@ def apply_patterns(
                          before, source)
             continue
         before = source
-        source, sites = apply_pattern(source, pattern, lines=lines_of(pattern))
+        source, sites = apply_pattern(source, pattern, lines=lines_of(pattern), path=path)
         if sites:
             hits.append((pattern, sites))
         if source != before:
@@ -965,6 +990,14 @@ def _emit(sink: ProgressSink, path: Path, hits: list[tuple] | None = None) -> No
         )
     except Exception:  # noqa: BLE001 — an observer cannot break the walk
         log.warning("progress sink raised on %s", path, exc_info=True)
+
+
+def _rel(root: Path, path: Path) -> str | None:
+    """``path`` relative to the project, as anchors name files (None outside it)."""
+    try:
+        return Path(path).resolve().relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        return None
 
 
 def _iter_py_files(root: Path):
@@ -1137,7 +1170,7 @@ def apply_to_repo(
             log.warning("skip %s: %s", path, exc)
             continue
         try:
-            new_source, hits = apply_patterns(original, patterns)
+            new_source, hits = apply_patterns(original, patterns, path=_rel(root, path))
         except Exception as exc:  # libcst parse error → skip the file
             log.warning("skip %s (parse error): %s", path, exc)
             continue
@@ -1195,7 +1228,8 @@ def preview_repo(
             continue
         steps = _FileSteps(on_step, path)
         try:
-            new_source, hits = apply_patterns(original, patterns, on_step=steps.hook)
+            new_source, hits = apply_patterns(original, patterns, on_step=steps.hook,
+                                              path=_rel(root, path))
         except Exception as exc:  # libcst parse error → skip
             log.warning("skip %s (parse error): %s", path, exc)
             _emit(on_file, path)
@@ -1424,7 +1458,7 @@ def apply_mixed_to_repo(
 
         pattern_hits: list[tuple[CodemodPattern, int]] = []
         try:
-            current, pattern_hits = apply_patterns(current, patterns)
+            current, pattern_hits = apply_patterns(current, patterns, path=_rel(root, path))
         except Exception as exc:
             log.warning("skip patterns for %s (parse error): %s", path, exc)
 
@@ -1485,7 +1519,8 @@ def preview_mixed_repo(
                 original, rules, allow=allow, blocked=blocked, on_step=steps.hook
             )
             new_source, pattern_hits = apply_patterns(after_rules, patterns,
-                                                      on_step=steps.hook)
+                                                      on_step=steps.hook,
+                                                      path=_rel(root, path))
         except Exception as exc:
             log.warning("skip %s (mixed preview error): %s", path, exc)
             _emit(on_file, path)

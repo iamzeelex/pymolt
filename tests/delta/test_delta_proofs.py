@@ -1,11 +1,12 @@
 """Proving successors (successors v2, stage S2): forwards, conditional forwards, twins,
-aliases, identity, the transfer check and chains. Pure over fake probe answers (the shapes
-``pymolt/delta/probe.py`` emits)."""
+aliases, identity, the transfer check and chains, and the codemods only proofs make. Pure over
+fake probe answers (the shapes ``pymolt/delta/probe.py`` emits)."""
 
 from __future__ import annotations
 
 from pymolt.delta.engine import DiffInput, as_touched, diff
-from pymolt.delta.models import RecordedWarning, TouchedSymbol
+from pymolt.delta.models import DeltaReport, RecordedWarning, TouchedSymbol
+from pymolt.delta.provider import successor_patterns
 
 from ._fakes import missing, res, shape, step
 
@@ -24,6 +25,11 @@ def _diff(old, new, symbols=None, *, extra=None, old_extra=None):
 
 def _member(cls, name, **kw):
     return res("pkg", step(cls, f"pkg.{cls}", kind="class"), step(name, f"pkg.{cls}.{name}", **kw))
+
+
+def _report(facts):
+    return DeltaReport(package="pkg", from_version="1", to_version="2", quality="complete",
+                       facts=facts)
 
 
 def _removed(facts):
@@ -66,6 +72,8 @@ def test_negative_in1d_a_forward_to_a_private_callee_proves_nothing():
     assert fact.successor == "pkg.isin"
     assert fact.succession["trust"] == "named"
     assert any("private" in r["why"] for r in fact.succession["rejected"])
+    patterns, _ = successor_patterns(_report([fact]), None)
+    assert patterns == []
 
 
 def test_negative_map_dict_a_chain_names_replace_strict_and_rewrites_nothing():
@@ -93,6 +101,7 @@ def test_negative_map_dict_a_chain_names_replace_strict_and_rewrites_nothing():
     assert fact.successor == "pkg.Expr.replace_strict"
     assert rec["trust"] == "named" and rec["transfer"].startswith("successor-changed")
     assert rec["chain"][0]["resolved"] == "pkg.Expr.replace_strict"
+    assert successor_patterns(_report([fact]), None)[0] == []
 
 
 def test_a_twin_body_proves_a_rename_at_the_target():
@@ -125,6 +134,7 @@ def test_a_target_side_proof_needs_the_old_implementation_unchanged():
     fact = next(f for f in _diff(old, new, extra=extra) if f.kind == "DEPRECATED")
     assert fact.successor == "pkg.Model.model_dump_json"
     assert fact.succession["transfer"].startswith("old-changed")
+    assert successor_patterns(_report([fact]), None)[0] == []
 
 
 def test_identity_in_the_old_version_beside_the_naming_text():
@@ -138,6 +148,9 @@ def test_identity_in_the_old_version_beside_the_naming_text():
             "pkg.nan": res("pkg", step("nan", "pkg.nan", kind="float", oid=7))}
     fact = _removed(_diff(old, new, extra=extra, old_extra=same))
     assert fact.succession["trust"] == "identity"
+    (pattern,) = successor_patterns(_report([fact]), None)[0]
+    assert (pattern.kind, pattern.old_qualname, pattern.new_qualname) == (
+        "replace-attr-path", "pkg.NaN", "pkg.nan")
 
 
 def test_negative_timezone_utc_another_object_is_no_identity():
@@ -159,6 +172,7 @@ def test_negative_timezone_utc_another_object_is_no_identity():
                           old_extra=other))
     assert fact.successor == "datetime.timezone.utc"
     assert fact.succession["trust"] == "named"
+    assert successor_patterns(_report([fact]), None)[0] == []
 
 
 def _param_world(old_extra=None, new_extra=None):
@@ -178,6 +192,9 @@ def test_an_alias_in_the_old_body_proves_a_keyword_rename():
     fact = next(f for f in _diff(old, new) if f.param == "size")
     assert fact.successor == "height"
     assert fact.succession["trust"] == "proof" and fact.succession["proof"]["kind"] == "alias"
+    (pattern,) = successor_patterns(_report([fact]), None)[0]
+    assert pattern.kind == "rename-keyword" and pattern.params == {"size": "height"}
+    assert pattern.template["blocked"] == []
 
 
 def test_a_helper_that_hands_one_parameter_back_as_another_proves_it():
@@ -203,3 +220,24 @@ def test_a_named_parameter_successor_without_proof_makes_no_rewrite():
     old, new = _param_world()
     fact = next(f for f in _diff(old, new) if f.param == "size")
     assert fact.successor == "height" and fact.succession["trust"] == "named"
+    assert successor_patterns(_report([fact]), None)[0] == []
+
+
+def test_a_forwards_callee_is_spelled_in_the_new_version_without_any_text():
+    """Django 2.2's ``url`` forwards to ``re_path`` and says nothing: the callee's own public
+    spelling is looked up in the new version all the same."""
+    sig = shape(("regex", POK, None), ("view", POK, None))
+    callee = shape(("route", POK, None), ("view", POK, None))
+    old = {"pkg.conf.url": res("pkg.conf", step(
+        "url", "pkg.conf.url", shape=sig,
+        body={"forward": {"callee": "re_path", "args": [{"p": "regex"}, {"p": "view"}],
+                          "kwargs": []}},
+        callee={"spellings": ["pkg.urls.re_path"], "shape": callee}))}
+    new = {"pkg.conf.url": missing("pkg.conf", "url")}
+    extra = {"pkg.urls.re_path": res("pkg.urls", step("re_path", "pkg.urls.re_path",
+                                                      shape=callee))}
+    fact = _removed(_diff(old, new, extra=extra))
+    assert fact.successor == "pkg.urls.re_path" and fact.succession["trust"] == "proof"
+    (pattern,) = successor_patterns(_report([fact]), None)[0]
+    assert pattern.kind == "rename-call"
+    assert pattern.template == {"forbid_keywords": ["regex"]}

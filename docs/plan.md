@@ -53,6 +53,28 @@ irrelevant changes.
   how (`succession`: its `trust`, the `sources`, `caveats` such as "the default has changed",
   and the names it `rejected` and why). A parameter paired with another only by its position is a
   candidate, never a successor. Prose and text only name a successor; they never rewrite code.
+- **Proven successors.** A successor is *proven* only by the library's own code, and only a
+  proven one is rewritten:
+  - **identity**: the same object (a move, or a removed name that was its named successor in
+    the old version: `np.NaN is np.nan`);
+  - **forward**: after its docstring and warnings, the old callable is one `return f(...)`
+    (polars 0.19's `groupby` is `return self.group_by(by, *more_by, ...)`), or one guarded by a
+    condition the call's own arguments decide (polars 1.x `count()` without columns is
+    `F.len().alias("count")`);
+  - **alias**: the body makes one parameter the other (`height = size`,
+    `kwargs["height"] = kwargs.pop("size")`, a helper handing `interpolation` back as `method`),
+    or a registered rename helper says so;
+  - **twin**: its body, apart from the warning, is the successor's (aiohttp's `has_body`).
+
+  A proof made in the old version holds when the successor is not deprecated in the target and
+  every call binds alike against the successor's old and new signatures; one made in the target
+  holds only when the old version's own implementation is the same (pydantic 2's `.json()`
+  forwards to `model_dump_json`, but pydantic 1's wrote other bytes). A forward to a private
+  callee proves nothing (numpy's `in1d` forwards to `_in1d`, which flattens, while `isin` keeps
+  the shape). When the successor deprecates a parameter the forward passes, its own text names
+  one more hop (polars `map_dict` -> `replace` -> `replace_strict`): named, never rewritten.
+  `succession.trust` is `identity` or `proof` for these, `transfer` says whether and how they
+  hold in the target, and `proof` names the code that proves them.
 - **Same object, new name.** A name that now points to the same object under another spelling is
   followed, not reported as removed.
 - **Receivers.** A method call is also compared under its receiver's class, and under that class's
@@ -101,6 +123,27 @@ A codemod is a match/rewrite template applied with LibCST, for example
   dependency rewrites included, and then imports the changed modules in the target environment
   unless `--no-smoke` is given ([commands.md](commands.md#pymolt-apply-dir)).
 
+A proven successor becomes one of these codemods (basis `library-proof`, claim `preserve`):
+- **`rename-keyword`**: `old=` becomes `new=` in calls of the callable, in a `**{"old": ...}`
+  literal passed to it and in `functools.partial(callable, old=...)`. A call that passes `new`
+  already, or a `**mapping` that is no literal, is left alone, and so is one that passes, or
+  leaves at a changed default, another parameter whose signature changes;
+- **`rename-member`**: `.old` becomes `.new`, a method call or an attribute read;
+- **`forward-template`**: the call is rebuilt from the forward, the old defaults the successor
+  changed written out (`df.with_row_count()` -> `df.with_row_index("row_nr")`).
+
+A function is reached through its import binding only: never a shadowed name, a binding made
+in an `except ImportError` fallback, a string or a `getattr` name. A method is rewritten only
+at the statements (anchors) where the baseline recorded receivers of the class the proof is
+about, and no project class in the receiver's hierarchy defines either name; a statement that
+holds the name twice, or a site the baseline never ran, stays with the agent step. Every
+rewritten call is checked against the old and new signatures: an argument that would bind to
+another parameter leaves the site alone. A successor that is named but not proven, or proven
+but not holding in the target, is an agent step with the successor, the forward rendered as
+`do.manual.suggestion`, and its provenance in `why.successor`; one the evidence names several of
+lists them as `do.manual.candidates`. A keyword rename's step names its parameters in
+`symbol.params`.
+
 ## The plan as steps
 
 The saved plan (`"schema_version": 2`) lists the migration as ordered steps, `steps` in `--json`.
@@ -138,6 +181,8 @@ Each step also says how it will be judged and how big it is:
   (its lines are judged as hand edits). An agent or person step's claim follows what the delta
   shows about the successor, and `why.claim` says which:
   - the same object (a move), or the same object with a changed signature: `preserve`;
+  - a successor the library's code proves, or one its text says does the same ("for the same
+    effect"): `preserve`;
   - another object (a removed symbol, a deprecated one whose successor the delta names, or a
     name now bound to another object): `intended`, with `verify.expect: representation`. Verify
     reports a change of type or representation only as drift, and fails another value or a new

@@ -29,6 +29,13 @@
   have, but its `__init__` assigns on `self`, counts as existing; one made any other way does not,
   and its successor is not named.
 
+- **A proven rewrite rests on signatures, not on behaviour.** A successor proven in the old
+  version (a forward, an alias) is rewritten when the successor keeps its signature in the
+  target; a successor that changes behaviour without changing its signature makes verify fail
+  the rewritten line, with the proof named beside it. A method is rewritten only where the
+  baseline ran it; its other sites, and a keyword rename next to another changed parameter, stay
+  with the agent.
+
 - **A step rolled back alone keeps what came after it, within limits.** `rollback --step` undoes
   only that step's change in a file that moved on, but refuses when a later edit touched the
   step's lines or the statements right around them (a hand edit there could depend on it), and an
