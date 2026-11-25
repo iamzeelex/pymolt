@@ -3284,10 +3284,47 @@ def _number(v: Any, kind: str) -> Any:
     return _NO_PROJECTION
 
 
+def _input_type_keys(inputs: Any) -> set[tuple[str, str]]:
+    """The (package, class name) keys of the objects a call was handed: its receiver and its
+    arguments (top level). A discarded result of one of these types is handed back, not new."""
+    out: set[tuple[str, str]] = set()
+    for _name, v in _argument_values(inputs):
+        k = _type_key(_object_label(v))
+        if k:
+            out.add(k)
+    return out
+
+
+# Set by ``_pair_entry``: the (package, class name) keys of the pair's input object types.
+_RECEIVERS: ContextVar[frozenset] = ContextVar("pymolt_receivers", default=frozenset())
+
+
+def _object_label(v: Any) -> str | None:
+    """The type of an object rendering (not a value): a library or project object, record,
+    opaque, cycle or response-like structure."""
+    if not isinstance(v, dict):
+        return None
+    for tag in ("__object__", "__dataclass__", "__opaque__", "__cycle__"):
+        if isinstance(v.get(tag), str):
+            return v[tag]
+    if isinstance(v.get("__structure__"), str) and "values" not in v:
+        return v["__structure__"]
+    return None
+
+
 def _project_value(v: Any, consumer: str) -> Any:
     if consumer == "discarded":
         lazy = _lazy_label(v)
-        return {"__lazy__": lazy} if lazy else {"__projected__": "discarded"}
+        if lazy:
+            return {"__lazy__": lazy}
+        label = _object_label(v)
+        if label is None or _type_key(label) in _RECEIVERS.get():
+            # a value, or an object the call was handed (a fluent ``return self``, seaborn
+            # handing back the ``ax=`` it drew on): not observed
+            return {"__projected__": "discarded"}
+        # an object of another kind: one that may stand for deferred work (an AsyncResult, a
+        # Deferred, a QuerySet), so it compares by its type, through the ladder
+        return {"__opaque__": label}
     if consumer in ("unpacked", "iterated"):
         items = _items_of(v)
         return {"__seq__": items} if items is not None else _NO_PROJECTION
@@ -8088,6 +8125,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     wraps = _WRAPS.set(_SEM.get() is not None and _project_callables(of.input)
                        and _canon(of.input) == _canon(nf.input))
     consumer = _CONSUMER.set(_pair_consumer(of, nf))
+    receivers = _RECEIVERS.set(frozenset(_input_type_keys(of.input) | _input_type_keys(nf.input)))
     try:
         cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
         explained = None
@@ -8100,6 +8138,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
             explained = _explain_masked(of, nf, cmp, profile)
     finally:
+        _RECEIVERS.reset(receivers)
         _CONSUMER.reset(consumer)
         _WRAPS.reset(wraps)
         _EDITED.reset(edited)
