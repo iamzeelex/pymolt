@@ -3136,12 +3136,14 @@ def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]
     return "no baseline trace is available for a version diff"
 
 
-def _missing_side_settle(used_slots: list[tuple[str, object]]) -> str:
-    """What settles ``_missing_side_reason``: capturing the side that is missing."""
+def _missing_side_settle(used_slots: list[tuple[str, object]], trace: str | None = None) -> str:
+    """What settles ``_missing_side_reason``: capturing the side that is missing. ``trace``: the
+    post-migration recording given by hand, which is a side that exists (no slot stands for it),
+    so only the baseline is missing."""
     names = {name for name, _ in used_slots}
     if names == {"baseline"}:
         return "capture post-migration"
-    if names == {"post-migration"}:
+    if names == {"post-migration"} or (not names and trace is not None):
         return "capture baseline (it records the code before the migration)"
     return "capture the baseline, then post-migration"
 
@@ -3204,7 +3206,7 @@ def _stamp_verdict(
                    "capture that side again")
     if against is None:
         unlike(_missing_side_reason(trace, used_slots, set_aside),
-               _missing_side_settle(used_slots), replay=True)
+               _missing_side_settle(used_slots, trace), replay=True)
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:

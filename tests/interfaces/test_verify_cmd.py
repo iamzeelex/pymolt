@@ -540,3 +540,20 @@ def test_noise_against_another_recording_is_not_settled_by_a_replicate(tmp_path)
     assert "pymolt capture baseline --replicate" not in text
     assert "Review — input changed: 1 entry at 1 site(s). Action: record the before side" in text
     assert "noise not measured (the before side is not the baseline capture" in text
+
+
+def test_one_recording_given_names_only_the_side_that_is_missing(tmp_path):
+    """Only `--post-migration FILE` (or only `--baseline FILE`): the settle names the other side,
+    not "the baseline, then post-migration"."""
+    project, trace = _probe_project(tmp_path, {"__dict__": [["a", 1]]})
+
+    for flag, wanted in (("--post-migration", "capture baseline"),
+                         ("--baseline", "capture post-migration")):
+        result = runner.invoke(cli, ["verify", str(project), flag, str(trace), "--json"])
+        assert result.exit_code == EXIT_INCONCLUSIVE, result.output
+        causes = json.loads(result.output)["contract"]["inconclusive_causes"]
+        settles = [c["settle"] for c in causes if "baseline trace" in c["reason"]
+                   or "no current trace" in c["reason"]]
+        assert settles, causes
+        assert all(s.startswith(wanted) for s in settles), settles
+        assert not any("then post-migration" in c["settle"] for c in causes), causes
