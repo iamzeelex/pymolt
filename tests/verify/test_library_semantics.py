@@ -403,3 +403,98 @@ def test_raises_relocate_but_a_subclass_fails(tmp_path):
     assert not one(run(tmp_path, old, moved, src), "dep.load").fails
     sub = [ev("dep.load", {"p": "x"}, raised="dep.exceptions.AxisIndexError")]
     assert one(run(tmp_path, old, sub, src), "dep.load").fails
+
+
+# ── 4. consumer projections ───────────────────────────────────────────────────────────────
+
+RFS_SRC = "import dep\ndef main(resp):\n    resp.raise_for_status()\n    return resp.json()\n"
+RESP = {"__structure__": "dep.Response", "status_code": 200}
+
+
+def rfs(result=None, raised=None):
+    return ev("dep.Response.raise_for_status", {"self": {"__opaque__": "dep.Response"}},
+              result=result, raised=raised)
+
+
+def test_a_discarded_result_compares_by_outcome_kind(tmp_path):
+    d = run(tmp_path, [rfs(None)], [rfs(RESP)], RFS_SRC)
+    e = one(d, "dep.Response.raise_for_status")
+    assert not e.fails and e.absorbed == ["projected:discarded"]
+    assert any(n.startswith("projected (discarded)") for n in e.notes)
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_mutation_a_discarded_call_that_starts_returning_a_coroutine_fails(tmp_path):
+    d = run(tmp_path, [rfs(None)], [rfs(COROUTINE)], RFS_SRC)
+    assert one(d, "dep.Response.raise_for_status").fails
+
+
+def test_mutation_a_discarded_call_that_now_raises_fails(tmp_path):
+    d = run(tmp_path, [rfs(None)], [rfs(raised="dep.HTTPStatusError")], RFS_SRC)
+    assert one(d, "dep.Response.raise_for_status").fails
+
+
+def test_a_used_result_is_compared_in_full(tmp_path):
+    src = RFS_SRC.replace("    resp.raise_for_status()", "    r = resp.raise_for_status()")
+    d = run(tmp_path, [rfs(None)], [rfs(RESP)], src)
+    assert one(d, "dep.Response.raise_for_status").fails
+
+
+MESH_SRC = "import numpy as np\ndef main(a, b):\n    x, y = np.meshgrid(a, b)\n"
+
+
+def mesh(tag, values):
+    return ev("numpy.meshgrid", {"xi": {"__tuple__": [1]}}, result={tag: values})
+
+
+def test_an_unpacked_result_erases_the_container_type(tmp_path):
+    d = run(tmp_path, [mesh("__list__", [1, 2])], [mesh("__tuple__", [1, 2])], MESH_SRC)
+    e = one(d, "numpy.meshgrid")
+    assert not e.fails and e.absorbed == ["projected:unpacked"]
+
+
+def test_mutation_an_unpacked_element_that_changes_fails(tmp_path):
+    d = run(tmp_path, [mesh("__list__", [1, 2])], [mesh("__tuple__", [1, 3])], MESH_SRC)
+    assert one(d, "numpy.meshgrid").fails
+    arity = run(tmp_path, [mesh("__list__", [1, 2])], [mesh("__tuple__", [1, 2, 3])], MESH_SRC)
+    assert one(arity, "numpy.meshgrid").fails
+
+
+INT_SRC = "def main(bars):\n    return [int(b.get_height()) for b in bars]\n"
+
+
+def height(values):
+    return [ev("dep.Rect.get_height", {"self": {"__opaque__": "dep.Rect"}}, result=v, line=2)
+            for v in values]
+
+
+def test_int_of_a_result_compares_as_int_makes_it(tmp_path):
+    d = run(tmp_path, height([4.0, 5.0]), height([4, 5]), INT_SRC)
+    e = one(d, "dep.Rect.get_height")
+    assert not e.fails and e.absorbed == ["projected:int"]
+    numpy = run(tmp_path, height([4.0]), height([{"__opaque__": "numpy.int64"}]), INT_SRC)
+    assert not one(numpy, "dep.Rect.get_height").fails
+
+
+def test_mutation_int_of_a_result_that_changes_fails(tmp_path):
+    d = run(tmp_path, height([4.0]), height([5.0]), INT_SRC)
+    assert one(d, "dep.Rect.get_height").fails
+
+
+def test_a_shadowed_builtin_is_no_projection(tmp_path):
+    src = "int = str\n" + INT_SRC
+    d = run(tmp_path, [ev("dep.Rect.get_height", {"self": {"__opaque__": "dep.Rect"}},
+                          result=4.0, line=3)],
+            [ev("dep.Rect.get_height", {"self": {"__opaque__": "dep.Rect"}}, result=4,
+                line=3)], src)
+    assert one(d, "dep.Rect.get_height").fails
+
+
+def test_a_truth_test_compares_truthiness(tmp_path):
+    src = "def main(r):\n    if r.ok():\n        return 1\n"
+
+    def ok(v):
+        return ev("dep.R.ok", {"self": {"__opaque__": "dep.R"}}, result=v, line=2)
+
+    assert not one(run(tmp_path, [ok(True)], [ok(1)], src), "dep.R.ok").fails
+    assert one(run(tmp_path, [ok(True)], [ok(0)], src), "dep.R.ok").fails

@@ -165,6 +165,21 @@ A returned value is compared by what your code can observe of it:
   lists them; they do not block PASS, like the [unobservable uses](#the-verdict).
 - A dependency record in a call's input, or as its receiver, is keyed by its type.
 
+What a statement does with a call's result decides what of it is compared (from the source
+snapshot, the same on both sides):
+
+| The statement | Compared |
+|---|---|
+| discards it (`resp.raise_for_status()` on its own line) | outcome kind and raise type; a lazy result (a coroutine, generator, iterator, Future, context manager) by its type, since discarding it means its work did not run |
+| unpacks or iterates it (`x, y = np.meshgrid(...)`, `for r in f()`) | the elements and their number, not the container type |
+| passes it alone to `int`, `float`, `bool` or `len` (not rebound in the file) | the converted value: `int(bar.get_height())` makes 4.0 and 4 equal |
+| tests its truth (`if f():`, `not f()`) | truthiness |
+| anything else | the full result |
+
+A pair equal only once projected is DRIFT (`projected`), with both types shown: the library did
+change what it returns, and the plan's scoring still sees that. `--strict` compares the full
+result.
+
 A type that changed is judged by a ladder:
 - **Values and raises**: strict. A class that moved within its package (same top-level package,
   same class name: `numpy.ma.core.MaskedArray` is `numpy.ma.MaskedArray`) is the only allowance.
