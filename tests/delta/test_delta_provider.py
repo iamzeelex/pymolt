@@ -107,13 +107,25 @@ def test_bundle_maps_facts_to_rules_patterns_and_impacts(tmp_path, fake_deltas):
 
 def test_without_rules_a_move_is_a_plain_pattern(tmp_path, fake_deltas):
     report = _report()
-    report.facts = [f for f in report.facts if f.kind != "REMOVED"]  # no append: no rule
+    # The delta probed append and found it still there: no rule.
+    report.facts = [f for f in report.facts if f.kind != "REMOVED"] + [DeltaFact(
+        symbol="pandas.core.series.Series.append", kind="UNCHANGED")]
     fake_deltas["report"] = report
     bundle = LocalDeltaProvider(tmp_path).fetch_bundle([PANDAS])["pandas"]
     assert bundle.rules == []
     (pattern,) = bundle.patterns
     assert (pattern.kind, pattern.old_qualname, pattern.new_qualname, pattern.confidence) == (
         "rewrite-import", "pandas.io.json.json_normalize", "pandas.json_normalize", "high")
+
+
+def test_a_complete_delta_silent_about_the_rules_symbols_keeps_the_rule(tmp_path, fake_deltas):
+    """zipline (legacy QA P3): ``df = df.append(...)`` on a local in a test the baseline never
+    ran. The delta never probed ``DataFrame.append``; its silence rules nothing out."""
+    report = _report()
+    report.facts = [f for f in report.facts if f.kind != "REMOVED"]
+    fake_deltas["report"] = report
+    bundle = LocalDeltaProvider(tmp_path).fetch_bundle([PANDAS])["pandas"]
+    assert "$S.append($OTHER, ignore_index=$IGN)" in [r.match for r in bundle.rules]
 
 
 def test_inconclusive_delta_is_an_impact_never_silence(tmp_path, fake_deltas):
