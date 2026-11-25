@@ -3598,10 +3598,9 @@ def _is_coroutine_marker(v: Any) -> bool:
 def _awaitable_like(v: Any) -> bool:
     """A rendering that may stand for an awaitable: a library object or a type-only marker
     (a Future, a Task, a request context manager). A plain value (None, a number, a string, a
-    container, a structure with its values) is never awaited, so against a coroutine it is a
-    change of type, compared as such."""
-    return isinstance(v, dict) and any(k in v for k in (
-        "__opaque__", "__object__", "__cycle__", "__dataclass__"))
+    container, a structure with its values) or a record (a dataclass) is never awaited, so
+    against a coroutine it is a change of type, compared as such."""
+    return isinstance(v, dict) and any(k in v for k in ("__opaque__", "__object__", "__cycle__"))
 
 
 def _awaited_unrecorded(old: list[Outcome], new: list[Outcome]) -> bool:

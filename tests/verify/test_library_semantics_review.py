@@ -422,3 +422,13 @@ def test_a_private_field_read_by_name_is_compared(tmp_path):
     d = run(tmp_path, [ev("dep.page", {}, result=page("a"))],
             [ev("dep.page", {}, result=page("b"))], src)
     assert d.verdict is FAIL
+
+
+# ── 14. a record that became a coroutine ──────────────────────────────────────────────────
+
+def test_a_sync_record_becoming_a_coroutine_fails(tmp_path):
+    src = "import dep\ndef main():\n    r = dep.fetch(1)\n    return r.value\n"
+    old = [ev("dep.fetch", {"n": 1}, result={"__dataclass__": "dep.Result",
+                                             "fields": [["value", 1]]})]
+    new = [ev("dep.fetch", {"n": 1}, result={"__opaque__": "coroutine"})]
+    assert run(tmp_path, old, new, src).verdict is FAIL
