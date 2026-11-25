@@ -118,6 +118,10 @@ Two cases go the other way. Both still fail, although they may be noise:
   what the `await` returned or raised is not recorded. Two such calls are not comparable, so the
   verdict is INCONCLUSIVE (needs evidence), never PASS on the markers alone. A call that now raises
   when it starts, or a plain value that became a coroutine, still fails.
+- **Calls made by compiled code (host fallback).** Until the watcher marks them, verify drops a
+  call whose name its line never mentions only when a compiled call the line does name ran there
+  (or it is a numpy dispatcher). A callback compiled code makes on a line with no recorded
+  compiled call is still compared as your line's call.
 - **Warnings from C methods.** A warning raised inside a compiled method (`datetime.utcnow` on
   3.12) is not attached to that call.
 - **Implicit C-slot calls on 3.9–3.11 compiled types.** `row["name"]` on SQLAlchemy 1.3's

@@ -343,7 +343,19 @@ Two captures from different Python versions are compared fairly:
   comparable;
 - a decorator's call is attributed to the `def` line before 3.11 and to its `@` line after. It
   is compared within its decorated statement, including several decorators from one factory
-  stacked on one function.
+  stacked on one function, and a closure whose module moved within its package
+  (`flask.scaffold.decorator` vs `flask.sansio.scaffold.Scaffold.route.<locals>.decorator`);
+- a comprehension's call runs in a `<listcomp>` frame before 3.12 and in its function after
+  (PEP 709): the function is read from the source snapshot when no other call on that line
+  names it;
+- a callee that moved to another module and binds its argument under another name
+  (`abort(status=403)` vs `abort(code=403)`) pairs at its call site by the argument values;
+- a call compiled code made while another call on your line ran (a C function or type calling
+  back into Python: `RandomState(0)` calling `concatenate`, markupsafe's C `escape` building a
+  `Markup`), and numpy's dispatchers (`_round_dispatcher`), are not calls your code made: they
+  are not compared, only counted (`via`). A call your line names is always compared;
+- an inherited constructor (`Response.__init__` for `PlainTextResponse(...)`) also confirms the
+  subclass's static contact.
 
 ## Coverage
 

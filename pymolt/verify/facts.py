@@ -595,6 +595,9 @@ class FactDiff(BaseModel):
     handle_comparison: str | None = None
 
     float_ulps: int = 1024    # the numeric layer's bound this diff used (0: exact)
+    via: int = 0              # facts made by compiled code during another call, not compared
+    # Symbols every fact of which was such a call (``_drop_via``): no call the project made.
+    via_symbols: list[str] = Field(default_factory=list)
 
     @property
     def numeric_drift(self) -> dict[str, Any] | None:
@@ -614,6 +617,8 @@ class FactDiff(BaseModel):
         out: Counter = Counter()
         for e in self.entries:
             out.update(set(e.absorbed or ()))
+        if self.via:
+            out[VIA] += self.via
         return dict(sorted(out.items()))
 
     def edited_sites(self) -> dict[str, int]:
@@ -5215,7 +5220,11 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         new_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})
                      for f in new_facts]
 
-    old_facts, new_facts = _normalize_scopes(old_facts), _normalize_scopes(new_facts)
+    old_facts = _normalize_scopes(old_facts, context.old_sources if context else None)
+    new_facts = _normalize_scopes(new_facts, context.new_sources if context else None)
+    kept_symbols = {f.symbol for f in (*old_facts, *new_facts)}
+    old_facts, new_facts, via = _drop_via(old_facts, new_facts, context)
+    via_symbols = sorted(kept_symbols - {f.symbol for f in (*old_facts, *new_facts)})
     modes = _site_modes(old_facts, new_facts, old.site_tallies, new.site_tallies)
     ov = _views(old_facts, modes)
     nv = _views(new_facts, modes)
@@ -5315,6 +5324,22 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         pairs, old_left, new_left = _pair_groups(
             old_left, new_left,
             lambda v: (site(v), v.fact.symbol.split(".")[0], v.fact.symbol.rsplit(".", 1)[-1]))
+        pair_pass(pairs, input_changed=True)
+
+    # 5d Same site, a callee of the same name that moved to another module, the same argument
+    # values however it binds or names them (werkzeug's ``abort(status=403)`` -> Flask's
+    # ``abort(code=403)``): pass 4 with the binding ignored, one-to-one, different symbols only
+    # (a symbol on both sides is pass 5b's).
+    if not sampled:
+        pairs, old_left, new_left = _pair_groups(
+            old_left, new_left, lambda v: (site(v), _symbol_leaf(v.fact.symbol),
+                                           _unbound_key(v.fact.input)))
+        same = [(o, n) for o, n in pairs if o.fact.symbol == n.fact.symbol]
+        if same:
+            back = {id(v) for pair in same for v in pair}
+            old_left = old_left + [o for o, _ in same]
+            new_left = new_left + [n for _, n in same]
+            pairs = [(o, n) for o, n in pairs if id(o) not in back]
         pair_pass(pairs, input_changed=True)
 
     # 6 Anchored pairing on edited lines (same symbol, ledger / plan symbol, one-statement
@@ -5487,13 +5512,106 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             f"({', '.join(envcmp.differs)}); {env_reviews} difference(s) at calls that read a "
             f"differing aspect are reviews, {env_readings} value(s) are each side's own "
             "reading")
-    return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger,
+    if via:
+        warnings.append(
+            f"via:{via}: fact(s) made by compiled code while another call on the project's "
+            "line ran (a callback with no Python frame of its own, a numpy dispatcher), not "
+            "calls the project made: not compared")
+    return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger, via=via,
+                    via_symbols=via_symbols,
                     old_summary=old.summary(),
                     new_summary=new.summary(), warnings=warnings, unsampled=unsampled,
                     dict_order=_order_status(old, new),
                     environment=_env.stamp(envcmp, old.environment, new.environment,
                                            reviews=env_reviews, explained=env_readings,
                                            inferred=_env_inference(old, new)))
+
+
+VIA = "via"
+_DISPATCHER = re.compile(r"^_\w*_dispatcher$")
+
+
+def _statement_text(f: Fact, sources: Mapping[str, str] | None,
+                    cache: dict[str, Any]) -> str | None:
+    """The text of the statement a fact's line is in (the snapshot's simple statement spanning
+    it), else the recorded line text."""
+    text = (sources or {}).get(f.file)
+    if text is not None and f.line is not None:
+        if f.file not in cache:
+            spans: dict[int, tuple[int, int]] = {}
+            try:
+                tree = _parse_source(text)
+            except (SyntaxError, ValueError):
+                tree = None
+            for node in ast.walk(tree) if tree is not None else ():
+                if isinstance(node, ast.stmt) and not _COMPOUND(node):
+                    for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+                        spans[ln] = (node.lineno, node.end_lineno or node.lineno)
+            cache[f.file] = (text.splitlines(), spans)
+        lines, spans = cache[f.file]
+        first, last = spans.get(f.line, (f.line, f.line))
+        return "\n".join(lines[first - 1:last])
+    return f.text
+
+
+def _names(name: str, text: str) -> bool:
+    return re.search(rf"(?<![\w.]){re.escape(name)}\b|\.{re.escape(name)}\b", text) is not None
+
+
+def _drop_via(old_facts: list[Fact], new_facts: list[Fact], context: DiffContext | None
+              ) -> tuple[list[Fact], list[Fact], int]:
+    """Calls the project's line did not make (the design's ``via``; host fallback until the
+    watcher marks them): a fact whose callee its statement never names, while a compiled call
+    the statement does name ran there on the same side (a C function or type calling back into
+    Python with no frame of its own: RandomState(0) -> concatenate, markupsafe's C escape ->
+    Markup.__new__), or a numpy dispatcher (``_round_dispatcher``, called by numpy's C
+    dispatch). A dunder is an implicit protocol, judged elsewhere. Decided per (file, line text,
+    callee name) on either side and applied to both, so the two sides stay symmetric. Returns
+    the kept facts and how many were dropped."""
+    keys: set[tuple] = set()
+    for facts, sources in ((old_facts, context.old_sources if context else None),
+                           (new_facts, context.new_sources if context else None)):
+        cache: dict[str, Any] = {}
+        by_stmt: dict[tuple, list[Fact]] = defaultdict(list)
+        texts: dict[tuple, str | None] = {}
+        for f in facts:
+            stmt = _statement_text(f, sources, cache)
+            k = (f.file, stmt)
+            by_stmt[k].append(f)
+            texts[k] = stmt
+        for (file, _s), group in by_stmt.items():
+            stmt = texts[(file, _s)]
+            compiled = any(
+                isinstance(g.input, dict) and g.input.get("__c_call__") is True and stmt
+                and _names(_symbol_leaf(g.symbol), stmt) for g in group)
+            for f in group:
+                leaf = _symbol_leaf(f.symbol)
+                if leaf.startswith("__") and leaf.endswith("__"):
+                    continue
+                dispatcher = (f.symbol.split(".")[0] == "numpy"
+                              and bool(_DISPATCHER.match(f.symbol.rsplit(".", 1)[-1])))
+                if dispatcher or (compiled and stmt and not _names(leaf, stmt)
+                                  and not (isinstance(f.input, dict)
+                                           and f.input.get("__c_call__") is True)):
+                    keys.add((f.file, f.text if f.text is not None else f.line, leaf))
+    if not keys:
+        return old_facts, new_facts, 0
+
+    def keep(f: Fact) -> bool:
+        return (f.file, f.text if f.text is not None else f.line,
+                _symbol_leaf(f.symbol)) not in keys
+
+    old_kept = [f for f in old_facts if keep(f)]
+    new_kept = [f for f in new_facts if keep(f)]
+    dropped = len(old_facts) - len(old_kept) + len(new_facts) - len(new_kept)
+    return old_kept, new_kept, dropped
+
+
+def _unbound_key(inputs: Any) -> str:
+    """A call's argument values, receiver aside, as one sorted multiset: the input whatever
+    the parameters' names or binding (an empty ``*args``/``**kwargs`` is no argument)."""
+    values = [_canon(v) for name, v in _argument_values(inputs) if name not in ("self", "cls")]
+    return _canon(sorted(values))
 
 
 def _site_key(symbol: str, file: str, func: str, line: int | None, text: str | None,
@@ -5805,15 +5923,33 @@ def _soften_unplaced(entries: list[FactEntry], old: FactSet, new: FactSet) -> No
 _PSEUDO_SCOPES = ("<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>", "<lambda>")
 
 
-def _normalize_scopes(facts: list[Fact]) -> list[Fact]:
+def _normalize_scopes(facts: list[Fact], sources: Mapping[str, str] | None = None
+                      ) -> list[Fact]:
     """Comprehension, generator and lambda frames belong to the function that contains them
     (3.12 inlines list/dict/set comprehensions, so the same code is ``<listcomp>`` on one side
     and the enclosing function on the other). A qualname ``f.<listcomp>`` becomes ``f``; a bare
-    pseudo-scope takes the real function recorded at the same (file, line) on its own side."""
+    pseudo-scope takes the real function recorded at the same (file, line) on its own side, or,
+    when none is, the function that contains its line in the side's source snapshot (the name
+    the interpreter records, ``co_name``; ``<module>`` at module level)."""
     real: dict[tuple[str, int], str] = {}
     for f in facts:
         if f.line is not None and not f.func.startswith("<") and "<" not in f.func:
             real.setdefault((f.file, f.line), f.func)
+    trees: dict[str, ast.AST | None] = {}
+
+    def from_source(file: str, line: int) -> str | None:
+        if file not in trees:
+            text = (sources or {}).get(file)
+            try:
+                trees[file] = _parse_source(text) if text is not None else None
+            except (SyntaxError, ValueError):
+                trees[file] = None
+        tree = trees[file]
+        if tree is None:
+            return None
+        fn = _enclosing_function(tree, line)
+        return fn.name if fn is not None else "<module>"
+
     out = []
     for f in facts:
         func = f.func
@@ -5821,7 +5957,7 @@ def _normalize_scopes(facts: list[Fact]) -> list[Fact]:
             if f".{marker}" in func:
                 func = func.split(f".{marker}")[0]
         if func in _PSEUDO_SCOPES and f.line is not None:
-            func = real.get((f.file, f.line), func)
+            func = real.get((f.file, f.line)) or from_source(f.file, f.line) or func
         out.append(f if func == f.func else f.model_copy(update={"func": func}))
     return out
 
@@ -7150,7 +7286,10 @@ def _qualname_equivalent(a: str, b: str) -> bool:
         return False
     ps, ls = short.rsplit(".", 1)
     pl, ll = long_.rsplit(".", 1)
-    return ls == ll and (pl == ps or pl.startswith(ps + "."))
+    # relocation-aware: the module may have moved within its package
+    # (``flask.scaffold.decorator`` -> ``flask.sansio.scaffold.Scaffold.route.<locals>.decorator``)
+    return ls == ll and (pl == ps or pl.startswith(ps + ".")
+                         or pl.split(".")[0] == ps.split(".")[0])
 
 
 _DEF_LINE = re.compile(r"^\s*(?:@|def\s|async\s+def\s|class\s)")
