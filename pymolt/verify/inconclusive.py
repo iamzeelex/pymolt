@@ -30,6 +30,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pymolt.verify.facts import (
+    ATTR_UNRENDERED,
     AWAITED_UNRECORDED,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
@@ -99,6 +100,10 @@ SETTLE_UNCOMPARABLE = {
                            "call is recorded when it starts, not what its await returned or "
                            "raised; a test that checks the awaited value, or a person's review "
                            "of these calls, does"),
+    "attribute-unrendered": ("capturing again does not settle it: an object is recorded by its "
+                             "instance state, so an attribute your code reads that is a property, "
+                             "or a cached or class attribute, is not in it; a test that asserts "
+                             "on that attribute, or a person's review, does"),
 }
 
 
@@ -212,6 +217,8 @@ def uncomparable_mechanism(e: Any) -> str:
         return "content-unseen"
     if AWAITED_UNRECORDED in notes:
         return "awaited-unrecorded"
+    if has(ATTR_UNRENDERED):
+        return "attribute-unrendered"
     if _value(_get(e, "category")) == "rewritten":
         return "unpaired"
     return "distribution-lost"

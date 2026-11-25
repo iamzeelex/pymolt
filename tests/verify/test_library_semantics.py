@@ -118,12 +118,16 @@ def test_planned_attribute_rename_compares_old_name_with_new(tmp_path):
     assert one(d, "dep.cluster.KMeans.fit").fails
 
 
-def test_a_read_attribute_on_one_side_only_is_a_change(tmp_path):
+def test_a_read_attribute_on_one_side_only_is_not_rendered_there(tmp_path):
+    # an ``__object__`` holds instance state only: ``score_`` may be a property on the old side
     old, new = kmeans(), kmeans(extra={"labels_": {"__list__": [0, 1]}, "score_": 3})
-    d = run(tmp_path, [fit(old)], [fit(new)], KM_SRC + "print(km.score_)\n")
-    assert one(d, "dep.cluster.KMeans.fit").fails
-    probed = run(tmp_path, [fit(old)], [fit(new)], KM_SRC + "print(hasattr(km, 'score_'))\n")
-    assert one(probed, "dep.cluster.KMeans.fit").fails
+    for src in (KM_SRC + "print(km.score_)\n", KM_SRC + "print(hasattr(km, 'score_'))\n"):
+        d = run(tmp_path, [fit(old)], [fit(new)], src)
+        e = one(d, "dep.cluster.KMeans.fit")
+        assert not e.fails and e.comparison is Comparison.UNCOMPARABLE
+        assert "read attribute not rendered: KMeans.score_ (baseline)" in e.notes
+        assert d.verdict is VerificationVerdict.INCONCLUSIVE
+        assert uncomparable_mechanism(e.model_dump(mode="json")) == "attribute-unrendered"
     unread = run(tmp_path, [fit(old)], [fit(new)], KM_SRC)
     e = one(unread, "dep.cluster.KMeans.fit")
     assert not e.fails and e.absorbed == ["handle-state"] and "score_" in " ".join(e.notes)

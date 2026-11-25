@@ -779,6 +779,8 @@ class FactDiff(BaseModel):
                     reason = "content-unseen"
                 elif AWAITED_UNRECORDED in e.notes:
                     reason = "awaited-unrecorded"
+                elif any(n.startswith(ATTR_UNRENDERED) for n in e.notes):
+                    reason = "attribute-unrendered"
                 else:
                     reason = "nondeterministic-unrecorded"
                 out.skipped_opaque.append({**_legacy_record(e, old_side=e.old is not None),
@@ -2557,6 +2559,9 @@ class _Evidence:
     # have counted and the projected one did not (``_Semantics``).
     absorbed: dict[str, list[str]] = field(default_factory=dict)
     numeric: list[tuple[float, float]] = field(default_factory=list)   # (ulps, relative)
+    # Attributes the project reads that one side's rendering does not hold, though it may have
+    # them (``Type.attr (side)``): the pair cannot be compared (``ATTR_UNRENDERED``).
+    unrendered: list[str] = field(default_factory=list)
 
     def absorb(self, mechanism: str, *details: str) -> None:
         self.absorbed.setdefault(mechanism, []).extend(details)
@@ -2569,6 +2574,7 @@ class _Evidence:
         for k, v in other.absorbed.items():
             self.absorb(k, *v)
         self.numeric.extend(other.numeric)
+        self.unrendered.extend(x for x in other.unrendered if x not in self.unrendered)
 
 
 _EVIDENCE: ContextVar[_Evidence | None] = ContextVar("pymolt_evidence", default=None)
@@ -2912,9 +2918,12 @@ def _read_pairs(xs: Mapping[str, Any], ys: Mapping[str, Any]
 
 def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str) -> bool:
     """Two dependency objects (``a`` old, ``b`` new): the same type (relocation allowed) and the
-    attributes the project reads equal; an attribute the project reads that exists on one side
-    only is a change (unknown, drift, only when a rendering was truncated). Unread state that
-    differs, or exists on one side only, is absorbed (``handle-state``), never compared."""
+    attributes the project reads equal. An attribute the code of the side lacking it reads is
+    a change when that side's rendering is complete (a dataclass record: absence is real);
+    otherwise it is not rendered there (an ``__object__`` holds instance state only: a property,
+    a cached or class attribute is not in it, nor in a truncated rendering), and the pair cannot
+    be compared (``ATTR_UNRENDERED``). Unread state that differs, or exists on one side only, is
+    absorbed (``handle-state``), never compared."""
     sem = _SEM.get()
     assert sem is not None
     if not _handle_types_relate(ta, tb):
@@ -2925,20 +2934,22 @@ def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str)
     if a.get("__truncated__") or b.get("__truncated__"):
         if ev is not None:
             ev.type_only = True
-    truncated = bool(a.get("__truncated__") or b.get("__truncated__"))
     moved_reads: list[str] = []
     for name in one_sided:
         # the side whose object lacks it: does that side's code read it?
-        lacking_reads = sem.new.read if name in xs else sem.old.read
-        if truncated:        # a truncated rendering may have cut it: unknown, type level
-            if ev is not None:
-                ev.drift.append(f"attribute {'removed' if name in xs else 'added'}: {name}")
-        elif name in lacking_reads:
-            return False     # the code reads it there, and it came or went: a change
-        else:
+        lacking, lacking_reads, side = ((b, sem.new.read, "post-migration") if name in xs
+                                        else (a, sem.old.read, "baseline"))
+        if name not in lacking_reads:
             # only the side that has it reads it (an edit moved the code to another name,
             # ``legendHandles`` -> ``legend_handles``): not compared, counted
             moved_reads.append(name)
+        elif _rendering_complete(lacking):
+            return False     # a record rendered whole lacks what the code reads: a change
+        elif ev is not None:
+            # not in that side's rendering, which may not hold it (``Table.c``: a property in
+            # SQLAlchemy 1.3, cached in the instance in 2.0): unknown, not a change
+            ev.unrendered.append(f"{(tb if name in xs else ta).rsplit('.', 1)[-1]}.{name} "
+                                 f"({side})")
     if moved_reads and ev is not None:
         ev.absorb(HANDLE_STATE, f"{ta.rsplit('.', 1)[-1]}: read on one side only: "
                   + ", ".join(moved_reads[:4]))
@@ -2952,6 +2963,13 @@ def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str)
         shown = ", ".join(differs[:4]) + (f" (+{len(differs) - 4})" if len(differs) > 4 else "")
         ev.absorb(HANDLE_STATE, f"{ta.rsplit('.', 1)[-1]}: {shown}")
     return True
+
+
+def _rendering_complete(v: Mapping[str, Any]) -> bool:
+    """Whether a handle's rendering holds every attribute it has: a dataclass record whole (its
+    fields). An ``__object__`` holds instance state only (no property, no class attribute, no
+    private name), and a truncated rendering was cut."""
+    return "__dataclass__" in v and not v.get("__truncated__")
 
 
 def _read_value_match(sem: _Semantics, x_name: str, y_name: str, x: Any, y: Any,
@@ -3442,6 +3460,11 @@ def _compare_plain(
         cmp = _compare_outcomes(old, new, DiffProfile(profile))
     finally:
         _EVIDENCE.reset(token)
+    if cmp.comparison is Comparison.EQUAL and ev.unrendered:
+        shown = ", ".join(ev.unrendered[:4]) + (
+            f" (+{len(ev.unrendered) - 4})" if len(ev.unrendered) > 4 else "")
+        return OutcomeComparison(Comparison.UNCOMPARABLE, None,
+                                 [*cmp.notes, f"{ATTR_UNRENDERED}: {shown}"])
     if cmp.comparison is Comparison.EQUAL and ev.drift:
         cmp.drift = True
         cmp.notes.extend(dict.fromkeys(ev.drift))
@@ -3702,6 +3725,8 @@ def _max_flow(supply: list[int], demand: list[int], edges: list[tuple[int, int]]
 #: ``COROUTINE_RESULT``): what it returned or raised once awaited is not recorded (value
 #: format 1). Two markers say nothing about what the awaits produced.
 AWAITED_UNRECORDED = "awaited result not recorded"
+# A read attribute one side's rendering does not hold (``_handles_match``): not rendered there.
+ATTR_UNRENDERED = "read attribute not rendered"
 _COROUTINE_MARKER = "coroutine"
 
 
