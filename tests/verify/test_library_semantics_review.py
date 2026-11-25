@@ -131,3 +131,57 @@ def test_an_attribute_each_side_reads_under_its_own_name_is_counted(tmp_path):
             [ev("dep.Axes.legend", {}, result=legend("legend_handles"))], src_old, src_new)
     e = one(d, "dep.Axes.legend")
     assert not e.fails and "handle-state" in e.absorbed
+# ── 6. via: aliases, --strict, a side without line text ───────────────────────────────────
+
+MSE_SRC = ("import numpy as np\nfrom dep.metrics import mean_squared_error as mse\n"
+           "def score(y, p):\n    return np.sqrt(mse(y, p))\n")
+
+
+def mse_calls(value):
+    sqrt = ev("numpy.sqrt", line=4, func="score")
+    sqrt["in"] = {"__c_call__": True}
+    sqrt["result"] = {"__opaque__": "unobserved:c-return"}
+    return [sqrt, ev("dep.metrics.mean_squared_error", {"y": 1, "p": 2}, result=value, line=4,
+                     func="score")]
+
+
+def test_a_call_through_an_import_alias_is_the_line_s_own(tmp_path):
+    d = run(tmp_path, mse_calls(0.25), mse_calls(4.0), MSE_SRC)
+    assert d.verdict is FAIL and d.via == 0
+
+
+def test_a_call_through_a_parameter_is_never_dropped(tmp_path):
+    src = "import numpy as np\ndef score(loss, y, p):\n    return np.sqrt(loss(y, p))\n"
+    old, new = mse_calls(0.25), mse_calls(4.0)
+    for e in old + new:
+        e["where"]["line"] = 3
+    d = run(tmp_path, old, new, src)
+    assert d.verdict is FAIL and d.via == 0
+
+
+def test_strict_never_drops_a_call(tmp_path):
+    src = ("import numpy as np\ndef churn():\n    rng = np.random.RandomState(0)\n"
+           "    return rng\n")
+    rs = ev("numpy.random.mtrand.RandomState", result={"__opaque__": "unobserved:c-return"})
+    rs["in"] = {"__c_call__": True}
+    conc = [ev("numpy.core.multiarray.concatenate", {"a": {"__list__": [v]}},
+               result={"__list__": [v]}) for v in (1, 2)]
+    assert run(tmp_path, [conc[0], rs], [conc[1], rs], src).via == 2
+    assert run(tmp_path, [conc[0], rs], [conc[1], rs], src, strict=True).via == 0
+
+
+def test_a_side_without_line_text_is_dropped_symmetrically():
+    from pymolt.verify.facts import Fact, Outcome, _drop_via
+
+    def fact(symbol, text, value, c_call=False):
+        return Fact(symbol=symbol, file="app.py", func="main", line=3, text=text,
+                    outcomes=[Outcome(kind="return", value=value)], count=1,
+                    input={"__c_call__": True} if c_call else {"arrays": [value]})
+
+    text = "rng = np.random.RandomState(0)"
+    old = [fact("numpy.core.multiarray.concatenate", text, 1),
+           fact("numpy.random.mtrand.RandomState", text, "c", True)]
+    new = [fact("numpy.core.multiarray.concatenate", None, 2),
+           fact("numpy.random.mtrand.RandomState", None, "c", True)]
+    old_kept, new_kept, dropped = _drop_via(old, new, None)
+    assert len(old_kept) == len(new_kept) == 1 and dropped == 2
