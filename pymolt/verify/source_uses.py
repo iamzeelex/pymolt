@@ -66,6 +66,7 @@ class SourceUses:
         default_factory=dict)
     files: int = 0          # files parsed
     unparsed: int = 0       # files that did not parse (their uses are unknown)
+    unparsed_files: list[str] = field(default_factory=list)
 
 
 def _leaf(node: ast.AST | None) -> str | None:
@@ -395,7 +396,7 @@ def parse(text: str) -> ast.AST | None:
         warnings.simplefilter("ignore")
         try:
             return ast.parse(text)
-        except (SyntaxError, ValueError):
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
             return None
 
 
@@ -409,31 +410,45 @@ def source_uses(sources: Mapping[str, str] | None) -> SourceUses | None:
             continue
         text = sources[file]
         tree = parse(text)
-        if tree is None:
+        if tree is None or not _analyse(uses, file, text, tree):
             uses.unparsed += 1
+            uses.unparsed_files.append(file)
             continue
         uses.files += 1
-        parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
-        modules = {(a.asname or a.name).split(".")[0] for n in ast.walk(tree)
-                   if isinstance(n, ast.Import) for a in n.names}
-        shadowed = _bound_names(tree) & set(_CONVERSIONS)
-        calls = uses.calls.setdefault(file, [])
-        reads = uses.result_reads.setdefault(file, [])
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call):
-                leaf = _leaf(n.func)
-                if leaf:
-                    calls.append((n.lineno, n.end_lineno or n.lineno, leaf,
-                                  _consumer(n, parents, shadowed)))
-                    names = _result_reads(n, parents)
-                    if names:
-                        reads.append((n.lineno, n.end_lineno or n.lineno, leaf, names))
-        v = _Visitor(uses, file, text.splitlines(), parents, modules, import_bindings(tree))
-        # ``called`` must be known before an Attribute is visited: a Call is visited before
-        # its func (generic_visit walks fields in order), so one pass suffices.
-        v.visit(tree)
     uses.dynamic.sort()
     return uses
+
+
+def _analyse(uses: SourceUses, file: str, text: str, tree: ast.AST) -> bool:
+    """Record one parsed file's uses; False when the file is too deep to walk (a long
+    generated expression: the visitor recurses), so its uses stay unknown."""
+    try:
+        _analyse_tree(uses, file, text, tree)
+    except (RecursionError, MemoryError):
+        return False
+    return True
+
+
+def _analyse_tree(uses: SourceUses, file: str, text: str, tree: ast.AST) -> None:
+    parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    modules = {(a.asname or a.name).split(".")[0] for n in ast.walk(tree)
+               if isinstance(n, ast.Import) for a in n.names}
+    shadowed = _bound_names(tree) & set(_CONVERSIONS)
+    calls = uses.calls.setdefault(file, [])
+    reads = uses.result_reads.setdefault(file, [])
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            leaf = _leaf(n.func)
+            if leaf:
+                calls.append((n.lineno, n.end_lineno or n.lineno, leaf,
+                              _consumer(n, parents, shadowed)))
+                names = _result_reads(n, parents)
+                if names:
+                    reads.append((n.lineno, n.end_lineno or n.lineno, leaf, names))
+    v = _Visitor(uses, file, text.splitlines(), parents, modules, import_bindings(tree))
+    # ``called`` must be known before an Attribute is visited: a Call is visited before
+    # its func (generic_visit walks fields in order), so one pass suffices.
+    v.visit(tree)
 
 
 def project_modules(*sources: Mapping[str, str] | None) -> frozenset[str]:

@@ -160,7 +160,10 @@ A returned value is compared by what your code can observe of it:
   code of the side that lacks it reads it; when only the other side's code reads it (an edit
   moved the read to another name), or no code does, it is counted with the unread state.
 - A capture without a source snapshot compares every object by its full state, as
-  `verify --strict` does. The report says which (`quality.objects`).
+  `verify --strict` does, and so does a diff with any project file that does not parse here
+  (its reads are unknown). The report says which (`quality.objects`). The post-migration
+  snapshot keeps only the files with calls in them; the read set takes the other files from the
+  checkout, else from the baseline snapshot.
 - Places that read attributes by a computed name (`getattr(x, name)`, `vars(x)`, `x.__dict__`,
   `asdict(x)`, `dir(x)`) cannot be projected. When an object's unread state differed, the verdict
   lists them; they do not block PASS, like the [unobservable uses](#the-verdict).
