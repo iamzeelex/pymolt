@@ -174,6 +174,31 @@ def _baseline_text(plan) -> str:
     return f"{text} ({name})" if name and plan.baseline_trace_sha256 else text
 
 
+_COMMAND = re.compile(r"`([^`]+)`")
+
+
+def _unknown_api_changes(plan) -> str | None:
+    """The header line naming the dependencies whose API changes the plan could not compute
+    (an inconclusive delta), the first reason, and what settles it; None when every delta was
+    computed. Their steps are missing from the plan, not absent from the migration."""
+    deltas = [d for d in (getattr(plan.risks, "deltas", None) or ())
+              if getattr(d, "subject", "dependency") == "dependency"]
+    unknown = [d for d in deltas if getattr(d, "quality", None) == "inconclusive"]
+    if not unknown:
+        return None
+    names = [d.package for d in unknown]
+    shown = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+    notes = [str(n) for d in unknown for n in (d.notes or ())]
+    reasons = [n for n in notes if not n.startswith(("old: ", "new: "))]
+    reason = f": {reasons[0]}" if reasons else ""
+    commands = [m.group(1) for n in notes for m in _COMMAND.finditer(n)
+                if m.group(1).startswith("docker start ")]
+    settle = (f"start the container (`{commands[0]}`) and run `pymolt plan` again" if commands
+              else "fix that and run `pymolt plan` again")
+    return (f"API changes unknown for {len(unknown)} of {len(deltas)} package(s) ({shown})"
+            f"{reason}. Their steps are missing from this plan: {settle}.")
+
+
 def _header(plan, next_command: str | None = None) -> list[str]:
     moves = [f"{d.name} {d.from_version} → {d.to_version}" for d in plan.dependencies]
     if plan.python:
@@ -187,6 +212,9 @@ def _header(plan, next_command: str | None = None) -> list[str]:
              _plain(f"{made_by} · {_baseline_text(plan)}", 500)]
     if moves:
         lines.append(_plain(" · ".join(moves), 500))
+    unknown = _unknown_api_changes(plan)
+    if unknown:
+        lines.append(_plain(unknown, 500))
     lines.append(f"{len(plan.steps)} steps" + (f": {parts}" if parts else "")
                  + (f". Next: `{_plain(next_command, 500)}`" if next_command
                     else ". Next: `pymolt status .` names it"))
