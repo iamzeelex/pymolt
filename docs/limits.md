@@ -74,7 +74,9 @@ Two cases go the other way. Both still fail, although they may be noise:
 - **Compiled calls.** A C function, a private Cython function, or a method of a Cython extension type
   is recorded without its result, and its arguments are not compared. Past 2,000 calls per call
   site, such calls are only counted. The public Cython functions of dependency modules are wrapped
-  and recorded in full.
+  and recorded in full, except those a wrapper would change: a fused function (it is indexed,
+  `f[double]`), a coroutine or generator function, and a static one stored bare in a class. These
+  are left alone, so they are recorded like a private one on 3.12 and not at all below.
 - **Late dunder contacts in long runs (3.12+).** Watching for dunder, property and generator calls
   turns off 30 s after the last new contact. A line of your code that runs for the first time turns
   it back on until nothing new happened for 5 s (`PYMOLT_TRACE_INCREMENTAL_REOPEN`; 0 keeps it off).

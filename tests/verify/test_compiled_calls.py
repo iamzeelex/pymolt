@@ -8,6 +8,7 @@ import collections
 import collections.abc
 import datetime
 import gc
+import inspect
 import itertools
 import json
 import math
@@ -140,10 +141,18 @@ def test_calls_from_a_dependency_are_not_the_boundary(cls):
 
 
 class _Fn:
-    """Stands in for a Cython function: same type name, owned by a fake package."""
+    """Stands in for a Cython function: same type name, owned by a fake package, and it binds
+    an instance in a class namespace as a (binding) Cython function does."""
 
     def __call__(self, x=None, *rest):
         return x
+
+    def __get__(self, obj, owner=None):
+        return self if obj is None else types.MethodType(self, obj)
+
+    # A real Cython function is function-like to ``inspect``; with a ``__get__`` this stand-in
+    # would be taken for a builtin descriptor without a signature.
+    __signature__ = inspect.signature(__call__.__get__(object()))
 
 
 _CyFn = type("cython_function_or_method", (_Fn,), {"__module__": "builtins"})
