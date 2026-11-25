@@ -366,6 +366,45 @@ def _module_file(module):
     return getattr(mod, "__file__", "") or ""
 
 
+_MODULE_DICT = types.ModuleType.__dict__["__dict__"]
+
+
+def _namespace(module, frame):
+    """The namespace a decision about ``module`` is about: the frame's globals, else the
+    namespace of ``sys.modules[module]`` (None if there is none)."""
+    ns = getattr(frame, "f_globals", None) if frame is not None else None
+    if ns is not None:
+        return ns
+    mod = sys.modules.get(module)
+    if mod is None:
+        return None
+    try:
+        return _MODULE_DICT.__get__(mod, types.ModuleType)
+    except TypeError:
+        return None                     # not a module object (a lazy stand-in in sys.modules)
+
+
+def _namespace_file(ns):
+    """``__file__`` of a module namespace, read from the namespace itself ("" if none).
+
+    A module name does not identify one namespace for the whole run: ``python -m pytest``
+    runs pytest's ``__main__`` (in site-packages), and Streamlit then executes the app's script
+    in a fresh module it also names ``__main__`` (``__file__`` = the script). So a decision is
+    made from the namespace the code runs in, and cached for that namespace only
+    (``_decided``), never for the name: under sys.monitoring the first ``__main__`` asked
+    about was pytest's, and the app's script inherited "not our code"."""
+    value = ns.get("__file__") if type(ns) is dict else None
+    return value if type(value) is str else ""
+
+
+def _decided(cache, module, ns):
+    """The cached decision for ``module`` when it was made for the namespace ``ns``, else None."""
+    ent = cache.get(module)
+    if ent is not None and ent[0] == id(ns):
+        return ent[1]
+    return None
+
+
 class SitePackagesMatcher(object):
     """Match ANY installed dependency: module whose source file is under site-packages.
 
@@ -391,18 +430,21 @@ class SitePackagesMatcher(object):
             return True   # a stdlib module this capture asked to record (PYMOLT_TRACE_STDLIB)
         if not self._roots or top in _BUILTIN_MODULES:
             return False  # C builtins (builtins, posix, ...) are never a dependency
-        cached = self._cache.get(module)
+        ns = _namespace(module, frame)
+        cached = _decided(self._cache, module, ns)
         if cached is not None:
             return cached
-        # The decision is cached per MODULE, so it is made from the module's own file: the
-        # first frame seen may run generated code (dataclass / namedtuple methods are exec'd in
-        # the module's globals with ``co_filename == "<string>"``), and deciding from it marked
-        # whole dependency modules (pydantic.fields, sqlalchemy.orm.attributes) as not ones.
-        filename = _module_file(module)
-        if not filename and frame is not None:
-            filename = frame.f_code.co_filename
+        # The decision is cached per module namespace, so it is made from the module's own
+        # file: the first frame seen may run generated code (dataclass / namedtuple methods are
+        # exec'd in the module's globals with ``co_filename == "<string>"``), and deciding from
+        # it marked whole dependency modules (pydantic.fields, sqlalchemy.orm.attributes) as not
+        # ones. A namespace with no ``__file__`` (a C module's callable: ``_module_file``) is
+        # placed by its module object, else by the frame's file.
+        filename = _namespace_file(ns) if ns is not None else ""
+        if not filename:
+            filename = _module_file(module) if frame is None else frame.f_code.co_filename
         ok = bool(filename) and filename.startswith(self._roots)
-        self._cache[module] = ok
+        self._cache[module] = (id(ns), ok)
         return ok
 
 
@@ -459,7 +501,8 @@ class AppMatcher(object):
             return False
         if frame is None:
             return False
-        cached = self._cache.get(module)
+        ns = _namespace(module, frame)
+        cached = _decided(self._cache, module, ns)
         if cached is not None:
             return cached
         # "our code" = a real file that is NOT under site-packages or the stdlib.
@@ -471,11 +514,12 @@ class AppMatcher(object):
         if frame_file.startswith("<frozen "):
             ok = False
         else:
-            # Per-module decision from the module's own file (see SitePackagesMatcher): a
-            # dependency's generated code (``"<string>"``) must not make it "our code".
-            filename = _module_file(module) or frame_file
+            # Per-namespace decision from the module's own file (see SitePackagesMatcher): a
+            # dependency's generated code (``"<string>"``) must not make it "our code", and a
+            # script run as ``__main__`` is ours even after pytest's ``__main__`` was not.
+            filename = (_namespace_file(ns) if ns is not None else "") or frame_file
             ok = bool(filename) and not filename.startswith(self._dep_roots)
-        self._cache[module] = ok
+        self._cache[module] = (id(ns), ok)
         return ok
 
 

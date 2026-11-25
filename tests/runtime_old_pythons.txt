@@ -9,3 +9,4 @@ tests/verify/test_setprofile_raise_types.py
 tests/verify/test_stdlib_not_wrapped.py
 tests/verify/test_class_lifetime.py
 tests/verify/test_wrap_protocol.py
+tests/verify/test_near_namespace.py
