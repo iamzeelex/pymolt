@@ -210,8 +210,10 @@ A type that changed is judged by a ladder:
   (`WrappedAPIView` vs `View.as_view.<locals>.view`), is drift unless your code reads a
   callable's `__name__` or `__qualname__`.
 - **A type an edited line produced** (`go.Heatmapgl(...)` edited to `go.Heatmap(...)`) that
-  reappears at an unedited call (`fig.data`) is judged with that edit: a review when the edit is
-  one, a failure when it fails.
+  reappears at an unedited call along the edit's data chain (`fig.data`, on the figure the
+  edited line built) is judged with that edit: a review when the edit is one, a failure when it
+  fails. An edit whose result is discarded carries nothing, and nothing is carried onto a class
+  your code introspects.
 - On an edited line, a new class is the edit's, judged by its claim ([Edited lines](#edited-lines)).
 
 Several outcomes at one fact (a call in a loop, over hidden receivers) are matched call by call,

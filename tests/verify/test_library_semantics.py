@@ -359,11 +359,16 @@ CARRY_NEW = "import dep\ndef fig():\n    return dep.Figure(dep.trace('heatmap', 
 CARRY_TEST = "from app import fig\ndef test():\n    assert fig().data[0].z == 1\n"
 
 
+FIGURE = {"__opaque__": "dep.Figure"}
+
+
 def carry(tmp_path, downstream_new):
-    old = [ev("dep.trace", {"kind": "heatmapgl"}, result={"__type__": "dep.gl.Heatmapgl"}),
+    old = [ev("dep.Figure", {"data": 1}, result=FIGURE),
+           ev("dep.trace", {"kind": "heatmapgl"}, result={"__type__": "dep.gl.Heatmapgl"}),
            ev("dep.Figure.data", {"self": {"__opaque__": "dep.Figure"}}, file="test_app.py",
               result={"__tuple__": [{"__opaque__": "dep.gl.Heatmapgl"}]})]
-    new = [ev("dep.trace", {"kind": "heatmap"}, result={"__type__": "dep.hm.Heatmap"}),
+    new = [ev("dep.Figure", {"data": 1}, result=FIGURE),
+           ev("dep.trace", {"kind": "heatmap"}, result={"__type__": "dep.hm.Heatmap"}),
            ev("dep.Figure.data", {"self": {"__opaque__": "dep.Figure"}}, file="test_app.py",
               result={"__tuple__": [{"__opaque__": downstream_new}]})]
     return run(tmp_path, old, new, {"app.py": CARRY_OLD, "test_app.py": CARRY_TEST},
