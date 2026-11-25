@@ -98,6 +98,10 @@ Two cases go the other way. Both still fail, although they may be noise:
   instances reach only a call site that stopped being watched before the class existed, is missed.
 - **Values inside a stream.** A generator or iterator a dependency returns is recorded as a
   generator: what it yields is not compared (urllib3's `stream()` chunks, `yaml.load_all`).
+- **Awaited results.** A coroutine call is recorded when it starts, with a marker for its result:
+  what the `await` returned or raised is not recorded. Two such calls are not comparable, so the
+  verdict is INCONCLUSIVE (needs evidence), never PASS on the markers alone. A call that now raises
+  when it starts, or a plain value that became a coroutine, still fails.
 - **Warnings from C methods.** A warning raised inside a compiled method (`datetime.utcnow` on
   3.12) is not attached to that call.
 - **Implicit C-slot calls on 3.9–3.11 compiled types.** `row["name"]` on SQLAlchemy 1.3's

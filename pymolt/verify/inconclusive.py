@@ -29,6 +29,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pymolt.verify.facts import (
+    AWAITED_UNRECORDED,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
@@ -93,6 +94,10 @@ SETTLE_UNCOMPARABLE = {
                              "record these compiled calls"),
     "distribution-lost": ("capturing again does not settle it: the capture kept only part of "
                           "these calls' outcomes (too many distinct ones for one input)"),
+    "awaited-unrecorded": ("capturing again with this pymolt does not settle it: a coroutine "
+                           "call is recorded when it starts, not what its await returned or "
+                           "raised; a test that checks the awaited value, or a person's review "
+                           "of these calls, does"),
 }
 
 
@@ -194,6 +199,8 @@ def uncomparable_mechanism(e: Any) -> str:
         return "call-shape"
     if has(CONTENT_UNSEEN):
         return "content-unseen"
+    if AWAITED_UNRECORDED in notes:
+        return "awaited-unrecorded"
     if _value(_get(e, "category")) == "rewritten":
         return "unpaired"
     return "distribution-lost"
