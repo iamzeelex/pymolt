@@ -782,18 +782,18 @@ def detection_of(symbol: str, entries: list[dict], root: Path) -> str | None:
 def verdict_ok(scenario: str, verdict: str | None, expected: str,
                fact_diff: dict) -> tuple[bool, str]:
     """Whether a scenario's verdict is the expected one. The equivalent scenario is expected to
-    be "not fail" (round 3): PASS, or INCONCLUSIVE with no changed entry and no failing edited
-    site, i.e. only review items or unverified edited sites. Any other scenario must match its
-    expected verdict exactly."""
+    be "not fail" (round 3): PASS, or INCONCLUSIVE with no failing entry and no failing edited
+    site, i.e. only review items or unverified edited sites (a review on an unedited line is a
+    CHANGED entry that does not fail). Any other scenario must match its expected verdict
+    exactly."""
     v = (verdict or "").lower()
     if scenario == "equiv" and expected.lower() == "pass":
         if v == "pass":
             return True, "not fail"
-        counts = fact_diff.get("counts") or {}
+        failing = any(e.get("fails") for e in fact_diff.get("entries") or ())
         failed = (fact_diff.get("edited_sites") or {}).get("failed") or 0
         fact_ok = (fact_diff.get("verdict") or "").lower() != "fail"
-        return v == "inconclusive" and fact_ok and not counts.get("changed") and not failed, \
-            "not fail"
+        return v == "inconclusive" and fact_ok and not failing and not failed, "not fail"
     return v == expected.lower(), expected
 
 
@@ -812,9 +812,16 @@ def metric_d(toy: dict, scens: dict[str, dict]) -> dict:
             if e.get("level") in lv:
                 lv[e["level"]] += 1
         exp_changed = spec.get("expected_changed") or []
-        by = {x: detection_of(x, entries, s["root"]) for x in exp_changed}
+        # The scorecard gate: an expected change counts only when verify FAILS on its symbol
+        # (a failing entry), never for a review item, noise or an entry explained away; a
+        # change scenario that fails on other symbols only is not a detection.
+        failing = [e for e in entries if e.get("fails")]
+        by = {x: detection_of(x, failing, s["root"]) for x in exp_changed}
         found = [x for x in exp_changed if by[x]]
         ok, expected = verdict_ok(name, verdict, spec["expected_verdict"], fd)
+        if ok and name == "change" and exp_changed and len(found) < len(exp_changed):
+            missing = ", ".join(x for x in exp_changed if x not in found)
+            ok, expected = False, f"{expected} on {missing}"
         out["scenarios"][name] = {
             "expected_changed_by": {x: v for x, v in by.items() if v},
             "verdict": verdict, "expected": expected,
@@ -822,7 +829,14 @@ def metric_d(toy: dict, scens: dict[str, dict]) -> dict:
             "ok": ok,
             "changed": changed, "expected_changed_found": found,
             "expected_changed_missing": [x for x in exp_changed if x not in found],
-            "counts": {k: v for k, v in (fd.get("counts") or {}).items() if v}}
+            "counts": {k: v for k, v in (fd.get("counts") or {}).items() if v},
+            # what each comparison relaxation absorbed (``FactDiff.absorbed``), and whether
+            # any absorbed entry is an expected change (it must never be)
+            "absorbed": dict(fd.get("absorbed") or {}),
+            "absorbed_expected": sorted({x for x in exp_changed for e in entries
+                                         if e.get("absorbed") and not e.get("fails")
+                                         and detection_of(x, [e], s["root"])}),
+            "numeric_drift": fd.get("numeric_drift")}
     tot = lv["exact"] + lv["type"]
     out["levels"] = lv
     out["exact_share"] = lv["exact"] / tot if tot else None
@@ -1165,6 +1179,10 @@ def write_scorecard(out: Path, rows: list[dict], meta: dict) -> None:
             lines.append(f"- D {n}: {d['verdict']} (expected {d['expected']}), "
                          f"counts {d['counts']}, missing changed {d['expected_changed_missing']}, "
                          f"detected by {d.get('expected_changed_by')}")
+            if d.get("absorbed"):
+                lines.append(f"- D {n} absorbed {d['absorbed']}"
+                             + (f"; ABSORBED AN EXPECTED CHANGE: {d['absorbed_expected']}"
+                                if d.get("absorbed_expected") else ""))
         lines.append(f"- D levels {r['D']['levels']}, opaque share {pct(r['D']['opaque_share'])}")
         for o in r["E"].get("post_migration", []):
             lines.append(f"- E post-migration (new side) {o['symbol']} {o['category']}"
