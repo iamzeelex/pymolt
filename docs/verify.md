@@ -200,11 +200,14 @@ with it.
 A type that changed is judged by a ladder:
 - **Values and raises**: strict. A class that moved within its package (same top-level package,
   same class name: `numpy.ma.core.MaskedArray` is `numpy.ma.MaskedArray`) is the only allowance.
+  A type-only rendering of a data package's object (numpy, pandas, polars, pyarrow, torch, jax,
+  datetime, pathlib, decimal, ...) is a value too.
 - **Dependency objects**: a relocation is equal; otherwise the class relation is unknown (pymolt
-  records no MRO yet), and the change is drift (`type drift`) when your code never introspects
-  either class: no `isinstance`, `issubclass`, `match`, `type(x) is C` or singledispatch names
-  it or any class of its top-level package (an import alias resolved: with no MRO, a base class
-  may be the one checked), no `except` names it, and nothing reads a type's name
+  records no MRO yet), and a change to another class of the same top-level package is drift
+  (`type drift`) when your code never introspects either class: no `isinstance`, `issubclass`,
+  `match`, `type(x) is C` or singledispatch names it or any class of its top-level package (an
+  import alias resolved: with no MRO, a base class may be the one checked), no `except` names
+  it, and nothing reads a type's name
   (`type(x).__name__`). Your code then
   sees the object through the calls it makes on it and the attributes it reads, both compared.
   Introspected, or when your code reads or probes (`hasattr`) off the call's result a name

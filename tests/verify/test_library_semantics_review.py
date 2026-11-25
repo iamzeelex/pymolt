@@ -311,3 +311,27 @@ def test_a_single_result_at_a_differing_record_is_counted_drift(tmp_path):
     d = run(tmp_path, [ev("dep.Metric.value", {"self": el(1)}, result="8")],
             [ev("dep.Metric.value", {"self": el(2)}, result="8")], src)
     assert d.verdict is PASS and d.absorbed.get("record-input") == 1
+
+
+# ── 10. value packages' opaque types are values; class drift within one package ───────────
+
+def test_an_opaque_array_becoming_a_series_is_a_value_type_change(tmp_path):
+    src = "import dep\ndef main():\n    r = dep.fit()\n    return r\n"
+    old = [ev("dep.fit", {}, result={"__list__": [{"__opaque__": "numpy.ndarray"}]})]
+    new = [ev("dep.fit", {}, result={"__list__": [{"__opaque__": "pandas.core.series.Series"}]})]
+    assert run(tmp_path, old, new, src).verdict is FAIL
+    dates = [ev("dep.fit", {}, result={"__opaque__": "datetime.datetime"})]
+    paths = [ev("dep.fit", {}, result={"__opaque__": "pathlib.PosixPath"})]
+    assert run(tmp_path, dates, paths, src).verdict is FAIL
+
+
+def test_class_drift_needs_the_same_top_level_package(tmp_path):
+    src = "import dep\ndef main():\n    return dep.redirect('/x')\n"
+
+    def r(cls):
+        return ev("dep.redirect", {"to": "/x"}, result={"__structure__": cls, "status_code": 302})
+
+    assert run(tmp_path, [r("werkzeug.wrappers.Response")], [r("flask.wrappers.Response")],
+               src).verdict is FAIL
+    assert run(tmp_path, [r("werkzeug.wrappers.Response")],
+               [r("werkzeug.sansio.response.Response2")], src).verdict is PASS
