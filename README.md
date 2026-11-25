@@ -92,6 +92,26 @@ The rules are in [docs/verify.md](docs/verify.md).
 - **PyMolt:** 3.12.
 - **The project you migrate:** 3.6 and later. On 3.12+ the tracer uses `sys.monitoring`. On 3.6–3.11 it uses `sys.setprofile`. Python 2.7 is not supported.
 
+## Tested libraries
+
+The benchmark in `bench/generalization` has one small project for each of these, upgraded across
+one major version: numpy, pandas, Polars, Matplotlib, seaborn, Plotly, scikit-learn, FastAPI,
+Django, Django REST framework, Flask, Requests, httpx, aiohttp, Streamlit, Starlette, asyncio,
+SQLAlchemy, pydantic, Jinja2, NetworkX, Click, PyYAML, urllib3 and the standard library. Each
+project is migrated twice: once keeping its behaviour, once with one real change. Over the 25:
+
+| | |
+|---|---|
+| API changes `plan` finds | 146 of 167 |
+| Replacements it names correctly | 75 of 147 (1 wrong) |
+| Call sites `apply` rewrote | 39, none wrong |
+| Behaviour-keeping migrations | 12 PASS, 12 INCONCLUSIVE, 1 FAIL |
+| Real changes `verify` fails on, at the changed call | 22 of 25 |
+
+The projects are small and written for the benchmark, so this shows how pymolt behaves on each
+library, not that it covers the library's whole API. Per library:
+[docs/limits.md](docs/limits.md#libraries).
+
 ## Limits
 
 Where pymolt cannot help yet:

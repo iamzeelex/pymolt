@@ -211,6 +211,66 @@ falls behind makes the program wait rather than drop events.
 
 ## Where it was tried
 
+### Libraries
+
+`bench/generalization` has one small project per library, upgraded across one major version
+(the Python moves to 3.12 too), with hand-listed ground truth: the API changes the project uses,
+from the library's changelog, and the replacement for each. Every project is migrated twice:
+`equiv` keeps its behaviour, `change` adds one real change that `verify` must fail on, at that
+call. Measured on the 0.2 code (2026-11-25); `python bench/generalization/run.py run` repeats it.
+
+| Library | Versions | API changes found | Replacements named | Sites rewritten | Equivalent migration | Real change caught |
+|---|---|---|---|---|---|---|
+| numpy | 1.26 → 2.5 | 9 / 10 | 6 / 10 | 6 | PASS | yes |
+| pandas | 1.5 → 2.2 | 2 / 2 | 1 / 1 | 1 | PASS | yes |
+| Polars | 0.19 → 1.44 | 8 / 8 | 8 / 8 | 5 | PASS | yes |
+| Matplotlib | 3.6 → 3.10 | 4 / 7 | 3 / 7 | 0 | PASS | yes |
+| seaborn | 0.11 → 0.13 | 5 / 6 | 3 / 5 | 1 | PASS | yes |
+| Plotly | 5.24 → 6.9 | 4 / 4 | 2 / 4 | 0 | INCONCLUSIVE (2) | yes |
+| scikit-learn | 1.1 → 1.6 | 7 / 7 | 1 / 5 | 0 | PASS | yes |
+| FastAPI | 0.95 → 0.165, pydantic 1 → 2 | 7 / 10 | 6 / 10, 1 wrong | 1 | INCONCLUSIVE (2) | yes |
+| Django | 2.2 → 4.2 | 7 / 7 | 5 / 7 | 9 | PASS | yes |
+| Django REST framework | 3.12 → 3.18, Django 3.2 → 5.2 | 4 / 7 | 4 / 7 | 8 | INCONCLUSIVE (2) | yes |
+| Flask | 2.0 → 3.1 | 9 / 11 | 5 / 10 | 2 | INCONCLUSIVE (2, 3) | yes |
+| Requests | 2.28 → 2.34 | 3 / 5 | 2 / 3 | 0 | PASS | yes |
+| httpx | 0.23 → 0.28 | 2 / 3 | 0 / 3 | 0 | INCONCLUSIVE (1) | yes |
+| aiohttp | 3.8 → 3.14 | 6 / 6 | 2 / 6 | 0 | INCONCLUSIVE (1) | no (1) |
+| Streamlit | 1.28 → 1.67 | 6 / 6 | 3 / 6 | 0 | FAIL (4) | yes |
+| Starlette | 0.27 → 1.10 | 7 / 7 | 1 / 7 | 0 | INCONCLUSIVE (1) | yes |
+| asyncio | Python 3.8 → 3.12 | 7 / 8 | 2 / 3 | 2 | INCONCLUSIVE (1) | on another call |
+| SQLAlchemy | 1.3 → 2.0 | 8 / 9 | 1 / 9 | 0 | INCONCLUSIVE (5) | yes |
+| pydantic | 1.10 → 2.14 | 9 / 9 | 8 / 9 | 0 | PASS | yes |
+| Jinja2 | 2.11 → 3.1 | 4 / 5 | 2 / 4 | 0 | INCONCLUSIVE (2) | yes |
+| NetworkX | 2.3 → 3.7 | 7 / 7 | 2 / 7 | 0 | PASS | yes |
+| Click | 7.1 → 8.5 | 2 / 3 | 1 / 3 | 0 | PASS | yes |
+| PyYAML | 5.4 → 6.0 | 4 / 4 | — | 0 | PASS | yes |
+| urllib3 | 1.26 → 2.2 | 5 / 5 | 5 / 5 | 0 | INCONCLUSIVE (2) | on another call |
+| standard library | Python 3.8 → 3.12 | 10 / 11 | 2 / 8 | 4 | INCONCLUSIVE (1, 2) | yes |
+| **Total** | | **146 / 167** | **75 / 147** | **39, none wrong** | **12 PASS** | **22 / 25** |
+
+- **Replacements named** counts a replacement the plan names in a step: from the library's own
+  code, data or deprecation text, or a curated fact. A replacement that is an expression rather
+  than a name (`str(G)` for `networkx.info`, SQLAlchemy 2.0's `with engine.begin() as conn:`)
+  is never named today; a parameter renamed or moved (`sparse` → `sparse_output`), and a
+  replacement whose text exists only in releases between the two versions, are named only
+  sometimes. That is most of what is missing.
+- **Sites rewritten** are the codemods `apply` wrote. Each one was compared after the migration:
+  34 calls compared equal, the rest had nothing to compare against, none changed.
+- Why an equivalent migration does not PASS (the numbers in the table):
+  1. a coroutine's awaited result is not recorded yet (aiohttp, httpx, Starlette, asyncio): the
+     verdict says the evidence is missing;
+  2. a hand edit gave a call another value (`conlist`, `safe_join`, `Markup`, `get_host`): a
+     person reviews it, or accepts it with `verify --accept`;
+  3. a class changed across packages (Flask's `redirect` now returns `flask.wrappers.Response`
+     instead of werkzeug's): verify cannot judge it without the class hierarchy;
+  4. Streamlit's FAIL is real: `AppTest.query_params` values changed from a list to a string,
+     which code that indexes them sees;
+  5. an attribute the code reads was not recorded on one side: SQLAlchemy 1.3's `Table.c` is a
+     property, which a capture does not render, so the two `Table` objects cannot be compared
+     there.
+
+### Real projects
+
 **Six legacy projects**, Python 3.6 → 3.12: hyper, vibora, theano, lasagne, alphalens, zipline.
 - All six capture a baseline.
 - Plans with rewrites were applied to five of them. lasagne's plan has none.

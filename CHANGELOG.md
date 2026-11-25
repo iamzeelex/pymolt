@@ -242,6 +242,9 @@ All notable changes to pymolt. The format follows
   `docs/glossary.md`, and `docs/limits.md` (what pymolt cannot do yet, measured overhead, the
   projects it was tried on).
 - `docs/RELEASING.md` (versions, branches, release steps) and this changelog.
+- The README lists the libraries pymolt is tested on, with the benchmark's totals, and
+  `docs/limits.md` gives each library's numbers and why a migration that keeps its behaviour is
+  not PASS.
 
 #### Packaging and CI
 
