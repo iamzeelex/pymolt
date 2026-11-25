@@ -461,3 +461,38 @@ def test_clock_readings_must_keep_their_counts():
         assert compare_outcomes(old, same).comparison is Comparison.EQUAL
     finally:
         _COUNTED.reset(token)
+
+
+# ── 16. --strict and counting for added None defaults; wrappers that relate ───────────────
+
+LINSPACE_SRC = "import numpy as np\ndef f():\n    return np.linspace(-1, 1, 20)\n"
+LIN_OLD = [ev("numpy.linspace", {"start": -1, "stop": 1, "num": 20}, result=1)]
+LIN_NEW = [ev("numpy.linspace", {"start": -1, "stop": 1, "num": 20, "device": None}, result=1)]
+
+
+def test_an_added_none_default_is_counted_and_strict_reviews_it(tmp_path):
+    d = run(tmp_path, LIN_OLD, LIN_NEW, LINSPACE_SRC)
+    assert d.absorbed.get("added-default-none") == 1 and d.verdict is PASS
+    strict = run(tmp_path, LIN_OLD, LIN_NEW, LINSPACE_SRC, strict=True)
+    assert one(strict, "numpy.linspace").review and strict.verdict is not PASS
+
+
+DECO2_SRC = ("from dep import deco\n@deco\ndef task_handler():\n    return 1\n"
+             "def unauthorized_backdoor():\n    return 2\n")
+
+
+def deco_call(result):
+    return ev("dep.deco", {"func": {"__callable__": "app.task_handler"}},
+              result={"__callable__": result}, line=2)
+
+
+def test_a_decorator_returning_another_project_function_fails(tmp_path):
+    d = run(tmp_path, [deco_call("app.WrappedHandler")], [deco_call("app.unauthorized_backdoor")],
+            DECO2_SRC)
+    assert d.verdict is FAIL
+
+
+def test_a_library_made_wrapper_or_closure_still_drifts(tmp_path):
+    d = run(tmp_path, [deco_call("app.WrappedHandler")],
+            [deco_call("app.View.as_view.<locals>.view")], DECO2_SRC)
+    assert d.verdict is PASS and one(d, "dep.deco").absorbed == ["type-drift:wrapper"]

@@ -64,6 +64,9 @@ class SourceUses:
     # ``hasattr(r, "x")`` in the same scope
     result_reads: dict[str, list[tuple[int, int, str, frozenset[str]]]] = field(
         default_factory=dict)
+    # names the project defines (functions and classes, any depth): a callable of one of these
+    # names is the project's own, never a wrapper a library made
+    defined: set[str] = field(default_factory=set)
     files: int = 0          # files parsed
     unparsed: int = 0       # files that did not parse (their uses are unknown)
     unparsed_files: list[str] = field(default_factory=list)
@@ -315,10 +318,16 @@ class _Visitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._register_annotation(node)
+        self.uses.defined.add(node.name)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.uses.defined.add(node.name)
         self.generic_visit(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._register_annotation(node)
+        self.uses.defined.add(node.name)
         self.generic_visit(node)
 
 

@@ -216,7 +216,8 @@ A type that changed is judged by a ladder:
   Introspected, or when your code reads or probes (`hasattr`) off the call's result a name
   neither rendering holds (a class attribute, a property): it fails.
 - **A decorator's wrapper** of the same function of yours, named differently by the new version
-  (`WrappedAPIView` vs `View.as_view.<locals>.view`), is drift unless your code reads a
+  (`WrappedAPIView` vs `View.as_view.<locals>.view`: a closure, or a name your code defines
+  nowhere; never another function of yours), is drift unless your code reads a
   callable's `__name__` or `__qualname__`.
 - **A type an edited line produced** (`go.Heatmapgl(...)` edited to `go.Heatmap(...)`) that
   reappears at an unedited call along the edit's data chain (`fig.data`, on the figure the
@@ -329,7 +330,7 @@ when an input carried such a value into an output.
   - a string literal of an edited line (`def chart(style="seaborn-v0_8-whitegrid")` edited from
     `"seaborn-whitegrid"`): the call is judged as that hand edit;
   - a parameter bound on one side only, to None (numpy 2's `linspace(device=None)`): an added
-    default, drift;
+    default, drift (`added-default-none`, counted; a review under `--strict`);
   - floats within rounding: the same input (`matched-modulo-numeric`).
   - This includes an input seen on one side only, at a call both sides make with the same outcome
     kinds and types and the same signature, such as a poll that saw one more intermediate value.
