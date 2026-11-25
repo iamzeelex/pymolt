@@ -41,3 +41,41 @@ def test_an_unpacked_library_namedtuple_compares_its_fields(tmp_path):
     renamed = run(tmp_path, [ttest(0.04)], [ttest(0.04, "scipy.stats._result.TtestResult")],
                   TTEST_SRC)
     assert renamed.verdict is PASS
+
+
+# ── 3. introspection through a base class or an import alias ──────────────────────────────
+
+def query(cls, line=3):
+    return ev("dep.query", {}, result={"__object__": cls, "attrs": {"status": 200}}, line=line)
+
+
+def test_isinstance_against_a_base_class_of_the_package_keeps_the_ladder_strict(tmp_path):
+    src = ("import dep\ndef main():\n    r = dep.query()\n"
+           "    if isinstance(r, dep.Response):\n        return 1\n")
+    d = run(tmp_path, [query("dep.models.JSONResponse")], [query("dep.models.StreamingPage")], src)
+    assert d.verdict is FAIL
+
+
+def test_isinstance_through_an_import_alias_keeps_the_ladder_strict(tmp_path):
+    src = ("from dep.models import JSONResponse as JR\nimport dep\ndef main():\n"
+           "    r = dep.query()\n    return isinstance(r, JR)\n")
+    d = run(tmp_path, [query("dep.models.JSONResponse", 4)],
+            [query("dep.models.StreamingPage", 4)], src)
+    assert d.verdict is FAIL
+
+
+def test_an_except_clause_of_the_package_does_not_check_a_returned_object(tmp_path):
+    src = ("import dep\ndef main():\n    try:\n        r = dep.query()\n"
+           "    except dep.ClientError:\n        return None\n")
+    d = run(tmp_path, [query("dep.client._RequestCM", 4)],
+            [query("dep.client._BaseRequestCM", 4)], src)
+    assert d.verdict is PASS
+
+
+def test_a_check_of_another_package_leaves_the_drift(tmp_path):
+    src = ("import dep\nimport other\ndef main():\n    r = dep.query()\n"
+           "    return isinstance(r, other.Thing)\n")
+    d = run(tmp_path, [query("dep.models.JSONResponse", 4)],
+            [query("dep.models.StreamingPage", 4)], src)
+    assert d.verdict is PASS and one(d, "dep.query").absorbed == ["type-drift:unintrospected"]
+

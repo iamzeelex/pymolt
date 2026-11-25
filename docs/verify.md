@@ -196,8 +196,10 @@ A type that changed is judged by a ladder:
   same class name: `numpy.ma.core.MaskedArray` is `numpy.ma.MaskedArray`) is the only allowance.
 - **Dependency objects**: a relocation is equal; otherwise the class relation is unknown (pymolt
   records no MRO yet), and the change is drift (`type drift`) when your code never introspects
-  either class: no `isinstance`, `issubclass`, `except`, `match`, `type(x) is C` or
-  singledispatch names it, and nothing reads a type's name (`type(x).__name__`). Your code then
+  either class: no `isinstance`, `issubclass`, `match`, `type(x) is C` or singledispatch names
+  it or any class of its top-level package (an import alias resolved: with no MRO, a base class
+  may be the one checked), no `except` names it, and nothing reads a type's name
+  (`type(x).__name__`). Your code then
   sees the object only through the calls it makes on it and the attributes it reads, both
   compared. Introspected: it fails.
 - **A decorator's wrapper** of the same function of yours, named differently by the new version
