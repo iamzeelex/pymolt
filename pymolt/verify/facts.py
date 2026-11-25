@@ -3476,6 +3476,8 @@ def _compare_outcomes(
 _COUNTED: ContextVar[bool] = ContextVar("pymolt_counted", default=False)
 _COUNTED_DIFF: ContextVar[bool] = ContextVar("pymolt_counted_diff", default=False)
 COUNT_CHANGED = "call-count-changed"
+EDITED_COUNT = "edited-count-changed"
+EDITED_COUNT_REVIEW = "call count changed at an edited statement"
 KINDS_MOVED = "outcome-kinds-moved"
 _MATCH_FULL_MAX = 4096   # outcome pairs a full matching is tried over (else: strict)
 
@@ -3519,6 +3521,11 @@ def _compare_counted(old: list[Outcome], new: list[Outcome], notes: list[str],
         nc[_canon([o.kind, o.value])] += o.count
     total_o, total_n = sum(oc.values()), sum(nc.values())
     if total_o != total_n:
+        if _EDITED.get() and _cover(old, new, _outcomes_match):
+            # an edited statement: the code changed, so its call count may; every value is
+            # one the other side returns too, so a person reviews it (``_pair_entry``)
+            return _with_types(Comparison.EQUAL, level,
+                               [*notes, EDITED_COUNT, f"calls: {total_o} -> {total_n}"], old, new)
         return _with_types(Comparison.CHANGED, ComparisonLevel.EXACT,
                            [*notes, COUNT_CHANGED, f"calls: {total_o} -> {total_n}"], old, new)
     if oc == nc:
@@ -8286,6 +8293,10 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         review=_numeric_review(cmp),
         **_raw_samples(of, nf),
     )
+    if cmp.comparison is Comparison.EQUAL and EDITED_COUNT in cmp.notes:
+        calls = next((x for x in cmp.notes if x.startswith("calls: ")), "")
+        entry.review = (f"{EDITED_COUNT_REVIEW} ({calls[7:]}), its values equal: the edit "
+                        "changed how often the call runs; review")
     if cmp.comparison is Comparison.EQUAL and CROSS_PACKAGE in cmp.absorbed:
         moved = next((x for x in cmp.notes if x.startswith("type drift (")), "")
         entry.category, entry.comparison, entry.drift = (FactCategory.CHANGED,

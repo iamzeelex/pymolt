@@ -71,3 +71,37 @@ def test_a_paired_call_that_fails_to_bind_fails_even_when_a_raise_is_attested(tm
              raised="TypeError", binding=True, func="names")
     d = run(tmp_path, [old_call()], [bad], OLD, new_src, edits=[attested])
     assert d.verdict is FAIL
+
+
+# ── a call count that changed at an edited statement ──────────────────────────────────────
+
+MK_OLD = "import dep\ndef f(text):\n    return dep.Markup(dep.escape(text))\n"
+MK_NEW = "import dep\ndef f(text):\n    return dep.Markup(dep.escape_new(text))\n"
+
+
+def mk(n, value="X&lt;Y"):
+    return [ev("dep.Markup.__new__", {"base": "X&lt;Y"}, result=value, func="f")
+            for _ in range(n)]
+
+
+def mk_edit(claim):
+    return {"file": "app.py", "located": {"old": [3], "new": [3]}, "claim": claim,
+            "basis": "manual", "step_id": "sig-5"}
+
+
+def test_a_count_change_at_an_edited_statement_with_equal_values_is_a_review(tmp_path):
+    for claim in ("preserve", "intended", None):
+        d = run(tmp_path, mk(2), mk(1), MK_OLD, MK_NEW, edits=[mk_edit(claim)] if claim else [])
+        e = one(d, "dep.Markup.__new__")
+        assert not e.fails and e.review.startswith("call count changed at an edited statement")
+        assert d.verdict is INCONCLUSIVE, claim
+
+
+def test_mutation_a_count_change_with_another_value_at_an_edited_statement_fails(tmp_path):
+    d = run(tmp_path, mk(2), mk(1, "other"), MK_OLD, MK_NEW, edits=[mk_edit("preserve")])
+    assert d.verdict is FAIL
+
+
+def test_an_unedited_statement_keeps_the_strict_count_rule(tmp_path):
+    d = run(tmp_path, mk(2), mk(1), MK_OLD)
+    assert one(d, "dep.Markup.__new__").fails
