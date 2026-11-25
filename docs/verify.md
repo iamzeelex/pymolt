@@ -200,8 +200,9 @@ A type that changed is judged by a ladder:
   it or any class of its top-level package (an import alias resolved: with no MRO, a base class
   may be the one checked), no `except` names it, and nothing reads a type's name
   (`type(x).__name__`). Your code then
-  sees the object only through the calls it makes on it and the attributes it reads, both
-  compared. Introspected: it fails.
+  sees the object through the calls it makes on it and the attributes it reads, both compared.
+  Introspected, or when your code reads or probes (`hasattr`) off the call's result a name
+  neither rendering holds (a class attribute, a property): it fails.
 - **A decorator's wrapper** of the same function of yours, named differently by the new version
   (`WrappedAPIView` vs `View.as_view.<locals>.view`), is drift unless your code reads a
   callable's `__name__` or `__qualname__`.

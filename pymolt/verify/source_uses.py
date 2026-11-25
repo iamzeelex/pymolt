@@ -59,6 +59,11 @@ class SourceUses:
     dynamic: list[tuple[str, int, str]] = field(default_factory=list)
     # file -> [(first line, last line, callee leaf, consumer)] of every call
     calls: dict[str, list[tuple[int, int, str, str]]] = field(default_factory=dict)
+    # file -> [(first line, last line, callee leaf, names)]: the attribute names the project
+    # reads (or probes) off a call's result: ``f().x``, or ``r = f()`` then ``r.x`` /
+    # ``hasattr(r, "x")`` in the same scope
+    result_reads: dict[str, list[tuple[int, int, str, frozenset[str]]]] = field(
+        default_factory=dict)
     files: int = 0          # files parsed
     unparsed: int = 0       # files that did not parse (their uses are unknown)
 
@@ -316,6 +321,62 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def _scope_of(node: ast.AST, parents: Mapping[int, ast.AST]) -> ast.AST | None:
+    p = parents.get(id(node))
+    while p is not None and not isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef
+                                           | ast.Lambda | ast.Module):
+        p = parents.get(id(p))
+    return p
+
+
+def _result_reads(call: ast.Call, parents: Mapping[int, ast.AST]) -> frozenset[str]:
+    """The attribute names read or probed off this call's result (``f().x``; ``r = f()``
+    then ``r.x`` or ``hasattr(r, "x")`` anywhere in the same function or module)."""
+    out: set[str] = set()
+    parent = parents.get(id(call))
+    if isinstance(parent, ast.Attribute) and parent.value is call:
+        grand = parents.get(id(parent))
+        if not (isinstance(grand, ast.Call) and grand.func is parent):
+            out.add(parent.attr)
+    target = None
+    if isinstance(parent, ast.Assign) and parent.value is call and len(parent.targets) == 1 \
+            and isinstance(parent.targets[0], ast.Name):
+        target = parent.targets[0].id
+    elif isinstance(parent, ast.AnnAssign) and parent.value is call \
+            and isinstance(parent.target, ast.Name):
+        target = parent.target.id
+    elif isinstance(parent, ast.NamedExpr) and parent.value is call:
+        target = parent.target.id
+    if target is None:
+        return frozenset(out)
+    scope = _scope_of(call, parents)
+    for n in ast.walk(scope) if scope is not None else ():
+        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == target and isinstance(n.ctx, ast.Load)):
+            grand = parents.get(id(n))
+            if not (isinstance(grand, ast.Call) and grand.func is n):
+                out.add(n.attr)
+        elif (isinstance(n, ast.Call) and _leaf(n.func) in ("hasattr", "getattr")
+              and len(n.args) >= 2 and isinstance(n.args[0], ast.Name)
+              and n.args[0].id == target):
+            lit = _literal_name(n.args[1])
+            if lit:
+                out.add(lit)
+    return frozenset(out)
+
+
+def result_reads_at(uses: SourceUses | None, file: str, line: int | None,
+                    leaf: str) -> frozenset[str]:
+    """The names read off the result of the project's call to ``leaf`` at ``file:line``."""
+    if uses is None or line is None:
+        return frozenset()
+    out: set[str] = set()
+    for first, last, name, names in uses.result_reads.get(file, ()):
+        if name == leaf and first <= line <= last:
+            out |= names
+    return frozenset(out)
+
+
 def consumer_at(uses: SourceUses | None, file: str, line: int | None, leaf: str) -> str | None:
     """How the project consumes the result of its call to ``leaf`` at ``file:line``: the
     consumer of the calls to that name spanning the line, when they agree; None when no such
@@ -357,12 +418,16 @@ def source_uses(sources: Mapping[str, str] | None) -> SourceUses | None:
                    if isinstance(n, ast.Import) for a in n.names}
         shadowed = _bound_names(tree) & set(_CONVERSIONS)
         calls = uses.calls.setdefault(file, [])
+        reads = uses.result_reads.setdefault(file, [])
         for n in ast.walk(tree):
             if isinstance(n, ast.Call):
                 leaf = _leaf(n.func)
                 if leaf:
                     calls.append((n.lineno, n.end_lineno or n.lineno, leaf,
                                   _consumer(n, parents, shadowed)))
+                    names = _result_reads(n, parents)
+                    if names:
+                        reads.append((n.lineno, n.end_lineno or n.lineno, leaf, names))
         v = _Visitor(uses, file, text.splitlines(), parents, modules, import_bindings(tree))
         # ``called`` must be known before an Attribute is visited: a Call is visited before
         # its func (generic_visit walks fields in order), so one pass suffices.
