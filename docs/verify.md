@@ -287,6 +287,7 @@ can only tighten it; loosening it needs a person's attestation.
 | fails to bind its arguments | FAIL | FAIL | FAIL | FAIL |
 | no partner, new side raises (the old statement raised nothing) | FAIL | FAIL | FAIL | unverified if it expects that raise; else FAIL |
 | no partner | unverified | unverified | unverified | unverified |
+| the call runs more or fewer times, every value equal | review | review | review | review |
 
 Values are not visible when the call was compared by type only, or when a value on either side
 was recorded as opaque, truncated or cyclic. Then an `intended` claim expecting `representation`

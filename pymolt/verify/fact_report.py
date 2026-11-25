@@ -73,6 +73,8 @@ ACTIONS = {
     "not reached": "check that the code around the call still runs under the tests",
     "no longer a dependency call here": "check what the name refers to on that line now",
     "carried from the edit": "review the edit the type comes from (each finding prints its id)",
+    "call count changed at an edited statement": "review the edit: the call now runs a "
+                                                 "different number of times",
     "class changed across packages": "check that the code using the result works with the new "
                                      "class, then accept it (`pymolt verify . --accept ID`)",
     "record-input": "review the calls on those dependency records (which record got which "
