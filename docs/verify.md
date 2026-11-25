@@ -141,7 +141,7 @@ then compares the two sides.
 | CHANGED | same call, different outcome | yes |
 | DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes, unless the name no longer refers to a dependency there or the function never ran (then inconclusive), or the other side makes the same call there with other inputs (an [input change](#run-noise)) |
 | REWRITTEN | the call site's line was edited; the call is compared with the one that replaced it | see [Edited lines](#edited-lines) |
-| DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view) | no, reported |
+| DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view); or floats equal within rounding ([`--float-ulps`](#dependency-objects-and-values)); or unread state of a dependency object (`handle-state`); or a result equal only as its statement uses it (`projected`); or another class of the same package that your code never introspects (`type drift`) | no, reported |
 | UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape; or one, taken in another checkout, records no project root; or the call is a coroutine, whose awaited result is not recorded | makes the verdict inconclusive |
 
 ### Dependency objects and values
