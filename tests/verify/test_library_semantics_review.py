@@ -274,3 +274,40 @@ def test_an_edit_s_type_is_not_carried_off_its_data_chain(tmp_path):
             {"app.py": app_new, "test_app.py": test})
     e = one(d, "dep.load")
     assert "type-drift:carried" not in e.absorbed     # the ladder judges it on its own
+
+
+# ── 9. record inputs keyed by their type do not absorb moved results ──────────────────────
+
+PRIO_SRC = "import dep\ndef main(tasks):\n    return [t.priority() for t in tasks]\n"
+
+
+def task(name):
+    return {"__dataclass__": "dep.sched.Task", "fields": [["name", name]]}
+
+
+def prio(pairs):
+    return [ev("dep.sched.Task.priority", {"self": task(n)}, result=r) for n, r in pairs]
+
+
+def test_results_swapped_between_the_same_record_receivers_fail(tmp_path):
+    d = run(tmp_path, prio([("a", 1), ("b", 2)]), prio([("a", 2), ("b", 1)]), PRIO_SRC)
+    assert d.verdict is FAIL
+    ok = run(tmp_path, prio([("a", 1), ("b", 2)]), prio([("b", 2), ("a", 1)]), PRIO_SRC)
+    assert ok.verdict is PASS
+
+
+def test_results_at_records_that_differ_between_captures_are_a_review(tmp_path):
+    d = run(tmp_path, prio([("a", 1), ("b", 2)]), prio([("a2", 2), ("b2", 1)]), PRIO_SRC)
+    e = one(d, "dep.sched.Task.priority")
+    assert d.verdict is not PASS and e.review and "record-input" in e.absorbed
+
+
+def test_a_single_result_at_a_differing_record_is_counted_drift(tmp_path):
+    src = "import dep\ndef main(el):\n    v = el.value\n"
+
+    def el(tree):
+        return {"__dataclass__": "dep.Metric", "fields": [["tree", tree]]}
+
+    d = run(tmp_path, [ev("dep.Metric.value", {"self": el(1)}, result="8")],
+            [ev("dep.Metric.value", {"self": el(2)}, result="8")], src)
+    assert d.verdict is PASS and d.absorbed.get("record-input") == 1

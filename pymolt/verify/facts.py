@@ -280,6 +280,9 @@ class Fact(BaseModel):
     # outcomes ("environment", "clock", "source"), and the fact as recorded.
     _masks: frozenset = PrivateAttr(default=frozenset())
     _raw: Any = PrivateAttr(default=None)
+    # Set by ``_record_inputs``: a digest of the input before its dependency records were
+    # reduced to their type (the calls on one record pair with each other within the fact).
+    _rdigest: str | None = PrivateAttr(default=None)
     # When its calls ran (epoch seconds: the earliest start, the latest end), from the events'
     # ``ts``/``dur``; None for a facts-snapshot capture, whose facts carry no call time.
     ts_min: float | None = None
@@ -2034,7 +2037,76 @@ def _record_inputs(f: Fact) -> Fact:
     (``_objects_to_opaque``), its state is output evidence, and as an input key it made every
     call a new fact (streamlit's element tree)."""
     new = _record_markers(f.input, top=True)
-    return f if new is f.input else f.model_copy(update={"input": new})
+    if new is f.input:
+        return f
+    g = f.model_copy(update={"input": new})
+    g.__pydantic_private__["_rdigest"] = _canon(f.input)
+    return g
+
+
+RECORD_INPUT = "record-input"
+
+
+def _view_key(f: Fact, modes: dict[str, str]) -> tuple:
+    sv = f.text if modes.get(f.file) == "text" else f.line
+    return (f.symbol, f.file, f.func, sv, _canon(f.input), f.binding)
+
+
+def _record_digests(facts: list[Fact], modes: dict[str, str]
+                    ) -> dict[tuple, dict[str, list[Outcome]]]:
+    """For each view keyed by a record's type: the outcomes of its calls per original input."""
+    out: dict[tuple, dict[str, list[Outcome]]] = defaultdict(dict)
+    for f in facts:
+        digest = f.__pydantic_private__.get("_rdigest") if f.__pydantic_private__ else None
+        if digest is not None:
+            out[_view_key(f, modes)].setdefault(digest, []).extend(f.outcomes)
+    return out
+
+
+def _judge_record_inputs(pending: list[tuple["_V", "_V", FactEntry]],
+                         calls: tuple[dict, dict], modes: dict[str, str]) -> None:
+    """Calls whose dependency-record inputs were keyed by the record's type, merged into one
+    fact: the merge must not hide results that moved between records. When both sides hold
+    the same records, each record's calls compare with the other side's for that record (a
+    result that moved is CHANGED); when the records differ between the captures, a fact with
+    several outcomes cannot be paired call by call and is a review item. Every merge that
+    erased a record difference is counted (``record-input``)."""
+    for o, n, e in pending:
+        a = calls[0].get(_view_key(o.fact, modes))
+        b = calls[1].get(_view_key(n.fact, modes))
+        if not a or not b or e.comparison is not Comparison.EQUAL:
+            continue
+        if a.keys() == b.keys():
+            moved = [d for d in a if compare_outcomes(
+                _merge_outcomes(a[d]), _merge_outcomes(b[d])).comparison is not Comparison.EQUAL]
+            if moved:
+                e.category, e.comparison = FactCategory.CHANGED, Comparison.CHANGED
+                e.level = ComparisonLevel.EXACT
+                e.notes.append(f"results moved between record inputs ({len(moved)} record(s))")
+            continue
+        e.absorbed = sorted({*e.absorbed, RECORD_INPUT})
+        e.notes.append(f"{RECORD_INPUT}: {len(a)} old / {len(b)} new record input(s) differ, "
+                       "keyed by their type")
+        if len(e.old or ()) > 1 or len(e.new or ()) > 1:
+            e.review = (f"{RECORD_INPUT}: calls on dependency records that differ between the "
+                        "captures returned several results; which record got which cannot be "
+                        "paired, so a result that moved between them is not ruled out: review")
+        elif e.category is FactCategory.EQUAL:
+            e.category, e.drift = FactCategory.DRIFT, True
+            e.explained = e.explained or (
+                f"{RECORD_INPUT}: the call's dependency-record input differs between the "
+                "captures and is keyed by its type")
+
+
+def _merge_outcomes(outcomes: list[Outcome]) -> list[Outcome]:
+    merged: dict[str, Outcome] = {}
+    for o in outcomes:
+        k = _canon([o.kind, o.value])
+        if k in merged:
+            merged[k] = merged[k].model_copy(update={"count": merged[k].count + o.count})
+        else:
+            merged[k] = o
+    return list(merged.values())
 
 
 def _record_markers(value: Any, *, top: bool = False) -> Any:
@@ -5350,6 +5422,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     modes = _site_modes(old_facts, new_facts, old.site_tallies, new.site_tallies)
     ov = _views(old_facts, modes)
     nv = _views(new_facts, modes)
+    record_calls = (_record_digests(old_facts, modes), _record_digests(new_facts, modes))
 
     defaulted_names: dict[str, set[str]] = defaultdict(set)
     for v in (*ov, *nv):
@@ -5534,6 +5607,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             (bool(old.dropped_events), bool(new.dropped_events)))
         entries.extend(groups)
 
+    _judge_record_inputs(pending, record_calls, modes)
     _mark_unobservable(old_left, new)
     _mark_vanished(old_left, new_facts, prov, ov)
     for v in old_left:

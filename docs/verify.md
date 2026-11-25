@@ -164,7 +164,10 @@ A returned value is compared by what your code can observe of it:
 - Places that read attributes by a computed name (`getattr(x, name)`, `vars(x)`, `x.__dict__`,
   `asdict(x)`, `dir(x)`) cannot be projected. When an object's unread state differed, the verdict
   lists them; they do not block PASS, like the [unobservable uses](#the-verdict).
-- A dependency record in a call's input, or as its receiver, is keyed by its type.
+- A dependency record in a call's input, or as its receiver, is keyed by its type
+  (`record-input`, counted). The calls on one record still pair with each other: a result that
+  moved to another record fails. When the records themselves differ between the captures, a call
+  with several results cannot be paired call by call and is a review item.
 
 What a statement does with a call's result decides what of it is compared (from the source
 snapshot, the same on both sides):

@@ -53,6 +53,7 @@ RULES = {
     "type-drift": "facts._handle_types_relate / _wrapper_naming / _carry_edit_types",
     "projected": "facts.compare_outcomes (the consuming statement, source_uses.consumer_at)",
     "numeric": "facts._floats_close (equal within --float-ulps at the value's precision)",
+    "record-input": "facts._judge_record_inputs (a dependency record input keyed by its type)",
 }
 
 # review reason (the review text's prefix) -> the one action that settles it
@@ -72,6 +73,8 @@ ACTIONS = {
     "not reached": "check that the code around the call still runs under the tests",
     "no longer a dependency call here": "check what the name refers to on that line now",
     "carried from the edit": "review the edit the type comes from (each finding prints its id)",
+    "record-input": "review the calls on those dependency records (which record got which "
+                    "result)",
 }
 _DEFAULT_ACTION = "review the entry"
 # The reasons a baseline replicate settles. Once one was measured and the entry still stands,
