@@ -583,6 +583,8 @@ All notable changes to pymolt. The format follows
 - A successor the old version's warning names is checked in the new version, so it is named when
   it exists there; a candidate the new version was not asked about is listed as "was not probed
   in the new version", where the plan said it "does not exist in the new version".
+- `plan --online` reads a module from an intermediate release's wheel with a cap on what it
+  inflates (4 MB) and on the sizes it accepts; a wheel past them is skipped with a note.
 
 #### Assess, scan and setup
 
