@@ -78,11 +78,11 @@ Every option is in [docs/commands.md](docs/commands.md).
 | Verdict | Meaning | Exit code |
 |---|---|---|
 | `FAIL` | A recorded call now has a different outcome (CHANGED), no longer happens (DISAPPEARED), or is new (APPEARED). | 1 |
-| `PASS` | Every recorded call has the same outcome, and the runs exercised every dependency symbol your code uses. | 0 |
+| `PASS` | Every recorded call has the same outcome, and the runs exercised every dependency symbol your code uses that a capture can record. Uses no capture can observe, such as a constant or an attribute read, are listed with the verdict. | 0 |
 | `INCONCLUSIVE` | pymolt cannot decide on its own. The captures, or some recorded values, cannot be compared (different command, dropped events, stale environment); the runs left a dependency symbol unexercised (BLIND); or a difference needs a person's review. The report names what is missing and what settles each review item. | 4 |
 
 - A call on an edited line (REWRITTEN) is compared with the call that replaced it. If `pymolt apply` made the edit, any different outcome fails. If you made it, a different value is a review item (INCONCLUSIVE), and only a new exception fails.
-- DRIFT (a parameter the call leaves at its default was added or removed) is reported and does not fail.
+- DRIFT is reported and does not fail: a parameter the call leaves at its default was added or removed, floats differ only within rounding (1024 ulps, `verify --float-ulps`), or a library object differs only in state your code does not read. `verify --strict` compares them in full.
 - Other exit codes: 1 from `capture` means the captured command failed, 2 an invalid invocation, 3 an environment or service failure.
 
 The rules are in [docs/verify.md](docs/verify.md).
