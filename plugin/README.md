@@ -9,12 +9,11 @@ your code actually calls at runtime, before and after, and tell you what changed
 
 ## Prerequisite
 
-Install the CLI so the `pymolt` command is on your PATH. The 0.1.0 release on PyPI predates
-this plugin, so install from source until the next release:
+Install the CLI so the `pymolt` command is on your PATH. 0.2.0rc1 is a release candidate, so
+ask for pre-releases:
 
 ```bash
-git clone https://github.com/iamzeelex/pymolt.git
-uv tool install ./pymolt   # or: pipx install ./pymolt
+uv tool install --prerelease allow pymolt==0.2.0rc1   # or: pipx install --pip-args=--pre pymolt==0.2.0rc1
 ```
 
 ## Install the plugin

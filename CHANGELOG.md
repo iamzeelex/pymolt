@@ -5,7 +5,7 @@ All notable changes to pymolt. The format follows
 [PEP 440](https://peps.python.org/pep-0440/) as described in
 [docs/RELEASING.md](docs/RELEASING.md).
 
-## [Unreleased]
+## [0.2.0rc1] - 2026-11-25
 
 ### Breaking
 
@@ -645,5 +645,5 @@ All notable changes to pymolt. The format follows
 
 First public release on PyPI.
 
-[Unreleased]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...HEAD
+[0.2.0rc1]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...v0.2.0rc1
 [0.1.0]: https://github.com/iamzeelex/pymolt/releases/tag/v0.1.0
