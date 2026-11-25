@@ -84,8 +84,11 @@ def test_report_dump_is_the_documented_schema(tmp_path, fake_world, no_network):
     assert (dump["from"], dump["to"], dump["old_python"], dump["new_python"]) == (
         "1.0", "2.0", "3.11.0", "3.12.0")
     assert dump["quality"] == "complete"
-    assert set(dump["facts"][0]) == {"symbol", "aliases", "kind", "param", "old", "new",
-                                     "deprecated_in_old", "successor", "evidence"}
+    # The documented keys, plus the optional pymolt.delta/1 addition a removal carries: where
+    # each of its spellings stopped resolving.
+    assert set(dump["facts"][0]) - {"vanished_at"} == {
+        "symbol", "aliases", "kind", "param", "old", "new", "deprecated_in_old", "successor",
+        "evidence"}
     kinds = {(f["kind"], f["symbol"]) for f in dump["facts"]}
     assert kinds == {("REMOVED", "pkg.gone"), ("DEFAULT", "pkg.keep")}
     json.loads(report.model_dump_json())  # serializable as-is

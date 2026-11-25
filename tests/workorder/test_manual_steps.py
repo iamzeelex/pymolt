@@ -333,3 +333,32 @@ def test_a_compile_finding_and_its_risk_make_one_step(tmp_path):
 
     # The message says what to do: linking its risks does not make it "no successor known".
     assert effort_of(compile_step).size == "small"
+
+
+def test_an_unverified_risk_is_a_check_with_no_successor_and_a_preserve_claim(tmp_path):
+    """A removal known only under the name the old version defined the call under (legacy QA
+    P1: ``NDFrame.groupby`` on pandas 3) asks to check the site's own spelling, with the command
+    to run; it claims no successor and does not loosen verify. A real removal of the same
+    symbol at another site keeps a step of its own."""
+    root, plan = _automated(tmp_path)
+    gone = {"kind": "REMOVED", "symbol": "pandas.core.generic.NDFrame.groupby",
+            "successor": "pandas.core.series.Series.groupby"}
+    unverified = _risk("pandas.core.generic.NDFrame.groupby", "app.py", 11, "frame",
+                       tier=RiskTier.LOW, fact=gone)
+    unverified.unverified = True
+    unverified.spelling = "pandas.core.frame.DataFrame.groupby"
+    certain = _risk("pandas.core.generic.NDFrame.groupby", "app.py", 7, "combine", fact=gone)
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes,
+                                  risks=PredictionReport(risks=[unverified, certain]),
+                                  manual_items=[], advisories=[], compile_findings=[],
+                                  dependencies=PANDAS)
+    check = next(s for s in steps if unverified.id in s.why.risk_ids)
+    other = next(s for s in steps if certain.id in s.why.risk_ids)
+    assert check.id != other.id and check.key != other.key
+    assert check.title == "`DataFrame.groupby`: check it still resolves in pandas 2.2.3"
+    assert check.claim == "preserve" and "not loosened" in check.why.claim
+    assert check.do.manual.successor is None and check.symbol.new is None
+    summary = check.do.manual.summary
+    assert "pydoc.locate('pandas.core.frame.DataFrame.groupby')" in summary
+    assert "No successor" not in summary and "Replace the calls" not in summary
+    assert other.claim == "intended"

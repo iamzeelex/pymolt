@@ -33,6 +33,9 @@ irrelevant changes.
     machine.
 - **Same object, new name.** A name that now points to the same object under another spelling is
   followed, not reported as removed.
+- **Receivers.** A method call is also compared under its receiver's class, and under that class's
+  public spellings, not only under the class that defined the method in the old version:
+  `df.groupby(...)`, recorded as `NDFrame.groupby`, is probed as `DataFrame.groupby` too.
 - **Inconclusive, never "no change".** A package pymolt cannot build or probe offline is reported as
   inconclusive.
 
@@ -215,10 +218,17 @@ The plan rates each affected call site into a dependency:
 
 | Tier | When |
 |---|---|
-| certain | the symbol the site calls is removed |
+| certain | a name the site writes is gone (removed, or moved so that the name no longer exists): a name on its statement or its function's, or the attribute it calls on a receiver whose class is still there |
 | high | a parameter the site leaves at its default changes its default between two concrete values, or to or from `None` or a sentinel when the site's own baseline warning names it; or the site emitted a deprecation-family warning in the baseline run |
 | medium | the signature changes for a parameter the site passes, or gains a required one; a default moves to or from `None` or a sentinel and no warning at the site names it (decided at call time, so the behaviour may not change) |
-| low | a deprecation with no warning at the site; a moved symbol; a class-level signature change; any change on a symbol the baseline never ran (BLIND), even a removal |
+| low | a deprecation with no warning at the site; a moved symbol the site does not write; a class-level signature change; any change on a symbol the baseline never ran (BLIND), even a removal; a removal known only under the name the old version defined the call under (`unverified`, below) |
+
+A site is rated by what it writes, not by where the old version defined the callee. The baseline
+records `df.groupby(...)` on pandas 0.25 as `NDFrame.groupby`; pandas 3 no longer defines `groupby`
+on `NDFrame`, but `DataFrame.groupby` still resolves, so the call is no risk. When the plan knows a
+removal only under that internal name and could not check the name the site uses, the risk is
+`low` and `unverified`: its step asks to check that name in the target environment, gives the
+one-line command, names no successor and does not loosen what `verify` accepts.
 
 Python-version risks (stdlib removals, syntax) have their own tiers, which depend on the evidence.
 For example, `certain` needs the symbol to be absent on a probed target interpreter, while an

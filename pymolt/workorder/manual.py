@@ -23,7 +23,10 @@ own). Low BLIND risks are steps too (PLAN.md collapses them).
 A manual step's claim follows the kind of successor its delta fact shows (``default_claim``):
 ``preserve`` for the same object, a behaviour change, or no fact about the successor;
 ``intended`` with the expectation ``representation`` for another object. ``why.claim`` says
-which, so PLAN.md and the briefs show it.
+which, so PLAN.md and the briefs show it. An ``unverified`` risk (its fact is about the name
+the old version defined the call under, not the one the site writes) makes a step of its own:
+check that the site's spelling still resolves, with the command to run, claiming ``preserve``
+and naming no successor.
 """
 
 from __future__ import annotations
@@ -231,12 +234,25 @@ _EXECUTOR_OF = {"manual-rewrite": "agent", "api-change": "agent", "python-manual
                 "behaviour-change": "person", "review": "person"}
 
 
+def _unverified(risk: Any) -> bool:
+    return bool(getattr(risk, "unverified", False))
+
+
+def _check_command(spelling: str) -> str:
+    """A one-line check, run in the target environment, that exits 0 when ``spelling``
+    resolves (``pydoc.locate`` imports the longest module prefix, then reads attributes)."""
+    return (f"python -c \"import pydoc, sys; sys.exit(pydoc.locate('{spelling}') is None)\"")
+
+
 def _title(step_type: str, risk: Any, target: str | None) -> str:
     fact = _fact(risk)
     kind, param = fact.get("kind"), fact.get("param")
     name = f"`{_short(risk.symbol)}`"
     successor = fact.get("successor")
     where = f" in {risk.package} {target}" if risk.package and target else ""
+    if _unverified(risk):
+        spelling = getattr(risk, "spelling", None)
+        return _cap(f"`{_short(spelling or risk.symbol)}`: check it still resolves{where}", 120)
     if step_type == "behaviour-change":
         if kind == "DEFAULT":
             return _cap(f"{name}: default `{param}` {fact.get('old')} → {fact.get('new')}", 120)
@@ -262,6 +278,17 @@ def _title(step_type: str, risk: Any, target: str | None) -> str:
 def _summary(step_type: str, risk: Any, hint: str = "") -> str:
     fact = _fact(risk)
     kind, param, successor = fact.get("kind"), fact.get("param"), fact.get("successor")
+    if _unverified(risk):
+        gone = fact.get("symbol") or risk.symbol
+        spelling = getattr(risk, "spelling", None)
+        head = (f"Only `{gone}`, the name the old version defined this call under, is known to "
+                "be gone; whether the call as these sites write it breaks is not known.")
+        if spelling:
+            return (f"{head} Check that `{spelling}` still resolves in the target environment "
+                    f"(`{_check_command(spelling)}` exits 0). If it does, these sites need no "
+                    "change; if not, rewrite the calls keeping each call's outcome.")
+        return (f"{head} Run these sites in the target environment; rewrite only a call that "
+                "fails, keeping its outcome.")
     if step_type == "behaviour-change":
         if kind == "DEFAULT":
             # Passing the old default explicitly keeps the old outcome only if the new version
@@ -332,6 +359,10 @@ def default_claim(step_type: str, risk: Any | None) -> tuple[str, str | None, st
     fact = _fact(risk) if risk is not None else {}
     kind, successor = fact.get("kind"), fact.get("successor")
     name = f"`{_short(risk.symbol)}`" if risk is not None else "?"
+    if risk is not None and _unverified(risk):
+        return "preserve", None, _cap(
+            f"{_NOT_LOOSENED}the delta found {name} gone only under the name the old version "
+            "defined it under, not under the name these sites call it by")
     another = None
     if kind == "MOVED":
         return "preserve", None, _cap(f"the delta shows {name} is the same object as "
@@ -418,7 +449,8 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
     fact = _fact(lead)
     scope = "python" if lead.scope == "python" else "dependency"
     ident = "|".join(str(x) for x in (scope, lead.package, lead.symbol, fact.get("kind"),
-                                      fact.get("param")))
+                                      fact.get("param"))) + ("|unverified" if _unverified(lead)
+                                                             else "")
     files = list(dict.fromkeys(r.site.file for r in group))
     from_, to = ((python_move or (None, None)) if scope == "python"
                  else versions.get(lead.package or "", (None, None)))
@@ -428,7 +460,8 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
         title=_title(step_type, lead, to), executor=_EXECUTOR_OF[step_type],
         claim=claim, basis="manual", scope=scope,
         package=lead.package if scope == "dependency" else None, from_=from_, to=to,
-        symbol={"old": lead.symbol, "new": fact.get("successor")},
+        symbol={"old": lead.symbol,
+                "new": None if _unverified(lead) else fact.get("successor")},
         where=_where(group, t0),
         why=StepWhy(evidence=_evidence(group), tier=_max_tier(_tier(r.tier) for r in group),
                     risk_ids=[r.id for r in group],
@@ -436,7 +469,8 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
                                           warnings=_warnings(group)),
                     delta=_delta(lead), claim=reason),
         do=StepDo(manual=ManualDo(summary=_summary(step_type, lead, _hint(lead)),
-                                  successor=fact.get("successor"))),
+                                  successor=None if _unverified(lead)
+                                  else fact.get("successor"))),
         verify=verify,
         effort=StepEffort(sites=len(group), files=len(files)),
     )
@@ -588,7 +622,8 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
                 linked[step.id].append(risk)
                 continue
         fact = _fact(risk)
-        key = (risk.scope, risk.package, risk.symbol, fact.get("kind"), fact.get("param"))
+        key = (risk.scope, risk.package, risk.symbol, fact.get("kind"), fact.get("param"),
+               _unverified(risk))
         groups.setdefault(key, []).append(risk)
     for step in automated:
         _attach(step, linked.get(step.id) or [], t0)
