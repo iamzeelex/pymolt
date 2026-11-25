@@ -2297,6 +2297,12 @@ def value_type(value: Any) -> Any:
         return {"set": _type_union(value["__set__"])}
     if "__tuple__" in value:
         return {"tuple": [value_type(e) for e in value["__tuple__"]]}
+    if "__seq__" in value:     # a consumer projection: the elements, container type erased
+        return {"tuple": [value_type(e) for e in value["__seq__"]]}
+    if "__lazy__" in value:
+        return {"lazy": value["__lazy__"]}
+    if "__projected__" in value:
+        return "projected"
     if "__dict__" in value:
         return {"dict": {_key_label(k): value_type(v) for k, v in _pairs(value["__dict__"])}}
     if "__dataclass__" in value:
@@ -2956,8 +2962,170 @@ class OutcomeComparison:
 def compare_outcomes(
     old: list[Outcome], new: list[Outcome], profile: DiffProfile | str = DiffProfile.EXACT,
 ) -> OutcomeComparison:
-    """Compare two outcome distributions (the support, not the counts). Equal only because a
-    class moved within its package is equal at type level, with a ``relocated`` note."""
+    """Compare two outcome distributions. Equal only because a class moved within its package
+    is equal at type level, with a ``relocated`` note. Under a consumer projection (set per
+    pair, ``_CONSUMER``), both sides' results are first reduced to what the consuming statement
+    observes; a pair equal only once projected is DRIFT (``projected:<consumer>``)."""
+    consumer = _CONSUMER.get()
+    if consumer:
+        po, pn = _project_outcomes(old, consumer), _project_outcomes(new, consumer)
+        if po is not None and pn is not None:
+            cmp = _compare_plain(po, pn, profile)
+            if cmp.comparison is Comparison.EQUAL:
+                token = _CONSUMER.set(None)
+                try:
+                    raw = _compare_plain(old, new, profile)
+                finally:
+                    _CONSUMER.reset(token)
+                if raw.comparison is not Comparison.EQUAL:
+                    cmp.drift = True
+                    cmp.absorbed = sorted({*cmp.absorbed, f"{PROJECTED}:{consumer}"})
+                    cmp.notes.append(_projected_note(consumer, old, new))
+                    cmp.old_types, cmp.new_types = _distinct_types(old), _distinct_types(new)
+                    if cmp.level is ComparisonLevel.EXACT and raw.level is not None:
+                        cmp.level = raw.level if raw.level is ComparisonLevel.TYPE else cmp.level
+            return cmp
+    return _compare_plain(old, new, profile)
+
+
+PROJECTED = "projected"
+# Set by ``_pair_entry``: how the project consumes the pair's result, the same on both sides
+# (``source_uses.consumer_at``).
+_CONSUMER: ContextVar[str | None] = ContextVar("pymolt_consumer", default=None)
+_PROJECTION_WORDS = {
+    "discarded": "the result is discarded (an expression statement): outcome kind and raise "
+                 "type compared, a lazy result by its type",
+    "unpacked": "the result is unpacked: elements and arity compared, not the container type",
+    "iterated": "the result is iterated: elements compared, not the container type",
+    "int": "the result is passed to int(): compared as int() makes it",
+    "float": "the result is passed to float(): compared as float() makes it",
+    "bool": "the result is passed to bool(): compared by truthiness",
+    "len": "the result is passed to len(): compared by length",
+    "truth": "the result is a truth test: compared by truthiness",
+}
+_LAZY = ("coroutine", "generator", "async_generator")
+_LAZY_SUFFIXES = ("Future", "Task", "iterator", "Iterator", "ContextManager")
+
+
+def _projected_note(consumer: str, old: list[Outcome], new: list[Outcome]) -> str:
+    def types(outs: list[Outcome]) -> str:
+        return ", ".join(sorted({_type_label(t.get("return", t.get("raise"))) or "?"
+                                 for t in map(outcome_type, outs)}))[:80]
+    return (f"projected ({consumer}): {_PROJECTION_WORDS.get(consumer, consumer)}; "
+            f"old {types(old)}, new {types(new)}")
+
+
+def _lazy_label(v: Any) -> str | None:
+    """The type of a lazy result (a coroutine, generator, iterator, Future or Task, context
+    manager): discarding one means its work did not run, so it is compared by type."""
+    if not isinstance(v, dict):
+        return None
+    for tag in ("__opaque__", "__object__", "__cycle__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            leaf = name.rsplit(".", 1)[-1]
+            if name in _LAZY or leaf.endswith(_LAZY_SUFFIXES) or leaf in (
+                    "map", "filter", "zip", "enumerate", "reversed"):
+                return name
+    return None
+
+
+_NO_PROJECTION = object()
+
+
+def _items_of(v: Any) -> list | None:
+    if isinstance(v, list):
+        return v
+    if isinstance(v, dict) and not v.get("__truncated__"):
+        for tag in ("__list__", "__tuple__"):
+            if isinstance(v.get(tag), list):
+                return v[tag]
+    return None
+
+
+def _length(v: Any) -> Any:
+    if isinstance(v, str):
+        return len(v)
+    if isinstance(v, dict) and not v.get("__truncated__"):
+        for tag in ("__list__", "__tuple__", "__set__", "__dict__"):
+            if isinstance(v.get(tag), list):
+                return len(v[tag])
+        if isinstance(v.get("__bytes__"), str):
+            return len(v["__bytes__"]) // 2
+        shape = v.get("shape")
+        if "__structure__" in v and isinstance(shape, list) and shape:
+            return shape[0]
+    return _NO_PROJECTION
+
+
+def _truth(v: Any) -> Any:
+    if v is None or isinstance(v, bool | int | float | str):
+        return bool(v)
+    n = _length(v)
+    return bool(n) if isinstance(n, int) else _NO_PROJECTION
+
+
+def _number(v: Any, kind: str) -> Any:
+    if isinstance(v, bool):
+        return int(v) if kind == "int" else float(v)
+    if isinstance(v, int | float) and (kind == "float" or math.isfinite(v)):
+        return int(v) if kind == "int" else float(v)
+    if isinstance(v, dict) and isinstance(v.get("__decimal__"), str):
+        try:
+            from decimal import Decimal
+            d = Decimal(v["__decimal__"])
+            return int(d) if kind == "int" else float(d)
+        except (ArithmeticError, ValueError):
+            return _NO_PROJECTION
+    if isinstance(v, dict) and isinstance(v.get("__opaque__"), str) \
+            and _NUMPY_SCALAR.match(v["__opaque__"]):
+        return {"__opaque__": kind}      # a numpy scalar: its value is not recorded (format 1)
+    return _NO_PROJECTION
+
+
+def _project_value(v: Any, consumer: str) -> Any:
+    if consumer == "discarded":
+        lazy = _lazy_label(v)
+        return {"__lazy__": lazy} if lazy else {"__projected__": "discarded"}
+    if consumer in ("unpacked", "iterated"):
+        items = _items_of(v)
+        return {"__seq__": items} if items is not None else _NO_PROJECTION
+    if consumer in ("int", "float"):
+        return _number(v, consumer)
+    if consumer in ("bool", "truth"):
+        r = _truth(v)
+        if r is _NO_PROJECTION and isinstance(v, dict) and (
+                "__opaque__" in v or "__object__" in v):
+            return {"__opaque__": "bool"}
+        return r
+    if consumer == "len":
+        r = _length(v)
+        return {"__opaque__": "int"} if r is _NO_PROJECTION and _type_only(v) else r
+    return _NO_PROJECTION
+
+
+def _project_outcomes(outcomes: list[Outcome], consumer: str) -> list[Outcome] | None:
+    """The outcomes as the consuming statement sees them (raises unchanged), merged where they
+    became equal; None when a result cannot be projected (it is then compared in full)."""
+    merged: dict[str, Outcome] = {}
+    for o in outcomes:
+        if o.kind == "return" and not _is_unrecorded(o):
+            value = _project_value(o.value, consumer)
+            if value is _NO_PROJECTION:
+                return None
+        else:
+            value = o.value
+        key = _canon([o.kind, value])
+        if key in merged:
+            merged[key] = merged[key].model_copy(update={"count": merged[key].count + o.count})
+        else:
+            merged[key] = Outcome(kind=o.kind, value=value, count=o.count)
+    return list(merged.values())
+
+
+def _compare_plain(
+    old: list[Outcome], new: list[Outcome], profile: DiffProfile | str = DiffProfile.EXACT,
+) -> OutcomeComparison:
     ev = _Evidence()
     token = _EVIDENCE.set(ev)
     try:
@@ -3311,7 +3479,7 @@ def _values_match(a: Any, b: Any) -> bool:
                 ev.drift.append(HANDLE_NOTE)
             return True
         return False
-    for tag in ("__list__", "__tuple__", "__set__"):
+    for tag in ("__list__", "__tuple__", "__set__", "__seq__"):
         if tag in a and tag in b:
             xs, ys = a[tag], b[tag]
             if not (isinstance(xs, list) and isinstance(ys, list)):
@@ -7215,6 +7383,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     edited = _EDITED.set(bool(o.rewritten_site or n.rewritten_site or rewritten))
     wraps = _WRAPS.set(_SEM.get() is not None and _project_callables(of.input)
                        and _canon(of.input) == _canon(nf.input))
+    consumer = _CONSUMER.set(_pair_consumer(of, nf))
     try:
         cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
         explained = None
@@ -7227,6 +7396,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
             explained = _explain_masked(of, nf, cmp, profile)
     finally:
+        _CONSUMER.reset(consumer)
         _WRAPS.reset(wraps)
         _EDITED.reset(edited)
         _COUNTED.reset(counted)
@@ -7285,6 +7455,18 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         explained=explained, absorbed=list(cmp.absorbed),
         **_raw_samples(of, nf),
     )
+
+
+def _pair_consumer(of: Fact, nf: Fact) -> str | None:
+    """How both sides' statements consume the call's result, when it is the same projection on
+    both (``source_uses.consumer_at``); None for the full result, without source snapshots or
+    under ``--strict``."""
+    sem = _SEM.get()
+    if sem is None or sem.strict:
+        return None
+    co = _uses.consumer_at(sem.old, of.file, of.line, _symbol_leaf(of.symbol))
+    cn = _uses.consumer_at(sem.new, nf.file, nf.line, _symbol_leaf(nf.symbol))
+    return co if co is not None and co == cn and co in _PROJECTION_WORDS else None
 
 
 def _counts_complete(f: Fact) -> bool:

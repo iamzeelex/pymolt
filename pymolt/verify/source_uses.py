@@ -19,6 +19,11 @@ it (``facts``' handle projection). This module reads that from a capture's sourc
   ``issubclass``, ``except``, ``match``, ``type(x) is C`` / ``x.__class__ == C``,
   ``singledispatch`` registrations); ``type_names_read``: the project reads a type's name
   (``type(x).__name__``, ``x.__class__.__qualname__``), so any class may be observed.
+- ``calls``: how each call's result is consumed (``consumer``): ``discarded`` (an expression
+  statement), ``awaited`` (``await f()`` on its own line), ``unpacked`` (``a, b = f()``),
+  ``iterated`` (``for x in f()``), ``int``/``float``/``bool``/``len`` (the sole argument of an
+  unshadowed builtin), ``truth`` (an ``if``/``while``/``assert`` test, ``not f()``), or
+  ``value`` (anything else: the full result).
 - ``dynamic``: the places the project reads attributes by a computed name (``getattr(x, var)``,
   ``vars(x)``, ``x.__dict__``, ``asdict(x)``, ``dir(x)``): what they read cannot be projected, so
   the verdict lists them.
@@ -48,6 +53,8 @@ class SourceUses:
     introspected: set[str] = field(default_factory=set)
     type_names_read: bool = False
     dynamic: list[tuple[str, int, str]] = field(default_factory=list)
+    # file -> [(first line, last line, callee leaf, consumer)] of every call
+    calls: dict[str, list[tuple[int, int, str, str]]] = field(default_factory=dict)
     files: int = 0          # files parsed
     unparsed: int = 0       # files that did not parse (their uses are unknown)
 
@@ -79,6 +86,54 @@ def _is_type_of(node: ast.AST) -> bool:
             and node.func.id == "type" and len(node.args) == 1:
         return True
     return isinstance(node, ast.Attribute) and node.attr == "__class__"
+
+
+_CONVERSIONS = ("int", "float", "bool", "len")
+
+
+def _bound_names(tree: ast.AST) -> set[str]:
+    """Every name the file binds anywhere (a conversion builtin rebound there is shadowed)."""
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store | ast.Del):
+            out.add(n.id)
+        elif isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            out.add(n.name)
+        elif isinstance(n, ast.alias):
+            out.add((n.asname or n.name).split(".")[0])
+        elif isinstance(n, ast.arg):
+            out.add(n.arg)
+    return out
+
+
+def _consumer(call: ast.Call, parents: dict[int, ast.AST], shadowed: set[str]) -> str:
+    node: ast.AST = call
+    parent = parents.get(id(node))
+    awaited = False
+    while isinstance(parent, ast.Await):
+        awaited = True
+        node, parent = parent, parents.get(id(parent))
+    if isinstance(parent, ast.Expr):
+        return "awaited" if awaited else "discarded"
+    if awaited:
+        return "value"            # an awaited result: its coroutine marker is all there is
+    if (isinstance(parent, ast.Assign) and parent.value is node and len(parent.targets) == 1
+            and isinstance(parent.targets[0], ast.Tuple | ast.List)
+            and not any(isinstance(e, ast.Starred) for e in parent.targets[0].elts)):
+        return "unpacked"
+    if isinstance(parent, ast.For | ast.AsyncFor | ast.comprehension) and parent.iter is node:
+        return "iterated"
+    if (isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name)
+            and parent.func.id in _CONVERSIONS and parent.func.id not in shadowed
+            and len(parent.args) == 1 and parent.args[0] is node and not parent.keywords):
+        return parent.func.id
+    if isinstance(parent, ast.If | ast.While | ast.IfExp | ast.Assert) and parent.test is node:
+        return "truth"
+    if isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not):
+        return "truth"
+    if isinstance(parent, ast.comprehension) and node in parent.ifs:
+        return "truth"
+    return "value"
 
 
 def _literal_name(node: ast.AST | None) -> str | None:
@@ -208,6 +263,19 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def consumer_at(uses: SourceUses | None, file: str, line: int | None, leaf: str) -> str | None:
+    """How the project consumes the result of its call to ``leaf`` at ``file:line``: the
+    consumer of the calls to that name spanning the line, when they agree; None when no such
+    call is in the source (or the snapshot is missing)."""
+    if uses is None or line is None:
+        return None
+    found = {c for first, last, name, c in uses.calls.get(file, ()) if name == leaf
+             and first <= line <= last}
+    if not found:
+        return None
+    return found.pop() if len(found) == 1 else "value"
+
+
 def parse(text: str) -> ast.AST | None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -234,6 +302,14 @@ def source_uses(sources: Mapping[str, str] | None) -> SourceUses | None:
         parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
         modules = {(a.asname or a.name).split(".")[0] for n in ast.walk(tree)
                    if isinstance(n, ast.Import) for a in n.names}
+        shadowed = _bound_names(tree) & set(_CONVERSIONS)
+        calls = uses.calls.setdefault(file, [])
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                leaf = _leaf(n.func)
+                if leaf:
+                    calls.append((n.lineno, n.end_lineno or n.lineno, leaf,
+                                  _consumer(n, parents, shadowed)))
         v = _Visitor(uses, file, text.splitlines(), parents, modules)
         # ``called`` must be known before an Attribute is visited: a Call is visited before
         # its func (generic_visit walks fields in order), so one pass suffices.
