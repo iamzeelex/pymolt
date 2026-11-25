@@ -103,8 +103,8 @@ project is migrated twice: once keeping its behaviour, once with one real change
 | | |
 |---|---|
 | API changes `plan` finds | 146 of 167 |
-| Replacements it names correctly | 75 of 147 (1 wrong) |
-| Call sites `apply` rewrote | 39, none wrong |
+| Replacements it names correctly | 77 of 147 (1 wrong) |
+| Call sites `apply` rewrote | 40, none wrong |
 | Behaviour-keeping migrations | 12 PASS, 12 INCONCLUSIVE, 1 FAIL |
 | Real changes `verify` fails on, at the changed call | 22 of 25 |
 

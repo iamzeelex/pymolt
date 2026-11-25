@@ -226,7 +226,7 @@ call. Measured on the 0.2 code (2026-11-25); `python bench/generalization/run.py
 | Polars | 0.19 → 1.44 | 8 / 8 | 8 / 8 | 5 | PASS | yes |
 | Matplotlib | 3.6 → 3.10 | 4 / 7 | 3 / 7 | 0 | PASS | yes |
 | seaborn | 0.11 → 0.13 | 5 / 6 | 3 / 5 | 1 | PASS | yes |
-| Plotly | 5.24 → 6.9 | 4 / 4 | 2 / 4 | 0 | INCONCLUSIVE (2) | yes |
+| Plotly | 5.24 → 6.9 | 4 / 4 | 3 / 4 | 0 | INCONCLUSIVE (2) | yes |
 | scikit-learn | 1.1 → 1.6 | 7 / 7 | 1 / 5 | 0 | PASS | yes |
 | FastAPI | 0.95 → 0.165, pydantic 1 → 2 | 7 / 10 | 6 / 10, 1 wrong | 1 | INCONCLUSIVE (2) | yes |
 | Django | 2.2 → 4.2 | 7 / 7 | 5 / 7 | 9 | PASS | yes |
@@ -234,7 +234,7 @@ call. Measured on the 0.2 code (2026-11-25); `python bench/generalization/run.py
 | Flask | 2.0 → 3.1 | 9 / 11 | 5 / 10 | 2 | INCONCLUSIVE (2, 3) | yes |
 | Requests | 2.28 → 2.34 | 3 / 5 | 2 / 3 | 0 | PASS | yes |
 | httpx | 0.23 → 0.28 | 2 / 3 | 0 / 3 | 0 | INCONCLUSIVE (1) | yes |
-| aiohttp | 3.8 → 3.14 | 6 / 6 | 2 / 6 | 0 | INCONCLUSIVE (1) | no (1) |
+| aiohttp | 3.8 → 3.14 | 6 / 6 | 3 / 6 | 1 | INCONCLUSIVE (1) | no (1) |
 | Streamlit | 1.28 → 1.67 | 6 / 6 | 3 / 6 | 0 | FAIL (4) | yes |
 | Starlette | 0.27 → 1.10 | 7 / 7 | 1 / 7 | 0 | INCONCLUSIVE (1) | yes |
 | asyncio | Python 3.8 → 3.12 | 7 / 8 | 2 / 3 | 2 | INCONCLUSIVE (1) | on another call |
@@ -246,7 +246,7 @@ call. Measured on the 0.2 code (2026-11-25); `python bench/generalization/run.py
 | PyYAML | 5.4 → 6.0 | 4 / 4 | — | 0 | PASS | yes |
 | urllib3 | 1.26 → 2.2 | 5 / 5 | 5 / 5 | 0 | INCONCLUSIVE (2) | on another call |
 | standard library | Python 3.8 → 3.12 | 10 / 11 | 2 / 8 | 4 | INCONCLUSIVE (1, 2) | yes |
-| **Total** | | **146 / 167** | **75 / 147** | **39, none wrong** | **12 PASS** | **22 / 25** |
+| **Total** | | **146 / 167** | **77 / 147** | **40, none wrong** | **12 PASS** | **22 / 25** |
 
 - **Replacements named** counts a replacement the plan names in a step: from the library's own
   code, data or deprecation text, or a curated fact. A replacement that is an expression rather
@@ -255,7 +255,7 @@ call. Measured on the 0.2 code (2026-11-25); `python bench/generalization/run.py
   replacement whose text exists only in releases between the two versions, are named only
   sometimes. That is most of what is missing.
 - **Sites rewritten** are the codemods `apply` wrote. Each one was compared after the migration:
-  34 calls compared equal, the rest had nothing to compare against, none changed.
+  35 calls compared equal, the rest had nothing to compare against, none changed.
 - Why an equivalent migration does not PASS (the numbers in the table):
   1. a coroutine's awaited result is not recorded yet (aiohttp, httpx, Starlette, asyncio): the
      verdict says the evidence is missing;
