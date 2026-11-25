@@ -156,8 +156,9 @@ A returned value is compared by what your code can observe of it:
   attributes are never compared. An attribute your code only indexes with literal keys
   (`app.config["SEED"]`) compares under those keys. Unread state that differs is counted, not
   compared: the entry is DRIFT with "handle state not observed". The calls your code makes on the
-  object are facts of their own. An attribute your code reads that exists on one side only is
-  drift, unless your code tests its presence (`hasattr`).
+  object are facts of their own. An attribute that exists on one side only is a change when the
+  code of the side that lacks it reads it; when only the other side's code reads it (an edit
+  moved the read to another name), or no code does, it is counted with the unread state.
 - A capture without a source snapshot compares every object by its full state, as
   `verify --strict` does. The report says which (`quality.objects`).
 - Places that read attributes by a computed name (`getattr(x, name)`, `vars(x)`, `x.__dict__`,
