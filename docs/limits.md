@@ -29,6 +29,11 @@
   have, but its `__init__` assigns on `self`, counts as existing; one made any other way does not,
   and its successor is not named.
 
+- **A proof covers only what the probe can read.** A body summarised completely (see
+  [plan.md](plan.md#dependency-api-changes)) is the only one that rewrites: a decorator pymolt
+  does not know, a body it cannot read (a compiled function), or an alias with other uses
+  leaves the successor named for an agent.
+
 - **A proven rewrite rests on signatures, not on behaviour.** A successor proven in the old
   version (a forward, an alias) is rewritten when the successor keeps its signature in the
   target; a successor that changes behaviour without changing its signature makes verify fail

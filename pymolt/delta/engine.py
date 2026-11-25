@@ -1596,6 +1596,14 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
         if fwd is None and cond is None:
             continue
         fwd_used = fwd or cond["forward"]
+        incomplete = _incomplete(body)
+        if incomplete is not None:
+            # The summary does not account for the whole callable: the successor stays named.
+            rec.setdefault("rejected", []).append({
+                "name": fwd_used.get("callee") or fwd_used.get("attr"),
+                "why": f"no proof: {incomplete}"})
+            fact.succession = rec
+            continue
         target, why = _callee_spelling(fwd_used, (step or {}).get("callee"), canon, members,
                                        new_of)
         if target is None:
@@ -1627,8 +1635,9 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
         else:
             transfer = "successor-unchanged" if callee_old is not None and \
                 callee_old == (tgt.step.get("shape") if tgt else None) else "per-site"
+        # a chained call on the result (``new(a).ravel()``) is part of the forward: no rename
         kind = "rename" if fwd is not None and _pass_through(fwd_used, old_shape) and \
-            not body.get("materialize") else "call"
+            not body.get("materialize") and not fwd_used.get("chain") else "call"
         rec.update(trust="proof", proof={
             "kind": "forward" if fwd is not None else "conditional-forward",
             "locus": canon, "version": "new" if side == "new" else "old", "side": side},
@@ -1642,7 +1651,8 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
             "cond": cond.get("cond") if cond and fwd is None else None,
             "old_shape": old_shape, "callee_old_shape": callee_old,
             "callee_new_shape": tgt.step.get("shape") if tgt is not None else None}
-        rec["old"] = {"spelling": fact.symbol, "canonical": canon, "spellings": members}
+        rec["old"] = {"spelling": fact.symbol, "canonical": canon, "spellings": members,
+                      "wrappers": _wrapper_symbols(old_step)}
         rec["new"] = {"spelling": target, "canonical": tgt.canonical if tgt else target}
         hop = _deprecated_hop(fwd_used, callee_old, tgt) if side == "old" and tgt else None
         if hop is not None:
@@ -1653,12 +1663,25 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
         fact.successor = fact.successor or target
         fact.succession = rec
         return
-    # a twin: the same body as the named successor's, apart from the warning
+    # a twin: the same body as the named successor's, apart from the warning, in the same
+    # owner (so its names resolve to the same globals), with no wrapper on either side
     if fact.successor and new_step is not None:
         tgt = new_of(fact.successor)
         mine = (new_step.get("body") or {}).get("key")
         theirs = ((tgt.step.get("body") or {}).get("key") if tgt is not None else None)
-        if mine and mine == theirs and new_step.get("shape") == tgt.step.get("shape"):
+        new_canon = str(new_step.get("canonical") or canon)
+        same_owner = tgt is not None and \
+            new_canon.rsplit(".", 1)[0] == str(tgt.canonical).rsplit(".", 1)[0]
+        if mine and mine == theirs and new_step.get("shape") == tgt.step.get("shape") and \
+                not same_owner:
+            rec.setdefault("rejected", []).append({
+                "name": fact.successor, "why": "no proof: its body reads alike, but in another "
+                                               "module or class, whose names may differ"})
+            fact.succession = rec
+            return
+        if mine and mine == theirs and new_step.get("shape") == tgt.step.get("shape") and \
+                _incomplete(new_step.get("body")) is None and \
+                _incomplete(tgt.step.get("body")) is None:
             rec.update(trust="proof", proof={"kind": "twin", "locus": canon, "version": "new",
                                              "side": "new"},
                        transfer="at-target" if _same_old_body(old_step, new_step) else
@@ -1672,6 +1695,34 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
             rec["old"] = {"spelling": fact.symbol, "canonical": canon, "spellings": members}
             rec["new"] = {"spelling": fact.successor, "canonical": tgt.canonical}
             fact.succession = rec
+
+
+def _incomplete(body: Mapping[str, Any] | None,
+                allowed: Iterable[str] = succ_mod.FORWARD_WRAPPERS) -> str | None:
+    """Why a body summary is no complete account of the callable (None: it is): a wrapper or
+    decorator it does not know, a parameter the body aliases besides forwarding, or a statement
+    besides the forward (``_noise`` keeps only warnings, docstrings and conflict checks out)."""
+    why = succ_mod.unknown_wrapper(body, allowed)
+    if why is not None:
+        return why
+    if (body or {}).get("aliases"):
+        a = body["aliases"][0]
+        return (f"the body also makes {a.get('old')} an alias of {a.get('new')}: the forward "
+                "is not all it does")
+    return None
+
+
+def _wrapper_symbols(step: Mapping[str, Any] | None) -> list[str]:
+    """The trace symbols of the wrappers around a callable (``module.code``): a call recorded
+    under one of them is a call of this callable."""
+    out = []
+    for c in (step or {}).get("cells") or ():
+        if c.get("module") and c.get("code"):
+            out.append(f"{c['module']}.{c['code']}")
+    for layer in ((step or {}).get("body") or {}).get("layers") or ():
+        if layer.get("module") and layer.get("code"):
+            out.append(f"{layer['module']}.{layer['code']}")
+    return sorted(set(out))
 
 
 def _deprecated_hop(fwd: Mapping[str, Any], callee_old: list | None, tgt: Spell
@@ -1734,15 +1785,29 @@ def _chains(facts: list[DeltaFact], resolve_new: Callable[[list[str]], Mapping[s
         f.succession = rec
 
 
-def _param_aliases(step: Mapping[str, Any] | None) -> dict[str, tuple[str, str]]:
-    """``{old: (new, how)}``: parameters a body makes one another's alias: in its own
-    statements (``height = size``, ``kwargs["height"] = kwargs.pop("size")``), or through a
-    helper that hands one back as the other (``method = _check(method, interpolation)`` with
-    ``_check`` returning ``interpolation`` unchanged), or a helper whose own body does it with
-    arguments the caller passes by the same names."""
-    out: dict[str, tuple[str, str]] = {}
-    for a in ((step or {}).get("body") or {}).get("aliases") or ():
-        out.setdefault(a["old"], (a["new"], a.get("how") or "assign"))
+_GUARDS = ("none", "not_none", "sentinel", "in")
+
+
+def _param_aliases(step: Mapping[str, Any] | None) -> dict[str, tuple[str, str, str]]:
+    """``{old: (new, how, guard)}``: parameters a body makes one another's alias, when that is
+    all it does with the old one: in its own statements (``height = size``,
+    ``kwargs["height"] = kwargs.pop("size")``), or through a helper that hands one back as the
+    other (``method = _check(method, interpolation)``, ``_check`` returning ``interpolation``
+    unrebound), or a helper whose own body does it with arguments the caller passes by the
+    same names. ``guard`` is the condition the alias holds under: ``none`` (always),
+    ``not_none`` (``if old is not None:``: only for a value other than None), ``sentinel``
+    (``if old is not _Default:``: any value a caller passes), ``in`` (``if "old" in
+    kwargs:``). An alias under another condition, or an old parameter the body also reads
+    elsewhere, is none: its other uses are not modelled."""
+    body = (step or {}).get("body") or {}
+    loads = body.get("loads") or {}
+    out: dict[str, tuple[str, str, str]] = {}
+    for a in body.get("aliases") or ():
+        guard = a.get("guard") or "none"
+        reads = 1 + (1 if guard in ("not_none", "sentinel") else 0)
+        if guard not in _GUARDS or (a.get("how") != "pop" and loads.get(a["old"], 0) > reads):
+            continue
+        out.setdefault(a["old"], (a["new"], a.get("how") or "assign", guard))
     for h in (step or {}).get("helper_warns") or ():
         params = list(h.get("params") or ())
         fed: dict[str, str] = {}
@@ -1753,12 +1818,21 @@ def _param_aliases(step: Mapping[str, Any] | None) -> dict[str, tuple[str, str]]
             if isinstance(desc, dict) and "p" in desc:
                 fed[k] = desc["p"]
         ret = h.get("returns")
-        if ret and h.get("assign") and ret in fed and fed[ret] != h["assign"]:
-            out.setdefault(fed[ret], (h["assign"], "helper:" + str(h.get("helper"))))
+        guard = h.get("guard") or "none"
+        if ret and h.get("assign") and ret in fed and fed[ret] != h["assign"] and \
+                guard in _GUARDS:
+            caller = fed[ret]
+            reads = 1 + (1 if guard in ("not_none", "sentinel") else 0)
+            if loads.get(caller, 0) <= reads:
+                out.setdefault(caller, (h["assign"], "helper:" + str(h.get("helper")), guard))
+        hloads = h.get("loads") or {}
         for a in h.get("aliases") or ():
+            g = a.get("guard") or "none"
+            reads = 1 + (1 if g in ("not_none", "sentinel") else 0)
             if a["old"] in fed and a["new"] in fed and fed[a["old"]] == a["old"] and \
-                    fed[a["new"]] == a["new"]:
-                out.setdefault(a["old"], (a["new"], "helper:" + str(h.get("helper"))))
+                    fed[a["new"]] == a["new"] and g in _GUARDS and \
+                    hloads.get(a["old"], 0) <= reads and loads.get(a["old"], 0) <= 1:
+                out.setdefault(a["old"], (a["new"], "helper:" + str(h.get("helper")), g))
     return out
 
 
@@ -1772,14 +1846,26 @@ def _prove_param(fact: DeltaFact, o: Mapping[str, Any], n: Mapping[str, Any],
         return
     rec = dict(fact.succession or {"scope": "param"})
     proof = rec.get("proof") if rec.get("trust") == "proof" else None
+    guard = "none"
     if proof is None:
         for side, step in (("new", n), ("old", o)):
             alias = _param_aliases(step).get(param)
             if alias and alias[0] == new:
                 proof = {"kind": "alias", "locus": alias[1] if alias[1].startswith("helper:")
                          else f"{fact.symbol} ({alias[1]})", "version": side, "side": side}
+                guard = alias[2]
                 break
     if proof is None:
+        return
+    side_step = n if proof["side"] == "new" else o
+    why = succ_mod.unknown_wrapper(side_step.get("body"), succ_mod.KEYWORD_WRAPPERS)
+    if why is not None:
+        # the rename is proven in the body, but a wrapper around it may treat the two
+        # keywords apart: named, not rewritten
+        rec["trust"] = "named"
+        rec.pop("proof", None)
+        rec.setdefault("rejected", []).append({"name": new, "why": f"no proof: {why}"})
+        fact.succession = rec
         return
     n_params = {p[0]: p for p in n.get("shape") or ()}
     if new not in n_params:
@@ -1796,7 +1882,9 @@ def _prove_param(fact: DeltaFact, o: Mapping[str, Any], n: Mapping[str, Any],
     rec.update(trust="proof", proof=proof, transfer=transfer, params={param: new})
     rec["sources"] = list(dict.fromkeys([*rec.get("sources", []), "proof"]))
     rec["template"] = {"kind": "rename-keyword", "old_shape": o.get("shape"),
-                       "new_shape": n.get("shape")}
+                       "new_shape": n.get("shape"), "guard": guard}
+    rec["old"] = {"spelling": fact.symbol, "spellings": fact.spellings(),
+                  "wrappers": _wrapper_symbols(o)}
     fact.succession = rec
 
 
@@ -1910,10 +1998,13 @@ def _param_successor(ch: ParamChange, o: dict, n: dict, ev: _Evidence
     for side, step in (("new", n), ("old", o)):
         hf = succ_mod.param_renames(step).get(param)
         if hf is not None and hf.new and (hf.new in n_params or not n_params):
-            rec.trust = "proof" if hf.registered else "named"
+            rec.trust = "proof" if hf.registered and not hf.values else "named"
+            if hf.values:
+                rec.caveats = [f"{hf.helper} also maps the values of {param} to {hf.new}: "
+                               "a value written for one is not one for the other"]
             rec.sources = ["helper"]
             rec.params = {param: hf.new}
-            if hf.registered:
+            if hf.registered and not hf.values:
                 rec.proof = {"kind": "helper", "locus": hf.helper, "version": hf.since,
                              "side": side}
             return hf.new, rec

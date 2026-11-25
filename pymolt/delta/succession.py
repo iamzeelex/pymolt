@@ -338,14 +338,60 @@ def _registry_for(qualname: str | None, written: str | None = None) -> dict | No
 
 def _registry_for_code(module: str | None, code: str | None) -> dict | None:
     """The helper whose wrapper a closure belongs to: the wrapper's code qualname starts with
-    the helper's own name (``deprecate_renamed_parameter.<locals>...``) in its module."""
+    the helper's own name (``deprecate_renamed_parameter.<locals>...``,
+    ``deprecated.__call__.<locals>.wrapper``) in its module, or is one it lists (``codes``)."""
     if not module or not code:
         return None
     for entry in registered_helpers():
         for q in [entry["qualname"], *(entry.get("aliases") or ())]:
             mod, _, leaf = q.rpartition(".")
-            if mod == module and (code == leaf or code.startswith(leaf + ".<locals>")):
+            if mod != module:
+                continue
+            if code == leaf or code.split(".")[0] == leaf or code in (entry.get("codes") or ()):
                 return entry
+    return None
+
+
+# Decorators that make no wrapper and change no call (a builtin descriptor, a typing marker).
+SAFE_DECORATORS = frozenset((
+    "builtins.property", "builtins.classmethod", "builtins.staticmethod", "abc.abstractmethod",
+    "functools.cached_property", "typing.overload", "typing.final",
+    "typing_extensions.overload", "typing_extensions.final", "property", "classmethod",
+    "staticmethod", "abstractmethod", "cached_property", "overload", "final"))
+#: What a proof may pass through: a forward (or a twin) only wrappers that warn or dispatch;
+#: a keyword rename also wrappers that pass keywords through or rename another keyword.
+FORWARD_WRAPPERS = ("warn", "dispatch")
+KEYWORD_WRAPPERS = ("warn", "dispatch", "keywords", "rename")
+
+
+def _wrapper_kind(layer: Mapping[str, Any]) -> str | None:
+    if layer.get("type"):
+        entry = next((e for e in registered_helpers()
+                      if layer["type"] in (e.get("types") or ())), None)
+    else:
+        entry = _registry_for_code(layer.get("module"), layer.get("code"))
+    return entry.get("wrapper") if entry else None
+
+
+def unknown_wrapper(body: Mapping[str, Any] | None, allowed: Iterable[str]) -> str | None:
+    """Why a body summary does not account for every wrapper around the callable (None: it
+    does): each layer on its ``__wrapped__`` chain, and each decorator, must be a registered
+    helper whose wrapper only does what ``allowed`` names, or a builtin descriptor. A summary
+    made before wrappers were read accounts for none."""
+    if not body or "layers" not in body or "decorators" not in body:
+        return "the probe did not read its wrappers"
+    allowed = tuple(allowed)
+    for layer in body.get("layers") or ():
+        kind = _wrapper_kind(layer)
+        if kind not in allowed:
+            what = layer.get("type") or f"{layer.get('module')}.{layer.get('code')}"
+            return f"it is wrapped by {what}, which pymolt does not know to leave calls alone"
+    for dec in body.get("decorators") or ():
+        if dec in SAFE_DECORATORS:
+            continue
+        entry = _registry_for(dec)
+        if entry is None or entry.get("wrapper") not in allowed:
+            return f"its decorator {dec} may change what it does"
     return None
 
 
@@ -362,9 +408,11 @@ class HelperFact:
     since: str | None = None
     alternative: str | None = None
     message: str | None = None
+    values: bool = False         # the helper also maps the values (pandas ``mapping=``)
 
     def label(self) -> str:
-        what = {"rename-parameter": f"renames {self.old} to {self.new}",
+        what = {"rename-parameter": f"renames {self.old} to {self.new}"
+                + (" and maps its values" if self.values else ""),
                 "rename-object": f"names {self.new}",
                 "prescription": f"prescribes {self.alternative}",
                 "prose": "says so"}.get(self.kind, self.kind)
@@ -394,9 +442,11 @@ def _fact_from_roles(entry: dict, roles: Mapping[str, Any], via: str) -> HelperF
         return value if isinstance(value, str) and value else None
 
     kind = entry.get("kind")
+    if kind == "transparent":
+        return None
     fact = HelperFact(kind=kind, helper=entry["qualname"], via=via, since=text("since"),
                       old=text("old"), new=text("new"), alternative=text("alternative"),
-                      message=text("message"))
+                      message=text("message"), values=roles.get("values") is not None)
     if kind == "rename-parameter" and not (fact.old and fact.new):
         return None
     if kind == "rename-object" and not fact.new:

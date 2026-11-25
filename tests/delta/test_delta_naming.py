@@ -253,7 +253,10 @@ def test_a_rename_helper_alias_gone_in_the_new_version_is_a_removed_parameter():
                           "polars.utils.deprecation.deprecate_renamed_parameter", "periods", "n",
                           version="0.19.11")
     old = {sp: res("pkg", step("Expr", "pkg.Expr", kind="class"),
-                   step("shift", sp, shape=sig, decorator_calls=[helper]))}
+                   step("shift", sp, shape=sig, decorator_calls=[helper],
+                        body={"layers": [], "loads": {},
+                              "decorators": ["polars.utils.deprecation."
+                                             "deprecate_renamed_parameter"]}))}
     new = {sp: res("pkg", step("Expr", "pkg.Expr", kind="class"),
                    step("shift", sp, shape=sig))}
     fact = _one(_diff(old, new), "SIGNATURE", "periods")
@@ -285,7 +288,9 @@ def test_a_parameter_the_new_version_renames_with_a_helper_is_deprecated_there()
                                                           ("labels", POK, "None"))))}
     new = {sp: res("pkg", step("boxplot", sp, shape=shape(("self", POK, None), ("x", POK, None),
                                                           ("tick_labels", POK, "None")),
-                               decorator_calls=[helper]))}
+                               decorator_calls=[helper],
+                               body={"layers": [], "loads": {}, "decorators": [
+                                   "matplotlib._api.deprecation.rename_parameter"]}))}
     facts = _diff(old, new)
     fact = _one(facts, "DEPRECATED", "labels")
     assert fact.successor == "tick_labels"
@@ -338,9 +343,19 @@ def test_a_positional_pairing_is_a_hint_never_a_successor():
 # ── registered helpers ────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("entry", succ_mod.registered_helpers(), ids=lambda e: e["qualname"])
-def test_every_registered_helper_reads_its_fixture(entry):
-    fixture = entry["fixture"]
+_FIXTURES = [(e, f) for e in succ_mod.registered_helpers()
+             for f in (e.get("fixtures") or [e["fixture"]])]
+
+
+@pytest.mark.parametrize("entry, fixture", _FIXTURES,
+                         ids=[f"{e['qualname']}-{i}" for i, (e, _f) in enumerate(_FIXTURES)])
+def test_every_registered_helper_reads_its_fixture(entry, fixture):
+    if "bare" in fixture or fixture["expect"] == {"kind": "transparent"}:
+        # a wrapper that only passes calls on: no fact, and it is known as such
+        assert entry.get("wrapper") in ("warn", "dispatch", "keywords", "rename")
+        assert succ_mod.helper_facts({"decorator_calls": [
+            {"name": "x", "qualname": entry["qualname"], "args": [], "kwargs": {}}]}) == []
+        return
     src = fixture.get("decorator") or fixture["call"]
     call = ast.parse(src, mode="eval").body
     args = [probe_mod._lit(a) for a in call.args]

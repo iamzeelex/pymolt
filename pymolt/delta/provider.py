@@ -351,7 +351,8 @@ def successor_patterns(report: DeltaReport, sites: BaselineSites | None
             continue
         # a module-level callable: through its module binding (``alias.old(...)``)
         if template.get("kind") == "rename" and rec.get("transfer") in (
-                "at-target", "successor-unchanged") and fact.detail.get("importable"):
+                "at-target", "successor-unchanged") and fact.detail.get("importable") and \
+                not _defaults_differ(template):
             # every importable spelling (``numpy.product`` and ``numpy.core.fromnumeric.product``)
             # to the successor's public one, binding-aware
             forbid = _renamed_keywords(template)
@@ -429,12 +430,29 @@ def _renamed_keywords(template: dict) -> list[str]:
 
 
 def _defaults_differ(template: dict) -> bool:
-    """A pass-through forward hands on the old method's own defaults: renaming the call is only
-    the same when the callee's defaults for those parameters are equal."""
-    old = {p[0]: p[2] for p in template.get("old_shape") or ()}
-    callee = {p[0]: p[2] for p in template.get("callee_old_shape") or ()}
-    return any(name in callee and str(old[name]) != str(callee[name]) for name in old
-               if old[name] is not None)
+    """A pass-through forward hands on the old callable's own defaults: renaming the call is
+    the same only when the callee's defaults for the parameters they land on are equal (by
+    position for a positional argument, by name for a keyword)."""
+    old = {p[0]: p for p in template.get("old_shape") or ()}
+    callee = [p for p in template.get("callee_old_shape") or ()
+              if p[0] not in ("self", "cls") or not template.get("member")]
+    if template.get("member") and callee and callee[0][0] in ("self", "cls"):
+        callee = callee[1:]
+    positional = [p for p in callee if p[1] in ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD")]
+    by_name = {p[0]: p for p in callee}
+    pairs: list[tuple[list, list | None]] = []
+    for i, desc in enumerate(template.get("args") or ()):
+        if isinstance(desc, dict) and "p" in desc and desc["p"] in old:
+            pairs.append((old[desc["p"]], positional[i] if i < len(positional) else None))
+    for key, desc in template.get("kwargs") or ():
+        if key != "**" and isinstance(desc, dict) and "p" in desc and desc["p"] in old:
+            pairs.append((old[desc["p"]], by_name.get(key)))
+    for mine, theirs in pairs:
+        if mine[2] is None:
+            continue                          # required: every call passes it
+        if theirs is None or str(theirs[2]) != str(mine[2]):
+            return True
+    return False
 
 
 def _is_member_symbol(symbol: str) -> bool:
