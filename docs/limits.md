@@ -57,8 +57,9 @@ replicate still did not settle:
 - **Attributes read by a computed name** (`getattr(x, name)`, `vars(x)`, `asdict(x)`) on a
   dependency object. verify compares such an object by the attributes your code reads by name, so
   the verdict lists these places instead of comparing what they read. `verify --strict` compares
-  the full state. A dependency's namedtuple your code reads by position (`parts[1]`) is projected
-  the same way: name its fields, or use `--strict`.
+  the full state. A dependency's namedtuple your code indexes later (`parts = f(); parts[1]`) is
+  projected the same way: name its fields, or use `--strict`. One unpacked or iterated on the
+  call's own statement (`t, p = stats.ttest_ind(...)`) compares every field.
 - **An environment difference** between the two captures (OS, resource limits, privileges) at a
   call that reads it. Capture both sides on the same platform.
 

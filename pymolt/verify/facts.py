@@ -3076,12 +3076,18 @@ _NO_PROJECTION = object()
 
 
 def _items_of(v: Any) -> list | None:
+    """The elements an unpacking or a loop reads: a list's or tuple's items, or an object's
+    attributes in their rendered order (a library namedtuple, ``t, p = stats.ttest_ind(...)``:
+    the renderer keeps its fields in order; any other object iterated is compared by all its
+    state, never by a projection of it)."""
     if isinstance(v, list):
         return v
     if isinstance(v, dict) and not v.get("__truncated__"):
         for tag in ("__list__", "__tuple__"):
             if isinstance(v.get(tag), list):
                 return v[tag]
+        if isinstance(v.get("__object__"), str) and isinstance(v.get("attrs"), dict):
+            return list(v["attrs"].values())
     return None
 
 
