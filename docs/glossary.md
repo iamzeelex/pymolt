@@ -19,7 +19,7 @@ One word per thing, in the CLI, the agent views, the MCP tools and these docs.
 | **coverage** | (recorded + ran, not recorded) over the contacts that are not unobservable: how much of the dependency surface the run reached |
 | **recall** | Recorded over (recorded + ran, not recorded): how much of what ran the capture caught. About 100%, or a tracer limit |
 | **granularity** | How coverage and recall knew a contact ran: `line` (3.12+), `function` (3.6–3.11), `file` (captures without the executed-code record), `symbol` (traces without call sites) |
-| **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)) |
+| **CHANGED**, **REWRITTEN**, **DISAPPEARED**, **APPEARED**, **DRIFT**, **UNCOMPARABLE** | The ways a fact can differ between captures (see [verify.md](verify.md#facts-and-the-diff)). DRIFT is a difference that is reported but does not fail: a defaulted parameter, a container type, float rounding, unread object state, how a statement uses the result, or a class of the same package |
 | **replicate** | A second run of the baseline's command on the same code and environment; what differs between the two is run-to-run noise |
 | **approval** | A person's attested `apply --approve-agent`: agents may apply this plan's pymolt steps and roll one back. A re-plan or any change to the plan voids it |
 | **attestation** | A person's confirmation, typed on a terminal, kept outside the project with an HMAC. Only an attestation can judge an edit more leniently than a hand edit |
