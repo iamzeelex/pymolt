@@ -506,7 +506,7 @@ class StaticReader:
                     and isinstance(body[0].value, ast.Call):
                 forwards = probe_mod._name(body[0].value.func)
         out: dict[str, Any] = {}
-        warns = probe_mod._warn_calls(tree)
+        warns = probe_mod._warn_calls(node if node is not None else tree)
         if warns:
             out["warns"] = warns
         if forwards:
@@ -515,6 +515,13 @@ class StaticReader:
         decorators = [d for d in decorators if d]
         if decorators:
             out["decorators"] = decorators
+        calls = probe_mod._decorator_calls(node, None)   # nothing is imported: no qualname
+        if calls:
+            out["decorator_calls"] = calls
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            raises = probe_mod._raise_messages(node)
+            if raises:
+                out["raises"] = raises
         return out
 
     def _deprecated_decorator(self, obj: Any) -> str | None:

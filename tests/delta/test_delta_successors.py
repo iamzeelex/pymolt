@@ -125,8 +125,6 @@ def test_engine_never_prefers_an_internal_reexport_when_a_public_one_is_live():
     ("Import 'markupsafe.Markup' instead.", "markupsafe.Markup"),
     ("pandas.util.testing is deprecated. Instead access pandas.testing directly",
      "pandas.testing"),
-    ("if your data is JSON, use `model_validate_json`, otherwise use `model_validate` instead.",
-     "model_validate_json"),
     ("Pydantic V1 style `@validator` validators are deprecated. You should migrate to "
      "Pydantic V2 style `@field_validator` validators", "field_validator"),
 ])
@@ -145,6 +143,17 @@ def test_successor_prose_patterns(message, expected):
     "This will be removed in a future version.",
 ])
 def test_stopwords_and_the_dispatcher_denylist_give_no_successor(message):
+    assert fetch_mod.successor_from([message]) is None
+
+
+@pytest.mark.parametrize("message", [
+    "if your data is JSON, use `model_validate_json`, otherwise use `model_validate` instead.",
+    "Please use one of Streamlit's new caching commands, `st.cache_data` or `st.cache_resource`.",
+    "Please adapt your code to use either `displot` (a figure-level function with similar "
+    "flexibility) or `histplot` (an axes-level function for histograms).",
+])
+def test_a_text_that_offers_a_choice_names_no_single_successor(message):
+    # Choosing among several candidates is an agent's or a person's job (owner's rule).
     assert fetch_mod.successor_from([message]) is None
 
 

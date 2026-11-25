@@ -40,6 +40,7 @@ from packaging.utils import canonicalize_name
 from pymolt.adapters.python_runner import RunnerSpec, run_in, to_container
 from pymolt.delta import envs as envs_mod
 from pymolt.delta import fetch as fetch_mod
+from pymolt.delta import succession as succ_mod
 from pymolt.delta.models import (
     KIND_ORDER,
     SCHEMA,
@@ -760,7 +761,7 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
 
     # what the second pass must answer: old canonical names that are not touched spellings,
     # when a member vanished or now names something else; and successor hints to check.
-    hints: dict[str, tuple[str | None, str | None]] = {}
+    hints: dict[str, list[succ_mod.Candidate]] = {}
     need: set[str] = set()
     for canon, members in groups.items():
         vanished = [m for m in members if not (m in sp_new and sp_new[m].exists)]
@@ -772,14 +773,18 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
             for m in members:  # the same object under another spelling, probed on the old side
                 need.update(sp_old[m].step.get("same_object_as") or [])
             hints[canon] = _local_hint(canon, members, sp_old, baseline, inp)
-            succ = hints[canon][0]
-            if succ:
-                need.update(_successor_candidates(succ, canon, members))
+            errors = [sp_new[m].step.get("error") or "" for m in vanished
+                      if m in sp_new and not sp_new[m].exists]
+            cands = [*hints[canon], *_error_candidates(errors, canon)]
+            for c in cands:
+                need.update(_successor_candidates(c.name, canon, members))
         for m in members:  # still there, deprecated: the new version may name its successor
             if m in sp_new and sp_new[m].exists:
-                succ = fetch_mod.successor_from(_new_prose(sp_new[m], _leaf(canon)))
-                if succ:
-                    need.update(_successor_candidates(succ, canon, [m]))
+                for c in _new_candidates(sp_new[m], _leaf(canon)):
+                    need.update(_successor_candidates(c.name, canon, [m]))
+                home = sp_new[m].step.get("same_object_home")
+                if home and home != m:          # the object's public home (identity)
+                    need.add(home)
     extra: dict[str, Spell] = {}
     todo = sorted(p for p in need if p not in sp_new)
     if todo and inp.resolve_new is not None:
@@ -817,7 +822,7 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
 
     for canon, members in sorted(groups.items()):
         for fact in _group_facts(canon, sorted(members), sp_old, new_of, new_error, baseline,
-                                 hints.get(canon, (None, None)), vanished_at):
+                                 hints.get(canon, []), vanished_at):
             add(fact)
     for pkg in facts:
         facts[pkg] = _dedupe(facts[pkg])
@@ -828,6 +833,7 @@ def _successor_candidates(succ: str, canon: str, members: Iterable[str] = ()) ->
     """Spellings a (possibly bare) successor name may stand for: as written, beside each member
     (``BaseModel.dict`` -> ``BaseModel.model_dump``), then under the package root."""
     root = canon.split(".")[0]
+    succ = succ.replace("-", "_") if "-" in succ.split(".")[0] else succ
     out = [succ]
     if "." not in succ:
         for m in members:
@@ -835,6 +841,9 @@ def _successor_candidates(succ: str, canon: str, members: Iterable[str] = ()) ->
                 out.append(m.rsplit(".", 1)[0] + "." + succ)
     if not succ.startswith(root + "."):
         out.append(f"{root}.{succ}")
+        head, _, rest = succ.partition(".")
+        if rest and head != root and len(head) <= 4:   # an import alias: ``np.nan``, ``st.rerun``
+            out.append(f"{root}.{rest}")
     return list(dict.fromkeys(out))
 
 
@@ -868,22 +877,71 @@ def _new_prose(spell: Spell, leaf: str) -> list[str]:
     return out
 
 
+def _names_of(canon: str) -> list[str]:
+    """The names a text about ``canon`` uses: its leaf, and a constructor's class."""
+    parts = canon.split(".")
+    if len(parts) > 1 and parts[-1] in ("__init__", "__new__", "__call__"):
+        return [parts[-2]]
+    return [parts[-1]]
+
+
+def _shape_params(step: Mapping[str, Any] | None) -> list[str]:
+    return [p[0] for p in (step or {}).get("shape") or () if p and p[1] not in _VAR]
+
+
+def _attributed_warnings(members: Iterable[str], sp_old: Mapping[str, Spell],
+                         baseline: Mapping[str, list[RecordedWarning]], canon: str
+                         ) -> tuple[list[RecordedWarning], list[RecordedWarning]]:
+    """``(attributed, pitfalls)``: the baseline warnings recorded at the symbol's sites, split by
+    the attribution rule (``succession.attributed``)."""
+    names = _names_of(canon)
+    params: list[str] = []
+    templates: list[str] = []
+    for m in members:
+        step = sp_old[m].step if m in sp_old else {}
+        params += _shape_params(step)
+        templates += succ_mod.templates_of(step)
+    mine, other = [], []
+    for m in members:
+        for w in baseline.get(m, []):
+            (mine if succ_mod.attributed(w.message, names, params, templates) else other).append(w)
+    return mine, other
+
+
+def _helper_texts(step: Mapping[str, Any], names: Iterable[str]) -> list[str]:
+    """The deprecation texts a step's helpers give about the object itself: the structured hints
+    of its registered helpers, and the messages of the warning helpers it calls that name it."""
+    out = []
+    for hf in succ_mod.helper_facts(step):
+        if hf.kind in ("rename-object", "prescription", "prose"):
+            text = succ_mod.prescription_text(hf)
+            if text:
+                out.append(text)
+    for h in step.get("helper_warns") or ():
+        out += [m for m in h.get("messages") or () if any(_mentions(m, n) for n in names)]
+    return out
+
+
 def _local_hint(canon: str, members: list[str], sp_old: Mapping[str, Spell],
                 baseline: Mapping[str, list[RecordedWarning]],
-                inp: DiffInput) -> tuple[str | None, str | None]:
-    """Successor hint from sources 1-3: baseline warning, old deprecation prose, knowledge."""
-    leaf = _leaf(canon)
-    warn_msgs = [w.message for m in members for w in baseline.get(m, [])]
-    succ = fetch_mod.successor_from(warn_msgs)
-    if succ:
-        return succ, "warning"
-    prose: list[str] = []
+                inp: DiffInput) -> list[succ_mod.Candidate]:
+    """Successor candidates from the old side: the baseline warnings attributed to the symbol,
+    its old deprecation prose and its registered helpers' data, then curated knowledge."""
+    names = _names_of(canon)
+    mine, _ = _attributed_warnings(members, sp_old, baseline, canon)
+    cands = succ_mod.candidates_from([w.message for w in mine], source="warning")
     for m in members:
-        prose += _hint_bucket2(sp_old[m].step, leaf)
-    succ = fetch_mod.successor_from(prose)
-    if succ:
-        return succ, "docstring"
-    if inp.knowledge_hint is not None:
+        step = sp_old[m].step
+        cands += succ_mod.candidates_from(_hint_bucket2(step, _leaf(canon)), source="docstring")
+        for hf in succ_mod.helper_facts(step):
+            if hf.kind in ("rename-object", "prescription"):
+                cands += succ_mod.candidates_from([succ_mod.prescription_text(hf) or ""],
+                                                  source="helper")
+        cands += succ_mod.candidates_from(
+            [t for t in _helper_texts(step, names)
+             if not any(t == succ_mod.prescription_text(h) for h in succ_mod.helper_facts(step)
+                        if h.kind != "prose")], source="prose")
+    if not cands and inp.knowledge_hint is not None:
         pkg = None
         for name in [canon, *members]:
             pkg = inp.root_to_package.get(name.split(".")[0])
@@ -892,24 +950,182 @@ def _local_hint(canon: str, members: list[str], sp_old: Mapping[str, Spell],
         if pkg:
             found = inp.knowledge_hint(pkg, [canon, *members])
             if found:
-                return found
-    return None, None
+                cands.append(succ_mod.Candidate(name=found[0], source=found[1], quoted=True))
+    return cands
+
+
+def _error_candidates(errors: Iterable[str], canon: str) -> list[succ_mod.Candidate]:
+    """Candidates the new version's error names, when the name is gone and the error is about it
+    (a module ``__getattr__``'s "`np.NaN` was removed ... Use `np.nan` instead")."""
+    names = _names_of(canon)
+    texts = [e.split(": ", 1)[-1] for e in errors if e and any(_mentions(e, n) for n in names)]
+    return succ_mod.candidates_from(texts, source="error")
+
+
+def _new_candidates(spell: Spell, leaf: str) -> list[succ_mod.Candidate]:
+    """Candidates the new version names for a spelling that still exists there: its deprecation
+    prose (``_new_prose``), and its helpers' texts about it."""
+    cands = succ_mod.candidates_from(_new_prose(spell, leaf), source="new-prose")
+    for hf in succ_mod.helper_facts(spell.step):
+        if hf.kind in ("rename-object", "prescription"):
+            cands += succ_mod.candidates_from([succ_mod.prescription_text(hf) or ""],
+                                              source="helper")
+    cands += succ_mod.candidates_from(_body_deprecations(spell.step, [leaf]), source="new-prose")
+    return cands
+
+
+def _body_deprecations(step: Mapping[str, Any], names: Iterable[str],
+                       always: bool | None = None) -> list[str]:
+    """Deprecation texts in a callable's own body, or in the warning helpers it calls, that name
+    it: a body that warns on every call (``always``), or only on some paths (``pl.count()``
+    without columns: the object is not marked deprecated, yet its successor is named there).
+    ``always`` None takes both."""
+    if step.get("kind") == "class":
+        return []
+    names = list(names)
+    texts = [w.get("message", "") for w in step.get("warns") or ()
+             if always is None or bool(w.get("always")) == always]
+    if always is not True:
+        for h in step.get("helper_warns") or ():
+            texts += list(h.get("messages") or ())
+    return [t for t in texts if t and _DEPRECATES.search(t)
+            and any(_mentions(t, n) for n in names)]
+
+
+_PARAM_SUBJECT = (r"(?:[`'\"]{P}[`'\"=]|(?<![\w.]){P}\s*=|(?<![\w.]){P}\s+(?:parameter|argument|"
+                  r"keyword|kwarg)|(?:parameter|argument|keyword|kwarg)s?\s+[`'\"]?{P}(?![\w])"
+                  r"|^\W*{P}\s+(?:is|was|has been|are)\s+(?:now\s+)?deprecated)")
+
+
+def _names_param(text: str, param: str) -> bool:
+    """The text is about the parameter: it quotes it (`` `shade` ``, ``'ci'``), writes it as a
+    keyword (``verify_ssl=``) or calls it a parameter or an argument. A name inside a call the
+    text shows (``headers.get(name, default)``) is not."""
+    rx = _PARAM_SUBJECT.replace("{P}", re.escape(param))
+    return re.search(rx, text or "", re.IGNORECASE) is not None
+
+
+_COMPAT_PARTS = {"v1", "compat", "_compat", "legacy", "deprecated", "_deprecated"}
+
+
+def _choose(cands: list[succ_mod.Candidate], canon: str, members: list[str],
+            new_of: Callable[[str], Spell | None], *, texts: Iterable[str] = (),
+            identity: str | None = None) -> tuple[str | None, succ_mod.Succession]:
+    """The successor ``cands`` name, if they name exactly one object that exists and is public in
+    the new version, and the succession record either way (``succession.Succession``).
+
+    Filters: it exists at the target and is not the old symbol itself; a private name (a
+    ``_segment``) or a compatibility namespace (``pydantic.v1``) is never chosen while another
+    candidate is; a bare generic word counts only as a member of the old symbol's own class.
+    Several distinct objects, or a text that offers a choice, name no successor: the candidates
+    are listed, ordered by evidence, for an agent or a person to choose."""
+    rec = succ_mod.Succession(scope="member" if _is_member(canon) else "object")
+    rec.caveats = succ_mod.caveats(texts)
+    rec.equivalent = succ_mod.asserts_equivalence(texts)
+    resolved: list[tuple[succ_mod.Candidate, str, str]] = []
+    if identity is not None:
+        target = new_of(identity)
+        if target is not None:
+            resolved.append((succ_mod.Candidate(name=identity, source="identity", quoted=True),
+                             identity, target.canonical))
+    rejected: dict[str, str] = {}
+    member_parents = {m.rsplit(".", 1)[0] for m in members if "." in m}
+    for c in cands:
+        if c.role == "param":
+            continue
+        options = _successor_candidates(c.name, canon, members)
+        spells = [sp for sp in options if new_of(sp) is not None]
+        if not spells:
+            spells = [sp for sp in options if _instance_attribute(sp, new_of)]
+            if spells:
+                sp = min(spells, key=_public_first)
+                resolved.append((c, sp, sp))
+                continue
+            rejected.setdefault(c.name, "does not exist in the new version")
+            continue
+        sp = min(spells, key=_public_first)
+        target = new_of(sp)
+        if sp in members or (target is not None and target.canonical == canon
+                             and sp.rsplit(".", 1)[-1] == canon.rsplit(".", 1)[-1]):
+            rejected.setdefault(c.name, "is the old symbol itself")
+            continue
+        if c.generic and not any(s.rsplit(".", 1)[0] in member_parents for s in spells):
+            rejected.setdefault(c.name, "a generic word, neither quoted, qualified nor a member "
+                                        "of the old symbol's class")
+            continue
+        resolved.append((c, sp, target.canonical if target is not None else sp))
+    public = [r for r in resolved if not _private(r[1])]
+    for c, sp, _ in resolved:
+        if _private(sp) and public:
+            rejected.setdefault(c.name, "private (a `_` segment)")
+    resolved = public or resolved
+    forward = [r for r in resolved if not (_COMPAT_PARTS & set(r[1].split(".")))]
+    for c, sp, _ in resolved:
+        if forward and (_COMPAT_PARTS & set(sp.split("."))):
+            rejected.setdefault(c.name, "a compatibility namespace, while the library names a "
+                                        "forward successor")
+    resolved = forward or resolved
+    rec.rejected = [{"name": n, "why": w} for n, w in rejected.items()
+                    if not any(r[0].name == n for r in resolved)]
+    by_object: dict[str, list[tuple[succ_mod.Candidate, str]]] = {}
+    for c, sp, key in resolved:
+        by_object.setdefault(key, []).append((c, sp))
+    choice = any(c.role == "alternative" for c, _, _ in resolved)
+    if len(by_object) == 1 and not choice:
+        items = next(iter(by_object.values()))
+        sp = min((s for _, s in items), key=_public_first)
+        sources = list(dict.fromkeys(c.source for c, _ in items))
+        rec.sources = sources
+        rec.trust = min((succ_mod.trust_of(src) for src in sources),
+                        key=succ_mod.TRUST_ORDER.index)
+        return sp, rec
+    if by_object:
+        order = {src: i for i, src in enumerate(("identity", "helper", "knowledge", "warning",
+                                                 "docstring", "new-prose", "prose", "error"))}
+        ranked = sorted(((c, s) for items in by_object.values() for c, s in items[:1]),
+                        key=lambda cs: (order.get(cs[0].source, 9), _public_first(cs[1])))
+        rec.candidates = [{"name": s, "source": c.source} for c, s in ranked]
+        rec.trust = None
+    return None, rec
+
+
+def _instance_attribute(spelling: str, new_of: Callable[[str], Spell | None]) -> bool:
+    """``Class.attr`` (or ``Class.attr.more``) where ``attr`` is no class attribute but one the
+    new version's ``__init__`` assigns on ``self`` (``self.status = status``)."""
+    parts = spelling.split(".")
+    for i in range(len(parts) - 1, 1, -1):
+        owner = new_of(".".join(parts[:i]))
+        if owner is not None:
+            return owner.step.get("kind") == "class" and \
+                parts[i] in (owner.step.get("instance_attrs") or ())
+    return False
+
+
+def _is_member(canon: str) -> bool:
+    parts = canon.split(".")
+    return len(parts) > 2 and parts[-2][:1].isupper()
+
+
+def _private(spelling: str) -> bool:
+    return any(part.startswith("_") and not part.startswith("__") for part in spelling.split("."))
 
 
 def _group_facts(
     canon: str, members: list[str], sp_old: Mapping[str, Spell],
     new_of: Callable[[str], Spell | None], new_error: Callable[[str], str | None],
-    baseline: Mapping[str, list[RecordedWarning]], hint: tuple[str | None, str | None],
+    baseline: Mapping[str, list[RecordedWarning]], hint: list[succ_mod.Candidate],
     vanished_at: Callable[[str], str | None] = lambda name: None,
 ) -> list[DeltaFact]:
     leaf = _leaf(canon)
+    names = _names_of(canon)
     old_steps = {m: sp_old[m] for m in members}
     surviving = [m for m in members if new_of(m) is not None]
     vanished = [m for m in members if new_of(m) is None]
     c_new = new_of(canon)
     any_old = old_steps[members[0]].step
 
-    # old-side deprecation evidence (object-level, unconditional) and baseline warnings
+    # old-side deprecation evidence (object-level, unconditional) and the baseline warnings
+    # attributed to the symbol (the others are pitfalls of the sites, never its evidence)
     ev = _Evidence()
     for m in members:
         s = old_steps[m]
@@ -917,8 +1133,10 @@ def _group_facts(
         ev.object_level += _side_deprecation(s.step, leaf, runtime, "")
         if s.step.get("kind") != "class":  # a class body's warn() calls are about anything
             ev.static += [w.get("message", "") for w in s.step.get("warns") or []]
+            for h in s.step.get("helper_warns") or ():
+                ev.static += list(h.get("messages") or ())
         ev.doc_mentions += list((s.step.get("doc") or {}).get("mentions") or [])
-        ev.baseline += baseline.get(m, [])
+    ev.baseline, _pitfalls = _attributed_warnings(members, sp_old, baseline, canon)
     ev.object_level = sorted(set(ev.object_level))
     old_deprecated = bool(ev.object_level or ev.baseline)
     baseline_ev = sorted({f"warning:{w.text()}" if len(w.text()) <= _MSG
@@ -972,6 +1190,9 @@ def _group_facts(
                       *baseline_ev],
             vanished_at=where_vanished(spells),
         )
+        fact.succession = succ_mod.Succession(
+            scope="member" if _is_member(canon) else "object", trust="identity",
+            sources=["identity"]).as_dict()
         fact.detail.update(
             importable=[s for s in spells if old_steps[s].index == 0],
             successor_importable=bool(target is not None and target.index == 0),
@@ -981,28 +1202,24 @@ def _group_facts(
 
     if removed:
         symbol = canon if canon in removed else removed[0]
-        succ, source = hint
-        error = next((e for e in (new_error(m) for m in removed) if e), None)
+        errors = [e for e in (new_error(m) for m in removed) if e]
+        error = errors[0] if errors else None
         evidence = ["existence"]
         if error:
             evidence.append(f"absent in new: {error}")
         evidence += [*ev.object_level, *baseline_ev]
+        cands = [*hint, *_error_candidates(errors, canon)]
+        succ, rec = _choose(cands, canon, members, new_of,
+                            texts=[c.text for c in cands])
         if succ:
-            evidence.append(f"successor:{source}")
+            evidence.append(f"successor:{rec.sources[0]}")
         fact = DeltaFact(
             symbol=symbol, aliases=[s for s in removed if s != symbol], kind="REMOVED",
             old=canon, successor=succ, deprecated_in_old=old_deprecated, evidence=evidence,
             vanished_at=where_vanished(removed),
         )
-        resolved = None
-        if succ:
-            for cand in _successor_candidates(succ, canon, removed):
-                if new_of(cand) is not None:
-                    resolved = cand
-                    break
-        if resolved and resolved != succ:
-            fact.successor = resolved
-        target = new_of(resolved) if resolved else None
+        fact.succession = rec.as_dict()
+        target = new_of(succ) if succ else None
         old_owner = old_steps[symbol].step
         fact.detail.update(
             importable=[s for s in removed if old_steps[s].index == 0],
@@ -1012,7 +1229,7 @@ def _group_facts(
                 and target.step.get("shape") == any_old.get("shape")
             ),
             online_query=_online_query(old_steps[symbol], old_owner),
-            hint_source=source,
+            hint_source=rec.sources[0] if succ and rec.sources else None,
             old_shape=any_old.get("shape"),
         )
         out.append(fact)
@@ -1021,6 +1238,7 @@ def _group_facts(
     changes: dict[tuple, set[str]] = {}
     notes: dict[tuple, list[str]] = {}
     new_dep: dict[str, set[str]] = {}
+    param_names: dict[tuple, tuple[str | None, succ_mod.Succession]] = {}
     for m in surviving:
         o = old_steps[m].step
         ns = new_of(m)
@@ -1032,11 +1250,12 @@ def _group_facts(
             ref = c_new
             if ref is not None and ref.canonical != cn:
                 symbol, rebound = m, f"rebound: {canon} -> {cn}"
-        for ch in param_changes(o.get("shape"), n.get("shape"), _own_prose(n),
-                                 bool(n.get("rejects_kwargs"))):
+        for ch, extra in _param_level(o, n, ev, m in sp_old and old_steps[m]):
             key = (symbol, ch.kind, ch.param, ch.old, ch.new)
             changes.setdefault(key, set()).add(m)
-            notes.setdefault(key, ["signature", *([rebound] if rebound else [])])
+            notes.setdefault(key, ["signature", *([rebound] if rebound else []), *extra])
+            if ch.param and (symbol, ch.param) not in param_names:
+                param_names[(symbol, ch.param)] = _param_successor(ch, o, n, ev)
         bc = bases_change(o, n)
         if bc is not None:
             key = (symbol, bc.kind, None, bc.old, bc.new)
@@ -1047,6 +1266,21 @@ def _group_facts(
         if dep_new:
             new_dep.setdefault(symbol, set()).update(dep_new)
             changes.setdefault((symbol, "DEPRECATED", None, None, None), set()).add(m)
+        else:
+            always = _body_deprecations(n, names, always=True)
+            # a warning on some calls only is about the object only when it names a successor
+            # that exists (polars ``count()``: "Please use `pl.len()`"); "passing a BlockManager
+            # is deprecated" is about one way of calling it
+            some = [t for t in _body_deprecations(n, names, always=False) if t not in always
+                    and any(new_of(sp) is not None
+                            for c in succ_mod.candidates_from([t]) if c.role != "param"
+                            for sp in _successor_candidates(c.name, canon, [m]))]
+            if always or some:  # its body warns: on every call, or on some paths only
+                changes.setdefault((symbol, "DEPRECATED", None, None, None), set()).add(m)
+                new_dep.setdefault(symbol, set()).update(
+                    [f"deprecated-in-new:warn: {_trim(t)}" for t in always[:2]]
+                    + [f"deprecated-in-new:in its body (some calls): {_trim(t)}"
+                       for t in some[:2]])
 
     param_facts = []
     for key, spells in sorted(changes.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
@@ -1066,7 +1300,12 @@ def _group_facts(
                 evidence += [f"old-prose: {_trim(m)}" for m in prose[:2]]
             if ev.object_level:
                 deprecated = True
-        if kind == "DEPRECATED":
+            if any(e.startswith("helper:") and "old version" in e for e in evidence):
+                deprecated = True
+            if kind == "DEPRECATED" and not any(e.startswith("deprecated-in-new:")
+                                                for e in evidence):
+                deprecated = True        # only the old version's texts say so
+        if kind == "DEPRECATED" and param is None:
             evidence = sorted(new_dep.get(symbol, set()))
         if param is None:
             evidence += [*ev.object_level, *baseline_ev]
@@ -1075,28 +1314,38 @@ def _group_facts(
             param=param, old=old, new=new, deprecated_in_old=deprecated,
             evidence=_unique(evidence),
         )
-        if kind == "DEPRECATED":
+        if param is not None and (symbol, param) in param_names:
+            succ, rec = param_names[(symbol, param)]
+            fact.successor = succ
+            fact.succession = rec.as_dict()
+            if succ:
+                fact.evidence.append(f"successor:{rec.sources[0] if rec.sources else 'named'}")
+        if kind == "DEPRECATED" and param is None:
             pool = [e.split(": ", 1)[-1] for e in evidence]
+            cands: list[succ_mod.Candidate] = succ_mod.candidates_from(pool, source="new-prose")
+            identity = None
             for sp in sorted(spells):
                 target_new = new_of(sp)
                 if target_new is not None:
                     pool += _new_prose(target_new, leaf)
-            succ = fetch_mod.successor_from(pool)
+                    cands += _new_candidates(target_new, leaf)
+                    home = target_new.step.get("same_object_home")
+                    if identity is None and home and home not in spells and \
+                            _about_access(evidence) and not _private(home):
+                        identity = home
+            succ, rec = _choose(cands, canon, sorted(spells), new_of, texts=pool,
+                                identity=identity)
             fact.successor = succ
-            if succ:
-                resolved = next((c for c in _successor_candidates(succ, canon, sorted(spells))
-                                 if c not in spells and new_of(c) is not None), None)
-                target = new_of(resolved) if resolved else None
-                if resolved:
-                    fact.successor = resolved
-                fact.detail.update(
-                    importable=[x for x in sorted(spells) if old_steps[x].index == 0],
-                    successor_importable=bool(target is not None and target.index == 0),
-                    successor_same_signature=bool(
-                        target is not None and any_old.get("shape") is not None
-                        and target.step.get("shape") == any_old.get("shape")),
-                    successor_exists=target is not None,
-                )
+            fact.succession = rec.as_dict()
+            target = new_of(succ) if succ else None
+            fact.detail.update(
+                importable=[x for x in sorted(spells) if old_steps[x].index == 0],
+                successor_importable=bool(target is not None and target.index == 0),
+                successor_same_signature=bool(
+                    target is not None and any_old.get("shape") is not None
+                    and target.step.get("shape") == any_old.get("shape")),
+                successor_exists=target is not None,
+            )
         param_facts.append(fact)
     out += param_facts
 
@@ -1105,12 +1354,19 @@ def _group_facts(
     loose = [e for e in baseline_ev if e not in carried]
     if surviving and (loose or (ev.object_level and not out)):
         symbol = canon if canon in surviving or canon not in members else surviving[0]
+        texts = [w.message for w in ev.baseline] + [e.split(": ", 1)[-1]
+                                                     for e in ev.object_level]
+        cands = [*succ_mod.candidates_from([w.message for w in ev.baseline], source="warning"),
+                 *succ_mod.candidates_from([e.split(": ", 1)[-1] for e in ev.object_level],
+                                           source="docstring"),
+                 *[c for c in hint if c.source in ("helper",)]]
+        succ, rec = _choose(cands, canon, members, new_of, texts=texts)
         fact = DeltaFact(
             symbol=symbol, aliases=[s for s in surviving if s != symbol], kind="DEPRECATED",
             deprecated_in_old=True, evidence=_unique([*ev.object_level, *loose]),
-            successor=fetch_mod.successor_from([w.message for w in ev.baseline]
-                                               + [e.split(": ", 1)[-1] for e in ev.object_level]),
+            successor=succ,
         )
+        fact.succession = rec.as_dict()
         out.append(fact)
 
     if not out and surviving:
@@ -1128,6 +1384,149 @@ def _group_facts(
             fact.detail["canonical"] = canon
             out.append(fact)
     return out
+
+
+_ACCESS_TAGS = ("getattr:", "access-warning:")
+
+
+def _about_access(evidence: Iterable[str]) -> bool:
+    """A deprecation that only accessing the name warns about (a module ``__getattr__``, an
+    access warning: ``numpy.core`` -> ``numpy._core``), not one of the object itself."""
+    tags = [str(e).removeprefix("deprecated-in-new:") for e in evidence
+            if not str(e).startswith("warning:")]
+    return bool(tags) and all(t.startswith(_ACCESS_TAGS) for t in tags)
+
+
+def _param_level(o: dict, n: dict, ev: _Evidence, spell: Any) -> list[tuple[ParamChange,
+                                                                               list[str]]]:
+    """The parameter changes of one spelling, with what the deprecation helpers add:
+
+    - a parameter the old version accepted only through a rename helper
+      (``@deprecate_renamed_parameter("periods", "n")``) that the new one accepts no more is
+      removed (SIGNATURE), though both signatures read the same;
+    - a parameter the new version still accepts through a rename helper
+      (``@_api.rename_parameter("3.9", "labels", "tick_labels")``) is deprecated there, not
+      removed or renamed (DEPRECATED);
+    - a parameter both versions have that the new one's own body, or a warning helper it calls,
+      says is deprecated (seaborn ``kdeplot(shade=)``) is deprecated there (DEPRECATED)."""
+    changes = param_changes(o.get("shape"), n.get("shape"), _own_prose(n),
+                            bool(n.get("rejects_kwargs")))
+    o_ren = succ_mod.param_renames(o)
+    n_ren = succ_mod.param_renames(n)
+    n_params = set(_shape_params(n))
+    o_params = set(_shape_params(o))
+    n_varkw = any(p[1] == "VAR_KEYWORD" for p in n.get("shape") or ())
+    out: list[tuple[ParamChange, list[str]]] = []
+    done: set[str] = set()
+    for ch in changes:
+        hf = n_ren.get(ch.param or "")
+        if hf is not None and ch.kind == "SIGNATURE":
+            done.add(ch.param)  # type: ignore[arg-type]
+            out.append((ParamChange("DEPRECATED", ch.param, None, None,
+                                    f"param {ch.param} deprecated, renamed to {hf.new}"),
+                        [f"deprecated-in-new:helper: {hf.label()}"]))
+            continue
+        out.append((ch, []))
+    for old, hf in o_ren.items():
+        if old in done or old in o_params or any(ch.param == old for ch, _ in out):
+            continue
+        if old in n_params:
+            continue
+        if old in n_ren:
+            out.append((ParamChange("DEPRECATED", old, None, None,
+                                    f"param {old} deprecated, renamed to {hf.new}"),
+                        [f"helper: {hf.label()} (the old version)",
+                         f"deprecated-in-new:helper: {n_ren[old].label()}"]))
+            continue
+        if n_varkw and not n.get("rejects_kwargs") and not _stated_removed(old, _own_prose(n)):
+            continue                    # the new **kwargs may still take it: nothing to say
+        out.append((ParamChange("SIGNATURE", old, f"alias of {hf.new}", None,
+                                f"param {old} removed (the old version accepted it as an alias "
+                                f"of {hf.new})"),
+                    [f"helper: {hf.label()} (the old version)"]))
+    named = {ch.param for ch, _ in out}
+    old_texts = [*_param_texts(o), *[w.message for w in ev.baseline]]
+    for param in sorted(n_params & o_params):
+        if param in named:
+            continue
+
+        def about(texts: list[str], param: str = param) -> list[str]:
+            return [t for t in texts if _names_param(t, param) and _DEPRECATES.search(t)
+                    and not _mentions(t, "positional")]
+
+        new_texts, old_ones = about(_param_texts(n)), about(old_texts)
+        if new_texts or old_ones:
+            extra = [f"deprecated-in-new:in its body: {_trim(new_texts[0])}"] if new_texts \
+                else []
+            extra += [f"old-prose: {_trim(t)}" for t in old_ones[:1]]
+            out.append((ParamChange("DEPRECATED", param, None, None,
+                                    f"param {param} deprecated"), extra))
+    return out
+
+
+def _param_texts(step: Mapping[str, Any]) -> list[str]:
+    """A callable's own texts about its parameters: warn and raise messages, and the messages
+    of the warning helpers it calls. None for a class: its source holds every method's texts,
+    about any of their parameters (its ``__init__`` speaks for the constructor)."""
+    if step.get("kind") == "class":
+        return []
+    texts = [w.get("message", "") for w in step.get("warns") or ()]
+    texts += [w.get("message", "") for w in step.get("raises") or ()]
+    for h in step.get("helper_warns") or ():
+        texts += list(h.get("messages") or ())
+    return [t for t in texts if t]
+
+
+def _param_successor(ch: ParamChange, o: dict, n: dict, ev: _Evidence
+                     ) -> tuple[str | None, succ_mod.Succession]:
+    """The parameter a changed parameter is replaced by, and how it is known:
+
+    - a rename helper on either side says so (its data: ``proof`` when the helper is
+      registered, ``named`` when its cells were read generically);
+    - otherwise the texts about it (either side's warn and raise messages, the warning helpers
+      they call, the baseline warnings) name one parameter the new signature has and the old
+      one lacked, or that the old body hands over (``named``);
+    - a parameter paired only by position (``param_changes``' rename) is a ``hint``, never a
+      successor."""
+    param = ch.param or ""
+    rec = succ_mod.Succession(scope="param")
+    n_params = set(_shape_params(n))
+    for side, step in (("new", n), ("old", o)):
+        hf = succ_mod.param_renames(step).get(param)
+        if hf is not None and hf.new and (hf.new in n_params or not n_params):
+            rec.trust = "proof" if hf.registered else "named"
+            rec.sources = ["helper"]
+            rec.params = {param: hf.new}
+            if hf.registered:
+                rec.proof = {"kind": "helper", "locus": hf.helper, "version": hf.since,
+                             "side": side}
+            return hf.new, rec
+    texts = [t for t in [*_param_texts(o), *_param_texts(n),
+                         *[w.message for w in ev.baseline]] if _names_param(t, param)]
+    rec.caveats = succ_mod.caveats(texts)
+    rec.equivalent = succ_mod.asserts_equivalence(texts)
+    found: list[str] = []
+    rejected: dict[str, str] = {}
+    for c in succ_mod.candidates_from(texts, source="prose"):
+        name = c.name.split(".")[-1] if c.role == "param" else c.name
+        if name == param or "." in name:
+            continue
+        if n_params and name not in n_params:
+            rejected.setdefault(name, "is no parameter of the new signature")
+            continue
+        if name not in found:
+            found.append(name)
+    rec.rejected = [{"name": k, "why": v} for k, v in rejected.items() if k not in found]
+    if len(found) == 1:
+        rec.trust, rec.sources, rec.params = "named", ["prose"], {param: found[0]}
+        return found[0], rec
+    if found:
+        rec.candidates = [{"name": f, "source": "prose"} for f in found]
+        return None, rec
+    if ch.kind == "SIGNATURE" and ch.new and ch.note.startswith(f"param {param} renamed to"):
+        rec.candidates = [{"name": ch.new, "source": "position"}]
+        rec.trust = None
+    return None, rec
 
 
 def _same_object_successor(step: dict, any_old: dict, leaf: str,

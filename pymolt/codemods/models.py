@@ -70,6 +70,9 @@ class ApiImpact(BaseModel):
     explanation: str
     transition_confidence: str | None = None
     transition_reason: str | None = None
+    param: str | None = None
+    """The parameter a parameter-level change is about (``replacement_path`` is then the
+    parameter that replaces it)."""
 
 
 class CodemodBundle(BaseModel):

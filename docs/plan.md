@@ -25,12 +25,34 @@ irrelevant changes.
   capture, lock, base interpreter or exact pin, a base version is `unknown` (a floor such as
   `flask>=0.10` is not what is installed): the move is listed from `unknown` and its API changes
   are inconclusive, never computed from the floor.
-- **Successors.** Where a removed name went is taken from:
-  - the warnings the baseline run recorded;
-  - the old version's docstrings;
+- **Successors.** Where a removed, deprecated or renamed name (or parameter) went is *named* from
+  the library's own text and data:
+  - the warnings the baseline run recorded at its sites, when they are about it (below);
+  - the old and new versions' deprecation prose: docstrings, `warn` and `raise` texts with a
+    message variable followed one step, and the warning helpers a body calls one level down
+    (flask's `_prepare_send_file_kwargs` says `attachment_filename` became `download_name`);
+  - the new version's error for a removed name (numpy 2's module `__getattr__`: "Use `np.nan`
+    instead"), and the body of a callable that warns on some calls only (polars `count()`);
+  - the data of known deprecation helpers, read from their decorator arguments or their
+    wrappers' closure cells (`deprecate_renamed_parameter("periods", "n")`,
+    `_api.rename_parameter("3.9", "labels", "tick_labels")`, `_api.deprecated(alternative=...)`;
+    the list is `pymolt/knowledge/deprecation_helpers.json`);
   - the knowledge shipped with pymolt;
   - with `--online`, intermediate releases on PyPI. Only package names and versions leave the
     machine.
+
+  A named successor must exist and be public in the target, and must not be the old symbol. A
+  private name (`numpy._core`) or a compatibility namespace (`pydantic.v1`) is never chosen while
+  another candidate is, and a bare generic word ("use `fit`") counts only when quoted, qualified,
+  or a member of the same class. A recorded warning is evidence about a symbol only when it names
+  the symbol or one of its parameters, or matches a warning its own code emits; any other one is
+  a pitfall of the site (seaborn's `factorplot` call warning about numpy's `result_type`). When
+  the evidence names several objects, or offers a choice ("`st.cache_data` or
+  `st.cache_resource`"), no successor is picked: the fact lists them as `succession.candidates`,
+  ordered by evidence, and the agent or person chooses. Every fact that names a successor says
+  how (`succession`: its `trust`, the `sources`, `caveats` such as "the default has changed",
+  and the names it `rejected` and why). A parameter paired with another only by its position is a
+  candidate, never a successor. Prose and text only name a successor; they never rewrite code.
 - **Same object, new name.** A name that now points to the same object under another spelling is
   followed, not reported as removed.
 - **Receivers.** A method call is also compared under its receiver's class, and under that class's
