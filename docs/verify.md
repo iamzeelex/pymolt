@@ -168,7 +168,9 @@ who recorded it (`apply --step ID --record`). Its old → new symbol pairs the c
 successor rewrite also records the keywords it renamed and the defaults it wrote out
 ([plan.md](plan.md#codemods)): before the inputs are compared, the new call's keywords take
 their old names back, and a written-out default equal to the old one counts as left at its
-default, so `shift(n=1)` compares with the baseline's `shift(periods=1)`. A recorded
+default, so `shift(n=1)` compares with the baseline's `shift(periods=1)`. Only the rewritten
+callable's own calls are taken back (the entry's old or new symbol, or that callable moved within
+its package); another call on the statement keeps its keys, and its input change shows. A recorded
 edit carries its step's claim: `preserve`, or `intended` expecting `representation` for a step
 that moves to another object ([plan.md](plan.md#the-plan-as-steps)). `--claim` and `--expect`
 can only tighten it; loosening it needs a person's attestation.

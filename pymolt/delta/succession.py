@@ -230,23 +230,47 @@ def _acceptable(name: str, code: bool = False) -> bool:
     return True
 
 
+_NEGATION = re.compile(r"\b(?:not|no|never|neither|nor|without|cannot|isn't|aren't|doesn't|"
+                       r"don't|won't|is\s+no\s+longer)\b", re.IGNORECASE)
+
+
+def _sentences(messages: Iterable[str]) -> list[str]:
+    return [s for msg in messages
+            for s in re.split(r"(?<=[.!?:;])\s+", " ".join(str(msg or "").split())) if s]
+
+
+def _equivalence(sentence: str) -> str | None:
+    """``"yes"`` when the sentence says the successor does the same, ``"no"`` when it says it
+    does not ("is not equivalent to", "does not have the same behaviour"), else None."""
+    m = _EQUIVALENT.search(sentence)
+    if m is None:
+        return None
+    # the denial sits right before the phrase ("is not equivalent", "does not have the same
+    # behaviour", "is no longer equivalent"), not anywhere earlier in the sentence
+    near = " ".join(sentence[:m.start()].split()[-4:])
+    return "no" if _NEGATION.search(near) else "yes"
+
+
 def caveats(messages: Iterable[str]) -> list[str]:
     """The sentences of ``messages`` that qualify a successor ("Note that the default ... has
-    changed", "encouraged to review"), capped. A caveat keeps text alone from rewriting code."""
+    changed", "encouraged to review", "is not equivalent to"), capped. A caveat keeps text
+    alone from rewriting code."""
     out: list[str] = []
-    for msg in messages:
-        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(str(msg or "").split())):
-            if _CAVEATS.search(sentence) and not _EQUIVALENT.search(sentence):
-                item = sentence[:200]
-                if item not in out:
-                    out.append(item)
+    for sentence in _sentences(messages):
+        eq = _equivalence(sentence)
+        if (_CAVEATS.search(sentence) and eq != "yes") or eq == "no":
+            item = sentence[:200]
+            if item not in out:
+                out.append(item)
     return out[:4]
 
 
 def asserts_equivalence(messages: Iterable[str]) -> bool:
     """A text that says the successor does the same ("for the same effect", "which has the
-    same behavior")."""
-    return any(_EQUIVALENT.search(str(m or "")) for m in messages)
+    same behavior"), and does not deny it ("is not equivalent to")."""
+    sentences = _sentences(messages)
+    found = [_equivalence(s) for s in sentences]
+    return "yes" in found and "no" not in found
 
 
 def first_successor(messages: Iterable[str]) -> str | None:

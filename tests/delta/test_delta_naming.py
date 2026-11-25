@@ -474,3 +474,11 @@ def test_probe_extractors_keep_the_legacy_syntax():
     tree = ast.parse(Path(probe_mod.__file__).read_text(encoding="utf-8"), feature_version=(3, 6))
     assert not any(isinstance(n, ast.JoinedStr) for n in ast.walk(tree))
     assert probe_mod.PROBE_VERSION >= 9
+
+
+def test_a_denied_equivalence_is_a_caveat_not_an_equivalence():
+    text = ("`map_dict` is deprecated. Use `replace` instead. Note that `replace` is not "
+            "equivalent to `map_dict`: unmapped values are kept.")
+    assert not succ_mod.asserts_equivalence([text])
+    assert any("not equivalent" in c for c in succ_mod.caveats([text]))
+    assert succ_mod.asserts_equivalence(["Use `errorbar=('ci', 95)` for the same effect."])

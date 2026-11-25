@@ -4,7 +4,9 @@ HOST side. A ``rename-keyword`` step turns ``shift(periods=1)`` into ``shift(n=1
 ``forward-template`` step may write out a default the successor changed
 (``with_row_count()`` -> ``with_row_index("row_nr")``). The post-migration capture then records
 the call with other keys than the baseline did, and the inputs would compare as changed: an input
-change, a review item, on a line the library's own code proves the same.
+change, a review item, on a line the library's own code proves the same. Only the rewritten
+callable's own calls (the entry's old or new symbol) are taken back: another call on the
+statement keeps its keys.
 
 The apply ledger says what each such rewrite renamed and wrote out (``param_map``,
 ``materialized``; ``apply_ledger.successor_maps``). :func:`normalize` maps the new side's
@@ -49,30 +51,48 @@ def _rename(mapping: Any, back: Mapping[str, str]) -> Any:
     return mapping
 
 
+def _of_entry(symbol: str | None, symbols: set[str]) -> bool:
+    """The fact is a call of the entry's callable: its old or new symbol, or that callable moved
+    within its package (the same top-level package and last name,
+    ``numpy.lib.function_base.percentile`` -> ``numpy.lib._function_base_impl.percentile``), the
+    rule verify pairs moved symbols by."""
+    if not symbol:
+        return False
+    if symbol in symbols:
+        return True
+    head, leaf = symbol.partition(".")[0], symbol.rsplit(".", 1)[-1]
+    return "." in symbol and any(
+        "." in s and s.partition(".")[0] == head and s.rsplit(".", 1)[-1] == leaf
+        for s in symbols)
+
+
 def normalize(facts: list[Any], edits: Iterable[Mapping[str, Any]] | None) -> list[Any]:
     """``facts`` (the post-migration side's) with each fact at a statement a successor rewrite
     made taken back to the old call's keys (see the module docstring)."""
     rules = []
     for e in edits or ():
         params, written = e.get("param_map"), e.get("materialized")
-        if not (params or written) or not e.get("file"):
+        symbols = {s for s in (e.get("old_symbol"), e.get("new_symbol")) if s}
+        if not (params or written) or not e.get("file") or not symbols:
             continue
         lines = _lines(e)
         if lines:
             rules.append((e["file"], lines, {new: old for old, new in (params or {}).items()},
-                          dict(written or {})))
+                          dict(written or {}), symbols))
     if not rules:
         return facts
     out = []
     for f in facts:
-        here = [r for r in rules if r[0] == f.file and
+        # only the rewritten callable's own calls: another call on the statement that renamed
+        # a keyword the same way is no proven rename, and its input change must show
+        here = [r for r in rules if r[0] == f.file and _of_entry(f.symbol, r[4]) and
                 ({f.line, *(f.lines or ())} & r[1])]
         if not here or not isinstance(f.input, dict):
             out.append(f)
             continue
         inp = dict(f.input)
         defaulted = [list(d) for d in f.defaulted] if f.defaulted is not None else None
-        for _file, _lines_, back, written in here:
+        for _file, _lines_, back, written, _symbols in here:
             if isinstance(inp.get("bound"), dict):
                 bound = _rename(inp["bound"], back)
                 for name, old_default in written.items():
