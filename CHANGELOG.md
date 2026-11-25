@@ -279,8 +279,11 @@ All notable changes to pymolt. The format follows
 - `verify`'s golden, canary and shadow options (`--golden-before`, `--golden-after`, `--policy`,
   `--metrics`, `--auto-rollback`, `--shadow`) are hidden until 0.3: no command makes their input
   files yet. They still work for a script that writes those files.
-- A dynamic-only symbol whose facts all compared equal no longer blocks PASS, nor does one made
-  only of calls compiled code made while the project's call ran.
+- A dynamic-only symbol (one the static map missed) no longer blocks PASS when it is settled as
+  a static symbol would be: its facts compared equal, are calls its line did not make (compiled
+  code calling back, an implicit hook), or are calls an edit made with no partner (unverified
+  edited sites; a new raise there still fails). A new call a hand edit introduced kept every
+  equivalent migration with such an edit INCONCLUSIVE.
 - A dependency use no capture can record no longer blocks PASS: one no capture can observe (an
   attribute read, a constant such as `yaml.SafeLoader`, a chain through a return value), and one
   whose line ran while the watcher recorded no call there (a numpy ufunc, `polars.col`, an

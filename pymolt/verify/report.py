@@ -1518,20 +1518,31 @@ def _unresolvable_class(error: str, dep: str) -> str | None:
 
 
 def _compared_equal_symbols(fdiff: FactDiff) -> list[str]:
-    """Symbols whose every fact was compared on both sides and found equal.
+    """Symbols whose facts settle them: every entry is one that does not keep a static symbol's
+    verdict from PASS either.
 
     Equal, DRIFT (only the library's defaults moved) and REWRITTEN-with-equal-outcome all
-    count as compared-equal; any other entry for a symbol — changed, vanished, appeared,
-    uncomparable, unpaired — disqualifies it. A symbol whose every fact was a call the
-    project's line did not make (``FactDiff.via_symbols``: compiled code calling back) is no
-    contact of the project's and settled too.
+    count as compared-equal. So does a call the project's line did not make: compiled code
+    calling back (``FactDiff.via_symbols``) or an implicit hook explained away (``explained``
+    "implicit: ..."), which is no contact of the project's. So does an unverified edited site
+    (a call a hand or recorded edit made with no partner on the other side), which the edited
+    site rules judge (a new raise there fails on its own) and the report counts. Any other entry
+    for a symbol (changed, vanished, appeared, uncomparable, a review) disqualifies it.
     """
     settled: set[str] = set(getattr(fdiff, "via_symbols", None) or ())
     unsettled: set[str] = set()
     for entry in fdiff.entries:
         names = {entry.symbol, *([entry.new_symbol] if entry.new_symbol else [])}
-        equal = entry.comparison is Comparison.EQUAL and entry.category in (
-            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN,
-        )
-        (settled if equal else unsettled).update(names)
+        (settled if _settles_symbol(entry) else unsettled).update(names)
     return sorted(settled - unsettled)
+
+
+def _settles_symbol(entry: Any) -> bool:
+    """Whether this entry leaves its symbol verified for the dynamic-only rule
+    (``_compared_equal_symbols``)."""
+    if entry.comparison is Comparison.EQUAL and entry.category in (
+            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN):
+        return True
+    if entry.fails or entry.inconclusive:
+        return False
+    return entry.unverified or (entry.explained or "").startswith("implicit:")

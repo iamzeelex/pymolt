@@ -456,3 +456,34 @@ def test_capped_and_shape_mismatched_facts_have_their_own_reasons():
     assert any(r.startswith("2 call fact(s) are missing at compiled-call sites") for r in reasons)
     assert any(r.startswith("1 call fact(s) were recorded as compiled calls") for r in reasons)
     assert not any("lost their outcome distribution" in r for r in reasons)
+
+
+def _entry(symbol, category, comparison, **kw):
+    from pymolt.verify.facts import FactEntry, SiteRef
+
+    site = SiteRef(file="myapp/views.py", func="handler", line=5, text="x")
+    return FactEntry(symbol=symbol, category=category, comparison=comparison,
+                     old_site=site, **kw)
+
+
+def test_dynamic_only_settled_like_a_static_symbol():
+    """A dynamic-only symbol is held to what holds a static one back from PASS: a call an edit
+    made with no partner (unverified, judged by the edited-site rules) and an implicit hook
+    explained away settle it; a changed, uncomparable or review entry does not."""
+    from pymolt.verify.facts import Comparison, FactCategory, FactDiff
+    from pymolt.verify.report import _compared_equal_symbols
+
+    fd = FactDiff(entries=[
+        _entry("dep.Headers.get", FactCategory.REWRITTEN, Comparison.MISSING, unverified=True),
+        _entry("dep.Lazy.__getattribute__", FactCategory.DRIFT, Comparison.MISSING,
+               explained="implicit: implicit protocol hook"),
+        _entry("dep.equal", FactCategory.EQUAL, Comparison.EQUAL),
+        _entry("dep.mixed", FactCategory.REWRITTEN, Comparison.MISSING, unverified=True),
+        _entry("dep.mixed", FactCategory.CHANGED, Comparison.CHANGED),
+        _entry("dep.review", FactCategory.REWRITTEN, Comparison.CHANGED, review="hand edit"),
+        _entry("dep.uncomparable", FactCategory.UNCOMPARABLE, Comparison.UNCOMPARABLE),
+        _entry("dep.other_noise", FactCategory.DRIFT, Comparison.MISSING,
+               explained="clock: a timestamp"),
+    ])
+    assert _compared_equal_symbols(fd) == ["dep.Headers.get", "dep.Lazy.__getattribute__",
+                                           "dep.equal"]

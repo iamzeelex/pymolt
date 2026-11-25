@@ -500,7 +500,10 @@ hand-written trace, or JSONL merged with `cat` without its sidecars, has no even
     `np.isnan`, `polars.col`, an implicit `__float__`), which capturing again repeats. The verdict
     lists it instead ("N dependency use(s) cannot be observed by a capture, so this verdict does
     not cover them"), and `--agent` gives it as `unobservable_uses`;
-  - every dynamic-only symbol had all its facts compared equal.
+  - every dynamic-only symbol is settled as a static one would be: each of its facts compared
+    equal, is a call its line did not make (compiled code calling back, an implicit hook
+    explained away), or is an unverified edited site (a call an edit made with no partner,
+    judged by the edited-site rules, where a new raise fails).
 - **INCONCLUSIVE**: anything else. The reasons name the missing evidence, for example "2 static
   dependency symbol(s) were not exercised (1 not run by the workload; 1 ran but not recorded)" or
   "capture freshness could not be established". Review
