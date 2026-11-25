@@ -51,6 +51,10 @@ class SourceUses:
     keys: dict[str, set[str]] = field(default_factory=dict)
     probed: set[str] = field(default_factory=set)
     introspected: set[str] = field(default_factory=set)
+    # the top-level packages of the classes it checks, resolved through the file's imports
+    # (``isinstance(r, JR)`` after ``from dep.models import JSONResponse as JR`` -> ``dep``):
+    # with no class hierarchy recorded, any class of such a package may be a base of another
+    introspected_packages: set[str] = field(default_factory=set)
     type_names_read: bool = False
     dynamic: list[tuple[str, int, str]] = field(default_factory=list)
     # file -> [(first line, last line, callee leaf, consumer)] of every call
@@ -65,6 +69,42 @@ def _leaf(node: ast.AST | None) -> str | None:
     if isinstance(node, ast.Attribute):
         return node.attr
     return None
+
+
+def _class_refs(node: ast.AST | None) -> list[ast.AST]:
+    """The class references an ``isinstance`` second argument / ``except`` clause holds."""
+    if isinstance(node, ast.Tuple | ast.List | ast.Set):
+        return [r for e in node.elts for r in _class_refs(e)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):   # ``A | B``
+        return _class_refs(node.left) + _class_refs(node.right)
+    return [node] if isinstance(node, ast.Name | ast.Attribute) else []
+
+
+def import_bindings(tree: ast.AST) -> dict[str, str]:
+    """Names the file's absolute imports bind -> the dotted path they stand for
+    (``import a.b as c`` -> ``c: a.b``; ``from x.y import Z as W`` -> ``W: x.y.Z``)."""
+    out: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.asname:
+                    out[a.asname] = a.name
+                else:
+                    out[a.name.split(".")[0]] = a.name.split(".")[0]
+        elif isinstance(n, ast.ImportFrom) and not n.level and n.module:
+            for a in n.names:
+                out[a.asname or a.name] = f"{n.module}.{a.name}"
+    return out
+
+
+def _dotted_name(node: ast.AST, bindings: Mapping[str, str]) -> str | None:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name) or node.id not in bindings:
+        return None
+    return ".".join([bindings[node.id], *reversed(parts)])
 
 
 def _class_leaves(node: ast.AST | None) -> set[str]:
@@ -144,7 +184,9 @@ def _literal_name(node: ast.AST | None) -> str | None:
 
 class _Visitor(ast.NodeVisitor):
     def __init__(self, uses: SourceUses, file: str, lines: list[str],
-                 parents: dict[int, ast.AST], modules: set[str]) -> None:
+                 parents: dict[int, ast.AST], modules: set[str],
+                 bindings: Mapping[str, str] | None = None) -> None:
+        self.bindings = bindings or {}
         self.uses = uses
         self.file = file
         self.lines = lines
@@ -180,6 +222,17 @@ class _Visitor(ast.NodeVisitor):
                     return ("key", key)
         return ("whole", None)
 
+    def _introspect(self, node: ast.AST | None, *, packages: bool = True) -> None:
+        """Record the classes a check names: their names, and through the file's imports
+        their full names' leaves and (``packages``) top-level packages."""
+        self.uses.introspected |= _class_leaves(node)
+        for ref in _class_refs(node):
+            full = _dotted_name(ref, self.bindings)
+            if full:
+                self.uses.introspected.add(full.rsplit(".", 1)[-1])
+                if packages:
+                    self.uses.introspected_packages.add(full.split(".")[0])
+
     def _dynamic(self, node: ast.AST, what: str) -> None:
         line = getattr(node, "lineno", 0)
         self.uses.dynamic.append((self.file, line, what))
@@ -199,7 +252,7 @@ class _Visitor(ast.NodeVisitor):
                 if name == "hasattr" or len(node.args) >= 3:
                     self.uses.probed.add(lit)
         elif name in ("isinstance", "issubclass") and len(node.args) >= 2:
-            self.uses.introspected |= _class_leaves(node.args[1])
+            self._introspect(node.args[1])
         elif name == "attrgetter":
             for a in node.args:
                 lit = _literal_name(a)
@@ -209,7 +262,7 @@ class _Visitor(ast.NodeVisitor):
         elif name in _DYNAMIC_CALLS and len(node.args) == _DYNAMIC_CALLS[name]:
             self._dynamic(node, f"{name}(x)")
         elif name == "register" and node.args:              # singledispatch ``f.register(C)``
-            self.uses.introspected |= _class_leaves(node.args[0])
+            self._introspect(node.args[0])
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -234,17 +287,17 @@ class _Visitor(ast.NodeVisitor):
         if any(_is_type_of(s) for s in sides):
             for s in sides:
                 if not _is_type_of(s):
-                    self.uses.introspected |= _class_leaves(s)
+                    self._introspect(s)
         self.generic_visit(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-        self.uses.introspected |= _class_leaves(node.type)
+        # an ``except`` clause tests a raised exception's class only (raises compare
+        # strictly): it never checks a returned object, so it marks no package
+        self._introspect(node.type, packages=False)
         self.generic_visit(node)
 
     def visit_MatchClass(self, node: ast.MatchClass) -> None:
-        leaf = _leaf(node.cls)
-        if leaf:
-            self.uses.introspected.add(leaf)
+        self._introspect(node.cls)
         self.generic_visit(node)
 
     def _register_annotation(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -252,7 +305,7 @@ class _Visitor(ast.NodeVisitor):
             if isinstance(d, ast.Attribute) and d.attr == "register":
                 args = [*node.args.posonlyargs, *node.args.args]
                 if args and args[0].annotation is not None:
-                    self.uses.introspected |= _class_leaves(args[0].annotation)
+                    self._introspect(args[0].annotation)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._register_annotation(node)
@@ -310,7 +363,7 @@ def source_uses(sources: Mapping[str, str] | None) -> SourceUses | None:
                 if leaf:
                     calls.append((n.lineno, n.end_lineno or n.lineno, leaf,
                                   _consumer(n, parents, shadowed)))
-        v = _Visitor(uses, file, text.splitlines(), parents, modules)
+        v = _Visitor(uses, file, text.splitlines(), parents, modules, import_bindings(tree))
         # ``called`` must be known before an Attribute is visited: a Call is visited before
         # its func (generic_visit walks fields in order), so one pass suffices.
         v.visit(tree)

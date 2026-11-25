@@ -2604,6 +2604,22 @@ def _unnameable(name: str) -> bool:
     return leaf.startswith("_") or "<locals>" in name
 
 
+def _introspected(*names: str) -> bool:
+    """The project may check one of these classes: it names one (or an alias of one) in an
+    ``isinstance``/``issubclass``/``except``/``match``/``type(x) is C``/singledispatch check,
+    it checks some class of one's top-level package (with no MRO recorded, that one may be a
+    base of these), or it reads a type's name."""
+    sem = _SEM.get()
+    if sem is None:
+        return False
+    if sem.old.type_names_read or sem.new.type_names_read:
+        return True
+    leaves = {n.rsplit(".", 1)[-1] for n in names}
+    packages = {n.split(".")[0] for n in names}
+    return bool(leaves & (sem.old.introspected | sem.new.introspected)
+                or packages & (sem.old.introspected_packages | sem.new.introspected_packages))
+
+
 def _handle_types_relate(ta: str, tb: str) -> bool:
     """The type ladder for two dependency objects (§2, without the MRO step): the same type or
     a relocation (same package, same class name); else, while the class relation is unknown
@@ -2616,9 +2632,7 @@ def _handle_types_relate(ta: str, tb: str) -> bool:
     sem = _SEM.get()
     if sem is None or _EDITED.get() or not (isinstance(ta, str) and isinstance(tb, str)):
         return False   # on an edited line the edit's claim judges a new class (``_judge_pairs``)
-    seen = sem.old.introspected | sem.new.introspected
-    if ({ta.rsplit(".", 1)[-1], tb.rsplit(".", 1)[-1]} & seen
-            or sem.old.type_names_read or sem.new.type_names_read):
+    if _introspected(ta, tb):
         return False
     same_module = ta.rsplit(".", 1)[0] == tb.rsplit(".", 1)[0]
     rule = ("private-same-module" if same_module and _unnameable(ta) and _unnameable(tb)
