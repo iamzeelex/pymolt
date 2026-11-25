@@ -146,3 +146,28 @@ def test_mutation_a_dependency_callable_whose_name_the_project_reads_fails(tmp_p
     d = run(tmp_path, old, new, VAL_OLD + reads, VAL_NEW + reads, edits=[edit])
     e = one(d, "dep.validator")
     assert e.fails and e.comparison is Comparison.CHANGED
+
+
+# ── the import system's dunder probe is not a new raise ─────────────────────────────────
+
+IMP_OLD = "from dep.urls import url_parse\n"
+IMP_NEW = "from urllib.parse import urlsplit\n"
+IMP_EDIT = {"file": "app.py", "located": {"old": [1, 1], "new": [1, 1]}, "claim": "hand",
+            "basis": "manual"}
+
+
+def probe(name):
+    return ev("urllib.parse.__getattr__", {"name": name}, raised="AttributeError", line=1,
+              func="<module>")
+
+
+def test_an_import_probe_of_a_dunder_on_an_edited_line_stays_unverified(tmp_path):
+    d = run(tmp_path, [], [probe("__path__")], IMP_OLD, IMP_NEW, edits=[IMP_EDIT])
+    e = one(d, "urllib.parse.__path__")
+    assert not e.fails and e.unverified
+
+
+def test_mutation_a_getattr_of_a_plain_name_raising_on_an_edited_line_fails(tmp_path):
+    d = run(tmp_path, [], [probe("urljoinx")], IMP_OLD, IMP_NEW, edits=[IMP_EDIT])
+    e = one(d, "urllib.parse.urljoinx")
+    assert e.fails and d.verdict is FAIL

@@ -9109,6 +9109,17 @@ def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> 
     return entry
 
 
+def _dunder_probe(f: Fact) -> bool:
+    """A ``__getattr__`` asked for a dunder name (the import system's ``__path__`` probe of a
+    module, ``copy``'s ``__deepcopy__``): the attribute protocol's probe, whose AttributeError
+    is its "absent" answer (``hasattr``, ``getattr`` with a default), not a raise."""
+    bound = f.input.get("bound") if isinstance(f.input, dict) else None
+    name = bound.get("name") if isinstance(bound, dict) else None
+    if not (f.attr_of or f.symbol.endswith(".__getattr__")) or not isinstance(name, str):
+        return False
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
 def _new_raise_unpaired(f: Fact, covering: Mapping | None, prov: _Provenance) -> str | None:
     """An unpaired new-side call on an edited statement that raises: a call that fails to bind
     fails whatever the claim; another raise fails when no call of the old statement's function
@@ -9116,7 +9127,8 @@ def _new_raise_unpaired(f: Fact, covering: Mapping | None, prov: _Provenance) ->
     if f.binding:
         return f"now fails to bind its arguments on an edited line ({_binding_raise(f)})"
     raised = sorted({_raise_name(o.value) for o in f.outcomes if o.kind == "raise"})
-    if not raised or (f.file, f.func) in getattr(prov, "old_edit_raises", set()):
+    if (not raised or (f.file, f.func) in getattr(prov, "old_edit_raises", set())
+            or (raised == ["AttributeError"] and _dunder_probe(f))):
         return None
     expect = str((covering or {}).get("expect") or "")
     if covering is not None and _attested(covering) and expect.startswith("raise:") \
