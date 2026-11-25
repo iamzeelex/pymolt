@@ -591,3 +591,95 @@ def test_inputs_within_rounding_are_the_same_input(tmp_path):
     changed = run(tmp_path, [pred([3.0], x=x_old)], [pred([3.5], x=x_new)], PRED_SRC)
     e = one(changed, "dep.Model.predict")
     assert e.fails and not e.review
+
+
+# ── 6. site identity ──────────────────────────────────────────────────────────────────────
+
+def test_an_inlined_comprehension_takes_its_function_from_the_source(tmp_path):
+    src = ("import dep\n"
+           "def test_bad(client):\n"
+           "    assert [client.post(b).status for b in [1, 2]] == [422, 422]\n")
+    old = [ev("dep.Client.post", {"b": 1}, result=422, func="<listcomp>")]
+    new = [ev("dep.Client.post", {"b": 1}, result=422, func="test_bad")]
+    e = one(run(tmp_path, old, new, src), "dep.Client.post")
+    assert e.category is FactCategory.EQUAL
+
+
+def test_a_subclass_constructor_is_an_observation_of_the_subclass(tmp_path):
+    import json
+
+    from pymolt.verify.report import _load_observations
+    p = tmp_path / "t.jsonl"
+    p.write_text(json.dumps({"t": "return", "q": "dep.Response.__init__", "v": 2,
+                             "sym": "dep.Response.__init__", "own": "dep.PlainTextResponse",
+                             "in": {"bound": {}}, "result": None,
+                             "where": {"file": "/proj/app.py", "line": 3, "func": "f"}}) + "\n")
+    view = _load_observations(p)
+    alias = view.observations["dep.PlainTextResponse.__init__"]
+    assert alias.alias and alias.site_lines == {("/proj/app.py", 3)}
+    assert not view.observations["dep.Response.__init__"].alias
+
+
+def test_a_relocated_decorator_closure_pairs_on_its_decorated_statement(tmp_path):
+    src = "from dep import bp\n@bp.route('/items')\ndef list_items():\n    return 1\n"
+    old = [ev("dep.scaffold.decorator", {"f": {"__callable__": "app.list_items"}},
+              result={"__callable__": "app.list_items"}, line=3, func="<module>")]
+    new = [ev("dep.sansio.scaffold.Scaffold.route.<locals>.decorator",
+              {"f": {"__callable__": "app.list_items"}},
+              result={"__callable__": "app.list_items"}, line=2, func="<module>")]
+    d = run(tmp_path, old, new, src)
+    (e,) = d.entries
+    assert "attribution-moved" in e.notes and not e.fails
+
+
+ABORT_SRC = "from dep import abort\ndef admin():\n    abort(403)\n"
+
+
+def test_a_moved_callee_binding_its_argument_differently_pairs(tmp_path):
+    old = [ev("werkzeug.exceptions.abort", {"status": 403}, raised="dep.Forbidden")]
+    new = [ev("flask.helpers.abort", {"code": 403}, raised="dep.Forbidden")]
+    d = run(tmp_path, old, new, ABORT_SRC)
+    (e,) = d.entries
+    assert not e.fails and e.new_symbol == "flask.helpers.abort"
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_mutation_a_moved_callee_given_another_value_fails(tmp_path):
+    old = [ev("werkzeug.exceptions.abort", {"status": 403}, raised="dep.Forbidden")]
+    new = [ev("flask.helpers.abort", {"code": 404}, raised="dep.NotFound")]
+    assert run(tmp_path, old, new, ABORT_SRC).verdict is VerificationVerdict.FAIL
+
+
+RNG_SRC = "import numpy as np\ndef churn():\n    rng = np.random.RandomState(0)\n    return rng\n"
+
+
+def concatenate(values):
+    return ev("numpy.core.multiarray.concatenate", {"arrays": {"__list__": values}},
+              result={"__list__": values})
+
+
+def test_a_call_compiled_code_made_on_the_line_is_not_compared(tmp_path):
+    rs = ev("numpy.random.mtrand.RandomState", extra_in={"__c_call__": True},
+            result={"__opaque__": "unobserved:c-return"})
+    rs["in"] = {"__c_call__": True}
+    d = run(tmp_path, [concatenate([1, 2])], [concatenate([7, 9]), rs], RNG_SRC)
+    assert not any(e.symbol.endswith("concatenate") for e in d.entries)
+    assert d.via == 2 and d.absorbed.get("via") == 2
+    # (the compiled call itself is new-side only here: the real backends explain that)
+    assert [e.symbol for e in d.failures()] == ["numpy.random.mtrand.RandomState"]
+    assert "numpy.core.multiarray.concatenate" in d.via_symbols
+
+
+def test_mutation_an_unnamed_call_with_no_compiled_call_on_its_line_stays(tmp_path):
+    d = run(tmp_path, [concatenate([1, 2])], [concatenate([7, 9])], RNG_SRC)
+    assert d.via == 0 and d.verdict is not VerificationVerdict.PASS
+
+
+def test_a_numpy_dispatcher_is_not_compared(tmp_path):
+    src = "import numpy as np\ndef f(v):\n    return np.round(v, 6)\n"
+    old = [ev("numpy.core.fromnumeric._round_dispatcher", {"a": 1.0}, result={"__tuple__": [1.0]}),
+           ev("numpy.core.fromnumeric.round", {"a": 1.0}, result=1.0)]
+    new = [ev("numpy._core.fromnumeric._round_dispatcher", {"a": 1.0}, result={"__tuple__": [2.0]}),
+           ev("numpy._core.fromnumeric.round", {"a": 1.0}, result=1.0)]
+    d = run(tmp_path, old, new, src)
+    assert d.via == 2 and d.verdict is VerificationVerdict.PASS

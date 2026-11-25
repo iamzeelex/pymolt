@@ -406,6 +406,9 @@ class _Observation:
     legacy: set[str] = field(default_factory=set)  # the v1 ``q`` spellings seen
     sites: dict[str, None] = field(default_factory=dict)  # ordered set of file:line
     site_lines: set[tuple[str, int]] = field(default_factory=set)  # (raw file, line)
+    # Only another name of an observed call (a subclass's inherited constructor, ``own``):
+    # it confirms a static target, never counts as an observation of its own.
+    alias: bool = False
 
 
 @dataclass
@@ -447,6 +450,7 @@ def _load_observations(path: str | Path) -> _TraceView:
             obs = view.observations[name] = _Observation(name=name, canonical=sym is not None)
         elif sym:
             obs.canonical = True
+        obs.alias = False
         if q:
             obs.legacy.add(q)
             view.q_names.add(q)
@@ -458,6 +462,21 @@ def _load_observations(path: str | Path) -> _TraceView:
         line = where.get("line")
         if isinstance(file, str) and file and isinstance(line, int):
             obs.site_lines.add((file, line))
+        # A constructor inherited from a base (``Response.__init__`` recording a
+        # ``PlainTextResponse(...)`` call) names the class constructed in ``own``: the call is
+        # also an observation of that class's constructor, so its contact is recorded.
+        own = rec.get("own")
+        leaf = name.rsplit(".", 1)[-1]
+        if (sym and isinstance(own, str) and own and leaf in ("__init__", "__new__")
+                and not name.startswith(own + ".")):
+            alias = f"{own}.{leaf}"
+            extra = view.observations.get(alias)
+            if extra is None:
+                extra = view.observations[alias] = _Observation(name=alias, canonical=True,
+                                                                alias=True)
+            extra.sites.setdefault(f"{where.get('file', '?')}:{where.get('line', '?')}", None)
+            if isinstance(file, str) and file and isinstance(line, int):
+                extra.site_lines.add((file, line))
     return view
 
 
@@ -792,7 +811,7 @@ def build_contract_report(
         hits = index.match(obs)
         for target in hits:
             matched[target].append(obs)
-        if not hits:
+        if not hits and not obs.alias:
             unmatched.append(obs)
 
     contact_files = {f for s in static.values() for f in s["files"]}
@@ -939,7 +958,7 @@ def build_contract_report(
             f"{report.test_runner_contacts} contact(s) of {len(names)} test-runner symbol(s) "
             f"({sample}) are left out of the verdict, coverage and recall: they belong to the "
             "test runner, which captures do not trace, not to the project's dependencies")
-    report.all_observed_targets = len(view.observations)
+    report.all_observed_targets = sum(1 for o in view.observations.values() if not o.alias)
     report.all_by_dep = _by_dep(symbols)
 
     report.impacted_symbols = [symbol for symbol in symbols if symbol.impacted]
@@ -1503,9 +1522,11 @@ def _compared_equal_symbols(fdiff: FactDiff) -> list[str]:
 
     Equal, DRIFT (only the library's defaults moved) and REWRITTEN-with-equal-outcome all
     count as compared-equal; any other entry for a symbol — changed, vanished, appeared,
-    uncomparable, unpaired — disqualifies it.
+    uncomparable, unpaired — disqualifies it. A symbol whose every fact was a call the
+    project's line did not make (``FactDiff.via_symbols``: compiled code calling back) is no
+    contact of the project's and settled too.
     """
-    settled: set[str] = set()
+    settled: set[str] = set(getattr(fdiff, "via_symbols", None) or ())
     unsettled: set[str] = set()
     for entry in fdiff.entries:
         names = {entry.symbol, *([entry.new_symbol] if entry.new_symbol else [])}
