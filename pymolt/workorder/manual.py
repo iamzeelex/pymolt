@@ -334,8 +334,17 @@ def _summary(step_type: str, risk: Any, hint: str = "") -> str:
                 "on it.")
     if risk.scope == "python":
         return "Rewrite these sites by hand" + (f": {hint}" if hint else ".")
+    candidates = [c.get("name") for c in (fact.get("succession") or {}).get("candidates") or ()
+                  if c.get("name")]
+    if param and successor:
+        return (f"Pass `{successor}=` instead of `{param}=` at these calls, keeping each call's "
+                "outcome.")
     if successor:
         return f"Replace the calls with `{successor}`, keeping each call's outcome."
+    if candidates:
+        return ("The library names several successors: choose one of "
+                + ", ".join(f"`{c}`" for c in candidates[:4]) + " at each site, keeping each "
+                "call's outcome.")
     if kind == "SIGNATURE":
         return f"Adapt the calls to the new signature{f' of {param}' if param else ''}."
     if kind == "DEPRECATED":
@@ -393,6 +402,15 @@ def default_claim(step_type: str, risk: Any | None) -> tuple[str, str | None, st
             f"{_NOT_LOOSENED}the delta found {name} gone only under the name the old version "
             "defined it under, not under the name these sites call it by")
     another = None
+    rec = fact.get("succession") or {}
+    if kind in ("REMOVED", "DEPRECATED", "SIGNATURE") and fact.get("successor") and (
+            rec.get("trust") in ("identity", "proof") or rec.get("equivalent")):
+        # The evidence asserts the successor does the same: a proof in the library's code, a
+        # chain of them, or the library's own words ("for the same effect").
+        how = ("the library's code proves it" if rec.get("trust") in ("identity", "proof")
+               else "the library says it does the same")
+        return "preserve", None, _cap(f"`{fact.get('successor')}` replaces {name} and {how} "
+                                      f"({rec.get('trust') or 'named'}); the outcome must hold")
     if kind == "MOVED":
         return "preserve", None, _cap(f"the delta shows {name} is the same object as "
                                       f"`{successor or fact.get('new') or '?'}` (MOVED)")
@@ -471,11 +489,58 @@ def _order_key(risks: list[Any]) -> tuple:
             first.site.line or 0, first.symbol)
 
 
+def _successor_of(fact: Mapping[str, Any]):
+    """The step's successor provenance (``StepSuccessor``), from the fact's ``succession``."""
+    from pymolt.workorder.models import StepSuccessor
+
+    rec = fact.get("succession") or {}
+    if not rec.get("trust") and not rec.get("candidates"):
+        return None
+    proof = rec.get("proof") or {}
+    return StepSuccessor(trust=rec.get("trust"),
+                         proof=_cap(f"{proof.get('kind')}: {proof.get('locus')}")
+                         if proof else None,
+                         version=proof.get("version"), transfer=rec.get("transfer"),
+                         caveats=[_cap(c) for c in rec.get("caveats") or ()][:10])
+
+
+def _render(template: Mapping[str, Any] | None, fact: Mapping[str, Any]) -> str | None:
+    """A forward's template as code with the old parameters' names (``x.replace_strict(mapping,
+    default=default)``): the suggestion for a proven successor pymolt does not apply."""
+    if not template or not template.get("callee"):
+        return None
+    names = {p[0]: p for p in template.get("old_shape") or ()}
+
+    def arg(desc: Mapping[str, Any]) -> str | None:
+        if "p" in desc:
+            return desc["p"]
+        if "c" in desc:
+            return repr(desc["c"])
+        if "star" in desc:
+            return "*" + desc["star"]
+        if "dstar" in desc:
+            return "**" + desc["dstar"]
+        return None
+
+    parts = [arg(d) for d in template.get("args") or ()]
+    parts += [f"{k}={arg(d)}" if k != "**" else arg(d) for k, d in template.get("kwargs") or ()]
+    if any(p is None for p in parts):
+        return None
+    callee = str(template["callee"])
+    head = ("x." + callee.rsplit(".", 1)[-1]) if template.get("member") else callee
+    text = f"{head}({', '.join(parts)})"
+    for attr, args, _kw in template.get("chain") or ():
+        text += f".{attr}({', '.join(a for a in (arg(d) for d in args) if a)})"
+    del names
+    return _cap(text, 200)
+
+
 def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
                python_move: tuple[str, str] | None,
                versions: Mapping[str, tuple[str | None, str | None]]) -> dict:
     lead = group[0]
     fact = _fact(lead)
+    rec = fact.get("succession") or {}
     scope = "python" if lead.scope == "python" else "dependency"
     ident = "|".join(str(x) for x in (scope, lead.package, lead.symbol, fact.get("kind"),
                                       fact.get("param"))) + ("|unverified" if _unverified(lead)
@@ -490,16 +555,22 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
         claim=claim, basis="manual", scope=scope,
         package=lead.package if scope == "dependency" else None, from_=from_, to=to,
         symbol={"old": lead.symbol,
-                "new": None if _unverified(lead) else fact.get("successor")},
+                "new": None if _unverified(lead) or fact.get("param") else fact.get("successor"),
+                "params": (dict(rec.get("params")) if rec.get("params") and not _unverified(lead)
+                           else None)},
         where=_where(group, t0),
         why=StepWhy(evidence=_evidence(group), tier=_max_tier(_tier(r.tier) for r in group),
                     risk_ids=[r.id for r in group],
                     baseline=StepBaseline(calls=sum(r.calls for r in group), sites=len(group),
                                           warnings=_warnings(group)),
-                    delta=_delta(lead), claim=reason),
-        do=StepDo(manual=ManualDo(summary=_summary(step_type, lead, _hint(lead)),
-                                  successor=None if _unverified(lead)
-                                  else fact.get("successor"))),
+                    delta=_delta(lead), claim=reason,
+                    successor=None if _unverified(lead) else _successor_of(fact)),
+        do=StepDo(manual=ManualDo(
+            summary=_summary(step_type, lead, _hint(lead)),
+            successor=None if _unverified(lead) else fact.get("successor"),
+            candidates=[] if _unverified(lead) else [
+                c["name"] for c in rec.get("candidates") or () if c.get("name")][:10],
+            suggestion=None if _unverified(lead) else _render(rec.get("template"), fact))),
         verify=verify,
         effort=StepEffort(sites=len(group), files=len(files)),
     )

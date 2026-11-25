@@ -407,11 +407,17 @@ def _split_bundles(
     rules_flat: list[CodemodRule] = []
     patterns_flat: list[CodemodPattern] = []
     downgraded: list[str] = []
+    from pymolt.codemods.successors import KINDS as SUCCESSOR_KINDS
+
     for name, bundle in bundles.items():
         downgraded.extend(bundle.downgraded)
         if bundle.rules:
-            by_pkg[name] = bundle.rules
+            # A successor pattern has no rule form (its anchors and template would be lost):
+            # it stays a pattern beside its package's rules.
+            successors = [p for p in bundle.patterns if p.kind in SUCCESSOR_KINDS]
+            by_pkg[name] = [*bundle.rules, *successors]
             rules_flat.extend(bundle.rules)
+            patterns_flat.extend(successors)
         else:
             by_pkg[name] = bundle.patterns
             patterns_flat.extend(bundle.patterns)

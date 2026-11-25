@@ -457,17 +457,22 @@ def _leaf(symbol: str) -> str:
 
 
 def _fix_for(site: RiskSite, symbol: str,
-             rewrites: Mapping[str, list[_Block]]) -> _Block | None:
+             rewrites: Mapping[str, list[_Block]], param: str | None = None) -> _Block | None:
     """The planned change that rewrites this call: its line changes and the symbol's name is
-    no longer on it. A static site (no line) is fixed when its function's text loses it."""
+    no longer on it. A static site (no line) is fixed when its function's text loses it. A risk
+    about a parameter is fixed when the keyword it names leaves the line (a keyword rename)."""
     blocks = rewrites.get(site.file) or ()
     leaf = _leaf(symbol)
+    keyword = re.compile(rf"(?<![\w.]){re.escape(param)}\s*=(?!=)") if param else None
     for block in blocks:
         if site.line is not None and not (block.start <= site.line <= block.end):
             continue
         if site.line is None and leaf not in block.old_text:
             continue
         if leaf not in block.new_text:
+            return block
+        if keyword is not None and keyword.search(block.old_text) and \
+                not keyword.search(block.new_text):
             return block
     return None
 
@@ -1086,7 +1091,9 @@ def predict_risks(
 
     rebinds = planned_rebinds(changes or (), rewrites) if rewrites else {}
     for risk in report.risks:
-        block = _fix_for(risk.site, risk.symbol, rewrites) or _rebind_fix_for(risk, rebinds)
+        param = (risk.fact or {}).get("param") if isinstance(risk.fact, Mapping) else None
+        block = _fix_for(risk.site, risk.symbol, rewrites, param) or \
+            _rebind_fix_for(risk, rebinds)
         if block is not None:
             risk.fixed_by_plan = True
             risk.fixed_by = list(block.recipes)

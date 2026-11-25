@@ -15,8 +15,10 @@ How a recipe is restricted:
   hand is renamed too, changes the effect, and makes the step stale;
 - a dependency ``rename-call`` and a rule cannot be told where to stop: they run on the whole
   text, and only the changes that meet the lines are kept, with any import they insert at module
-  level. When that leaves out a change and the kept ones remove or replace an import, re-basing
-  is refused: the left-out site may still need it.
+  level. A successor pattern (``rename-keyword``, ``rename-member``, ``forward-template``) runs
+  the same way, on its own anchors re-resolved in the current text, so a site whose statement
+  changed is no longer one of them. When that leaves out a change and the kept ones remove or
+  replace an import, re-basing is refused: the left-out site may still need it.
 
 The recipe sees the current text, binding-aware (LibCST's scope analysis), so a statement whose
 context changed its meaning gets the recipe's answer for the new context; the effect check and
@@ -52,8 +54,8 @@ def rerun(step: PlanStep, edit: StepEdit, text: str, lines: frozenset[int] | Non
         patterns = list(recipe.patterns)
         if all(_native(p) for p in patterns):
             restrict = None if lines is None else (lambda _p: lines)
-            return apply_patterns(text, patterns, lines_for=restrict)[0]
-        return _keep_at(text, apply_patterns(text, patterns)[0], lines)
+            return apply_patterns(text, patterns, lines_for=restrict, path=edit.file)[0]
+        return _keep_at(text, apply_patterns(text, patterns, path=edit.file)[0], lines)
     raise ValueError(f"a {recipe.kind} recipe is not re-run on Python source")
 
 

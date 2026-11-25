@@ -83,6 +83,8 @@ LEDGER_REMEDY = keep_remedy(
     "what each apply step changed, which rollback and verify read")
 #: The claims a schema-1 ledger and plan name; each is a ``basis`` of ``preserve`` in v2.
 CLAIMS = ("same-object", "same-signature", "verified-rule", "python-fixer")
+#: A v2-only basis: the library's own code proves the rewrite (successors v2).
+LIBRARY_PROOF = "library-proof"
 #: The step a schema-1 run is read as (``pymolt.workorder.v1``).
 V1_STEP = "v1"
 
@@ -111,6 +113,8 @@ def claim_for(item: Any) -> str | None:
             "verified":
         return None
     evidence = [str(e) for e in getattr(item, "evidence", None) or ()]
+    if any(e.startswith("pymolt.delta proof") for e in evidence):
+        return "library-proof"     # a forward, alias, twin, rename helper or identity proved it
     if any(e.startswith("pymolt.delta MOVED") for e in evidence):
         return "same-object"
     if any(e.startswith("pymolt.delta") for e in evidence):
