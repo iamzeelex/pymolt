@@ -319,20 +319,16 @@ def source_uses(sources: Mapping[str, str] | None) -> SourceUses | None:
 
 
 def project_modules(*sources: Mapping[str, str] | None) -> frozenset[str]:
-    """Top-level module names the project's own files define (``app/views.py`` -> ``app``,
-    ``tests/test_x.py`` -> ``tests`` and ``test_x``: pytest may import a test module by its
-    bare name), plus ``__main__``."""
+    """Every name a project file may be imported under as a top-level module: each directory
+    component of its path and its stem (``src/mypkg/models.py`` -> ``src``, ``mypkg`` and
+    ``models``: a src layout imports ``mypkg``; ``tests/test_x.py`` -> ``tests``, ``test_x``:
+    pytest may import a test module by its bare name), plus ``__main__``. Over-inclusion is the
+    safe direction: a type of any of these modules is the project's, compared as a value."""
     out = {"__main__"}
     for src in sources:
-        rels = {r.replace("\\", "/") for r in src or () if r.endswith(".py")}
-        for rel in rels:
-            parts = rel[:-3].split("/")
-            package = "/".join(parts[:-1])
-            if parts[-1] == "__init__":
-                parts = parts[:-1]
-            if not parts:
+        for rel in src or ():
+            rel = rel.replace("\\", "/")
+            if not rel.endswith(".py"):
                 continue
-            out.add(parts[0])
-            if f"{package}/__init__.py" not in rels:   # not a package: imported by its name
-                out.add(parts[-1])
+            out.update(x for x in rel[:-3].split("/") if x and x != "__init__")
     return frozenset(out)
