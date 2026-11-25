@@ -144,6 +144,36 @@ then compares the two sides.
 | DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view) | no, reported |
 | UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape; or one, taken in another checkout, records no project root; or the call is a coroutine, whose awaited result is not recorded | makes the verdict inconclusive |
 
+### Dependency objects and values
+
+A returned value is compared by what your code can observe of it:
+- **Values** compare by content: builtins and containers (each element on its own), arrays and
+  frames, dates, enums, and records your project declares (a dataclass, attrs, pydantic or
+  namedtuple class in your code).
+- **Dependency objects** (*handles*: any other object a dependency returns, including a record a
+  dependency declares) compare by their type, and by the attributes your code reads by name
+  (`x.name`, `getattr(x, "name")`), as each capture's source snapshot shows them. Private
+  attributes are never compared. An attribute your code only indexes with literal keys
+  (`app.config["SEED"]`) compares under those keys. Unread state that differs is counted, not
+  compared: the entry is DRIFT with "handle state not observed". The calls your code makes on the
+  object are facts of their own. An attribute your code reads that exists on one side only is
+  drift, unless your code tests its presence (`hasattr`).
+- A capture without a source snapshot compares every object by its full state, as
+  `verify --strict` does. The report says which (`quality.objects`).
+- Places that read attributes by a computed name (`getattr(x, name)`, `vars(x)`, `x.__dict__`,
+  `asdict(x)`, `dir(x)`) cannot be projected. When an object's unread state differed, the verdict
+  lists them; they do not block PASS, like the [unobservable uses](#the-verdict).
+- A dependency record in a call's input, or as its receiver, is keyed by its type.
+
+Several outcomes at one fact (a call in a loop, over hidden receivers) are matched call by call,
+with their counts. A call that changed among N, a call more or fewer (`call-count-changed`), or
+counts that moved between outcome kinds (`outcome-kinds-moved`) is a change. A value that moved
+between calls at a fact whose input is not fully observed goes through the
+[unmeasured-noise](#run-noise) review.
+
+Every relaxation counts what it absorbed: the fact diff's `absorbed` gives the entries each one
+made equal where the full comparison would not have.
+
 ### Edited lines
 
 A line diff of the source each capture stored decides who edited a call's line:

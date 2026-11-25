@@ -109,6 +109,7 @@ from pymolt.core.stdlib import is_stdlib
 from pymolt.state_io import atomic_write_json
 from pymolt.verify import dict_order as _order
 from pymolt.verify import environment as _env
+from pymolt.verify import source_uses as _uses
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -173,6 +174,9 @@ class DiffContext:
     not_in_capture: list[str] = field(default_factory=list)
     # The accepts verify honours, and ``--strict`` (``verify.accepts.AcceptContext``).
     accepts: Any = None
+    # ``verify --strict``: a dependency object is compared by its full public state, not by
+    # what the project reads of it (``_Semantics``).
+    strict: bool = False
 
 
 class DiffProfile(StrEnum):
@@ -495,6 +499,9 @@ class FactEntry(BaseModel):
     # ``input-substitution``, ``attribution``, ``backend``, ``possibly-dropped``, ...). Reporting
     # groups by the mechanism; it never changes the verdict by itself.
     explained: str | None = None
+    # The relaxations that made this entry equal where the full comparison would not have
+    # (``handle-state``, ...): every run counts what each one absorbed (``FactDiff.absorbed``).
+    absorbed: list[str] = Field(default_factory=list)
     # Run-to-run noise measured by a replicate capture: the difference is real but the baseline
     # itself varies there the same way. Neither failing nor inconclusive.
     noise: str | None = None
@@ -572,6 +579,21 @@ class FactDiff(BaseModel):
     # (old)"`` ...); the two captures' runtime environments compared (``environment.stamp``).
     dict_order: str | None = Field(default=None, exclude=True)
     environment: Any = Field(default=None, exclude=True)
+    # The places the project reads attributes by a computed name (``getattr(x, var)``,
+    # ``vars(x)``, ``x.__dict__``, ``asdict(x)``), listed when a dependency object's unread state
+    # differed: what they read is not compared (``--strict`` compares the full state).
+    dynamic_reads: list[str] = Field(default_factory=list)
+    # How dependency objects were compared: ``projected`` (by what the project reads of them),
+    # ``full`` (``--strict``) or ``full: no source snapshot``.
+    handle_comparison: str | None = None
+
+    @property
+    def absorbed(self) -> dict[str, int]:
+        """Entries each relaxation made equal where the full comparison would not have."""
+        out: Counter = Counter()
+        for e in self.entries:
+            out.update(set(e.absorbed or ()))
+        return dict(sorted(out.items()))
 
     def edited_sites(self) -> dict[str, int]:
         """Edited sites by outcome: equal / representation-only / need review / unverified
@@ -669,6 +691,9 @@ class FactDiff(BaseModel):
             "new": self.new_summary.model_dump(mode="json"),
             "noise_measured": self.noise_measured,
             "replicate_applies": self.replicate_applies,
+            "absorbed": self.absorbed,
+            "handle_comparison": self.handle_comparison,
+            "dynamic_reads": list(self.dynamic_reads),
             "entries": entries,
         }
 
@@ -1963,6 +1988,43 @@ def _module_getattr_name(symbol: str, inputs: Any) -> str | None:
     return name if owner and not owner[-1][:1].isupper() else None
 
 
+def _record_inputs(f: Fact) -> Fact:
+    """A fact whose input carries a dependency's record (a library-declared dataclass, anywhere)
+    or a record as its receiver, keyed by the record's type: like a library object
+    (``_objects_to_opaque``), its state is output evidence, and as an input key it made every
+    call a new fact (streamlit's element tree)."""
+    new = _record_markers(f.input, top=True)
+    return f if new is f.input else f.model_copy(update={"input": new})
+
+
+def _record_markers(value: Any, *, top: bool = False) -> Any:
+    if isinstance(value, dict):
+        name = value.get("__dataclass__")
+        if isinstance(name, str) and not _project_type(name):
+            return {"__opaque__": name}
+        out: dict[str, Any] = {}
+        changed = False
+        for k, v in value.items():
+            if top and k == "bound" and isinstance(v, dict):
+                nv = {}
+                for n, x in v.items():
+                    if n in ("self", "cls") and isinstance(x, dict) \
+                            and isinstance(x.get("__dataclass__"), str):
+                        nv[n] = {"__opaque__": x["__dataclass__"]}
+                    else:
+                        nv[n] = _record_markers(x)
+                    changed = changed or nv[n] is not x
+                out[k] = nv if any(nv[n] is not v[n] for n in v) else v
+            else:
+                out[k] = _record_markers(v)
+                changed = changed or out[k] is not v
+        return out if changed else value
+    if isinstance(value, list):
+        items = [_record_markers(v) for v in value]
+        return items if any(a is not b for a, b in zip(items, value)) else value
+    return value
+
+
 def _objects_to_opaque(value: Any) -> Any:
     """``{"__object__": T, ...}`` -> ``{"__opaque__": T}`` anywhere in an input: a structural
     object is output evidence; keyed as an input it would make every call a new fact."""
@@ -2305,6 +2367,8 @@ def types_match(a: Any, b: Any) -> bool:
         return _same_type_name(a["type"], b["type"])
     if "callable" in a and "callable" in b:
         return _same_closure(a["callable"], b["callable"])
+    if _handle_type_tree(a) and _handle_type_tree(b):
+        return _handle_types_match(a, b)
     if "object" in a and "object" in b:
         if not _same_type_name(a["object"], b["object"]):
             return False
@@ -2353,6 +2417,20 @@ class _Evidence:
     drift: list[str] = field(default_factory=list)   # additive / absent-vs-empty attribute notes
     type_only: bool = False                         # something compared by type name only
     closures: list[tuple[str, str]] = field(default_factory=list)
+    # What a relaxation absorbed (mechanism -> details): differences the full comparison would
+    # have counted and the projected one did not (``_Semantics``).
+    absorbed: dict[str, list[str]] = field(default_factory=dict)
+
+    def absorb(self, mechanism: str, *details: str) -> None:
+        self.absorbed.setdefault(mechanism, []).extend(details)
+
+    def merge(self, other: "_Evidence") -> None:
+        self.relocated.extend(x for x in other.relocated if x not in self.relocated)
+        self.drift.extend(other.drift)
+        self.type_only = self.type_only or other.type_only
+        self.closures.extend(other.closures)
+        for k, v in other.absorbed.items():
+            self.absorb(k, *v)
 
 
 _EVIDENCE: ContextVar[_Evidence | None] = ContextVar("pymolt_evidence", default=None)
@@ -2363,6 +2441,169 @@ UNOBSERVABLE_NOTE = "the replacement on this line was not observable"
 HANDLE_NOTE = "state of a handle differs; calls on it compare separately"
 _SENTINEL_RE = re.compile(
     r"unset|missing|not_?set|no_?default|undefined|nothing|sentinel|no_?value|not_?given")
+
+
+@dataclass
+class _Semantics:
+    """What the project can observe of the dependency objects it holds, for one diff (built from
+    both captures' source snapshots, ``source_uses``). A dependency object (a *handle*: a library
+    ``__object__`` or a library-declared record) is compared by its type and the attributes the
+    project reads by name; its other state is counted, not compared. Values (builtins,
+    containers, structures, records the project declares) compare by content as before. None
+    (no source snapshot): every object compares by its full state, as before."""
+
+    old: _uses.SourceUses
+    new: _uses.SourceUses
+    project: frozenset[str]
+    renames: dict[str, str] = field(default_factory=dict)  # old attribute -> new (plan's leaf)
+    strict: bool = False
+
+
+_SEM: ContextVar[_Semantics | None] = ContextVar("pymolt_semantics", default=None)
+HANDLE_STATE = "handle-state"
+
+
+def _semantics_for(context: DiffContext | None) -> _Semantics | None:
+    if context is None or not context.old_sources or not context.new_sources:
+        return None
+    old, new = _uses.source_uses(context.old_sources), _uses.source_uses(context.new_sources)
+    if old is None or new is None or not (old.files and new.files):
+        return None
+    renames: dict[str, str] = {}
+    for a, b in (context.successors or {}).items():
+        la, lb = str(a).rsplit(".", 1)[-1], str(b).rsplit(".", 1)[-1]
+        if la != lb and la.isidentifier() and lb.isidentifier():
+            renames.setdefault(la, lb)
+    return _Semantics(old=old, new=new,
+                      project=_uses.project_modules(context.old_sources, context.new_sources),
+                      renames=renames, strict=bool(context.strict))
+
+
+def _project_type(name: Any) -> bool:
+    sem = _SEM.get()
+    return sem is not None and isinstance(name, str) and name.split(".")[0] in sem.project
+
+
+def _handle_name(v: Any) -> str | None:
+    """The type name of a dependency object compared by projection (a library ``__object__`` or
+    ``__dataclass__``); None for a value, without source snapshots, or under ``--strict``."""
+    sem = _SEM.get()
+    if sem is None or sem.strict or not isinstance(v, dict):
+        return None
+    for tag in ("__object__", "__dataclass__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            return None if _project_type(name) else name
+    return None
+
+
+def _handle_state(v: Mapping[str, Any]) -> dict[str, Any]:
+    if "__object__" in v:
+        return dict(_attr_items(v))
+    return {str(n): x for n, x in _pairs(v.get("fields"))}
+
+
+def _read_pairs(xs: Mapping[str, Any], ys: Mapping[str, Any]
+                ) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """``(old name, new name)`` pairs of a handle's attributes the project reads (on either side,
+    a planned rename mapped), the read names present on one side only, and the names not read.
+    Private names are never compared."""
+    sem = _SEM.get()
+    assert sem is not None
+    paired: list[tuple[str, str]] = []
+    one_sided: list[str] = []
+    unread: list[str] = []
+    seen_new: set[str] = set()
+    for name in sorted(xs):
+        new_name = sem.renames.get(name, name) if sem.renames.get(name) in ys else name
+        read = not name.startswith("_") and (name in sem.old.read or new_name in sem.new.read)
+        if new_name in ys:
+            seen_new.add(new_name)
+            (paired.append((name, new_name)) if read else unread.append(name))
+        else:
+            (one_sided.append(name) if read else unread.append(name))
+    for name in sorted(ys.keys() - seen_new):
+        read = not name.startswith("_") and (name in sem.new.read or name in sem.old.read)
+        (one_sided.append(name) if read else unread.append(name))
+    return paired, one_sided, unread
+
+
+def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str) -> bool:
+    """Two dependency objects (``a`` old, ``b`` new): the same type (relocation allowed) and the
+    attributes the project reads equal; an attribute read on one side only is additive drift,
+    unless the project tests its presence (``hasattr``). Unread state that differs is absorbed
+    (``handle-state``), never compared."""
+    sem = _SEM.get()
+    assert sem is not None
+    if not _same_type_name(ta, tb):
+        return False
+    xs, ys = _handle_state(a), _handle_state(b)
+    paired, one_sided, unread = _read_pairs(xs, ys)
+    ev = _EVIDENCE.get()
+    if a.get("__truncated__") or b.get("__truncated__"):
+        if ev is not None:
+            ev.type_only = True
+    for name in one_sided:
+        if name in sem.old.probed or name in sem.new.probed:
+            return False     # the project tests its presence: an attribute that came or went
+        if ev is not None:
+            ev.drift.append(f"attribute {'removed' if name in xs else 'added'}: {name}")
+    for x_name, y_name in paired:
+        if not _read_value_match(sem, x_name, y_name, xs[x_name], ys[y_name], unread):
+            return False
+    differs = [n for n in unread
+               if n.endswith("[other keys]") or n not in xs or n not in ys
+               or _canon(xs[n]) != _canon(ys[n])]
+    if differs and ev is not None:
+        shown = ", ".join(differs[:4]) + (f" (+{len(differs) - 4})" if len(differs) > 4 else "")
+        ev.absorb(HANDLE_STATE, f"{ta.rsplit('.', 1)[-1]}: {shown}")
+    return True
+
+
+def _read_value_match(sem: _Semantics, x_name: str, y_name: str, x: Any, y: Any,
+                      unread: list[str]) -> bool:
+    """A read attribute's values: whole, or, for a dict the project only indexes by literal
+    keys (``app.config["SEED"]``), the entries under those keys (one present on one side only
+    is a change: the project's lookup would fail on the other)."""
+    whole = x_name in sem.old.whole or y_name in sem.new.whole
+    keys = (sem.old.keys.get(x_name, set()) | sem.new.keys.get(y_name, set()))
+    if whole or not keys or not (isinstance(x, dict) and isinstance(y, dict)
+                                 and "__dict__" in x and "__dict__" in y):
+        return _attr_value_match(x_name, x, y)
+    dx = {k: v for k, v in _pairs(x["__dict__"]) if isinstance(k, str)}
+    dy = {k: v for k, v in _pairs(y["__dict__"]) if isinstance(k, str)}
+    for k in sorted(keys):
+        if (k in dx) != (k in dy):
+            return False
+        if k in dx and not _attr_value_match(f"{x_name}[{k!r}]", dx[k], dy[k]):
+            return False
+    if _canon(x) != _canon(y):
+        unread.append(f"{x_name}[other keys]")
+    return True
+
+
+def _handle_types_match(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """``types_match`` for two dependency objects' ``value_type`` trees: their type, and the
+    types of the attributes the project reads."""
+    ta = a.get("object", a.get("dataclass"))
+    tb = b.get("object", b.get("dataclass"))
+    if not _same_type_name(ta, tb):
+        return False
+    xs = a.get("attrs", a.get("fields"))
+    ys = b.get("attrs", b.get("fields"))
+    if not isinstance(xs, dict) or not isinstance(ys, dict):
+        return True
+    paired, _one, _unread = _read_pairs(xs, ys)
+    return all(types_match(xs[x], ys[y]) for x, y in paired)
+
+
+def _handle_type_tree(t: Any) -> bool:
+    if not isinstance(t, dict):
+        return False
+    name = t.get("object", t.get("dataclass"))
+    sem = _SEM.get()
+    return (isinstance(name, str) and sem is not None and not sem.strict
+            and not _project_type(name) and ("object" in t or "dataclass" in t))
 
 
 def _type_key(name: Any) -> tuple[str, str] | None:
@@ -2483,6 +2724,9 @@ def _attr_value_match(name: str, x: Any, y: Any) -> bool:
     if isinstance(x, list) and isinstance(y, list):
         return len(x) == len(y) and all(_attr_value_match(name, p, q) for p, q in zip(x, y))
     if isinstance(x, dict) and isinstance(y, dict):
+        hx, hy = _handle_name(x), _handle_name(y)
+        if hx and hy:
+            return _handles_match(x, y, hx, hy)
         if "__object__" in x and "__object__" in y:
             if ev is not None:
                 ev.type_only = True
@@ -2565,6 +2809,7 @@ class OutcomeComparison:
     old_types: list[Any] | None = None
     new_types: list[Any] | None = None
     drift: bool = False  # equal, but an attribute was added/removed or went absent <-> empty
+    absorbed: list[str] = field(default_factory=list)  # relaxations that made it equal
 
 
 def compare_outcomes(
@@ -2581,6 +2826,10 @@ def compare_outcomes(
     if cmp.comparison is Comparison.EQUAL and ev.drift:
         cmp.drift = True
         cmp.notes.extend(dict.fromkeys(ev.drift))
+    if cmp.comparison is Comparison.EQUAL and ev.absorbed:
+        cmp.drift = True
+        cmp.absorbed = sorted(ev.absorbed)
+        cmp.notes.extend(_absorbed_note(m, d) for m, d in sorted(ev.absorbed.items()))
     if (ev.relocated or ev.type_only) and cmp.comparison is Comparison.EQUAL:
         cmp.notes.extend(f"relocated: {a} -> {b}" for a, b in ev.relocated)
         cmp.notes.extend(f"closure: {a} -> {b}" for a, b in ev.closures)
@@ -2610,6 +2859,8 @@ def _compare_outcomes(
     if untyped:
         notes.append("exception type unknown on one side")
     markers = untyped or any(_partial(o) for o in (*old, *new))
+    if profile is DiffProfile.EXACT and nondet and _COUNTED.get():
+        return _compare_counted(old, new, notes, markers)
     if profile is DiffProfile.EXACT:
         if o_keys == n_keys or (nondet and _clock_sets_match(old, new)):
             level = ComparisonLevel.TYPE if markers else ComparisonLevel.EXACT
@@ -2627,6 +2878,134 @@ def _compare_outcomes(
             or _cover(old_t, new_t, _outcome_types_match))
     return _with_types(Comparison.EQUAL if same else Comparison.CHANGED, ComparisonLevel.TYPE,
                        notes, old, new)
+
+
+# Set by ``_pair_entry`` for one pair: both facts carry every call's outcome with its count
+# (not aggregated, not sampled, no outcome past a cap), so outcomes match with their counts.
+_COUNTED: ContextVar[bool] = ContextVar("pymolt_counted", default=False)
+_COUNTED_DIFF: ContextVar[bool] = ContextVar("pymolt_counted_diff", default=False)
+COUNT_CHANGED = "call-count-changed"
+KINDS_MOVED = "outcome-kinds-moved"
+_MATCH_FULL_MAX = 4096   # outcome pairs a full matching is tried over (else: strict)
+
+
+def _absorbed_note(mechanism: str, details: list[str]) -> str:
+    shown = "; ".join(dict.fromkeys(details))
+    shown = shown if len(shown) <= 200 else shown[:199] + "…"
+    if mechanism == HANDLE_STATE:
+        return f"handle state not observed: unread attributes differ ({shown})"
+    return f"{mechanism}: {shown}"
+
+
+def _compare_counted(old: list[Outcome], new: list[Outcome], notes: list[str],
+                     markers: bool) -> OutcomeComparison:
+    """Several outcomes on a side, every call counted: the calls match one-to-one under the
+    comparison's own equivalence (``_outcomes_match``: handles projected, relocations, ...), so
+    a change in one of N calls in a loop, or counts moving between outcomes, is a change. A
+    total that moved is a presence change (``call-count-changed``); counts that moved between
+    outcome kinds (raise x2 -> x1) are ``outcome-kinds-moved``. Both fail whatever the noise
+    gate; a value moving between calls at an input-hidden fact goes through it."""
+    level = ComparisonLevel.TYPE if markers else ComparisonLevel.EXACT
+    oc: Counter = Counter()
+    nc: Counter = Counter()
+    for o in old:
+        oc[_canon([o.kind, o.value])] += o.count
+    for o in new:
+        nc[_canon([o.kind, o.value])] += o.count
+    total_o, total_n = sum(oc.values()), sum(nc.values())
+    if total_o != total_n:
+        return _with_types(Comparison.CHANGED, ComparisonLevel.EXACT,
+                           [*notes, COUNT_CHANGED, f"calls: {total_o} -> {total_n}"], old, new)
+    if oc == nc:
+        return _with_types(Comparison.EQUAL, level, notes, old, new)
+    clocked = any(o.kind == "return" and _clock_parts(o.value) for o in (*old, *new))
+    if clocked and _clock_sets_match(old, new):
+        return _with_types(Comparison.EQUAL, level, notes, old, new)
+    if _multiset_match(old, new):
+        return _with_types(Comparison.EQUAL, level, notes, old, new)
+    moved = Counter()
+    for o in old:
+        moved[_kind_label(o)] += o.count
+    for o in new:
+        moved[_kind_label(o)] -= o.count
+    extra = [KINDS_MOVED] if any(moved.values()) else ["counts-moved"]
+    return _with_types(Comparison.CHANGED, ComparisonLevel.EXACT, [*notes, *extra], old, new)
+
+
+def _kind_label(o: Outcome) -> str:
+    return "return" if o.kind == "return" else f"raise:{_raise_name(o.value)}"
+
+
+def _multiset_match(old: list[Outcome], new: list[Outcome]) -> bool:
+    """Every call on one side matched to one on the other (counts as capacities, a maximum
+    flow over the ``_outcomes_match`` pairs). The evidence of the pairs used is kept."""
+    edges: dict[tuple[int, int], _Evidence] = {}
+    if len(old) * len(new) > _MATCH_FULL_MAX:
+        return False     # too many distinct outcomes to match: strict
+    for i, x in enumerate(old):
+        for j, y in enumerate(new):
+            sub = _Evidence()
+            token = _EVIDENCE.set(sub)
+            try:
+                ok = _outcomes_match(x, y)
+            finally:
+                _EVIDENCE.reset(token)
+            if ok:
+                edges[(i, j)] = sub
+    total = sum(o.count for o in old)
+    flow = _max_flow([o.count for o in old], [o.count for o in new], list(edges))
+    if sum(flow.values()) != total:
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        for key, units in flow.items():
+            if units:
+                ev.merge(edges[key])
+    return True
+
+
+def _max_flow(supply: list[int], demand: list[int], edges: list[tuple[int, int]]
+              ) -> dict[tuple[int, int], int]:
+    """A maximum flow from ``supply`` (old outcomes' counts) to ``demand`` (new ones') over the
+    allowed edges (Edmonds-Karp; the graphs are a few dozen nodes)."""
+    n, m = len(supply), len(demand)
+    src, sink = n + m, n + m + 1
+    cap: dict[tuple[int, int], int] = defaultdict(int)
+    adj: dict[int, set[int]] = defaultdict(set)
+
+    def add(u: int, v: int, c: int) -> None:
+        cap[(u, v)] += c
+        adj[u].add(v)
+        adj[v].add(u)
+
+    big = sum(supply) + 1
+    for i, c in enumerate(supply):
+        add(src, i, c)
+    for j, c in enumerate(demand):
+        add(n + j, sink, c)
+    for i, j in edges:
+        add(i, n + j, big)
+    while True:
+        prev = {src: src}
+        queue = [src]
+        while queue and sink not in prev:
+            u = queue.pop(0)
+            for v in adj[u]:
+                if v not in prev and cap[(u, v)] > 0:
+                    prev[v] = u
+                    queue.append(v)
+        if sink not in prev:
+            break
+        bottleneck, v = big, sink
+        while v != src:
+            bottleneck = min(bottleneck, cap[(prev[v], v)])
+            v = prev[v]
+        v = sink
+        while v != src:
+            cap[(prev[v], v)] -= bottleneck
+            cap[(v, prev[v])] += bottleneck
+            v = prev[v]
+    return {(i, j): cap[(n + j, i)] for i, j in edges}
 
 
 #: A coroutine call is recorded when it starts, with a marker for its result (``_backend``'s
@@ -2738,6 +3117,9 @@ def _values_match(a: Any, b: Any) -> bool:
         return True
     if isinstance(a, str) and isinstance(b, str) and "⟨clock:" in a:
         return clock_values_match(a, b)
+    ha, hb = _handle_name(a), _handle_name(b)
+    if ha and hb:
+        return _handles_match(a, b, ha, hb)
     if _type_only(a) or _type_only(b):
         return types_match(value_type(a), value_type(b))
     if not (isinstance(a, dict) and isinstance(b, dict)):
@@ -4305,15 +4687,33 @@ def diff_facts(
 
     ``order_causes``: known causes of dict key order changes (``OrderCause``); an order finding
     that matches one exactly is cited, and from 5 keys on the citation proves determinism."""
-    token = _HANDLES.set(_handle_types(old.facts, new.facts))
+    sem = _semantics_for(context)
+    # Without source snapshots a receiver of operation-like calls is a handle whose state is
+    # not compared (``_HANDLES``); with them, what the project reads of it decides
+    # (``_Semantics``); under ``--strict``, its full state.
+    strict = bool(context is not None and context.strict)
+    token = _HANDLES.set(_handle_types(old.facts, new.facts) if sem is None and not strict
+                         else frozenset())
+    sem_token = _SEM.set(sem)
+    counted = _COUNTED_DIFF.set(not (old.aggregated or new.aggregated or old.site_tallies
+                                     or new.site_tallies or old.outcomes_other
+                                     or new.outcomes_other))
     reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
     noise = _NOISE.set(_NoiseState())
     try:
-        return _diff_facts(old, new, DiffProfile(profile), context, tuple(order_causes))
+        diff = _diff_facts(old, new, DiffProfile(profile), context, tuple(order_causes))
     finally:
         _NOISE.reset(noise)
         _TYPE_RELOC.reset(reloc)
+        _COUNTED_DIFF.reset(counted)
+        _SEM.reset(sem_token)
         _HANDLES.reset(token)
+    diff.handle_comparison = ("full" if strict else "projected" if sem is not None
+                              else "full: no source snapshot")
+    if sem is not None and HANDLE_STATE in diff.absorbed:
+        diff.dynamic_reads = sorted({f"{f}:{line} {what}" for uses in (sem.old, sem.new)
+                                     for f, line, what in uses.dynamic})
+    return diff
 
 
 def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
@@ -4344,6 +4744,9 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         if (k := source_kind(f.symbol)) is not None and not (k[1] and seeded))
     old_facts = _canonicalise(old_facts, noise.old)
     new_facts = _canonicalise(new_facts, noise.new)
+    if _SEM.get() is not None and not _SEM.get().strict:
+        old_facts = [_record_inputs(f) for f in old_facts]
+        new_facts = [_record_inputs(f) for f in new_facts]
     old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
         old_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})
@@ -5437,6 +5840,8 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
             continue  # inputs differ: the input-change and masked-input rules judge those
         if _order_proved(e):
             continue  # a dict key order shown deterministic (_judge_order): not run noise
+        if COUNT_CHANGED in e.notes or KINDS_MOVED in e.notes:
+            continue  # calls appeared or vanished, or moved between outcome kinds: strict
         if (e.category is not FactCategory.CHANGED or e.comparison is not Comparison.CHANGED
                 or e.review or e.noise or e.unverified or e.provenance not in (None, "unedited")
                 or e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED)
@@ -6629,16 +7034,24 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     """Classify one old/new pair. ``rewritten`` is ``"same-call"`` / ``"positional"`` for a
     REWRITTEN pair (outcomes compared, symbol and input free to differ), else None."""
     of, nf = o.fact, n.fact
-    cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
-    explained = None
-    if cmp.comparison is not Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
-        raw = _raw_equal(of, nf, profile)  # raw first: equal recorded outcomes are equal
-        if raw is not None:
-            cmp = raw
-    if cmp.comparison is Comparison.CHANGED:
-        cmp, explained = _explain_change(o, n, cmp, profile)
-    elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
-        explained = _explain_masked(of, nf, cmp, profile)
+    counted = _COUNTED.set(_COUNTED_DIFF.get() and _counts_complete(of) and _counts_complete(nf)
+                           and not (_is_widened_input(of.input) or _is_widened_input(nf.input)))
+    try:
+        cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
+        explained = None
+        if cmp.comparison is not Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
+            raw = _raw_equal(of, nf, profile)  # raw first: equal recorded outcomes are equal
+            if raw is not None:
+                cmp = raw
+        if cmp.comparison is Comparison.CHANGED:
+            cmp, explained = _explain_change(o, n, cmp, profile)
+        elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
+            explained = _explain_masked(of, nf, cmp, profile)
+    finally:
+        _COUNTED.reset(counted)
+    if cmp.comparison is Comparison.EQUAL and cmp.absorbed and explained is None:
+        explained = next((n for n in cmp.notes if n.startswith("handle state")), None)
+        explained = f"{cmp.absorbed[0]}: {explained or ', '.join(cmp.absorbed)}"
     drift = (of.defaulted is not None and nf.defaulted is not None
              and of.defaulted != nf.defaulted) or cmp.drift
     if rewritten:
@@ -6685,9 +7098,14 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         old_count=of.count, new_count=nf.count, notes=all_notes,
         old_where=of.where, new_where=nf.where,
         old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
-        explained=explained,
+        explained=explained, absorbed=list(cmp.absorbed),
         **_raw_samples(of, nf),
     )
+
+
+def _counts_complete(f: Fact) -> bool:
+    """Every call of the fact is in its outcomes, each with its count."""
+    return bool(f.outcomes) and sum(o.count for o in f.outcomes) == f.count
 
 
 def _raw_equal(of: Fact, nf: Fact, profile: DiffProfile) -> OutcomeComparison | None:

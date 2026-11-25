@@ -338,18 +338,24 @@ def test_ambiguous_outcome_matches_return_none_or_raise_only():
 
 
 def test_nondeterministic_sets(tmp_path):
+    # Several outcomes at one fact are calls, matched one-to-one with their counts: a site is
+    # nondeterministic only on evidence (a replicate, a mask), never because a loop called it
+    # with hidden receivers.
     def calls(*results):
         return [ev("lib.now", {}, result=r, sym="lib.now") for r in results]
 
-    same = run_diff(tmp_path, calls(1, 2, 1), calls(2, 1))
+    same = run_diff(tmp_path, calls(1, 2, 1), calls(2, 1, 1))
     entry = only(same, FactCategory.EQUAL)
     assert entry.level is ComparisonLevel.EXACT and "nondeterministic" in entry.notes
 
-    other_values = run_diff(tmp_path, calls(1, 2), calls(5))
-    assert only(other_values, FactCategory.EQUAL).level is ComparisonLevel.TYPE
+    one_more = only(run_diff(tmp_path, calls(1, 2, 1), calls(2, 1)), FactCategory.CHANGED)
+    assert "call-count-changed" in one_more.notes and one_more.level is ComparisonLevel.EXACT
 
-    other_type = run_diff(tmp_path, calls(1, 2), calls("a"))
-    assert only(other_type, FactCategory.CHANGED).level is ComparisonLevel.TYPE
+    other_values = run_diff(tmp_path, calls(1, 2), calls(5, 5))
+    assert only(other_values, FactCategory.CHANGED).level is ComparisonLevel.EXACT
+
+    other_type = run_diff(tmp_path, calls(1, 2), calls("a", "a"))
+    assert only(other_type, FactCategory.CHANGED).fails
 
 
 def test_aggregated_nondeterministic_marker_is_uncomparable(tmp_path):

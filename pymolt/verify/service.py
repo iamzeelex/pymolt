@@ -2931,6 +2931,7 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
 
     root = Path(os.path.abspath(project_dir))
     ctx = DiffContext()
+    ctx.strict = strict
     ctx.old_sources = load_sources(sources_path(against))
     ctx.new_sources = load_sources(sources_path(trace))
     receipt = MigrationReceipt.load(root)

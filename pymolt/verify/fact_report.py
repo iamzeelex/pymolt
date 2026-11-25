@@ -49,6 +49,7 @@ RULES = {
     "unmeasured-noise": "facts._gate_unmeasured",
     "replicate": "replicate.apply_noise_profile",
     "order": "facts._judge_order",
+    "handle-state": "facts._handles_match (a dependency object, by what the project reads of it)",
 }
 
 # review reason (the review text's prefix) -> the one action that settles it
@@ -385,6 +386,7 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                     "new": diff.new_summary.dropped_events},
         "backends": {"old": diff.old_summary.backends, "new": diff.new_summary.backends},
         "dict_order": diff.dict_order or "not recorded (old, new)",
+        "objects": diff.handle_comparison or "full: no source snapshot",
         "environment": _environment_stamp(diff, by_class),
         "levels": {k: {"entries": v, "share": round(v / total, 3)}
                    for k, v in sorted(levels.items())},
@@ -424,6 +426,7 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
         "accepted": accepted,
         "accepted_total": len(by_class["accepted"]),
         "explained": table,
+        "absorbed": diff.absorbed,
         "quality": quality,
     }
 

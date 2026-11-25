@@ -551,10 +551,10 @@ def _inconclusive_note(unified) -> str:
 def _unobservable_note(rep) -> str:
     """The Verdict panel's line naming the dependency uses no capture can observe: they do not
     keep the verdict from PASS, so the panel says the verdict does not cover them."""
-    from pymolt.interfaces.views import unobservable_line
+    from pymolt.interfaces.views import semantics_lines, unobservable_line
 
-    line = unobservable_line(rep)
-    return f"\n[dim]{escape(line)}[/dim]" if line else ""
+    lines = [x for x in (unobservable_line(rep), *semantics_lines(rep)) if x]
+    return "".join(f"\n[dim]{escape(line)}[/dim]" for line in lines)
 
 
 def _fail_note(unified, project_dir: str = ".") -> str:

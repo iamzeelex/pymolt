@@ -43,6 +43,11 @@ replicate still did not settle:
 - **An input that changed with no visible cause** on an unedited line, including an input one side
   passed and the other did not, at a call both sides make.
 - **A dict whose key order changed**, unless the order is shown to be deterministic.
+- **Attributes read by a computed name** (`getattr(x, name)`, `vars(x)`, `asdict(x)`) on a
+  dependency object. verify compares such an object by the attributes your code reads by name, so
+  the verdict lists these places instead of comparing what they read. `verify --strict` compares
+  the full state. A dependency's namedtuple your code reads by position (`parts[1]`) is projected
+  the same way: name its fields, or use `--strict`.
 - **An environment difference** between the two captures (OS, resource limits, privileges) at a
   call that reads it. Capture both sides on the same platform.
 
