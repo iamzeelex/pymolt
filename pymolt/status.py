@@ -1142,10 +1142,10 @@ def _decide_next(
             + (". No apply run made this migration, so there is nothing to roll back"
                if by_hand else "")
             + ". A person decides: fix the code"
-            + (f" (`pymolt apply --step {back[0]}` brings the rolled-back step back)"
+            + (f" (`{command(shown, 'apply', '--step', back[0])}` brings the rolled-back step back)"
                if back else "")
             + ", then capture post-migration again and verify; or accept an intended change "
-              "with `pymolt verify . --accept ID` on a terminal.")
+              f"with `{command(shown, 'verify', '--accept', 'ID')}` on a terminal.")
         return
     if _noise_settles(verification) and replicate():
         return

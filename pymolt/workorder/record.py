@@ -111,17 +111,21 @@ def in_progress_steps(receipt: Any, run_id: str | None = None) -> list[tuple[str
     return out
 
 
-def refuse_open_record(receipt: Any, operation: str) -> None:
+def refuse_open_record(receipt: Any, operation: str, shown: str = ".") -> None:
     """``apply`` and ``rollback`` write nothing while a record is open (its diff would hold
-    their changes)."""
+    their changes). ``shown``: the project dir as the hint's commands name it
+    (``status.shown_dir``)."""
+    from pymolt.status import command
+
     busy = in_progress_steps(receipt)
     if busy:
         run, sid = busy[0]
         raise StepRefusal(
             f"step {sid} of run {run[:8]} is being recorded: {operation} would write into its "
             "record",
-            hint=f"Finish it with `pymolt apply --step {sid} --record --done`, or drop it with "
-                 f"`pymolt apply --step {sid} --record --abort`.")
+            hint=f"Finish it with `{command(shown, 'apply', '--step', sid, '--record', '--done')}`"
+                 f", or drop it with "
+                 f"`{command(shown, 'apply', '--step', sid, '--record', '--abort')}`.")
 
 
 # ── the claim ladder at record time ─────────────────────────────────────────────────────────

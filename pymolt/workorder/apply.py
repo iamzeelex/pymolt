@@ -145,7 +145,8 @@ AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a pers
 def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | None = None,
                 through: str | None = None, dry_run: bool = False,
                 allow_no_baseline: bool = False, smoke: bool = False,
-                agent: bool = False, smoke_reason: str | None = None) -> ApplyResult:
+                agent: bool = False, smoke_reason: str | None = None,
+                shown: str = ".") -> ApplyResult:
     """Apply the selected pymolt steps of ``plan`` (module docstring). Under ``agent`` the
     plan must be approved for agents (``workorder.approval``), except for a dry run.
     ``smoke_reason``: why the smoke import is not run, for the receipts (``--no-smoke``, an MCP
@@ -161,7 +162,7 @@ def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | Non
     with _migration_lock(project_dir, "apply"):
         return _apply(Path(project_dir).resolve(), plan, step=step, through=through,
                       dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke,
-                      agent=agent, smoke_reason=smoke_reason)
+                      agent=agent, smoke_reason=smoke_reason, shown=shown)
 
 
 def skip_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, reason: str, *,
@@ -412,7 +413,7 @@ def _classify(decisions: list[FileDecision]) -> str:
 
 def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | None,
            dry_run: bool, allow_no_baseline: bool, smoke: bool, agent: bool = False,
-           smoke_reason: str | None = None) -> ApplyResult:
+           smoke_reason: str | None = None, shown: str = ".") -> ApplyResult:
     receipt = MigrationReceipt.load(root)
     run_id, state = run_for(root, plan, receipt)
     _check_frozen(root, run_id, plan)
@@ -429,7 +430,7 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
     if not dry_run:
         from pymolt.workorder.record import refuse_open_record
 
-        refuse_open_record(receipt, "apply")
+        refuse_open_record(receipt, "apply", shown)
     ledger = _load_ledger(root, receipt)
     start_fp, start_setup, baseline = _preconditions(
         root, plan, receipt, run_id, allow_no_baseline=allow_no_baseline)

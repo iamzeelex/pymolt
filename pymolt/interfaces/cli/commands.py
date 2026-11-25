@@ -1110,7 +1110,8 @@ def apply_plan_cmd(
             result = apply_steps(project_path, migration_plan, step=step, through=through,
                                  dry_run=dry_run, allow_no_baseline=allow_no_baseline,
                                  smoke=smoke, agent=agent,
-                                 smoke_reason=None if smoke else "--no-smoke")
+                                 smoke_reason=None if smoke else "--no-smoke",
+                                 shown=shown_dir(project_dir))
     except MigrationCheckError as exc:
         if not json_output:
             console.print(f"[dim]Self-check: {escape(exc.check.summary())}[/dim]")
@@ -1410,7 +1411,7 @@ def rollback(
     project_path = require_project_dir(project_dir, json_output=json_output)
     try:
         result = rollback_steps(project_path, run_id=run_id, step=step, force=force,
-                                cascade=cascade, agent=agent)
+                                cascade=cascade, agent=agent, shown=shown_dir(project_dir))
         migration_plan, rolled_back_at, rolled_run = (result.plan, result.rolled_back_at,
                                                       result.run_id)
     except MigrationConflictError as exc:

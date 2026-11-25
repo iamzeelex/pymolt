@@ -1346,21 +1346,25 @@ def failing_steps_text(steps) -> str:
     return ", ".join(f"{s['id']} ({s['status']})" for s in steps)
 
 
-def fail_lines(unified, project_dir: str = ".") -> list[str]:
+def fail_lines(unified, shown: str = ".") -> list[str]:
     """What a FAIL leaves to a person: the plan steps whose sites failed, when known
     (``unified.failing_steps``), then the two ways on: fix the code and capture again, or accept
-    an intended change, a person's attested act on a terminal."""
+    an intended change, a person's attested act on a terminal. ``shown``: the project dir as
+    the commands name it (``status.shown_dir``)."""
+    from pymolt.status import command
+
     steps = list(getattr(unified, "failing_steps", None) or ())
     lines = []
     if steps:
         lines.append(f"Failing at the sites of plan step(s) {failing_steps_text(steps)}.")
         back = [s["id"] for s in steps if s["status"] == "rolled_back"]
         if back:
-            lines.append("Rolled back: `pymolt apply --step " + back[0] + "` brings "
+            lines.append(f"Rolled back: `{command(shown, 'apply', '--step', back[0])}` brings "
                          + ("it" if len(back) == 1 else "each") + " back.")
     lines.append("A person decides: fix the code, then capture post-migration again and verify; "
-                 f"or accept an intended change with `pymolt verify {project_dir} --accept ID` on "
-                 "a terminal (each finding prints its id).")
+                 "or accept an intended change with "
+                 f"`{command(shown, 'verify', '--accept', 'ID')}` on a terminal (each finding "
+                 "prints its id).")
     return lines
 
 

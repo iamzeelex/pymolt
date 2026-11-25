@@ -564,7 +564,7 @@ def _fail_note(unified, project_dir: str = ".") -> str:
 
     if unified.verdict is not VerificationVerdict.FAIL:
         return ""
-    return "".join(f"\n{escape(line)}" for line in fail_lines(unified, project_dir))
+    return "".join(f"\n{escape(line)}" for line in fail_lines(unified, shown_dir(project_dir)))
 
 
 def _step_lines(judged: dict) -> list[str]:
