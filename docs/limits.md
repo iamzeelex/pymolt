@@ -12,6 +12,13 @@
   no run reaches is BLIND, and the verdict stays INCONCLUSIVE. This holds after `apply` too, whether
   or not the plan changed that symbol ([verify.md](verify.md#scope-after-apply)).
 - **Python 2.7** is not supported: a capture reports that the tracer failed to start.
+- **Tests that race.** A capture slows the program it traces ([overhead](#overhead)), so a timing
+  race in the project or its test harness that a normal run wins can fail under capture. For
+  example, Streamlit 1.28's `AppTest` stops waiting at the first finished script run: an app that
+  calls `st.rerun()` fails with `KeyError: 'client_state'` once that first run takes longer than
+  AppTest's 0.1 s poll. Later Streamlit versions wait for the script thread. As with any failing
+  run, such a capture is not accepted as the baseline: fix the race, deselect the test, or keep the
+  failing baseline with `--accept-failing`.
 - **Golden snapshots, canary gates and shadow operations** are not offered in 0.2: no command
   makes their input files yet, so `verify` hides those options until 0.3.
 
