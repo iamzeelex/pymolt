@@ -73,7 +73,7 @@ replicate still did not settle:
   `x = f(); a, b = x` does not erase the container type.
 - **A dependency object whose class changed.** pymolt does not record class hierarchies yet, so
   a new class of the same package your code never introspects is drift, whatever its relation to
-  the old one. Your code's calls on the object are compared, and so are the attributes it reads
+  the old one; one of another package is a review item. Your code's calls on the object are compared, and so are the attributes it reads
   that the capture rendered (instance state). A class attribute or property your code reads off
   the call's own result (`r = f(); r.streaming`) is not rendered: the class change then stays a
   change. Read further away (through another variable, in another function), it is not seen. A
