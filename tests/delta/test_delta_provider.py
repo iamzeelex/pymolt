@@ -185,3 +185,27 @@ def test_plan_then_apply_writes_the_expected_rewrite(tmp_path, fake_deltas, monk
     assert "return pd.concat([s1, s2], ignore_index=True)" in after
     assert "from pandas import json_normalize" in after
     assert "xs.append(1)" in after  # list.append is not a pandas call: untouched
+
+
+def test_the_gate_takes_a_wrapper_record_only_from_the_members_own_wrapper(tmp_path):
+    """A polars call recorded under ``deprecate_renamed_parameter``'s generic wrapper lends its
+    receiver to no other call on the line (pandas ``pdf.groupby``)."""
+    from types import SimpleNamespace
+
+    from pymolt.delta.provider import BaselineSites
+
+    (tmp_path / "app").mkdir()
+    src = "def f(pdf, pl_df):\n    return pdf.groupby('k').sum(), pl_df.shift(periods=1)\n"
+    (tmp_path / "app" / "x.py").write_text(src)
+    wrapper = ("polars.utils.deprecation.deprecate_renamed_parameter.<locals>.decorate."
+               "<locals>.wrapper")
+    sites = BaselineSites(tmp_path)
+    sites.facts = [SimpleNamespace(
+        symbol=wrapper, text=src.splitlines()[1], file="app/x.py", line=2, lines=[2],
+        input={"bound": {}, "varargs": {"__tuple__": [
+            {"__object__": "polars.dataframe.frame.DataFrame"}]}})]
+    old = {"polars.dataframe.frame.DataFrame.groupby", "polars.DataFrame.groupby"}
+    groupby_wrapper = ["polars.utils.deprecation.deprecate_function.<locals>.decorate."
+                       "<locals>.wrapper"]
+    assert sites.gate(old, "groupby", "group_by", (), groupby_wrapper)[0] == []
+    assert sites.gate(old, "shift", "shift", (), [wrapper])[0]       # its own wrapper: a site

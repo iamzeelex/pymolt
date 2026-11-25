@@ -207,20 +207,24 @@ class BaselineSites:
             return None
 
     def gate(self, old_spellings: set[str], old_leaf: str, new_leaf: str,
-             owners: Iterable[str] = ()) -> tuple[list[Any], list[str], list[str]]:
+             owners: Iterable[str] = (), wrappers: Iterable[str] = ()
+             ) -> tuple[list[Any], list[str], list[str]]:
         """``(anchors, receivers, refused)``: the statements of the baseline's calls of the
         member whose every recorded receiver the proof covers (its class, or a public spelling
         of it, owns the proven old member), with no project class in the receiver's hierarchy
         defining the old or the new name; and why the other sites were refused."""
         parents = {s.rsplit(".", 1)[0] for s in old_spellings if "." in s} | set(owners)
+        wrapper_symbols = set(wrappers)
         by_site: dict[tuple[str, int], set[str | None]] = {}
         for f in self.facts:
             symbol = getattr(f, "symbol", "") or ""
             text = getattr(f, "text", None) or ""
             if symbol in old_spellings:
                 pass
-            elif "<locals>" in symbol and f".{old_leaf}(" in text:
-                pass                        # recorded under a decorator's generic wrapper
+            elif "<locals>" in symbol and symbol in wrapper_symbols and f".{old_leaf}(" in text:
+                # recorded under the very wrapper the old member is wrapped in (a decorator's
+                # generic ``wrapper``), never another call's on the line
+                pass
             else:
                 continue
             raw = self._touched._receiver_type(f)
@@ -335,7 +339,8 @@ def successor_patterns(report: DeltaReport, sites: BaselineSites | None
                 notes.append(f"{fact.symbol}: no baseline sites to gate on")
                 continue
             anchors, receivers, refused = sites.gate(
-                old_spellings, old_leaf, new_leaf, (rec.get("old") or {}).get("owners") or ())
+                old_spellings, old_leaf, new_leaf, (rec.get("old") or {}).get("owners") or (),
+                (rec.get("old") or {}).get("wrappers") or ())
             if not anchors:
                 notes.append(f"{fact.symbol}: no site the gate accepts"
                              + (f" ({refused[0]})" if refused else ""))
@@ -397,6 +402,8 @@ def _rename_keyword_pattern(group: list[DeltaFact], report: DeltaReport,
         aliases=sorted(old_spellings - {_strip_ctor(fact.symbol)}),
         template={"old_shape": template.get("old_shape"), "new_shape": template.get("new_shape"),
                   "blocked": blocked, "succession": succession_summary(fact),
+                  "guards": {f.param: ((f.succession or {}).get("template") or {}).get("guard")
+                             or "none" for f in group},
                   "member_leaf": fact.symbol.rsplit(".", 1)[-1] if member else None},
         evidence=evidence)
     if member:
@@ -405,8 +412,9 @@ def _rename_keyword_pattern(group: list[DeltaFact], report: DeltaReport,
             notes.append(f"{label}: no baseline sites to gate on")
             return
         leaf = fact.symbol.rsplit(".", 1)[-1]
+        old_rec = fact.succession.get("old") or {}
         anchors, receivers, refused = sites.gate(
-            old_spellings, leaf, leaf, (fact.succession.get("old") or {}).get("owners") or ())
+            old_spellings, leaf, leaf, old_rec.get("owners") or (), old_rec.get("wrappers") or ())
         if not anchors:
             notes.append(f"{label}: no site the gate accepts"
                          + (f" ({refused[0]})" if refused else ""))
