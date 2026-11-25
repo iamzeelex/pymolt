@@ -86,13 +86,13 @@ PR; only tags are pushed directly.
 
 **1. Freeze and cut the branch.** Everything meant for 0.2 is merged into `main`
 and CI is green. The ruleset requires `test` and `package` to have passed on the commit a new
-`release/*` branch starts at, and a PR's merge commit has no checks of its own. So cut the branch
-at the head commit of the PR that brought `main` there, which carries the checks and the same tree
-as `main` (check: `git rev-parse main^{tree} <head>^{tree}` prints one tree twice):
+`release/*` branch starts at: the CI run that merging the last PR starts on `main`
+(`gh run list --branch main --limit 1`) must have finished green, or the push is declined. Then
+cut the branch at `main` as it is:
 
 ```bash
 git switch main && git pull
-git push origin <head of the last merged PR>:refs/heads/release/0.2
+git push origin main:refs/heads/release/0.2
 ```
 
 **2. Prepare the RC** in a PR into `release/0.2`, branch `chore/release-0.2.0rc1`:
