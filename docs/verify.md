@@ -493,11 +493,13 @@ hand-written trace, or JSONL merged with `cat` without its sidecars, has no even
   - at least one fact compared equal (or was accepted). Noise a replicate measured, a call
     explained away as implicit and an unverified edited site do not fail, but they show nothing
     unchanged: a diff made only of them is INCONCLUSIVE;
-  - no static symbol is BLIND that a capture could record. A symbol whose every contact no
-    capture can observe (an attribute read, a constant such as `yaml.SafeLoader`, a chain through
-    a return value) does not keep the verdict from PASS: the verdict lists it instead ("N
-    dependency use(s) cannot be observed by a capture, so this verdict does not cover them"), and
-    `--agent` gives it as `unobservable_uses`;
+  - no static symbol is BLIND that a capture could record. A symbol no capture can record does
+    not keep the verdict from PASS: one whose every contact is unobservable (an attribute read, a
+    constant such as `yaml.SafeLoader`, a chain through a return value), or one whose statement
+    ran at line granularity while the watcher recorded no call there (a numpy ufunc such as
+    `np.isnan`, `polars.col`, an implicit `__float__`), which capturing again repeats. The verdict
+    lists it instead ("N dependency use(s) cannot be observed by a capture, so this verdict does
+    not cover them"), and `--agent` gives it as `unobservable_uses`;
   - every dynamic-only symbol had all its facts compared equal.
 - **INCONCLUSIVE**: anything else. The reasons name the missing evidence, for example "2 static
   dependency symbol(s) were not exercised (1 not run by the workload; 1 ran but not recorded)" or
@@ -508,9 +510,9 @@ hand-written trace, or JSONL merged with `cat` without its sidecars, has no even
 An INCONCLUSIVE verdict also says who settles it. Each reason is one of two kinds:
 - **needs a person** (`needs_review`): a review item. A person fixes the code, or accepts an
   intended change with `pymolt verify . --accept ID`. A difference a baseline replicate measured
-  and still could not settle is one too. So are BLIND symbols whose line ran without a recorded
-  call: capturing again records the same, so a person reviews each use. (Symbols whose every
-  contact is unobservable are no reason at all: the verdict lists them, see PASS above.)
+  and still could not settle is one too. (BLIND symbols no capture can record, whether every
+  contact is unobservable or the line ran without a recorded call, are no reason at all: the
+  verdict lists them, see PASS above.)
 - **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols a test
   can still reach (not run, or "ran" only by their function or file), a fact
   that could not be compared, a capture that is missing, invalid, stale or unlike the other, a
