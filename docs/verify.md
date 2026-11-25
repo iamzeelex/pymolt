@@ -177,7 +177,7 @@ snapshot, the same on both sides):
 
 | The statement | Compared |
 |---|---|
-| discards it (`resp.raise_for_status()` on its own line) | outcome kind and raise type; a lazy result (a coroutine, generator, iterator, Future, context manager) by its type, since discarding it means its work did not run |
+| discards it (`resp.raise_for_status()` on its own line) | outcome kind and raise type; an object other than one the call was handed (a lazy result, an `AsyncResult`, a `Deferred`: discarding one may mean its work did not run) by its type; a value, or the receiver or an argument handed back, not at all |
 | unpacks or iterates it (`x, y = np.meshgrid(...)`, `for r in f()`) | the elements and their number, not the container type |
 | passes it alone to `int`, `float`, `bool` or `len` (not rebound in the file) | the converted value: `int(bar.get_height())` makes 4.0 and 4 equal |
 | tests its truth (`if f():`, `not f()`) | truthiness |

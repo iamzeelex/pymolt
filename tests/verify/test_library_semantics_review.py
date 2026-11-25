@@ -379,3 +379,33 @@ def test_reads_in_a_file_the_post_migration_snapshot_lacks_come_from_the_checkou
     src = (proj / "app.py").read_text()
     ctx = DiffContext(old_sources={"app.py": src}, new_sources={"app.py": src}, edits=[])
     assert diff_facts(facts["old"], facts["new"], context=ctx).verdict is FAIL
+
+
+# ── 12. a discarded result that is an object of another kind compares by type ─────────────
+
+def test_a_discarded_call_that_now_returns_a_deferred_fails(tmp_path):
+    src = "import dep\ndef main(job):\n    dep.run_job(job)\n"
+    old = [ev("dep.run_job", {"job": 1}, result=None)]
+    new = [ev("dep.run_job", {"job": 1}, result={"__object__": "dep.tasks.AsyncResult",
+                                                 "attrs": {"id": "x"}})]
+    assert run(tmp_path, old, new, src).verdict is FAIL
+
+
+def test_a_discarded_fluent_return_of_the_receiver_is_not_observed(tmp_path):
+    src = "import dep\ndef main(resp):\n    resp.raise_for_status()\n"
+
+    def rfs(result):
+        return ev("dep.Response.raise_for_status", {"self": {"__opaque__": "dep.Response"}},
+                  result=result)
+
+    d = run(tmp_path, [rfs(None)], [rfs({"__structure__": "dep.Response", "status_code": 200})],
+            src)
+    assert d.verdict is PASS
+    # an object the call was handed as an argument and hands back (``sns.barplot(ax=ax)``)
+    plot = "import sns\ndef main(ax):\n    sns.barplot(x=1, ax=ax)\n"
+
+    def bar(result, ax="dep.axes.AxesSubplot"):
+        return ev("sns.barplot", {"x": 1, "ax": {"__opaque__": ax}}, result=result)
+
+    d = run(tmp_path, [bar(None)], [bar({"__opaque__": "dep.axes.AxesSubplot"})], plot)
+    assert d.verdict is PASS
