@@ -3543,6 +3543,8 @@ def _multiset_match(old: list[Outcome], new: list[Outcome]) -> bool:
     """Every call on one side matched to one on the other (counts as capacities, a maximum
     flow over the ``_outcomes_match`` pairs). The evidence of the pairs used is kept."""
     edges: dict[tuple[int, int], _Evidence] = {}
+    if _all_floats(old) and _all_floats(new):
+        return _sorted_float_match(old, new)
     if len(old) * len(new) > _MATCH_FULL_MAX:
         return False     # too many distinct outcomes to match: strict
     for i, x in enumerate(old):
@@ -3565,6 +3567,25 @@ def _multiset_match(old: list[Outcome], new: list[Outcome]) -> bool:
             if units:
                 ev.merge(edges[key])
     return True
+
+
+_SORTED_MATCH_MAX = 200_000   # calls a sorted float matching expands
+
+
+def _all_floats(outcomes: list[Outcome]) -> bool:
+    return all(o.kind == "return" and isinstance(o.value, float) for o in outcomes)
+
+
+def _sorted_float_match(old: list[Outcome], new: list[Outcome]) -> bool:
+    """Scalar float results matched with their counts: both sides' calls sorted and paired in
+    order, each pair within rounding (``_values_match``). The tolerance grows with magnitude
+    and is symmetric, so when any one-to-one matching exists the sorted one does: exact, and
+    no cap on the number of distinct values (a loop of 65 differently rounded values)."""
+    xs = sorted(v for o in old for v in [o.value] * o.count)
+    ys = sorted(v for o in new for v in [o.value] * o.count)
+    if len(xs) != len(ys) or len(xs) > _SORTED_MATCH_MAX:
+        return False
+    return all(x == y or _values_match(x, y) for x, y in zip(xs, ys))
 
 
 def _max_flow(supply: list[int], demand: list[int], edges: list[tuple[int, int]]
