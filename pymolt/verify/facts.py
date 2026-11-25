@@ -2774,7 +2774,7 @@ _EDITED: ContextVar[bool] = ContextVar("pymolt_edited", default=False)
 
 
 # Set by ``_pair_entry``: the pair's input passes a project callable (a decorator call).
-_WRAPS: ContextVar[bool] = ContextVar("pymolt_wraps", default=False)
+_WRAPS: ContextVar[frozenset] = ContextVar("pymolt_wraps", default=frozenset())
 _NAME_READS = ("__name__", "__qualname__")
 
 
@@ -2784,10 +2784,21 @@ def _wrapper_naming(a: Any, b: Any) -> bool:
     under another name (DRF's ``WrappedAPIView`` -> ``View.as_view.<locals>.view``). Drift,
     unless the project reads a callable's name (``__name__``, ``__qualname__``)."""
     sem = _SEM.get()
-    if (sem is None or sem.strict or _EDITED.get() or not _WRAPS.get()
+    wrapped = _WRAPS.get()
+    if (sem is None or sem.strict or _EDITED.get() or not wrapped
             or not (_project_type(a) and _project_type(b))):
         return False
     if any(n in sem.old.read or n in sem.new.read for n in _NAME_READS):
+        return False
+    defined = sem.old.defined | sem.new.defined
+
+    def wraps_it(label: str) -> bool:
+        # the decorated function itself, a closure, or a name the project defines nowhere (a
+        # class the library made for it): never another function of the project's own
+        return (label in wrapped or "<locals>" in label
+                or label.rsplit(".", 1)[-1] not in defined)
+
+    if not (wraps_it(a) and wraps_it(b)):
         return False
     ev = _EVIDENCE.get()
     if ev is not None:
@@ -2795,15 +2806,19 @@ def _wrapper_naming(a: Any, b: Any) -> bool:
     return True
 
 
-def _project_callables(value: Any) -> bool:
+def _project_callables(value: Any, out: set[str] | None = None) -> set[str]:
+    """The project's callables an input passes (their labels)."""
+    out = set() if out is None else out
     if isinstance(value, dict):
         name = value.get("__callable__")
         if isinstance(name, str) and _project_type(name):
-            return True
-        return any(_project_callables(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_project_callables(v) for v in value)
-    return False
+            out.add(name)
+        for v in value.values():
+            _project_callables(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _project_callables(v, out)
+    return out
 
 
 def _handle_state(v: Mapping[str, Any]) -> dict[str, Any]:
@@ -6922,13 +6937,20 @@ def _added_none_default(o: _V, n: _V, e: FactEntry) -> bool:
     if _canon(strip(a, b)) != _canon(strip(b, a)):
         return False
     added = sorted(set((a or {}).get("bound", {})) ^ set((b or {}).get("bound", {})))
-    e.notes.append("added-default-none")
+    e.notes.append(ADDED_NONE)
+    e.absorbed = sorted({*e.absorbed, ADDED_NONE})
     e.explained = e.explained or (
         f"binding: a parameter bound on one side only, to None ({', '.join(added)}): an added "
         "default, not an input change")
     if e.comparison is Comparison.EQUAL and e.category is FactCategory.EQUAL:
         e.category, e.drift = FactCategory.DRIFT, True
+    if _STRICT.get() and not e.review:
+        e.review = (f"{ADDED_NONE}: a parameter bound on one side only, to None "
+                    f"({', '.join(added)}); --strict reviews it")
     return True
+
+
+ADDED_NONE = "added-default-none"
 
 
 def _edited_literal_input(o: _V, n: _V, e: FactEntry, prov: "_Provenance") -> bool:
@@ -8145,8 +8167,9 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     counted = _COUNTED.set(_COUNTED_DIFF.get() and _counts_complete(of) and _counts_complete(nf)
                            and not (_is_widened_input(of.input) or _is_widened_input(nf.input)))
     edited = _EDITED.set(bool(o.rewritten_site or n.rewritten_site or rewritten))
-    wraps = _WRAPS.set(_SEM.get() is not None and _project_callables(of.input)
-                       and _canon(of.input) == _canon(nf.input))
+    wraps = _WRAPS.set(frozenset(_project_callables(of.input))
+                       if _SEM.get() is not None and _canon(of.input) == _canon(nf.input)
+                       else frozenset())
     consumer = _CONSUMER.set(_pair_consumer(of, nf))
     receivers = _RECEIVERS.set(frozenset(_input_type_keys(of.input) | _input_type_keys(nf.input)))
     try:
