@@ -109,6 +109,7 @@ from pymolt.core.stdlib import is_stdlib
 from pymolt.state_io import atomic_write_json
 from pymolt.verify import dict_order as _order
 from pymolt.verify import environment as _env
+from pymolt.verify import successor_inputs
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -4307,6 +4308,9 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         if (k := source_kind(f.symbol)) is not None and not (k[1] and seeded))
     old_facts = _canonicalise(old_facts, noise.old)
     new_facts = _canonicalise(new_facts, noise.new)
+    # a successor rewrite's renamed keywords and written-out defaults, read back in the old
+    # call's terms before anything is keyed (``verify.successor_inputs``)
+    new_facts = successor_inputs.normalize(new_facts, context.edits if context else None)
     old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
         old_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})

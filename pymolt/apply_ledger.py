@@ -63,7 +63,7 @@ from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 from pydantic_core import ValidationError
 
 from pymolt.anchors import Anchor, Statement, StatementIndex
@@ -231,6 +231,21 @@ class LedgerEntry(BaseModel):
     expect: str | None = None
     old_symbol: str | None = None
     new_symbol: str | None = None
+    # A successor rewrite (successors v2): the keywords it renamed (old -> new), the member it
+    # renamed (old -> new), and the defaults it wrote out (parameter -> the old default's
+    # repr). Verify maps the new side's inputs back by them (``verify.successor_inputs``).
+    param_map: dict[str, str] | None = None
+    member_map: dict[str, str] | None = None
+    materialized: dict[str, str] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_maps(self, handler: Any) -> dict[str, Any]:
+        # optional additions: an entry without them dumps as before
+        data = handler(self)
+        for key in ("param_map", "member_map", "materialized"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
     def as_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -305,6 +320,56 @@ class EntryAttrs:
     expect: str | None = None
     old_symbol: str | None = None
     new_symbol: str | None = None
+    param_map: dict[str, str] | None = None
+    member_map: dict[str, str] | None = None
+    materialized: dict[str, str] | None = None
+
+
+def successor_maps(patterns: Iterable[Any]) -> dict[str, dict[str, str] | None]:
+    """``{param_map, member_map, materialized}`` of a step's successor patterns: the keywords a
+    ``rename-keyword`` renames; the member a ``rename-member`` or a member ``forward-template``
+    renames, and the keywords the forward hands on under another name; the defaults a
+    ``forward-template`` may write out (those the successor changed)."""
+    params: dict[str, str] = {}
+    members: dict[str, str] = {}
+    written: dict[str, str] = {}
+    for p in patterns:
+        kind = getattr(p, "kind", None)
+        template = getattr(p, "template", None) or {}
+        if kind == "rename-keyword":
+            params.update(getattr(p, "params", None) or {})
+        if kind in ("rename-member", "forward-template") and template.get("member_leaf"):
+            old_leaf = p.old_qualname.rsplit(".", 1)[-1]
+            new_leaf = p.new_qualname.rsplit(".", 1)[-1]
+            if old_leaf != new_leaf:
+                members[old_leaf] = new_leaf
+        if kind != "forward-template":
+            continue
+        old_shape = {q[0]: q for q in template.get("old_shape") or ()}
+        callee = [q for q in template.get("callee_new_shape") or ()
+                  if q[1] in ("POSITIONAL_ONLY", "POSITIONAL_OR_KEYWORD")]
+        if callee and callee[0][0] in ("self", "cls") and template.get("member_leaf"):
+            callee = callee[1:]
+        callee_defaults = {q[0]: q[2] for q in template.get("callee_new_shape") or ()}
+        for i, desc in enumerate(template.get("args") or ()):
+            if isinstance(desc, dict) and "p" in desc and i < len(callee):
+                name = callee[i][0]
+                if name != desc["p"]:
+                    params[desc["p"]] = name
+                spec = old_shape.get(desc["p"])
+                if spec and spec[2] is not None and str(spec[2]) != str(
+                        callee_defaults.get(name)):
+                    written[name] = str(spec[2])
+        for key, desc in template.get("kwargs") or ():
+            if key == "**" or not (isinstance(desc, dict) and "p" in desc):
+                continue
+            if key != desc["p"]:
+                params[desc["p"]] = key
+            spec = old_shape.get(desc["p"])
+            if spec and spec[2] is not None and str(spec[2]) != str(callee_defaults.get(key)):
+                written[key] = str(spec[2])
+    return {"param_map": params or None, "member_map": members or None,
+            "materialized": written or None}
 
 
 def attrs_for_recipe(key: str | None, claims: dict[str, str]) -> EntryAttrs:
@@ -393,7 +458,8 @@ def entries_for(file: str, before: str, after: str,
         common = {"run_id": run_id, "step_id": step_id, "file": file, "kind": region.kind,
                   "rule": region.rule, "claim": region.claim, "basis": region.basis,
                   "expect": region.expect, "old_symbol": region.old_symbol,
-                  "new_symbol": region.new_symbol}
+                  "new_symbol": region.new_symbol, "param_map": region.param_map,
+                  "member_map": region.member_map, "materialized": region.materialized}
         if not anchored:
             out.append(LedgerEntry(**common, old_lines=(i1 + 1, i2) if i2 > i1 else None,
                                    new_lines=(j1 + 1, j2) if j2 > j1 else None))
@@ -417,12 +483,13 @@ def step_attrs(step: Any) -> EntryAttrs:
     keys = list(getattr(recipe, "keys", None) or ())
     kind, old, new = _parse_recipe(keys[0]) if keys else (None, None, None)
     symbol = step.symbol
+    maps = successor_maps(getattr(recipe, "patterns", None) or ()) if recipe is not None else {}
     return EntryAttrs(
         kind=kind or (recipe.kind if recipe is not None else step.type),
         rule=" + ".join(keys) if keys else None,
         claim=step.claim, basis=step.basis,
         expect=getattr(step.verify, "expect", None),
-        old_symbol=symbol.old or old, new_symbol=symbol.new or new)
+        old_symbol=symbol.old or old, new_symbol=symbol.new or new, **maps)
 
 
 # ── reading and writing ───────────────────────────────────────────────────────────────────
