@@ -580,6 +580,9 @@ All notable changes to pymolt. The format follows
 - A refusal because of who asks or how (the `--agent` limits, the approval gate, options that do
   not go together) is no longer printed as a plan conflict with a re-plan hint; an agent's refusal
   says a person runs the same command on a terminal. Exit codes are unchanged (2).
+- A successor the old version's warning names is checked in the new version, so it is named when
+  it exists there; a candidate the new version was not asked about is listed as "was not probed
+  in the new version", where the plan said it "does not exist in the new version".
 
 #### Assess, scan and setup
 

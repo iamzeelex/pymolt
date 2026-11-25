@@ -788,6 +788,10 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
                 need.update(callee.get("spellings") or ())
                 if callee.get("member") and "." in m:
                     need.add(m.rsplit(".", 1)[0] + "." + callee["member"])
+        for m in members:  # what the old version warned at baseline names: check it exists
+            for c in succ_mod.candidates_from([w.message for w in baseline.get(m, ())],
+                                              source="warning"):
+                need.update(_successor_candidates(c.name, canon, members))
         for m in members:  # still there, deprecated: the new version may name its successor
             if m in sp_new and sp_new[m].exists:
                 for c in _new_candidates(sp_new[m], _leaf(canon)):
@@ -803,6 +807,10 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
     def new_of(name: str) -> Spell | None:
         s = sp_new.get(name) or extra.get(name)
         return s if s is not None and s.exists else None
+
+    # every spelling the new interpreter was asked about: ``_choose`` says a candidate does not
+    # exist there only when it was asked, and that it was not probed otherwise
+    new_of.asked = frozenset(sp_new) | frozenset(todo) | frozenset(extra)  # type: ignore[attr-defined]
 
     def new_error(name: str) -> str | None:
         parts = name.split(".")
@@ -1114,7 +1122,10 @@ def _choose(cands: list[succ_mod.Candidate], canon: str, members: list[str],
                 sp = min(spells, key=_public_first)
                 resolved.append((c, sp, sp))
                 continue
-            rejected.setdefault(c.name, "does not exist in the new version")
+            asked = getattr(new_of, "asked", None)
+            rejected.setdefault(c.name, "does not exist in the new version"
+                                if asked is None or any(o in asked for o in options)
+                                else "was not probed in the new version")
             continue
         if _is_member(canon):           # a member's successor is a member of its class first
             beside = [x for x in spells if x.rsplit(".", 1)[0] in member_parents]
