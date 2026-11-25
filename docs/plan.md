@@ -51,8 +51,8 @@ irrelevant changes.
   `st.cache_resource`"), no successor is picked: the fact lists them as `succession.candidates`,
   ordered by evidence, and the agent or person chooses. Every fact that names a successor says
   how (`succession`: its `trust`, the `sources`, `caveats` such as "the default has changed"
-  or "is not equivalent to", and the names it `rejected` and why). A parameter paired with another only by its position is a
-  candidate, never a successor. Prose and text only name a successor; they never rewrite code.
+  or "is not equivalent to", and the names it `rejected` and why). A parameter paired with
+  another only by its position is a candidate, never a successor. Prose and text only name a successor; they never rewrite code.
 - **Proven successors.** A successor is *proven* only by the library's own code, and only a
   proven one is rewritten:
   - **identity**: the same object (a move, or a removed name that was its named successor in
@@ -86,7 +86,8 @@ irrelevant changes.
     proves no plain rename.
 
   Anything else (an unknown decorator, a helper that is handed `kwargs`, a twin in another
-  module) leaves the successor named, with the reason in `succession.rejected`.
+  module) leaves the successor named, with the reason in `succession.rejected`: a forward's
+  callee is still the successor (trust `named`, source `code`), for an agent to apply.
 
   A proof made in the old version holds when the successor is not deprecated in the target and
   every call binds alike against the successor's old and new signatures; one made in the target

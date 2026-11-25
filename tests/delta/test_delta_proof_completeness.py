@@ -277,3 +277,28 @@ def test_mining_never_raises_on_a_forward_to_cls(tmp_path):
         sys.path.remove(str(tmp_path))
         sys.modules.pop("m_cls", None)
     assert mined["body"]["forward"]["callee"] == "cls"
+
+
+def test_an_incomplete_forward_still_names_its_callee(tmp_path):
+    """The text names no successor; the body forwards to ``total`` under a wrapper pymolt does
+    not know (django's ``keep_lazy_text``): the successor is named from the code, not
+    rewritten."""
+    new = {"__init__.py": "def total(values):\n    return sum(values)\n"}
+    old = {"__init__.py": new["__init__.py"] + '''
+import functools, warnings
+def _lazy(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        return fn(*a, **k)
+    return wrapper
+@_lazy
+def old_total(values):
+    warnings.warn("old_total is deprecated", DeprecationWarning)
+    return total(values)
+'''}
+    before, after, out, facts = _rewrite(tmp_path, old, new, "fakepkg.old_total",
+                                         "from fakepkg import old_total\ny = old_total([1, 2])\n")
+    assert before == after and "old_total" in out
+    fact = next(f for f in facts if f.symbol == "fakepkg.old_total" and not f.param)
+    assert fact.successor == "fakepkg.total"
+    assert fact.succession["trust"] == "named" and "code" in fact.succession["sources"]
