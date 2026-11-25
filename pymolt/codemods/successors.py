@@ -27,6 +27,7 @@ parameter, or a parameter left at a default the target changed, leaves the site 
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -71,7 +72,8 @@ def site_spans(text: str, sites: Iterable[Any] | None, path: str | None
             continue
         found = index.resolve(anchor)
         if found.ok and found.statement is not None:
-            spans.append((found.statement.first, found.statement.end))
+            # the statement's own lines: a compound statement's header, never its body
+            spans.append((found.statement.first, found.statement.last))
     return spans
 
 
@@ -101,10 +103,9 @@ def _positional_name(params: list[list], i: int) -> str | None:
 
 
 def _norm_default(value: Any) -> Any:
-    text = None if value is None else str(value)
-    if text is not None and text.startswith("<") and text.endswith(">"):
-        return "<sentinel>"
-    return text
+    """A default's repr as compared: only an object address (`` at 0x...``) is no part of it;
+    ``<class 'float'>`` and ``<class 'int'>`` differ."""
+    return None if value is None else re.sub(r" at 0x[0-9a-fA-F]+", "", str(value))
 
 
 def binds_same(npos: int, keywords: Iterable[str], old: list | None, new: list | None,
@@ -186,7 +187,7 @@ class _Bound(cst.CSTTransformer):
             return False
         if not qnames or any(q.source != QualifiedNameSource.IMPORT for q in qnames):
             return False
-        if not any(q.name in names for q in qnames):
+        if not all(q.name in names for q in qnames):     # a binding on every path, not some
             return False
         head = _head(func)
         if head is None:
@@ -223,6 +224,28 @@ class _Bound(cst.CSTTransformer):
         except KeyError:
             return (0, 0)
         return pos.start.line, pos.end.line
+
+    def visit_Module(self, node: cst.Module) -> None:
+        member = getattr(self, "member", None)
+        self._occurrences = []
+        if member:
+            counter = _AttrCounter(member)
+            node.visit(counter)
+            self._occurrences = counter.nodes
+
+    def _only_one(self, node: cst.CSTNode) -> bool:
+        """The member occurs once in the statement holding ``node`` (its own lines): the
+        receiver the baseline recorded there is this call's."""
+        start, end = self._span(node)
+        span = next(((a, b) for a, b in self.spans or () if a <= start and end <= b), None)
+        if span is None:
+            return False
+        here = [n for n in self._occurrences
+                if span[0] <= self._span(n)[0] and self._span(n)[1] <= span[1]]
+        if len(here) != 1:
+            self.skipped.append(f"its statement holds .{self.member} {len(here)} times")
+            return False
+        return True
 
 
 def _catches_import_error(handler: cst.ExceptHandler) -> bool:
@@ -271,9 +294,11 @@ class RenameKeywordCodemod(_Bound):
     def __init__(self, names: Iterable[str], params: Mapping[str, str], *,
                  member: str | None = None, spans: list[tuple[int, int]] | None = None,
                  old_shape: list | None = None, blocked: Iterable[Mapping] = (),
-                 new_shape: list | None = None) -> None:
+                 new_shape: list | None = None, guards: Mapping[str, str] | None = None
+                 ) -> None:
         super().__init__()
         self.new_shape = new_shape
+        self.guards = dict(guards or {})
         self.names = set(names)
         self.params = dict(params)
         self.member = member
@@ -288,7 +313,8 @@ class RenameKeywordCodemod(_Bound):
         if self.member is not None:
             if not (isinstance(func, cst.Attribute) and func.attr.value == self.member):
                 return False
-            return self.spans is not None and _in_spans(self.spans, *self._span(call))
+            return self.spans is not None and _in_spans(self.spans, *self._span(call)) and \
+                self._only_one(func)
         return self._import_bound(func, self.names) and _in_spans(self.spans,
                                                                   *self._span(call))
 
@@ -325,6 +351,19 @@ class RenameKeywordCodemod(_Bound):
         if why is not None:
             self.skipped.append(why)
             return updated
+        new_params = _params(self.new_shape, self.member is not None)
+        by_position = {_positional_name(new_params, i) for i in range(npos)}
+        clash = [self.params[o] for o in olds if self.params[o] in by_position]
+        if clash:
+            self.skipped.append(f"it passes {clash[0]} by position already")
+            return updated
+        for o in olds:
+            if self.guards.get(o) == "not_none" and not _non_none_literal(
+                    _keyword_value(original, o)):
+                # the old body aliases only a value other than None: a value pymolt cannot
+                # read could be None, and then the old keyword did nothing
+                self.skipped.append(f"it passes {o} a value that may be None")
+                return updated
         args = []
         for arg in updated.args:
             if arg.keyword is not None and arg.keyword.value in self.params:
@@ -342,6 +381,34 @@ class RenameKeywordCodemod(_Bound):
             args.append(arg)
         self.sites += 1
         return updated.with_changes(args=args)
+
+
+def _keyword_value(call: cst.Call, name: str) -> cst.BaseExpression | None:
+    for arg in call.args:
+        if arg.keyword is not None and arg.keyword.value == name:
+            return arg.value
+        if arg.star == "**" and isinstance(arg.value, cst.Dict):
+            for el in arg.value.elements:
+                key = getattr(el, "key", None)
+                if isinstance(key, cst.SimpleString) and key.evaluated_value == name:
+                    return getattr(el, "value", None)
+    return None
+
+
+def _non_none_literal(node: cst.BaseExpression | None) -> bool:
+    if isinstance(node, (cst.SimpleString, cst.ConcatenatedString, cst.Integer, cst.Float,
+                         cst.Imaginary)):
+        return True
+    if isinstance(node, cst.UnaryOperation) and isinstance(node.expression,
+                                                           (cst.Integer, cst.Float)):
+        return True
+    return isinstance(node, cst.Name) and node.value in ("True", "False")
+
+
+def _simple(node: cst.BaseExpression | None) -> bool:
+    """A name or a literal: evaluating it again, later or not at all changes nothing."""
+    return isinstance(node, cst.Name) or _non_none_literal(node) or (
+        isinstance(node, cst.Name) and node.value == "None")
 
 
 # ── rename-member ────────────────────────────────────────────────────────────────────────
@@ -457,7 +524,8 @@ class ForwardTemplateCodemod(_Bound):
         func = call.func
         if self.member is not None:
             return isinstance(func, cst.Attribute) and func.attr.value == self.member and \
-                self.spans is not None and _in_spans(self.spans, *self._span(call))
+                self.spans is not None and _in_spans(self.spans, *self._span(call)) and \
+                self._only_one(func)
         return isinstance(func, cst.Attribute) and self._import_bound(func, self.names) and \
             _in_spans(self.spans, *self._span(call))
 
@@ -479,29 +547,36 @@ class ForwardTemplateCodemod(_Bound):
         if any(a.star for a in call.args):
             return "it unpacks arguments pymolt cannot see"
         bound: dict[str, cst.BaseExpression] = {}
+        source_order: list[str] = []      # the site's arguments, as the call evaluates them
         extra_pos: list[cst.Arg] = []
         extra_kw: list[cst.Arg] = []
         star = next((p[0] for p in params if p[1] == "VAR_POSITIONAL"), None)
         dstar = next((p[0] for p in params if p[1] == "VAR_KEYWORD"), None)
         positional = [p for p in params if p[1] in _POSITIONAL]
         names = {p[0]: p for p in params}
-        for i, arg in enumerate(a for a in call.args if a.keyword is None):
-            if i < len(positional):
-                bound[positional[i][0]] = arg.value
-            elif star:
-                extra_pos.append(arg)
-            else:
-                return "it passes more positional arguments than the old signature takes"
+        i = 0
         for arg in call.args:
             if arg.keyword is None:
+                if i < len(positional):
+                    bound[positional[i][0]] = arg.value
+                    source_order.append(positional[i][0])
+                elif star:
+                    extra_pos.append(arg)
+                    source_order.append("*")
+                else:
+                    return "it passes more positional arguments than the old signature takes"
+                i += 1
                 continue
             k = arg.keyword.value
             if k in names and names[k][1] in (*_POSITIONAL, "KEYWORD_ONLY"):
                 bound[k] = arg.value
+                source_order.append(k)
             elif dstar:
                 extra_kw.append(arg)
+                source_order.append("**")
             else:
                 return f"it passes {k}, which the old signature does not take"
+        self._used: list[str] = []
         cond = self.t.get("cond")
         if cond:
             p = next(iter(cond.values()))
@@ -523,11 +598,15 @@ class ForwardTemplateCodemod(_Bound):
             if value is None:           # *args handed on
                 new_args.extend(a.with_changes(comma=cst.MaybeSentinel.DEFAULT)
                                 for a in extra_pos)
+                if extra_pos:
+                    self._used.append("*")
                 continue
             new_args.append(cst.Arg(value=value))
         for key, desc in self.t.get("kwargs") or ():
             if key == "**":
                 new_args.extend(extra_kw)
+                if extra_kw:
+                    self._used.append("**")
                 continue
             value, passed = self._value(desc, bound, names)
             if isinstance(value, str):
@@ -554,6 +633,9 @@ class ForwardTemplateCodemod(_Bound):
         new_args = self._trim(new_args, n_names, bound, names)
         if isinstance(new_args, str):
             return new_args
+        why = self._evaluation(source_order, bound, extra_pos, extra_kw)
+        if why is not None:
+            return why
         npos = sum(1 for a in new_args if a.keyword is None and not a.star)
         kws = [a.keyword.value for a in new_args if a.keyword is not None]
         why = binds_same(npos, kws, self.t.get("callee_old_shape"), callee_new, member)
@@ -578,11 +660,37 @@ class ForwardTemplateCodemod(_Bound):
                            args=_commas(chain_args))
         return out
 
+    def _evaluation(self, source_order: list[str], bound: Mapping[str, cst.BaseExpression],
+                    extra_pos: list[cst.Arg], extra_kw: list[cst.Arg]) -> str | None:
+        """Why the rebuilt call would evaluate the site's arguments otherwise (None: it would
+        not): an argument the forward drops, repeats or moves before another is allowed only
+        when it is a name or a literal, which no evaluation can tell apart."""
+        def simple(p: str) -> bool:
+            if p == "*":
+                return all(_simple(a.value) for a in extra_pos)
+            if p == "**":
+                return all(_simple(a.value) for a in extra_kw)
+            return _simple(bound.get(p))
+
+        for p in source_order:
+            uses = self._used.count(p)
+            if uses == 0:
+                return f"the forward does not hand on {p}, which this call passes"
+            if uses > 1 and not simple(p):
+                return f"the forward evaluates {p} {uses} times"
+        firsts = list(dict.fromkeys(u for u in self._used if u in source_order))
+        moving = [p for p in firsts if not simple(p)]
+        expected = [p for p in source_order if not simple(p)]
+        if moving != expected:
+            return "the forward evaluates this call's arguments in another order"
+        return None
+
     def _value(self, desc: Mapping[str, Any], bound: Mapping[str, cst.BaseExpression],
                names: Mapping[str, list]) -> tuple[cst.BaseExpression | str | None, bool]:
         if "p" in desc:
             p = desc["p"]
             if p in bound:
+                self._used.append(p)
                 return bound[p], True
             spec = names.get(p)
             if spec is None:
@@ -633,7 +741,7 @@ class ForwardTemplateCodemod(_Bound):
             return "its module binding is unknown"
         modules = {q.name for q in qnames}
         new_mod, _, leaf = new.rpartition(".")
-        if new_mod not in modules:
+        if modules != {new_mod}:           # the module on every path, not on some
             return f"{new} lives in another module than the call's binding"
         return func.with_changes(attr=cst.Name(leaf))
 
@@ -663,7 +771,7 @@ def apply_successor_pattern(source: str, pattern: Any, *, path: str | None = Non
         transformer: Any = RenameKeywordCodemod(
             names, pattern.params or {}, member=member, spans=spans,
             old_shape=template.get("old_shape"), blocked=template.get("blocked") or (),
-            new_shape=template.get("new_shape"))
+            new_shape=template.get("new_shape"), guards=template.get("guards"))
     elif pattern.kind == "rename-member":
         transformer = RenameMemberCodemod(
             pattern.old_qualname.rsplit(".", 1)[-1], pattern.new_qualname.rsplit(".", 1)[-1],

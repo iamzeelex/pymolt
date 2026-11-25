@@ -154,13 +154,18 @@ A proven successor becomes one of these codemods (basis `library-proof`, claim `
 - **`forward-template`**: the call is rebuilt from the forward, the old defaults the successor
   changed written out (`df.with_row_count()` -> `df.with_row_index("row_nr")`).
 
-A function is reached through its import binding only: never a shadowed name, a binding made
-in an `except ImportError` fallback, a string or a `getattr` name. A method is rewritten only
-at the statements (anchors) where the baseline recorded receivers of the class the proof is
-about, and no project class in the receiver's hierarchy defines either name; a statement that
-holds the name twice, or a site the baseline never ran, stays with the agent step. Every
-rewritten call is checked against the old and new signatures: an argument that would bind to
-another parameter leaves the site alone. A successor that is named but not proven, or proven
+A function is reached through its import binding only, the same binding on every path (not an
+`if`/`else` that imports another module under the same name): never a shadowed name, a binding
+made in an `except ImportError` fallback, a string or a `getattr` name. A method is rewritten
+only at the statements (anchors) where the baseline recorded receivers of the class the proof
+is about, and no project class in the receiver's hierarchy defines either name; the statement's
+own lines must hold the method once (a compound statement's header, never its body), and a
+call the baseline recorded under a deprecation wrapper counts only under the method's own
+wrapper. Every rewritten call is checked against the old and new signatures: an argument that
+would bind to another parameter, a new keyword already passed by position, or a value an alias
+guarded by `is not None` could not tell (anything but a literal) leaves the site alone. A
+`forward-template` keeps the call's evaluation: it refuses to drop, repeat or reorder an
+argument that is not a name or a literal. A successor that is named but not proven, or proven
 but not holding in the target, is an agent step with the successor, the forward rendered as
 `do.manual.suggestion`, and its provenance in `why.successor`; one the evidence names several of
 lists them as `do.manual.candidates`. A keyword rename's step names its parameters in
