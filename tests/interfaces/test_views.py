@@ -501,7 +501,7 @@ _VERIFY_KEYS = {
     "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "coverage_bounded",
     "blind_split",
     "unobservable_contacts", "compared", "changes", "change_counts", "calibration",
-    "impact_focus", "failing_steps", "unobservable_uses",
+    "impact_focus", "failing_steps", "unobservable_uses", "dynamic_attribute_reads",
 }
 
 

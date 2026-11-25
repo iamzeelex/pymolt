@@ -369,7 +369,9 @@ def verify_migration(
         help="Accept a failing or review finding (its id) as an intended change: a person on "
              "a terminal types the nonce printed"),
     strict: bool = typer.Option(
-        False, "--strict", help="Review every accepted change instead of counting it equal"),
+        False, "--strict",
+        help="Review every accepted change instead of counting it equal, and compare a "
+             "dependency object's full state, not only what your code reads of it"),
     step: str | None = typer.Option(
         None, "--step",
         help="Also print this step's judgement and exit by it (0 verified, 1 failed, 4 needs "

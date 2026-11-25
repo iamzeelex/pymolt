@@ -1304,6 +1304,32 @@ def unobservable_line(rep) -> str | None:
             f"does not cover them; a person may glance at: {shown}")
 
 
+def _whole_fact_diff(rep) -> dict:
+    fd = getattr(rep, "all_fact_diff", None) or getattr(rep, "fact_diff", None)
+    return fd if isinstance(fd, dict) else {}
+
+
+def dynamic_reads_line(rep) -> str | None:
+    """One line naming the places the project reads attributes by a computed name
+    (``getattr(x, var)``, ``vars(x)``, ``x.__dict__``, ``asdict(x)``), when a dependency
+    object's unread state differed: verify compares what the project reads of such an object by
+    name, so what those places read is not compared. Listed, not blocking (like
+    ``unobservable_uses``); ``verify --strict`` compares the full state. None when there are
+    none."""
+    reads = list(_whole_fact_diff(rep).get("dynamic_reads") or ())
+    if not reads:
+        return None
+    shown = ", ".join(reads[:5]) + (f", … ({len(reads) - 5} more)" if len(reads) > 5 else "")
+    return (f"{len(reads)} place(s) read a dependency object's attributes by a computed name, "
+            "so the state they may read is not compared (`verify --strict` compares it all); "
+            f"a person may glance at: {shown}")
+
+
+def semantics_lines(rep) -> list[str]:
+    """The verdict's lines about how dependency objects and values were compared."""
+    return [line for line in (dynamic_reads_line(rep),) if line]
+
+
 def failing_steps_text(steps) -> str:
     """``beh-1 (rolled_back), mech-1 (applied)``: the plan steps whose sites failed."""
     return ", ".join(f"{s['id']} ({s['status']})" for s in steps)
@@ -1394,6 +1420,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         # BLIND symbols no capture can observe: they do not keep the verdict from PASS, and the
         # verdict does not cover them (``unobservable_line``).
         "unobservable_uses": list(getattr(rep, "unobservable_uses", None) or ()),
+        # Places the project reads a dependency object's attributes by a computed name: listed,
+        # not compared (``dynamic_reads_line``).
+        "dynamic_attribute_reads": list(_whole_fact_diff(rep).get("dynamic_reads") or ()),
     }
     lines = [f"VERDICT: {verdict.upper()}"
              + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]
@@ -1402,6 +1431,7 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append(settles)
     if unseen := unobservable_line(rep):
         lines.append(unseen)
+    lines.extend(semantics_lines(rep))
     if rep.baseline_stale:
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
