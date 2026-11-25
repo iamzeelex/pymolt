@@ -68,6 +68,9 @@ class UnifiedVerificationReport(BaseModel):
     # A FAIL's plan steps whose sites failed, in effect or not (``judge.failing_steps``): what
     # the FAIL output, ``--agent`` and ``status`` name.
     failing_steps: list[dict[str, Any]] = Field(default_factory=list)
+    # Floats the fact diff found equal only within floating-point rounding (``FactDiff.
+    # numeric_drift``): entries, values, the largest distance in ulps and relatively, the bound.
+    numeric_drift: dict[str, Any] | None = None
 
     def save(self, project_dir: str | Path) -> Path:
         """Write the verdict (with its steps' judgements) atomically, under the state lock;
@@ -192,6 +195,7 @@ def build_unified_verification(
         steps_run=steps_run,
         failing_steps=(_failing_steps(contract) if verdict is VerificationVerdict.FAIL
                        else []),
+        numeric_drift=(contract.all_fact_diff or contract.fact_diff or {}).get("numeric_drift"),
     )
 
 

@@ -193,7 +193,8 @@ failed, applied or not (`--agent`: `data.failing_steps`).
 | `--profile`, `--comparator` | How values are compared: `exact`, `shape`, or `custom` with `module:callable` |
 | `--probe-python` | A target interpreter to replay the recorded calls in |
 | `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
-| `--strict` | Review every accepted change instead of counting it equal |
+| `--strict` | Review every accepted change instead of counting it equal; compare a dependency object's full state and a result in full; make floats equal only within rounding review items |
+| `--float-ulps N` | Floats are equal within N units in the last place at their own precision (default 1024; 0: exact) |
 | `--verbose`, `-v` | Also show what was explained away: masked noise, replicate-explained differences |
 | `--step` | Also print that step's judgement and exit by it: 0 verified, 1 failed, 4 needs review, needs evidence or not in the capture, 2 an unknown step. The verdict still covers the whole surface |
 

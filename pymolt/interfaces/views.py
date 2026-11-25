@@ -1325,9 +1325,20 @@ def dynamic_reads_line(rep) -> str | None:
             f"a person may glance at: {shown}")
 
 
+def numeric_line(rep) -> str | None:
+    """``k values equal within floating-point rounding (<=N ulps)``: the numeric layer is
+    always stamped. None when no float needed it."""
+    drift = _whole_fact_diff(rep).get("numeric_drift")
+    if not drift:
+        return None
+    return (f"{drift['values']} value(s) equal within floating-point rounding "
+            f"(≤{drift['bound_ulps']} ulps; at most {drift['max_ulps']:g} ulps, relative "
+            f"{drift['max_relative']:.1e}); `verify --float-ulps 0` compares them exactly")
+
+
 def semantics_lines(rep) -> list[str]:
     """The verdict's lines about how dependency objects and values were compared."""
-    return [line for line in (dynamic_reads_line(rep),) if line]
+    return [line for line in (numeric_line(rep), dynamic_reads_line(rep)) if line]
 
 
 def failing_steps_text(steps) -> str:
@@ -1423,6 +1434,8 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         # Places the project reads a dependency object's attributes by a computed name: listed,
         # not compared (``dynamic_reads_line``).
         "dynamic_attribute_reads": list(_whole_fact_diff(rep).get("dynamic_reads") or ()),
+        # Floats equal only within floating-point rounding (``numeric_line``), or None.
+        "numeric_drift": _whole_fact_diff(rep).get("numeric_drift"),
     }
     lines = [f"VERDICT: {verdict.upper()}"
              + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]

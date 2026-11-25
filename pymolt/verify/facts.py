@@ -175,8 +175,11 @@ class DiffContext:
     # The accepts verify honours, and ``--strict`` (``verify.accepts.AcceptContext``).
     accepts: Any = None
     # ``verify --strict``: a dependency object is compared by its full public state, not by
-    # what the project reads of it (``_Semantics``).
+    # what the project reads of it (``_Semantics``); numeric drift is a review item.
     strict: bool = False
+    # ``verify --float-ulps N``: two floats are equal within N units in the last place at their
+    # own precision (0: exact). None: the default, ``FLOAT_ULPS``.
+    float_ulps: int | None = None
 
 
 class DiffProfile(StrEnum):
@@ -203,6 +206,8 @@ class Comparison(StrEnum):
 
 class ComparisonLevel(StrEnum):
     EXACT = "exact"
+    # exact, but floats equal only within floating-point rounding (``float_ulps``)
+    NUMERIC = "numeric"
     MASKED = "masked"  # exact once volatile positions (environment, clock, source, input) masked
     TYPE = "type"
     KIND = "kind"   # from tallies: which outcome kinds (return / raise types) occurred
@@ -502,6 +507,8 @@ class FactEntry(BaseModel):
     # The relaxations that made this entry equal where the full comparison would not have
     # (``handle-state``, ...): every run counts what each one absorbed (``FactDiff.absorbed``).
     absorbed: list[str] = Field(default_factory=list)
+    # Floats equal within rounding at this entry: ``{"values", "max_ulps", "max_relative"}``.
+    numeric: dict[str, Any] | None = None
     # Run-to-run noise measured by a replicate capture: the difference is real but the baseline
     # itself varies there the same way. Neither failing nor inconclusive.
     noise: str | None = None
@@ -586,6 +593,20 @@ class FactDiff(BaseModel):
     # How dependency objects were compared: ``projected`` (by what the project reads of them),
     # ``full`` (``--strict``) or ``full: no source snapshot``.
     handle_comparison: str | None = None
+
+    float_ulps: int = 1024    # the numeric layer's bound this diff used (0: exact)
+
+    @property
+    def numeric_drift(self) -> dict[str, Any] | None:
+        """Floats equal only within floating-point rounding: how many values at how many
+        entries, the largest distance in ulps and relatively, and the bound. None: none."""
+        hits = [e.numeric for e in self.entries if e.numeric]
+        if not hits:
+            return None
+        return {"entries": len(hits), "values": sum(h["values"] for h in hits),
+                "max_ulps": max(h["max_ulps"] for h in hits),
+                "max_relative": max(h["max_relative"] for h in hits),
+                "bound_ulps": self.float_ulps}
 
     @property
     def absorbed(self) -> dict[str, int]:
@@ -692,6 +713,7 @@ class FactDiff(BaseModel):
             "noise_measured": self.noise_measured,
             "replicate_applies": self.replicate_applies,
             "absorbed": self.absorbed,
+            "numeric_drift": self.numeric_drift,
             "handle_comparison": self.handle_comparison,
             "dynamic_reads": list(self.dynamic_reads),
             "entries": entries,
@@ -2440,6 +2462,7 @@ class _Evidence:
     # What a relaxation absorbed (mechanism -> details): differences the full comparison would
     # have counted and the projected one did not (``_Semantics``).
     absorbed: dict[str, list[str]] = field(default_factory=dict)
+    numeric: list[tuple[float, float]] = field(default_factory=list)   # (ulps, relative)
 
     def absorb(self, mechanism: str, *details: str) -> None:
         self.absorbed.setdefault(mechanism, []).extend(details)
@@ -2451,6 +2474,7 @@ class _Evidence:
         self.closures.extend(other.closures)
         for k, v in other.absorbed.items():
             self.absorb(k, *v)
+        self.numeric.extend(other.numeric)
 
 
 _EVIDENCE: ContextVar[_Evidence | None] = ContextVar("pymolt_evidence", default=None)
@@ -2957,6 +2981,7 @@ class OutcomeComparison:
     new_types: list[Any] | None = None
     drift: bool = False  # equal, but an attribute was added/removed or went absent <-> empty
     absorbed: list[str] = field(default_factory=list)  # relaxations that made it equal
+    numeric: dict[str, Any] | None = None   # floats equal within rounding (``FactEntry.numeric``)
 
 
 def compare_outcomes(
@@ -3137,6 +3162,14 @@ def _compare_plain(
         cmp.notes.extend(dict.fromkeys(ev.drift))
     if cmp.comparison is Comparison.EQUAL and ev.relocated:
         ev.absorb("type-drift:relocated", *(f"{a} -> {b}" for a, b in ev.relocated))
+    if cmp.comparison is Comparison.EQUAL and ev.numeric:
+        u = max(x for x, _ in ev.numeric)
+        r = max(y for _, y in ev.numeric)
+        cmp.numeric = {"values": len(ev.numeric), "max_ulps": round(u, 1),
+                       "max_relative": float(f"{r:.3g}")}
+        ev.absorb(NUMERIC, f"{len(ev.numeric)} value(s), max {u:.0f} ulps, relative {r:.1e}")
+        if cmp.level is ComparisonLevel.EXACT:
+            cmp.level = ComparisonLevel.NUMERIC
     if cmp.comparison is Comparison.EQUAL and ev.absorbed:
         cmp.absorbed = sorted(ev.absorbed)
         # a relocation keeps its own note and stays EQUAL at type level, as before; it is only
@@ -3209,6 +3242,9 @@ def _absorbed_note(mechanism: str, details: list[str]) -> str:
     shown = shown if len(shown) <= 200 else shown[:199] + "…"
     if mechanism == HANDLE_STATE:
         return f"handle state not observed: unread attributes differ ({shown})"
+    if mechanism == NUMERIC:
+        return (f"numeric drift: floats equal within floating-point rounding "
+                f"(<= {_ULPS.get()} ulps): {shown}")
     if mechanism.startswith("type-drift:"):
         why = {"relocated": "the class moved within its package",
                "unintrospected": "a dependency object's class changed and the project never "
@@ -3435,10 +3471,80 @@ def _is_ambiguous(o: Outcome) -> bool:
             and str(o.value.get("__opaque__", "")).startswith("ambiguous"))
 
 
+FLOAT_ULPS = 1024     # owner decision (2026-11-24): the numeric layer's default bound
+NUMERIC = "numeric"
+_ULPS: ContextVar[int] = ContextVar("pymolt_ulps", default=FLOAT_ULPS)
+_STRICT: ContextVar[bool] = ContextVar("pymolt_strict", default=False)
+# (scale, mantissa bits) while comparing the values of one float array: the array's largest
+# magnitude is the scale, at the array's own precision.
+_NUM_SCALE: ContextVar[tuple[float, int] | None] = ContextVar("pymolt_num_scale", default=None)
+_MANTISSA = {"float64": 52, "float32": 23, "float16": 10, "float": 52, "double": 52,
+             "single": 23, "half": 10}
+
+
+def _ulp(scale: float, bits: int) -> float:
+    return math.ulp(scale) * 2.0 ** (52 - bits)
+
+
+def _floats_close(a: float, b: float) -> float | None:
+    """The distance of two different floats in units in the last place, when within the bound
+    (``_ULPS``) at their precision; None otherwise. Scalars scale by the larger magnitude, and
+    zero against non-zero is never close; inside an array the array's largest magnitude is the
+    scale. Non-finite values, and a bound of 0, are exact."""
+    bound = _ULPS.get()
+    if bound <= 0 or not (math.isfinite(a) and math.isfinite(b)):
+        return None
+    if a == b:
+        return 0.0                       # +0.0 and -0.0
+    scope = _NUM_SCALE.get()
+    if scope is None:
+        if a == 0.0 or b == 0.0:
+            return None                  # zero against non-zero, with no scale to judge by
+        scale, bits = max(abs(a), abs(b)), 52
+    else:
+        scale, bits = scope
+    if scale <= 0.0:
+        return None
+    distance = abs(a - b) / _ulp(scale, bits)
+    return distance if distance <= bound else None
+
+
+def _float_leaves(v: Any, out: list[float]) -> list[float]:
+    if isinstance(v, float):
+        out.append(v)
+    elif isinstance(v, list):
+        for x in v:
+            _float_leaves(x, out)
+    elif isinstance(v, dict):
+        for x in v.values():
+            _float_leaves(x, out)
+    return out
+
+
+def _numeric_scope(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[float, int] | None:
+    """The scale of one float array (both sides' values, the same dtype): its largest finite
+    magnitude, at the dtype's precision."""
+    bits = _MANTISSA.get(str(a.get("dtype")))
+    if bits is None or a.get("dtype") != b.get("dtype"):
+        return None
+    leaves = [abs(x) for x in _float_leaves(a.get("values"), _float_leaves(b.get("values"), []))
+              if math.isfinite(x)]
+    return (max(leaves), bits) if leaves else None
+
+
 def _values_match(a: Any, b: Any) -> bool:
     """Exact equality (type-strict: ``1 != 1.0 != True``), falling back to type equality only
     where either side holds a type-only rendering."""
     if _canon(a) == _canon(b):
+        return True
+    if isinstance(a, float) and isinstance(b, float):
+        distance = _floats_close(a, b)
+        if distance is None:
+            return False
+        ev = _EVIDENCE.get()
+        if ev is not None:
+            top = max(abs(a), abs(b))
+            ev.numeric.append((distance, abs(a - b) / top if top else 0.0))
         return True
     if isinstance(a, str) and isinstance(b, str) and "⟨clock:" in a:
         return clock_values_match(a, b)
@@ -3504,9 +3610,14 @@ def _values_match(a: Any, b: Any) -> bool:
             # ``numpy.ma.MaskedArray``); the rest (dtype, shape, columns) compares as is
             rest_a = {k: v for k, v in a.items() if k not in ("values", "__structure__")}
             rest_b = {k: v for k, v in b.items() if k not in ("values", "__structure__")}
-            return (_same_type_name(a["__structure__"], b["__structure__"])
-                    and _canon(rest_a) == _canon(rest_b)
-                    and _values_match(a["values"], b["values"]))
+            if not (_same_type_name(a["__structure__"], b["__structure__"])
+                    and _canon(rest_a) == _canon(rest_b)):
+                return False
+            token = _NUM_SCALE.set(_numeric_scope(a, b))
+            try:
+                return _values_match(a["values"], b["values"])
+            finally:
+                _NUM_SCALE.reset(token)
         return types_match(value_type(a), value_type(b))
     return False
 
@@ -5042,11 +5153,18 @@ def diff_facts(
                                      or new.site_tallies or old.outcomes_other
                                      or new.outcomes_other))
     reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
+    ulps = (context.float_ulps if context is not None and context.float_ulps is not None
+            else FLOAT_ULPS)
+    ulps_token = _ULPS.set(max(0, int(ulps)))
+    strict_token = _STRICT.set(strict)
     noise = _NOISE.set(_NoiseState())
     try:
         diff = _diff_facts(old, new, DiffProfile(profile), context, tuple(order_causes))
+        diff.float_ulps = _ULPS.get()
     finally:
         _NOISE.reset(noise)
+        _STRICT.reset(strict_token)
+        _ULPS.reset(ulps_token)
         _TYPE_RELOC.reset(reloc)
         _COUNTED_DIFF.reset(counted)
         _SEM.reset(sem_token)
@@ -6233,6 +6351,8 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
             continue  # a compiled call's arguments were never recorded: nothing to compare
         if _input_labels(n.fact.input) & fresh_new or _input_labels(o.fact.input) & fresh_old:
             continue  # downstream of an edit
+        if _numeric_input(o, n, e):
+            continue  # the same input within floating-point rounding: not an input change
         changed, drift = _unexplained_input_leaves(o, n, stats)
         if changed is None:
             # the same argument values: only how the new version binds or names them drifted
@@ -6262,6 +6382,63 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
                         f"visible cause ({shown}); {_REPLICATE_HINT}")
         count += 1
     return count
+
+
+def _numeric_equal(a: Any, b: Any) -> bool:
+    """Two inputs equal except for floats within floating-point rounding (``_values_match``'s
+    numeric layer, an array's floats by the array's scale)."""
+    if _canon(a) == _canon(b):
+        return True
+    if isinstance(a, float) and isinstance(b, float):
+        return _values_match(a, b)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_numeric_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False
+        if "__structure__" in a:
+            return _values_match(a, b)
+        return all(_numeric_equal(a[k], b[k]) for k in a)
+    return False
+
+
+def _numeric_input(o: _V, n: _V, e: FactEntry) -> bool:
+    """A pair whose inputs differ only by floats within rounding (sklearn's ``X`` at 1-2 ulps):
+    the same call given the same input (``matched-modulo-numeric``). Its outcome comparison
+    stands as is: equal is numeric drift, a different outcome fails."""
+    def bare(inputs: Any) -> Any:   # an empty ``*args``/``**kwargs`` binds nothing
+        if not isinstance(inputs, dict):
+            return inputs
+        return {k: v for k, v in inputs.items()
+                if not (k in ("args", "varargs", "kwargs")
+                        and v in (None, [], {}, {"__tuple__": []}, {"__dict__": []}))}
+
+    ev = _Evidence()
+    token = _EVIDENCE.set(ev)
+    try:
+        close = _numeric_equal(bare(o.fact.input), bare(n.fact.input))
+    finally:
+        _EVIDENCE.reset(token)
+    if not (close and ev.numeric):
+        return False
+    u = max(x for x, _ in ev.numeric)
+    r = max(y for _, y in ev.numeric)
+    prior = e.numeric or {"values": 0, "max_ulps": 0.0, "max_relative": 0.0}
+    e.numeric = {"values": prior["values"] + len(ev.numeric),
+                 "max_ulps": max(prior["max_ulps"], round(u, 1)),
+                 "max_relative": max(prior["max_relative"], float(f"{r:.3g}"))}
+    e.notes.append("matched-modulo-numeric")
+    if e.comparison is Comparison.EQUAL:
+        e.absorbed = sorted({*e.absorbed, NUMERIC})
+        if e.category is FactCategory.EQUAL:
+            e.category, e.drift = FactCategory.DRIFT, True
+        e.explained = e.explained or (
+            f"{NUMERIC}: the input differs only within floating-point rounding "
+            f"({len(ev.numeric)} value(s), max {u:.0f} ulps)")
+        if _STRICT.get():
+            e.review = (f"numeric drift: the input differs only within floating-point rounding "
+                        f"(max {u:.0f} ulps); --strict reviews it")
+    return True
 
 
 INPUT_VARIANT = "input-variant"
@@ -7452,9 +7629,18 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         old_count=of.count, new_count=nf.count, notes=all_notes,
         old_where=of.where, new_where=nf.where,
         old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
-        explained=explained, absorbed=list(cmp.absorbed),
+        explained=explained, absorbed=list(cmp.absorbed), numeric=cmp.numeric,
+        review=_numeric_review(cmp),
         **_raw_samples(of, nf),
     )
+
+
+def _numeric_review(cmp: OutcomeComparison) -> str | None:
+    """``--strict``: floats equal only within rounding are a review item, not drift."""
+    if not (_STRICT.get() and cmp.numeric and cmp.comparison is Comparison.EQUAL):
+        return None
+    return (f"numeric drift: {cmp.numeric['values']} value(s) equal only within floating-point "
+            f"rounding (max {cmp.numeric['max_ulps']:.0f} ulps); --strict reviews it")
 
 
 def _pair_consumer(of: Fact, nf: Fact) -> str | None:
