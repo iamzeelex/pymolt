@@ -683,3 +683,86 @@ def test_a_numpy_dispatcher_is_not_compared(tmp_path):
            ev("numpy._core.fromnumeric.round", {"a": 1.0}, result=1.0)]
     d = run(tmp_path, old, new, src)
     assert d.via == 2 and d.verdict is VerificationVerdict.PASS
+
+
+# ── 8. provenance ─────────────────────────────────────────────────────────────────────────
+
+def test_the_interpreter_prefix_is_masked_like_the_project_root(tmp_path):
+    import json
+
+    from pymolt.verify.facts import diff_facts, load_facts
+    src = "import certifi\ndef ctx():\n    return certifi.where()\n"
+    paths = {"old": "/envs/old/lib/python3.11/site-packages/certifi/cacert.pem",
+             "new": "/envs/new/lib/python3.12/site-packages/certifi/cacert.pem"}
+    facts = {}
+    for side in ("old", "new"):
+        p = tmp_path / f"{side}.jsonl"
+        e = ev("certifi.core.where", {}, result=paths[side])
+        p.write_text(json.dumps(e) + "\n")
+        (tmp_path / f"{side}.jsonl.meta.json").write_text(json.dumps({
+            "site_text": {"/proj/app.py:3": "return certifi.where()"},
+            "processes": [{"executable": f"/envs/{side}/bin/python"}]}))
+        facts[side] = load_facts(p, root="/proj")
+    from pymolt.verify.facts import DiffContext
+    d = diff_facts(facts["old"], facts["new"],
+                   context=DiffContext(old_sources={"app.py": src}, new_sources={"app.py": src},
+                                       edits=[]))
+    (e,) = d.entries
+    assert not e.fails and e.comparison is Comparison.EQUAL and e.level.value == "masked"
+
+
+def test_a_parameter_bound_to_none_on_one_side_only_is_an_added_default(tmp_path):
+    src = "import numpy as np\ndef f():\n    return np.linspace(-1, 1, 20)\n"
+    old = [ev("numpy.linspace", {"start": -1, "stop": 1, "num": 20}, result=1)]
+    new = [ev("numpy.linspace", {"start": -1, "stop": 1, "num": 20, "device": None}, result=1)]
+    e = one(run(tmp_path, old, new, src), "numpy.linspace")
+    assert not e.review and "added-default-none" in e.notes and not e.fails
+    other = [ev("numpy.linspace", {"start": -1, "stop": 1, "num": 20, "device": "cpu"},
+                result=1)]
+    assert one(run(tmp_path, old, other, src), "numpy.linspace").review.startswith(
+        "input changed")
+
+
+STYLE_OLD = ("import dep\n"
+             "def chart(style='seaborn-whitegrid'):\n"
+             "    return dep.use(style)\n")
+STYLE_NEW = STYLE_OLD.replace("seaborn-whitegrid", "seaborn-v0_8-whitegrid")
+
+
+def test_an_input_from_a_hand_edited_literal_is_judged_as_the_hand_edit(tmp_path):
+    old = [ev("dep.use", {"style": "seaborn-whitegrid"}, result=None)]
+    new = [ev("dep.use", {"style": "seaborn-v0_8-whitegrid"}, result=None)]
+    e = one(run(tmp_path, old, new, STYLE_OLD, STYLE_NEW), "dep.use")
+    assert e.provenance == "hand" and not e.review and e.compared_equal
+    changed = [ev("dep.use", {"style": "seaborn-v0_8-whitegrid"}, result=1)]
+    e = one(run(tmp_path, old, changed, STYLE_OLD, STYLE_NEW), "dep.use")
+    assert e.review == "the value differs on a hand-edited line: review"
+    raised = [ev("dep.use", {"style": "seaborn-v0_8-whitegrid"}, raised="OSError")]
+    assert one(run(tmp_path, old, raised, STYLE_OLD, STYLE_NEW), "dep.use").fails
+
+
+def test_mutation_an_input_no_edit_explains_stays_an_input_change(tmp_path):
+    old = [ev("dep.use", {"style": "classic"}, result=None)]
+    new = [ev("dep.use", {"style": "dark"}, result=None)]
+    e = one(run(tmp_path, old, new, STYLE_OLD, STYLE_NEW), "dep.use")
+    assert e.review and e.review.startswith("input changed")
+
+
+JOIN_OLD = "from flask import safe_join\ndef f(d, p):\n    path = safe_join(d, p)\n"
+JOIN_NEW = "from werkzeug.utils import safe_join\ndef f(d, p):\n    path = safe_join(d, p)\n"
+
+
+def test_a_call_through_a_name_an_edit_rebound_is_the_edit_s_site(tmp_path):
+    old = [ev("flask.helpers.safe_join", {"directory": "/srv"}, raised="dep.NotFound")]
+    new = [ev("werkzeug.security.safe_join", {"directory": "/srv"}, result=None)]
+    e = one(run(tmp_path, old, new, JOIN_OLD, JOIN_NEW), "flask.helpers.safe_join")
+    assert e.provenance == "hand" and e.review and not e.fails
+
+
+def test_mutation_a_rebound_call_that_now_raises_fails(tmp_path):
+    old = [ev("flask.helpers.safe_join", {"directory": "/srv"}, result="/srv/x")]
+    new = [ev("werkzeug.security.safe_join", {"directory": "/srv"}, raised="dep.NotFound")]
+    e = one(run(tmp_path, old, new, JOIN_OLD, JOIN_NEW), "flask.helpers.safe_join")
+    assert e.fails
+    same = run(tmp_path, old, new, JOIN_OLD, JOIN_OLD)  # the name was not rebound: strict
+    assert one(same, "flask.helpers.safe_join").fails
