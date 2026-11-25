@@ -268,7 +268,9 @@ A line diff of the source each capture stored decides who edited a call's line:
   fails. A call with no partner is counted as an unverified edited site; it does not block PASS,
   unless it is a new-side call that raises while no call of the old statement's function raised
   there (it fails, as a new raise does, unless a person attested that raise), or one that
-  fails to bind its arguments (it fails whatever the claim).
+  fails to bind its arguments (it fails whatever the claim). A `__getattr__` asked for a dunder
+  name (the import system's `__path__` probe of a module) that raises AttributeError is a probe
+  answering "absent", not a new raise.
 
 A ledger entry is judged by its claim, whoever made the edit: pymolt, or an agent or a person
 who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls. A
