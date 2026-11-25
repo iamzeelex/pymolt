@@ -152,8 +152,8 @@ A returned value is compared by what your code can observe of it:
   namedtuple class in your code).
 - **Dependency objects** (*handles*: any other object a dependency returns, including a record a
   dependency declares) compare by their type, and by the attributes your code reads by name
-  (`x.name`, `getattr(x, "name")`), as each capture's source snapshot shows them. Private
-  attributes are never compared. An attribute your code only indexes with literal keys
+  (`x.name`, `getattr(x, "name")`), as each capture's source snapshot shows them. A private
+  attribute is compared only when your code reads it by name (`p._cursor`). An attribute your code only indexes with literal keys
   (`app.config["SEED"]`) compares under those keys. Unread state that differs is counted, not
   compared: the entry is DRIFT with "handle state not observed". The calls your code makes on the
   object are facts of their own. An attribute that exists on one side only is a change when the

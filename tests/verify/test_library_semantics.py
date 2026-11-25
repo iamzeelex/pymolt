@@ -100,12 +100,12 @@ def test_strict_compares_the_full_public_state(tmp_path):
     assert d.absorbed == {}
 
 
-def test_private_state_is_never_compared(tmp_path):
-    src = KM_SRC + "print(km._tol)\n"
+def test_private_state_is_compared_only_when_read_by_name(tmp_path):
     old, new = kmeans(), kmeans()
     new["attrs"]["_tol"] = 0.5
-    d = run(tmp_path, [fit(old)], [fit(new)], src)
-    assert not one(d, "dep.cluster.KMeans.fit").fails
+    assert not one(run(tmp_path, [fit(old)], [fit(new)], KM_SRC), "dep.cluster.KMeans.fit").fails
+    d = run(tmp_path, [fit(old)], [fit(new)], KM_SRC + "print(km._tol)\n")
+    assert one(d, "dep.cluster.KMeans.fit").fails
 
 
 def test_planned_attribute_rename_compares_old_name_with_new(tmp_path):
