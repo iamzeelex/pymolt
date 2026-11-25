@@ -43,6 +43,10 @@ replicate still did not settle:
 - **An input that changed with no visible cause** on an unedited line, including an input one side
   passed and the other did not, at a call both sides make.
 - **A dict whose key order changed**, unless the order is shown to be deterministic.
+- **A dependency object whose class changed.** pymolt does not record class hierarchies yet, so
+  a new class your code never introspects is drift, whatever its relation to the old one. Your
+  code's calls on the object and the attributes it reads are still compared. A `str()` or
+  `repr()` of the object that shows its class name is not tied to the class.
 - **Attributes read by a computed name** (`getattr(x, name)`, `vars(x)`, `asdict(x)`) on a
   dependency object. verify compares such an object by the attributes your code reads by name, so
   the verdict lists these places instead of comparing what they read. `verify --strict` compares

@@ -165,6 +165,23 @@ A returned value is compared by what your code can observe of it:
   lists them; they do not block PASS, like the [unobservable uses](#the-verdict).
 - A dependency record in a call's input, or as its receiver, is keyed by its type.
 
+A type that changed is judged by a ladder:
+- **Values and raises**: strict. A class that moved within its package (same top-level package,
+  same class name: `numpy.ma.core.MaskedArray` is `numpy.ma.MaskedArray`) is the only allowance.
+- **Dependency objects**: a relocation is equal; otherwise the class relation is unknown (pymolt
+  records no MRO yet), and the change is drift (`type drift`) when your code never introspects
+  either class: no `isinstance`, `issubclass`, `except`, `match`, `type(x) is C` or
+  singledispatch names it, and nothing reads a type's name (`type(x).__name__`). Your code then
+  sees the object only through the calls it makes on it and the attributes it reads, both
+  compared. Introspected: it fails.
+- **A decorator's wrapper** of the same function of yours, named differently by the new version
+  (`WrappedAPIView` vs `View.as_view.<locals>.view`), is drift unless your code reads a
+  callable's `__name__` or `__qualname__`.
+- **A type an edited line produced** (`go.Heatmapgl(...)` edited to `go.Heatmap(...)`) that
+  reappears at an unedited call (`fig.data`) is judged with that edit: a review when the edit is
+  one, a failure when it fails.
+- On an edited line, a new class is the edit's, judged by its claim ([Edited lines](#edited-lines)).
+
 Several outcomes at one fact (a call in a loop, over hidden receivers) are matched call by call,
 with their counts. A call that changed among N, a call more or fewer (`call-count-changed`), or
 counts that moved between outcome kinds (`outcome-kinds-moved`) is a change. A value that moved

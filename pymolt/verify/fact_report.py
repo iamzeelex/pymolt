@@ -50,6 +50,7 @@ RULES = {
     "replicate": "replicate.apply_noise_profile",
     "order": "facts._judge_order",
     "handle-state": "facts._handles_match (a dependency object, by what the project reads of it)",
+    "type-drift": "facts._handle_types_relate / _wrapper_naming / _carry_edit_types",
 }
 
 # review reason (the review text's prefix) -> the one action that settles it
@@ -68,6 +69,7 @@ ACTIONS = {
     "the value differs on a hand-edited line": "review the hand edit at the call site",
     "not reached": "check that the code around the call still runs under the tests",
     "no longer a dependency call here": "check what the name refers to on that line now",
+    "carried from the edit": "review the edit the type comes from (each finding prints its id)",
 }
 _DEFAULT_ACTION = "review the entry"
 # The reasons a baseline replicate settles. Once one was measured and the entry still stands,

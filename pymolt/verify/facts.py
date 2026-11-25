@@ -2347,6 +2347,14 @@ def types_match(a: Any, b: Any) -> bool:
         return True
     if isinstance(b, dict) and ("nondeterministic" in b or "ambiguous" in b):
         return True
+    la, lb = _handle_tree_label(a), _handle_tree_label(b)
+    if la and lb:
+        if _handle_type_tree(a) and _handle_type_tree(b):
+            return _handle_types_match(a, b)
+        if not _handle_types_relate(la, lb):
+            return False
+        sa, sb = a.get("status_code"), b.get("status_code")
+        return sa is None or sb is None or sa == sb
     if isinstance(a, dict) and ("opaque" in a or "cycle" in a):
         return _named_match(a, b)
     if isinstance(b, dict) and ("opaque" in b or "cycle" in b):
@@ -2366,7 +2374,8 @@ def types_match(a: Any, b: Any) -> bool:
     if "type" in a and "type" in b:
         return _same_type_name(a["type"], b["type"])
     if "callable" in a and "callable" in b:
-        return _same_closure(a["callable"], b["callable"])
+        return (_same_closure(a["callable"], b["callable"])
+                or _wrapper_naming(a["callable"], b["callable"]))
     if _handle_type_tree(a) and _handle_type_tree(b):
         return _handle_types_match(a, b)
     if "object" in a and "object" in b:
@@ -2379,6 +2388,11 @@ def types_match(a: Any, b: Any) -> bool:
         # attributes present on both sides; one-sided attributes are additive, not a change
         return all(types_match(a["attrs"][k], b["attrs"][k])
                    for k in a["attrs"].keys() & b["attrs"].keys())
+    if "structure" in a and "structure" in b:
+        rest_a = {k: v for k, v in a.items() if k != "structure"}
+        rest_b = {k: v for k, v in b.items() if k != "structure"}
+        return _same_type_name(a["structure"], b["structure"]) and _canon(rest_a) == _canon(
+            rest_b)
     if "dataclass" in a and "dataclass" in b:
         fa, fb = a.get("fields", {}), b.get("fields", {})
         return (a["dataclass"] == b["dataclass"] and fa.keys() == fb.keys()
@@ -2497,6 +2511,114 @@ def _handle_name(v: Any) -> str | None:
     return None
 
 
+# Opaque renderings that stand for values, not handles: a type change of one is behaviour.
+_VALUE_OPAQUE_PREFIXES = ("ambiguous", "unobserved:", "float-nonfinite")
+_NUMPY_SCALAR = re.compile(
+    r"^numpy\.(?:(?:float|int|uint|complex)\d*|longdouble|clongdouble|longlong|ulonglong|"
+    r"intc|uintc|intp|uintp|short|ushort|byte|ubyte|half|single|double|csingle|cdouble|"
+    r"bool_?|str_|bytes_|void|datetime64|timedelta64|generic|number)$")
+_VALUE_TYPES = frozenset({"decimal.Decimal", "fractions.Fraction",
+                          "pandas._libs.tslibs.timestamps.Timestamp",
+                          "pandas._libs.tslibs.timedeltas.Timedelta",
+                          "pandas._libs.tslibs.nattype.NaTType", "pandas._libs.missing.NAType"})
+
+
+def _value_type_name(name: str) -> bool:
+    """A type-only rendering of a value (a builtin, a numpy scalar, a decimal, a pandas
+    scalar): its type is compared strictly."""
+    return ("." not in name or name.startswith(_VALUE_OPAQUE_PREFIXES)
+            or bool(_NUMPY_SCALAR.match(name)) or name in _VALUE_TYPES)
+
+
+def _handle_label(v: Any) -> str | None:
+    """The type name of any rendering of a dependency object, for the type ladder: a library
+    ``__object__``/``__dataclass__``, an ``__opaque__``/``__cycle__`` of a library type that is
+    no value type, a response-like ``__structure__`` (``status_code``, no values). None for a
+    value, without source snapshots, or under ``--strict``."""
+    sem = _SEM.get()
+    if sem is None or sem.strict or not isinstance(v, dict):
+        return None
+    for tag in ("__object__", "__dataclass__", "__opaque__", "__cycle__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            if _project_type(name) or (tag in ("__opaque__", "__cycle__")
+                                       and _value_type_name(name)):
+                return None
+            return name
+    name = v.get("__structure__")
+    if isinstance(name, str) and "values" not in v and "status_code" in v:
+        return name
+    return None
+
+
+def _unnameable(name: str) -> bool:
+    leaf = name.rsplit(".", 1)[-1]
+    return leaf.startswith("_") or "<locals>" in name
+
+
+def _handle_types_relate(ta: str, tb: str) -> bool:
+    """The type ladder for two dependency objects (§2, without the MRO step): the same type or
+    a relocation (same package, same class name); else, while the class relation is unknown
+    (no MRO is recorded), drift when the project never introspects either class
+    (``isinstance``, ``issubclass``, ``except``, ``match``, ``type(x) is C``, singledispatch,
+    or reading a type's name): the program can only observe such an object through the calls
+    it makes on it (facts of their own) and the attributes it reads. Introspected: strict."""
+    if _same_type_name(ta, tb):
+        return True
+    sem = _SEM.get()
+    if sem is None or _EDITED.get() or not (isinstance(ta, str) and isinstance(tb, str)):
+        return False   # on an edited line the edit's claim judges a new class (``_judge_pairs``)
+    seen = sem.old.introspected | sem.new.introspected
+    if ({ta.rsplit(".", 1)[-1], tb.rsplit(".", 1)[-1]} & seen
+            or sem.old.type_names_read or sem.new.type_names_read):
+        return False
+    same_module = ta.rsplit(".", 1)[0] == tb.rsplit(".", 1)[0]
+    rule = ("private-same-module" if same_module and _unnameable(ta) and _unnameable(tb)
+            else "unintrospected")
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        ev.absorb(f"type-drift:{rule}", f"{ta} -> {tb}")
+    return True
+
+
+# Set by ``_pair_entry`` for a pair on an edited line: the edit made any new class, so the
+# type ladder's relation-unknown drift does not apply (relocation still does).
+_EDITED: ContextVar[bool] = ContextVar("pymolt_edited", default=False)
+
+
+# Set by ``_pair_entry``: the pair's input passes a project callable (a decorator call).
+_WRAPS: ContextVar[bool] = ContextVar("pymolt_wraps", default=False)
+_NAME_READS = ("__name__", "__qualname__")
+
+
+def _wrapper_naming(a: Any, b: Any) -> bool:
+    """Two callables of the project's modules, returned by a call that was passed a project
+    callable (a decorator applied to the same function on both sides): the library wraps it
+    under another name (DRF's ``WrappedAPIView`` -> ``View.as_view.<locals>.view``). Drift,
+    unless the project reads a callable's name (``__name__``, ``__qualname__``)."""
+    sem = _SEM.get()
+    if (sem is None or sem.strict or _EDITED.get() or not _WRAPS.get()
+            or not (_project_type(a) and _project_type(b))):
+        return False
+    if any(n in sem.old.read or n in sem.new.read for n in _NAME_READS):
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        ev.absorb("type-drift:wrapper", f"{a} -> {b}")
+    return True
+
+
+def _project_callables(value: Any) -> bool:
+    if isinstance(value, dict):
+        name = value.get("__callable__")
+        if isinstance(name, str) and _project_type(name):
+            return True
+        return any(_project_callables(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_project_callables(v) for v in value)
+    return False
+
+
 def _handle_state(v: Mapping[str, Any]) -> dict[str, Any]:
     if "__object__" in v:
         return dict(_attr_items(v))
@@ -2535,7 +2657,7 @@ def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str)
     (``handle-state``), never compared."""
     sem = _SEM.get()
     assert sem is not None
-    if not _same_type_name(ta, tb):
+    if not _handle_types_relate(ta, tb):
         return False
     xs, ys = _handle_state(a), _handle_state(b)
     paired, one_sided, unread = _read_pairs(xs, ys)
@@ -2587,7 +2709,7 @@ def _handle_types_match(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
     types of the attributes the project reads."""
     ta = a.get("object", a.get("dataclass"))
     tb = b.get("object", b.get("dataclass"))
-    if not _same_type_name(ta, tb):
+    if not _handle_types_relate(ta, tb):
         return False
     xs = a.get("attrs", a.get("fields"))
     ys = b.get("attrs", b.get("fields"))
@@ -2604,6 +2726,25 @@ def _handle_type_tree(t: Any) -> bool:
     sem = _SEM.get()
     return (isinstance(name, str) and sem is not None and not sem.strict
             and not _project_type(name) and ("object" in t or "dataclass" in t))
+
+
+def _handle_tree_label(t: Any) -> str | None:
+    """The type name of a ``value_type`` tree standing for a dependency object (an object or
+    record tree, an opaque or cycle of a library type, a response-like structure)."""
+    sem = _SEM.get()
+    if sem is None or sem.strict or not isinstance(t, dict):
+        return None
+    if _handle_type_tree(t):
+        return t.get("object", t.get("dataclass"))
+    for k in ("opaque", "cycle"):
+        name = t.get(k)
+        if isinstance(name, str):
+            return None if _project_type(name) or _value_type_name(name) else name
+    name = t.get("structure")
+    if isinstance(name, str) and "status_code" in t and "values" not in t and not any(
+            k in t for k in ("shape", "dtype", "dtypes", "columns")):
+        return name
+    return None
 
 
 def _type_key(name: Any) -> tuple[str, str] | None:
@@ -2826,10 +2967,16 @@ def compare_outcomes(
     if cmp.comparison is Comparison.EQUAL and ev.drift:
         cmp.drift = True
         cmp.notes.extend(dict.fromkeys(ev.drift))
+    if cmp.comparison is Comparison.EQUAL and ev.relocated:
+        ev.absorb("type-drift:relocated", *(f"{a} -> {b}" for a, b in ev.relocated))
     if cmp.comparison is Comparison.EQUAL and ev.absorbed:
-        cmp.drift = True
         cmp.absorbed = sorted(ev.absorbed)
-        cmp.notes.extend(_absorbed_note(m, d) for m, d in sorted(ev.absorbed.items()))
+        # a relocation keeps its own note and stays EQUAL at type level, as before; it is only
+        # counted (``absorbed``). Every other relaxation is DRIFT, with its note.
+        shown = {m: d for m, d in ev.absorbed.items() if m != "type-drift:relocated"}
+        if shown:
+            cmp.drift = True
+            cmp.notes.extend(_absorbed_note(m, d) for m, d in sorted(shown.items()))
     if (ev.relocated or ev.type_only) and cmp.comparison is Comparison.EQUAL:
         cmp.notes.extend(f"relocated: {a} -> {b}" for a, b in ev.relocated)
         cmp.notes.extend(f"closure: {a} -> {b}" for a, b in ev.closures)
@@ -2894,6 +3041,15 @@ def _absorbed_note(mechanism: str, details: list[str]) -> str:
     shown = shown if len(shown) <= 200 else shown[:199] + "…"
     if mechanism == HANDLE_STATE:
         return f"handle state not observed: unread attributes differ ({shown})"
+    if mechanism.startswith("type-drift:"):
+        why = {"relocated": "the class moved within its package",
+               "unintrospected": "a dependency object's class changed and the project never "
+                                 "checks it (no MRO recorded: relation unknown)",
+               "private-same-module": "two private classes of one module",
+               "wrapper": "a decorator's wrapper of the same project function, named "
+                          "differently",
+               "carried": "a type an edited line produced"}.get(mechanism[11:], mechanism)
+        return f"type drift ({why}): {shown}"
     return f"{mechanism}: {shown}"
 
 
@@ -3084,7 +3240,8 @@ def _raises_match(a: Any, b: Any) -> bool:
     """Same exception type; an untyped raise matches any raise (raise vs return still
     differs, and two different known types still differ)."""
     a, b = _raise_name(a), _raise_name(b)
-    return a == b or UNTYPED_RAISE in (a, b) or _reloc_equiv(a, b)
+    return a == b or UNTYPED_RAISE in (a, b) or _reloc_equiv(a, b) or (
+        "." in a and "." in b and _same_type_name(a, b))
 
 
 def _is_untyped_raise(o: Outcome) -> bool:
@@ -3120,6 +3277,17 @@ def _values_match(a: Any, b: Any) -> bool:
     ha, hb = _handle_name(a), _handle_name(b)
     if ha and hb:
         return _handles_match(a, b, ha, hb)
+    la, lb = _handle_label(a), _handle_label(b)
+    if la and lb:
+        if not _handle_types_relate(la, lb):
+            return False
+        if a.get("status_code") != b.get("status_code"):
+            return False
+        if _type_only(a) or _type_only(b) or a.get("__truncated__") or b.get("__truncated__"):
+            ev = _EVIDENCE.get()
+            if ev is not None:
+                ev.type_only = True
+        return True
     if _type_only(a) or _type_only(b):
         return types_match(value_type(a), value_type(b))
     if not (isinstance(a, dict) and isinstance(b, dict)):
@@ -3127,7 +3295,8 @@ def _values_match(a: Any, b: Any) -> bool:
     if "__type__" in a and "__type__" in b:
         return _same_type_name(a["__type__"], b["__type__"])
     if "__callable__" in a and "__callable__" in b:
-        return _same_closure(a["__callable__"], b["__callable__"])
+        return (_same_closure(a["__callable__"], b["__callable__"])
+                or _wrapper_naming(a["__callable__"], b["__callable__"]))
     if "__object__" in a and "__object__" in b:
         if a.get("__truncated__") or b.get("__truncated__"):  # truncated object: type level
             return types_match(value_type(a), value_type(b))
@@ -3163,9 +3332,13 @@ def _values_match(a: Any, b: Any) -> bool:
                         for (na, va), (nb, vb) in zip(xs, ys)))
     if "__structure__" in a and "__structure__" in b:
         if "values" in a and "values" in b:
-            rest_a = {k: v for k, v in a.items() if k != "values"}
-            rest_b = {k: v for k, v in b.items() if k != "values"}
-            return _canon(rest_a) == _canon(rest_b) and _values_match(a["values"], b["values"])
+            # the label relocates like any type name (``numpy.ma.core.MaskedArray`` is
+            # ``numpy.ma.MaskedArray``); the rest (dtype, shape, columns) compares as is
+            rest_a = {k: v for k, v in a.items() if k not in ("values", "__structure__")}
+            rest_b = {k: v for k, v in b.items() if k not in ("values", "__structure__")}
+            return (_same_type_name(a["__structure__"], b["__structure__"])
+                    and _canon(rest_a) == _canon(rest_b)
+                    and _values_match(a["values"], b["values"]))
         return types_match(value_type(a), value_type(b))
     return False
 
@@ -3208,7 +3381,8 @@ def _cover(xs: Iterable, ys: Iterable, match: Callable[[Any, Any], bool]) -> boo
 
 # ── Round 3: edit provenance (line-mapped diff, ledger, anchors, representation) ───────────
 
-_TYPE_RELOC: ContextVar[Mapping[str, str]] = ContextVar("pymolt_type_reloc", default={})
+# old -> new type names (a mapping, or a list of pairs once edits carried types).
+_TYPE_RELOC: ContextVar[Any] = ContextVar("pymolt_type_reloc", default={})
 _NOISE_PREFIXES = ("importlib._bootstrap",)
 _CLASS_HOOKS = ("__init_subclass__", "__set_name__", "__prepare__")
 _APPEAR_HOOKS = ("__getattribute__",)  # a new implicit protocol hook is not a call anyone made
@@ -3270,7 +3444,8 @@ def _entry_lines(entry: Mapping, side: int) -> Iterable[int]:
 def _reloc_equiv(a: str, b: str) -> bool:
     """``a`` and ``b`` are an old/new spelling pair from the plan's type relocations (full
     names or their last segments)."""
-    for old_t, new_t in _TYPE_RELOC.get().items():
+    rel = _TYPE_RELOC.get()
+    for old_t, new_t in (rel.items() if isinstance(rel, Mapping) else rel):
         names = {old_t, new_t, old_t.rsplit(".", 1)[-1], new_t.rsplit(".", 1)[-1]}
         if a != b and a in names and b in names:
             return True
@@ -4931,6 +5106,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         entries.append(_single_entry(v, old_side=False, prov=prov))
     _lift_namespace_edits(pending, prov)
     _judge_pairs(pending, old_left, new_left, prov)
+    _carry_edit_types(pending, prov)
     _apply_noise(entries, prov, {f.symbol.split('.')[0] for f in old_facts})
     backend_only = _soften_backend(entries, old, new)
     if sampled:
@@ -7036,6 +7212,9 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     of, nf = o.fact, n.fact
     counted = _COUNTED.set(_COUNTED_DIFF.get() and _counts_complete(of) and _counts_complete(nf)
                            and not (_is_widened_input(of.input) or _is_widened_input(nf.input)))
+    edited = _EDITED.set(bool(o.rewritten_site or n.rewritten_site or rewritten))
+    wraps = _WRAPS.set(_SEM.get() is not None and _project_callables(of.input)
+                       and _canon(of.input) == _canon(nf.input))
     try:
         cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
         explained = None
@@ -7048,10 +7227,15 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
             explained = _explain_masked(of, nf, cmp, profile)
     finally:
+        _WRAPS.reset(wraps)
+        _EDITED.reset(edited)
         _COUNTED.reset(counted)
-    if cmp.comparison is Comparison.EQUAL and cmp.absorbed and explained is None:
-        explained = next((n for n in cmp.notes if n.startswith("handle state")), None)
-        explained = f"{cmp.absorbed[0]}: {explained or ', '.join(cmp.absorbed)}"
+    shown = [m for m in cmp.absorbed if m != "type-drift:relocated"]
+    if cmp.comparison is Comparison.EQUAL and shown and explained is None:
+        note = next((x for x in cmp.notes
+                     if x.startswith(("handle state", "type drift", "numeric", "projected"))),
+                    None)
+        explained = f"{shown[0]}: {note or ', '.join(shown)}"
     drift = (of.defaulted is not None and nf.defaulted is not None
              and of.defaulted != nf.defaulted) or cmp.drift
     if rewritten:
@@ -7401,6 +7585,99 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
             e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
             e.review = "the value differs on a hand-edited line: review"
             e.notes.append(e.review)
+
+
+_TYPE_TAGS = ("__type__", "__opaque__", "__object__", "__dataclass__", "__structure__",
+              "__cycle__")
+
+
+def _type_labels(value: Any, out: set[str]) -> set[str]:
+    if isinstance(value, dict):
+        for tag in _TYPE_TAGS:
+            name = value.get(tag)
+            if isinstance(name, str) and "." in name:
+                out.add(name)
+        for v in value.values():
+            _type_labels(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _type_labels(v, out)
+    return out
+
+
+def _edit_type_pairs(old: list[Outcome], new: list[Outcome]) -> list[tuple[str, str]]:
+    """The type names an edited line's outcomes hold on one side only, paired old -> new (each
+    old-only name with each new-only one, at most 4 of each)."""
+    a: set[str] = set()
+    b: set[str] = set()
+    for o in old:
+        if o.kind == "return":
+            _type_labels(o.value, a)
+    for o in new:
+        if o.kind == "return":
+            _type_labels(o.value, b)
+    only_a, only_b = sorted(a - b), sorted(b - a)
+    if not only_a or not only_b or len(only_a) > 4 or len(only_b) > 4:
+        return []
+    return [(x, y) for x in only_a for y in only_b]
+
+
+def _carry_edit_types(pending: list[tuple[_V, _V, FactEntry]], prov: _Provenance) -> None:
+    """A type an edited line produced, reappearing downstream (plotly: the hand edit
+    ``go.Heatmapgl`` -> ``go.Heatmap``, then ``fig.data`` on an unedited test line returns a
+    Heatmap): the downstream change is judged with that edit, not on its own. When every
+    difference of an unedited CHANGED pair is one of those type pairs, it takes the edit's
+    judgement: a review when the edit is one, a failure when it fails, drift when the edit
+    compared equal (``type-drift:carried``)."""
+    if prov.ctx is None:
+        return
+    carried: dict[tuple[str, str], FactEntry] = {}
+    for o, n, e in pending:
+        if o.rewritten_site or n.rewritten_site:
+            for pair in _edit_type_pairs(o.fact.outcomes, n.fact.outcomes):
+                carried.setdefault(pair, e)
+    if not carried:
+        return
+    rel = _TYPE_RELOC.get()
+    token = _TYPE_RELOC.set([*(rel.items() if isinstance(rel, Mapping) else rel), *carried])
+    strict_ladder = _EDITED.set(True)   # an edit made the class: no relation-unknown drift
+    try:
+        for o, n, e in pending:
+            drifted = e.category is FactCategory.DRIFT and any(
+                m in e.absorbed for m in _LADDER_DRIFT)
+            if (o.rewritten_site or n.rewritten_site
+                    or not (e.category is FactCategory.CHANGED or drifted)
+                    or e.review or e.noise or e.provenance not in (None, "unedited")):
+                continue
+            cmp = compare_outcomes(o.fact.outcomes, n.fact.outcomes)
+            if cmp.comparison is not Comparison.EQUAL:
+                continue
+            used = [p for p in carried if f"relocated: {p[0]} -> {p[1]}" in cmp.notes]
+            if not used:
+                continue
+            src = carried[used[0]]
+            where = (src.new_site or src.old_site).label()
+            shown = ", ".join(f"{a} -> {b}" for a, b in used[:3])
+            if drifted:   # judged with the edit, not as a class the library changed
+                e.absorbed = [m for m in e.absorbed if m not in _LADDER_DRIFT]
+                e.notes = [x for x in e.notes if not x.startswith("type drift (")]
+                e.category, e.comparison = FactCategory.CHANGED, Comparison.CHANGED
+            e.absorbed = sorted({*e.absorbed, "type-drift:carried"})
+            e.notes.append(f"type carried from the edit at {where}: {shown}")
+            e.explained = f"type-drift:carried: from the edit at {where} ({shown})"
+            if src.fails:
+                continue                    # the edit itself fails: so does what it produced
+            if src.review:
+                e.review = (f"carried from the edit at {where}: the type it produced reaches "
+                            f"this call ({shown}); {src.review}")
+            else:
+                e.category, e.comparison, e.drift = FactCategory.DRIFT, Comparison.EQUAL, True
+    finally:
+        _EDITED.reset(strict_ladder)
+        _TYPE_RELOC.reset(token)
+
+
+_LADDER_DRIFT = ("type-drift:unintrospected", "type-drift:private-same-module")
 
 
 def _tier(entry: Mapping) -> str:

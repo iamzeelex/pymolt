@@ -162,12 +162,14 @@ class _Visitor(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load) and id(node) not in self.called and not module_attr:
             if node.attr == "__dict__":
                 self._dynamic(node, "x.__dict__")
-            self.uses.read.add(node.attr)
             use, key = self._attribute_use(node)
             if use == "key" and key is not None:
+                self.uses.read.add(node.attr)
                 self.uses.keys.setdefault(node.attr, set()).add(key)
             elif use == "whole":
+                self.uses.read.add(node.attr)
                 self.uses.whole.add(node.attr)
+            # written into only (``env.globals["f"] = f``, ``app.config.update(...)``): not read
             if node.attr in ("__name__", "__qualname__", "__module__") and _is_type_of(node.value):
                 self.uses.type_names_read = True
         self.generic_visit(node)
