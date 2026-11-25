@@ -279,6 +279,26 @@ def test_an_alias_guarded_by_not_none_renames_only_a_literal():
     assert apply_successor_pattern("import pkg\ny = pkg.plot(d, size=s)\n", p)[1] == 0
     assert apply_successor_pattern("import pkg\ny = pkg.plot(d, size=None)\n", p)[1] == 0
     assert apply_successor_pattern("import pkg\ny = pkg.plot(d, size=3)\n", p)[1] == 1
+    assert apply_successor_pattern('import pkg\ny = pkg.plot(d, size="%s" % n)\n', p)[1] == 1
+    assert apply_successor_pattern('import pkg\ny = pkg.plot(d, size=f"{n}")\n', p)[1] == 1
+    assert apply_successor_pattern('import pkg\ny = pkg.plot(d, size=n % 2)\n', p)[1] == 0
+
+
+def test_a_not_none_alias_onto_a_none_default_renames_any_value():
+    """flask's ``if attachment_filename is not None: download_name = attachment_filename`` with
+    ``download_name=None``: a skipped None and a None passed to the new name bind alike."""
+    old = [["path", POK, None], ["download_name", POK, "None"],
+           ["attachment_filename", POK, "None"], ["etag", POK, "True"], ["add_etags", POK, "None"]]
+    new = [["path", POK, None], ["download_name", POK, "None"], ["etag", POK, "True"]]
+    p = CodemodPattern(old_qualname="pkg.send", new_qualname="pkg.send", kind="rename-keyword",
+                       params={"attachment_filename": "download_name", "add_etags": "etag"},
+                       template={"old_shape": old, "new_shape": new,
+                                 "guards": {"attachment_filename": "not_none",
+                                            "add_etags": "not_none"}})
+    out, n = apply_successor_pattern("import pkg\ny = pkg.send(b, attachment_filename=name)\n", p)
+    assert n == 1 and "download_name=name" in out
+    # etag defaults to True: add_etags=None kept it True, etag=None would not
+    assert apply_successor_pattern("import pkg\ny = pkg.send(b, add_etags=v)\n", p)[1] == 0
 
 
 def _fwd(src: str, args: list, sig: list, callee: list, kwargs: list | None = None):

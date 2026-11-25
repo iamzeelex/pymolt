@@ -308,6 +308,14 @@ class RenameKeywordCodemod(_Bound):
         self.sites = 0
         self.skipped: list[str] = []
 
+    def _none_by_default(self, name: str) -> bool:
+        """The new parameter defaults to None on both sides: a None the old keyword skipped and
+        a None passed to the new one bind alike."""
+        shapes = [sh for sh in (self.old_shape, self.new_shape) if sh]
+        found = [p for sh in shapes for p in sh if p and p[0] == name]
+        return bool(shapes) and len(found) == len(shapes) and \
+            all(len(p) > 2 and str(p[2]) == "None" for p in found)
+
     def _targets(self, call: cst.Call) -> bool:
         func = call.func
         if self.member is not None:
@@ -358,10 +366,11 @@ class RenameKeywordCodemod(_Bound):
             self.skipped.append(f"it passes {clash[0]} by position already")
             return updated
         for o in olds:
-            if self.guards.get(o) == "not_none" and not _non_none_literal(
-                    _keyword_value(original, o)):
+            if self.guards.get(o) == "not_none" and not _never_none(
+                    _keyword_value(original, o)) and not self._none_by_default(self.params[o]):
                 # the old body aliases only a value other than None: a value pymolt cannot
-                # read could be None, and then the old keyword did nothing
+                # read could be None, and then the old keyword did nothing (the new one kept
+                # its default, which a None passed to it now replaces)
                 self.skipped.append(f"it passes {o} a value that may be None")
                 return updated
         args = []
@@ -403,6 +412,19 @@ def _non_none_literal(node: cst.BaseExpression | None) -> bool:
                                                            (cst.Integer, cst.Float)):
         return True
     return isinstance(node, cst.Name) and node.value in ("True", "False")
+
+
+def _never_none(node: cst.BaseExpression | None) -> bool:
+    """A value that cannot be None: a literal other than None, a display (list, dict, tuple,
+    set, comprehension), an f-string, or a ``"..." % x`` format (``str.__mod__`` returns a
+    string or raises)."""
+    if _non_none_literal(node):
+        return True
+    if isinstance(node, (cst.FormattedString, cst.List, cst.Dict, cst.Tuple, cst.Set,
+                         cst.ListComp, cst.DictComp, cst.SetComp, cst.Lambda)):
+        return True
+    return isinstance(node, cst.BinaryOperation) and isinstance(node.operator, cst.Modulo) and \
+        isinstance(node.left, (cst.SimpleString, cst.ConcatenatedString, cst.FormattedString))
 
 
 def _simple(node: cst.BaseExpression | None) -> bool:

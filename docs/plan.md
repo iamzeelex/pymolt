@@ -80,8 +80,10 @@ irrelevant changes.
     result (`return isin(a, b).ravel()` is no rename of `isin`) and with the successor's
     defaults equal to the ones it hands on;
   - an alias is the old parameter's only use, under no condition, or under one any value a
-    caller passes meets (`if size is not None:` holds only for a value other than None, so only
-    such a literal is renamed), and a forward with an alias beside it is no forward;
+    caller passes meets (`if size is not None:` holds only for a value other than None, so a
+    site is renamed when its value cannot be None, a literal or a string format, or when the
+    new parameter defaults to None anyway), and a forward with an alias beside it is no
+    forward;
   - a rename helper that also maps the values (pandas `deprecate_kwarg(..., mapping=...)`)
     proves no plain rename.
 
