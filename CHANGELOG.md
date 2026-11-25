@@ -138,8 +138,7 @@ All notable changes to pymolt. The format follows
   exercised, per risk and per step, and lists the failing changes no prediction covered.
 - An "Impact focus" line in the `verify` report: the plan's changed API paths and the static
   symbols on them.
-- An INCONCLUSIVE verdict says whether it needs a person (`needs_review`: a review item, or BLIND
-  symbols whose line ran without a recorded call, which capturing again records the same) or
+- An INCONCLUSIVE verdict says whether it needs a person (`needs_review`: a review item) or
   evidence (`needs_evidence`: BLIND symbols a test can still reach, a fact that could not be
   compared, a capture missing, stale or unlike the other, noise no baseline replicate measured).
   The BLIND table says per kind what settles its rows; a `--probe-python` replay never does.
@@ -282,11 +281,12 @@ All notable changes to pymolt. The format follows
   files yet. They still work for a script that writes those files.
 - A dynamic-only symbol whose facts all compared equal no longer blocks PASS, nor does one made
   only of calls compiled code made while the project's call ran.
-- A dependency use no capture can observe (an attribute read, a constant such as
-  `yaml.SafeLoader`, a chain through a return value) no longer blocks PASS: the verdict lists
-  them ("N dependency use(s) cannot be observed by a capture"), and `verify --agent` gives them as
-  `unobservable_uses` (owner decision). A symbol whose line ran without a recorded call is still a
-  review item.
+- A dependency use no capture can record no longer blocks PASS: one no capture can observe (an
+  attribute read, a constant such as `yaml.SafeLoader`, a chain through a return value), and one
+  whose line ran while the watcher recorded no call there (a numpy ufunc, `polars.col`, an
+  implicit `__float__`). The verdict lists them ("N dependency use(s) cannot be observed by a
+  capture"), and `verify --agent` gives them as `unobservable_uses` (owner decisions). A BLIND
+  symbol a test can still reach keeps blocking.
 - `verify` compares a dependency object by its type and the attributes your code reads (old names
   on the old side, new names on the new one); unread state that differs is counted as drift.
   Values (builtins, containers, records your project declares, the opaque types of data packages

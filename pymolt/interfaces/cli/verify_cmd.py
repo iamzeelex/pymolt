@@ -379,7 +379,7 @@ def _blind_caption(symbol, contacts, coarse: set[str]) -> str:
         text = ("unobservable" if symbol.blind_reason == "unobservable"
                 else "ran, not recorded") + (": no capture can record them, a person reviews "
                                              "each use")
-        if not blind_blocks_pass(symbol):
+        if not blind_blocks_pass(symbol, contacts):
             text += " (they do not keep the verdict from PASS)"
         return text
     if coarse:

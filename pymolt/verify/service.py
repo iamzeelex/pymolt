@@ -3450,10 +3450,14 @@ def _blind_reasons(report: ContractReport) -> list[str]:
 
 def _blind_held(report: ContractReport) -> tuple[list, list]:
     """The BLIND symbols that keep the verdict from PASS, and those that do not
-    (``inconclusive.blind_blocks_pass``, the owner's open decision on unobservable ones)."""
+    (``inconclusive.blind_blocks_pass``: the owner's decision that a symbol no capture can record
+    does not), judged from each symbol's own contacts."""
+    by_target: dict[str, list] = {}
+    for c in report.contacts:
+        by_target.setdefault(c.target, []).append(c)
     blind = [s for s in report.symbols if s.status == "blind"]
-    return ([s for s in blind if blind_blocks_pass(s)],
-            [s for s in blind if not blind_blocks_pass(s)])
+    held = [s for s in blind if blind_blocks_pass(s, by_target.get(s.target, ()))]
+    return held, [s for s in blind if s not in held]
 
 
 def _blind_causes(report: ContractReport) -> list[InconclusiveCause]:

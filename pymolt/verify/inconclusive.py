@@ -15,7 +15,8 @@ kinds (``InconclusiveKind``):
 
 A BLIND symbol no capture can record (``blind_kind``: every contact of it unobservable, or ran
 at its line without a record) is ``needs_review``: no evidence settles it, a person reviews
-those uses. Whether it keeps the verdict from PASS at all is ``UNOBSERVABLE_BLIND_BLOCKS_PASS``.
+those uses. Whether it keeps the verdict from PASS at all is ``UNOBSERVABLE_BLIND_BLOCKS_PASS``
+(the owner's choice: it does not; the verdict lists it).
 
 Each reason carries its kind with it (``InconclusiveCause``), set where the reason is made and
 never parsed back from its text. The verdict's kind is ``needs_review`` when any reason needs a
@@ -101,22 +102,32 @@ SETTLE_UNCOMPARABLE = {
 }
 
 
-#: OWNER DECISION (QA V2, 2026-11-24: False): whether a BLIND symbol that no capture can observe
-#: keeps the verdict from PASS. Such a symbol (``SymbolStatus.blind_reason`` "unobservable") has only
-#: unobservable contacts: an attribute read, base class or constant of a symbol never observed
-#: (``Loader=yaml.SafeLoader``), a chain through a return value, a dependency not installed where
-#: the capture ran, interpreter code. True, the rule so far: it blocks PASS, as a review item
-#: (``blind_kind``). False, the owner's choice: it stays BLIND in the counts and tables, it is no
-#: reason, so it cannot keep a verdict from PASS, and the verdict lists it
-#: (``ContractReport.unobservable_uses``) for a person to glance at. This constant is the one place
-#: the rule lives: everything that asks goes through ``blind_blocks_pass``.
+#: OWNER DECISIONS (QA V2, 2026-11-24 and 2026-11-25: False): whether a BLIND symbol that no capture
+#: can record keeps the verdict from PASS. Such a symbol is ``needs_review`` by ``blind_kind``: each
+#: of its contacts is unobservable (an attribute read, base class or constant of a symbol never
+#: observed, ``Loader=yaml.SafeLoader``; a chain through a return value; a dependency not installed
+#: where the capture ran; interpreter code), or its statement ran at line granularity and the
+#: watcher recorded no call there (a numpy ufunc, ``polars.col``, an implicit ``__float__``), which
+#: capturing again repeats. True, the rule before: it blocks PASS, as a review item. False, the
+#: owner's choice (2026-11-24 for unobservable contacts, 2026-11-25 for statements that ran
+#: unrecorded): it stays BLIND in the counts and tables, it is no reason, so it cannot keep a
+#: verdict from PASS, and the verdict lists it (``ContractReport.unobservable_uses``) for a person
+#: to glance at. A BLIND symbol a capture can still record (a contact not run, or "ran" only by its
+#: function or file) always blocks. This constant is the one place the rule lives: everything that
+#: asks goes through ``blind_blocks_pass``.
 UNOBSERVABLE_BLIND_BLOCKS_PASS = False
 
 
-def blind_blocks_pass(symbol: Any) -> bool:
-    """Whether this BLIND symbol is a reason the verdict cannot PASS
-    (``UNOBSERVABLE_BLIND_BLOCKS_PASS``)."""
-    return UNOBSERVABLE_BLIND_BLOCKS_PASS or _get(symbol, "blind_reason") != "unobservable"
+def blind_blocks_pass(symbol: Any, contacts: Iterable[Any] | None = None) -> bool:
+    """Whether this BLIND symbol is a reason the verdict cannot PASS: always while a capture can
+    still record it (``blind_kind`` needs_evidence); one no capture can record only under
+    ``UNOBSERVABLE_BLIND_BLOCKS_PASS``. ``contacts`` are the symbol's own contacts; without them
+    only an all-unobservable symbol (``blind_reason``) counts as one no capture can record."""
+    if UNOBSERVABLE_BLIND_BLOCKS_PASS:
+        return True
+    if contacts is None:
+        return _get(symbol, "blind_reason") != "unobservable"
+    return blind_kind(symbol, contacts) is not NEEDS_REVIEW
 
 
 def coarse_ran(contacts: Iterable[Any]) -> set[str]:
