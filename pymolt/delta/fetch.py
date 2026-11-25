@@ -31,6 +31,10 @@ from pymolt.state_io import atomic_write_bytes, atomic_write_text
 
 MAX_RELEASES = 8
 _TAIL = 65536
+# A wheel is untrusted input: a central directory or a module past these sizes is not read, and
+# a member is inflated only up to ``_MAX_MEMBER`` (a zip bomb stops there, as a FetchError).
+_MAX_CENTRAL_DIRECTORY = 16 * 1024 * 1024
+_MAX_MEMBER = 4 * 1024 * 1024
 
 def successor_from(messages: list[str]) -> str | None:
     """The one successor ``messages`` name (``succession.first_successor``): the first message
@@ -118,6 +122,8 @@ class Fetcher:
         if eocd < 0:
             raise FetchError("no zip end-of-central-directory record in the tail")
         _, _, _, _, _, cd_size, cd_off, _ = struct.unpack("<IHHHHIIH", tail[eocd: eocd + 22])
+        if cd_size > _MAX_CENTRAL_DIRECTORY:
+            raise FetchError(f"zip central directory of {cd_size} bytes is past the cap")
         if cd_off >= tail_start:
             cd = tail[cd_off - tail_start: cd_off - tail_start + cd_size]
         else:
@@ -129,16 +135,30 @@ class Fetcher:
             )
             name = cd[pos + 46: pos + 46 + nlen].decode("utf-8", "replace")
             if name == member:
+                if csize > _MAX_MEMBER:
+                    raise FetchError(f"{member} is {csize} bytes compressed, past the cap")
                 hdr = self._get(url, lho, lho + 30 + nlen + 512 + csize)
                 lnlen, lelen = struct.unpack("<HH", hdr[26:30])
                 start = 30 + lnlen + lelen
                 data = hdr[start: start + csize]
                 if len(data) < csize:
                     data = self._get(url, lho + start, lho + start + csize - 1)
-                raw = zlib.decompress(data, -15) if method == 8 else data
-                return raw.decode("utf-8", "replace")
+                return _inflate(data, method, member).decode("utf-8", "replace")
             pos += 46 + nlen + elen + clen
         return None
+
+
+def _inflate(data: bytes, method: int, member: str) -> bytes:
+    """A zip member's bytes, stored (0) or deflated (8), never more than ``_MAX_MEMBER``."""
+    if method == 0:
+        return data
+    if method != 8:
+        raise FetchError(f"{member} uses zip compression method {method}")
+    inflater = zlib.decompressobj(-15)
+    raw = inflater.decompress(data, _MAX_MEMBER)
+    if inflater.unconsumed_tail:
+        raise FetchError(f"{member} inflates past {_MAX_MEMBER} bytes")
+    return raw
 
 
 def _safe(text: str) -> str:

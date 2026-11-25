@@ -580,6 +580,8 @@ All notable changes to pymolt. The format follows
 - A refusal because of who asks or how (the `--agent` limits, the approval gate, options that do
   not go together) is no longer printed as a plan conflict with a re-plan hint; an agent's refusal
   says a person runs the same command on a terminal. Exit codes are unchanged (2).
+- `plan --online` reads a module from an intermediate release's wheel with a cap on what it
+  inflates (4 MB) and on the sizes it accepts; a wheel past them is skipped with a note.
 
 #### Assess, scan and setup
 
