@@ -496,3 +496,21 @@ def test_a_library_made_wrapper_or_closure_still_drifts(tmp_path):
     d = run(tmp_path, [deco_call("app.WrappedHandler")],
             [deco_call("app.View.as_view.<locals>.view")], DECO2_SRC)
     assert d.verdict is PASS and one(d, "dep.deco").absorbed == ["type-drift:wrapper"]
+
+
+# ── 17. many rounded floats in a loop ─────────────────────────────────────────────────────
+
+def test_65_calls_each_within_rounding_pass(tmp_path):
+    import math
+    src = "import dep\ndef main(lines):\n    ys = [ln.get_ydata() for ln in lines]\n"
+
+    def calls(vals):
+        return [ev("dep.Line2D.get_ydata", {"self": {"__opaque__": "dep.Line2D"}}, result=v)
+                for v in vals]
+
+    xs = [float(i) + 1.0 for i in range(65)]
+    d = run(tmp_path, calls(xs), calls([x + 4 * math.ulp(x) for x in xs]), src)
+    e = one(d, "dep.Line2D.get_ydata")
+    assert not e.fails and d.verdict is PASS and e.numeric["values"] > 0
+    moved = run(tmp_path, calls(xs), calls(xs[:-1] + [100.0]), src)
+    assert one(moved, "dep.Line2D.get_ydata").fails
