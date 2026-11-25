@@ -2755,17 +2755,26 @@ def _handle_types_relate(ta: str, tb: str) -> bool:
     sem = _SEM.get()
     if sem is None or _EDITED.get() or not (isinstance(ta, str) and isinstance(tb, str)):
         return False   # on an edited line the edit's claim judges a new class (``_judge_pairs``)
-    if ta.split(".")[0] != tb.split(".")[0]:
-        return False   # another package's class: no relation to assume (owner decision, QA)
     if _introspected(ta, tb):
         return False
+    ev = _EVIDENCE.get()
+    if ta.split(".")[0] != tb.split(".")[0]:
+        # another package's class (werkzeug's Response -> flask's): whether it matters is
+        # unknown without the MRO tables; the pair is a review item (``_pair_entry``), its
+        # read attributes still compared
+        if ev is not None:
+            ev.absorb(CROSS_PACKAGE, f"{ta} -> {tb}")
+        return True
     same_module = ta.rsplit(".", 1)[0] == tb.rsplit(".", 1)[0]
     rule = ("private-same-module" if same_module and _unnameable(ta) and _unnameable(tb)
             else "unintrospected")
-    ev = _EVIDENCE.get()
     if ev is not None:
         ev.absorb(f"type-drift:{rule}", f"{ta} -> {tb}")
     return True
+
+
+CROSS_PACKAGE = "type-drift:cross-package"
+CROSS_PACKAGE_REVIEW = "class changed across packages"
 
 
 # Set by ``_pair_entry`` for a pair on an edited line: the edit made any new class, so the
@@ -3478,6 +3487,8 @@ def _absorbed_note(mechanism: str, details: list[str]) -> str:
     if mechanism == NUMERIC:
         return (f"numeric drift: floats equal within floating-point rounding "
                 f"(<= {_ULPS.get()} ulps): {shown}")
+    if mechanism == CROSS_PACKAGE:
+        return f"type drift (a class of another package, relation unknown): {shown}"
     if mechanism.startswith("type-drift:"):
         why = {"relocated": "the class moved within its package",
                "unintrospected": "a dependency object's class changed and the project never "
@@ -8252,7 +8263,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         notes.append(f"now raises {raised} while binding its arguments" if nf.binding
                      else f"no longer raises {raised} while binding its arguments")
     all_notes = [*notes, *cmp.notes]
-    return FactEntry.model_construct(  # trusted, typed values: no validation copies
+    entry = FactEntry.model_construct(  # trusted, typed values: no validation copies
         _ENTRY_FIELDS_SET, category=category, comparison=cmp.comparison, level=cmp.level,
         symbol=of.symbol, new_symbol=nf.symbol if nf.symbol != of.symbol else None,
         old_site=_site_ref(of), new_site=_site_ref(nf),
@@ -8267,9 +8278,17 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         review=_numeric_review(cmp),
         **_raw_samples(of, nf),
     )
+    if cmp.comparison is Comparison.EQUAL and CROSS_PACKAGE in cmp.absorbed:
+        moved = next((x for x in cmp.notes if x.startswith("type drift (")), "")
+        entry.category, entry.comparison, entry.drift = (FactCategory.CHANGED,
+                                                         Comparison.CHANGED, False)
+        entry.review = (f"{CROSS_PACKAGE_REVIEW}; relation unknown until Stage 2 MRO tables "
+                        f"({moved.split(': ', 1)[-1][:160]}): the project never checks either "
+                        "class and the attributes it reads compare equal; review")
+    return entry
 
 
-_LADDER_RULES = ("type-drift:unintrospected", "type-drift:private-same-module")
+_LADDER_RULES = ("type-drift:unintrospected", "type-drift:private-same-module", CROSS_PACKAGE)
 
 
 def _top_names(outcomes: list[Outcome]) -> set[str] | None:

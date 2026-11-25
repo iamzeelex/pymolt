@@ -331,10 +331,26 @@ def test_class_drift_needs_the_same_top_level_package(tmp_path):
     def r(cls):
         return ev("dep.redirect", {"to": "/x"}, result={"__structure__": cls, "status_code": 302})
 
-    assert run(tmp_path, [r("werkzeug.wrappers.Response")], [r("flask.wrappers.Response")],
-               src).verdict is FAIL
+    cross = run(tmp_path, [r("werkzeug.wrappers.Response")], [r("flask.wrappers.Response")], src)
+    assert cross.verdict is VerificationVerdict.INCONCLUSIVE    # a review: relation unknown
     assert run(tmp_path, [r("werkzeug.wrappers.Response")],
                [r("werkzeug.sansio.response.Response2")], src).verdict is PASS
+
+
+def test_mutation_a_cross_package_class_change_with_a_differing_read_attribute_fails(tmp_path):
+    src = "import dep\ndef main():\n    r = dep.get()\n    return r.code\n"
+
+    def get_(cls, code):
+        return ev("dep.get", {}, result={"__object__": cls, "attrs": {"code": code}})
+
+    assert run(tmp_path, [get_("werkzeug.wrappers.Response", 1)],
+               [get_("flask.wrappers.Response", 2)], src).verdict is FAIL
+    # an introspected class, or a read the rendering lacks, stays strict across packages too
+    checked = src + "def is_resp(r):\n    return isinstance(r, dep.Response)\n"
+    unrendered = src.replace("r.code", "r.streaming")
+    for s in (checked, unrendered):
+        assert run(tmp_path, [get_("werkzeug.wrappers.Response", 1)],
+                   [get_("flask.wrappers.Response", 1)], s).verdict is FAIL
 
 
 # ── 11. a project file that does not parse, or is too deep to walk ────────────────────────

@@ -206,7 +206,10 @@ A type that changed is judged by a ladder:
   A type-only rendering of a data package's object (numpy, pandas, polars, pyarrow, torch, jax,
   datetime, pathlib, decimal, ...) is a value too.
 - **Dependency objects**: a relocation is equal; otherwise the class relation is unknown (pymolt
-  records no MRO yet), and a change to another class of the same top-level package is drift
+  records no MRO yet). A change to a class of another top-level package (werkzeug's `Response`
+  to `flask.wrappers.Response`) under the same conditions is a review item, "class changed
+  across packages" (needs a person; `--strict` fails it). A change to another class of the same
+  top-level package is drift
   (`type drift`) when your code never introspects either class: no `isinstance`, `issubclass`,
   `match`, `type(x) is C` or singledispatch names it or any class of its top-level package (an
   import alias resolved: with no MRO, a base class may be the one checked), no `except` names

@@ -66,6 +66,7 @@ from pymolt.state_io import (
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
     AWAITED_UNRECORDED,
+    CROSS_PACKAGE_REVIEW,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
@@ -3595,6 +3596,14 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
                 "capture a baseline replicate with random hash seeds (`pymolt capture "
                 "baseline --replicate`), then verify again" if replicable
                 else noise_settle))
+    hit = [e for e in reviews if str(e.get("review")).startswith(CROSS_PACKAGE_REVIEW)]
+    reviews = [e for e in reviews if not str(e.get("review")).startswith(CROSS_PACKAGE_REVIEW)]
+    if hit:
+        names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+        causes.append(cause(
+            f"{len(hit)} call(s) returned a class of another package that the project never "
+            f"checks ({names}); the relation is unknown until Stage 2 MRO tables",
+            NEEDS_REVIEW, "review", SETTLE_REVIEW))
     hit = [e for e in reviews if str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     reviews = [e for e in reviews if not str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     if hit:

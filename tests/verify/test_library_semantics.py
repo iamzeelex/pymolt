@@ -280,10 +280,16 @@ def test_a_handle_class_the_project_never_checks_is_drift(tmp_path):
     assert d.verdict is VerificationVerdict.PASS
 
 
-def test_mutation_a_handle_class_of_another_package_fails(tmp_path):
+def test_a_handle_class_of_another_package_is_a_review(tmp_path):
     d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
             [redirect("flask.wrappers.Response")], REDIRECT_SRC)
-    assert one(d, "dep.redirect").fails
+    e = one(d, "dep.redirect")
+    assert not e.fails and e.review.startswith("class changed across packages")
+    assert e.absorbed == ["type-drift:cross-package"]
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+    strict = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
+                 [redirect("flask.wrappers.Response")], REDIRECT_SRC, strict=True)
+    assert one(strict, "dep.redirect").fails
 
 
 def test_mutation_a_handle_class_the_project_checks_with_isinstance_fails(tmp_path):
