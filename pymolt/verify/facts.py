@@ -3423,7 +3423,9 @@ def _compare_outcomes(
     if untyped:
         notes.append("exception type unknown on one side")
     markers = untyped or any(_partial(o) for o in (*old, *new))
-    if profile is DiffProfile.EXACT and nondet and _COUNTED.get():
+    if profile is DiffProfile.EXACT and _COUNTED.get() and (
+            nondet or sum(o.count for o in old) != sum(o.count for o in new)):
+        # every call counted: a call more or fewer is a change, one outcome or several
         return _compare_counted(old, new, notes, markers)
     if profile is DiffProfile.EXACT:
         if o_keys == n_keys or (nondet and _clock_sets_match(old, new)):
@@ -3495,7 +3497,7 @@ def _compare_counted(old: list[Outcome], new: list[Outcome], notes: list[str],
     if oc == nc:
         return _with_types(Comparison.EQUAL, level, notes, old, new)
     clocked = any(o.kind == "return" and _clock_parts(o.value) for o in (*old, *new))
-    if clocked and _clock_sets_match(old, new):
+    if clocked and _clock_sets_match(old, new) and _template_counts(old) == _template_counts(new):
         return _with_types(Comparison.EQUAL, level, notes, old, new)
     if _multiset_match(old, new):
         return _with_types(Comparison.EQUAL, level, notes, old, new)
@@ -3506,6 +3508,16 @@ def _compare_counted(old: list[Outcome], new: list[Outcome], notes: list[str],
         moved[_kind_label(o)] -= o.count
     extra = [KINDS_MOVED] if any(moved.values()) else ["counts-moved"]
     return _with_types(Comparison.CHANGED, ComparisonLevel.EXACT, [*notes, *extra], old, new)
+
+
+def _template_counts(outcomes: list[Outcome]) -> Counter:
+    """Calls per outcome with clock readings reduced to their template: the counts a clock
+    comparison must keep (8 calls moving from a static value to a clock reading is a change)."""
+    out: Counter = Counter()
+    for o in outcomes:
+        parts = _clock_parts(o.value) if o.kind == "return" else None
+        out[_canon([o.kind, parts[0] if parts else o.value])] += o.count
+    return out
 
 
 def _kind_label(o: Outcome) -> str:
@@ -5441,9 +5453,7 @@ def diff_facts(
     token = _HANDLES.set(_handle_types(old.facts, new.facts) if sem is None and not strict
                          else frozenset())
     sem_token = _SEM.set(sem)
-    counted = _COUNTED_DIFF.set(not (old.aggregated or new.aggregated or old.site_tallies
-                                     or new.site_tallies or old.outcomes_other
-                                     or new.outcomes_other))
+    counted = _COUNTED_DIFF.set(_every_call_counted(old) and _every_call_counted(new))
     reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
     ulps = (context.float_ulps if context is not None and context.float_ulps is not None
             else FLOAT_ULPS)
@@ -6795,8 +6805,22 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
             continue  # inputs differ: the input-change and masked-input rules judge those
         if _order_proved(e):
             continue  # a dict key order shown deterministic (_judge_order): not run noise
-        if COUNT_CHANGED in e.notes or KINDS_MOVED in e.notes:
-            continue  # calls appeared or vanished, or moved between outcome kinds: strict
+        if KINDS_MOVED in e.notes:
+            continue  # calls moved between outcome kinds: strict whatever the noise
+        if (COUNT_CHANGED in e.notes and e.category is FactCategory.CHANGED and not e.review
+                and not e.noise and e.provenance in (None, "unedited")
+                and _kinds_match(e.old, e.new)):
+            # as many calls more or fewer, in a workload whose values vary between runs (a poll
+            # that ran once more): what a replicate settles, not a failure
+            e.review = (f"{UNMEASURED_NOISE}: the call ran {e.old_count} time(s) before and "
+                        f"{e.new_count} after, in a workload whose values vary between runs "
+                        f"({variation}); capture a baseline replicate to settle")
+            e.notes.append("unmeasured-noise")
+            e.explained = "unmeasured-noise: the call count changed in a varying workload"
+            count += 1
+            continue
+        if COUNT_CHANGED in e.notes:
+            continue
         if (e.category is not FactCategory.CHANGED or e.comparison is not Comparison.CHANGED
                 or e.review or e.noise or e.unverified or e.provenance not in (None, "unedited")
                 or e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED)
@@ -8267,6 +8291,18 @@ def _pair_consumer(of: Fact, nf: Fact) -> str | None:
     co = _uses.consumer_at(sem.old, of.file, of.line, _symbol_leaf(of.symbol))
     cn = _uses.consumer_at(sem.new, nf.file, nf.line, _symbol_leaf(nf.symbol))
     return co if co is not None and co == cn and co in _PROJECTION_WORDS else None
+
+
+def _every_call_counted(fs: FactSet) -> bool:
+    """Every call of the capture is in its facts with its count: not aggregated, no outcome
+    past a cap, and, for a sampled capture (tallies), every call folded (none sampled out,
+    evicted or widened)."""
+    if fs.aggregated or fs.outcomes_other:
+        return False
+    if not fs.site_tallies:
+        return True
+    return (fs.calls is not None and fs.sampled == fs.calls and not fs.evicted
+            and not fs.widened)
 
 
 def _counts_complete(f: Fact) -> bool:

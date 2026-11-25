@@ -432,3 +432,32 @@ def test_a_sync_record_becoming_a_coroutine_fails(tmp_path):
                                              "fields": [["value", 1]]})]
     new = [ev("dep.fetch", {"n": 1}, result={"__opaque__": "coroutine"})]
     assert run(tmp_path, old, new, src).verdict is FAIL
+
+
+# ── 15. counted totals; clock readings keep their counts ──────────────────────────────────
+
+def test_a_call_more_with_one_outcome_fails(tmp_path):
+    src = "import dep\ndef main(lines):\n    ys = [ln.get_ydata() for ln in lines]\n"
+
+    def calls(n):
+        return [ev("dep.Line2D.get_ydata", {"self": {"__opaque__": "dep.Line2D"}}, result=3.0)
+                for _ in range(n)]
+
+    e = one(run(tmp_path, calls(2), calls(3), src), "dep.Line2D.get_ydata")
+    assert e.fails and "call-count-changed" in e.notes
+
+
+def test_clock_readings_must_keep_their_counts():
+    from pymolt.verify.facts import _COUNTED, Comparison, Outcome, compare_outcomes
+    old = [Outcome(kind="return", value="⟨clock:@[+10,+20]s⟩", count=1),
+           Outcome(kind="return", value="static", count=9)]
+    new = [Outcome(kind="return", value="⟨clock:@[+15,+25]s⟩", count=9),
+           Outcome(kind="return", value="static", count=1)]
+    token = _COUNTED.set(True)
+    try:
+        assert compare_outcomes(old, new).comparison is Comparison.CHANGED
+        same = [Outcome(kind="return", value="⟨clock:@[+15,+25]s⟩", count=1),
+                Outcome(kind="return", value="static", count=9)]
+        assert compare_outcomes(old, same).comparison is Comparison.EQUAL
+    finally:
+        _COUNTED.reset(token)

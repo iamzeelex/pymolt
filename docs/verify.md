@@ -225,11 +225,13 @@ A type that changed is judged by a ladder:
   your code introspects.
 - On an edited line, a new class is the edit's, judged by its claim ([Edited lines](#edited-lines)).
 
-Several outcomes at one fact (a call in a loop, over hidden receivers) are matched call by call,
-with their counts. A call that changed among N, a call more or fewer (`call-count-changed`), or
-counts that moved between outcome kinds (`outcome-kinds-moved`) is a change. A value that moved
-between calls at a fact whose input is not fully observed goes through the
-[unmeasured-noise](#run-noise) review.
+The outcomes at one fact (a call in a loop, over hidden receivers) are matched call by call,
+with their counts, whenever every call was counted. A call that changed among N, a call more or
+fewer (`call-count-changed`, one outcome or several), or counts that moved between outcome kinds
+(`outcome-kinds-moved`) is a change. A value that moved between calls at a fact whose input is
+not fully observed, and a call count that moved in a workload whose values vary between runs,
+go through the [unmeasured-noise](#run-noise) review; a baseline replicate that shows the count
+varying makes it noise.
 
 Every relaxation counts what it absorbed: the fact diff's `absorbed` gives the entries each one
 made equal where the full comparison would not have.
