@@ -200,11 +200,18 @@ def test_deprecated_in_new_from_a_pep562_branch():
     old = {"pkg.__version__": res("pkg", step("__version__", "pkg.__version__", kind="str"))}
     new = {"pkg.__version__": res("pkg", step("__version__", "pkg.__version__", kind="str",
                                               getattr_warns=getattr_warn))}
-    facts, _ = _diff(old, new)
+    live = {"importlib.metadata.version": res(
+        "importlib.metadata", step("version", "importlib.metadata.version"))}
+    facts, _ = _diff(old, new, extra=live)
     (dep,) = facts["pkg"]
     assert dep.kind == "DEPRECATED" and dep.deprecated_in_old is False
     assert dep.evidence[0].startswith("deprecated-in-new:getattr:")
     assert dep.successor == "importlib.metadata.version"
+    # named but absent from the new version: rejected, with the reason
+    facts, _ = _diff(old, new)
+    (dep,) = facts["pkg"]
+    assert dep.successor is None
+    assert dep.succession["rejected"][0]["name"] == "importlib.metadata.version"
 
 
 def test_deprecated_in_old_only_from_the_baseline_warning():
@@ -242,15 +249,44 @@ def _removed_with(doc=None, warns=None, symbols=None, knowledge=None, extra=None
     return removed
 
 
-def test_hint_1_baseline_warning_beats_the_docstring():
+def _live(*names):
+    return {n: res("pkg", step(n.rsplit(".", 1)[1], n, shape=shape(("x", POK, None))))
+            for n in names}
+
+
+def test_hint_1_warning_and_docstring_that_agree_name_the_successor():
+    w = RecordedWarning(category="DeprecationWarning", message="old() is deprecated. "
+                        "Use pkg.new_one instead.")
+    fact = _removed_with(doc={"directive": [".. deprecated:: 1.0 Use :func:`new_one` instead."]},
+                         symbols=[TouchedSymbol(path="pkg.old", warnings=[w])],
+                         knowledge=lambda pkg, names: ("pkg.from_knowledge", "knowledge:k"),
+                         extra=_live("pkg.new_one", "pkg.from_knowledge"))
+    assert fact.successor == "pkg.new_one"
+    assert "successor:warning" in fact.evidence
+    assert fact.succession["sources"] == ["warning", "docstring"]
+    assert fact.succession["trust"] == "named"
+    assert fact.deprecated_in_old is True
+
+
+def test_hint_1_texts_naming_two_objects_name_candidates_not_a_successor():
+    # The owner's rule: choosing among several candidates is an agent's or a person's job.
     w = RecordedWarning(category="DeprecationWarning", message="old() is deprecated. "
                         "Use pkg.from_warning instead.")
     fact = _removed_with(doc={"directive": [".. deprecated:: 1.0 Use pkg.from_doc instead."]},
                          symbols=[TouchedSymbol(path="pkg.old", warnings=[w])],
-                         knowledge=lambda pkg, names: ("pkg.from_knowledge", "knowledge:k"))
-    assert fact.successor == "pkg.from_warning"
-    assert "successor:warning" in fact.evidence
-    assert fact.deprecated_in_old is True
+                         extra=_live("pkg.from_warning", "pkg.from_doc"))
+    assert fact.successor is None
+    assert [c["name"] for c in fact.succession["candidates"]] == ["pkg.from_warning",
+                                                                  "pkg.from_doc"]
+
+
+def test_hint_1_a_named_successor_must_exist_in_the_new_version():
+    w = RecordedWarning(category="DeprecationWarning", message="old() is deprecated. "
+                        "Use pkg.get_metric instead.")
+    fact = _removed_with(symbols=[TouchedSymbol(path="pkg.old", warnings=[w])])
+    assert fact.successor is None
+    assert fact.succession["rejected"] == [{"name": "pkg.get_metric",
+                                            "why": "does not exist in the new version"}]
 
 
 def test_hint_2_docstring_and_sphinx_roles_resolve_against_the_new_version():
@@ -267,9 +303,11 @@ def test_hint_2_docstring_and_sphinx_roles_resolve_against_the_new_version():
 
 
 def test_hint_3_knowledge_when_the_old_version_says_nothing():
-    fact = _removed_with(knowledge=lambda pkg, names: ("pkg.from_knowledge", "knowledge:k"))
+    fact = _removed_with(knowledge=lambda pkg, names: ("pkg.from_knowledge", "knowledge:k"),
+                         extra=_live("pkg.from_knowledge"))
     assert fact.successor == "pkg.from_knowledge"
     assert "successor:knowledge:k" in fact.evidence
+    assert fact.succession["trust"] == "curated"
 
 
 def test_hint_4_is_left_to_the_online_fetch():

@@ -35,6 +35,10 @@ Fact kinds:
                  the two sides in words;
 - ``UNCHANGED``  checked, and nothing above applies.
 
+A parameter fact (``param`` set) can also be DEPRECATED: the new version still accepts the
+parameter but warns about it (a rename helper there, or its own body says so). Its
+``successor`` is then the parameter that replaces it.
+
 ``symbol`` is the canonical old name (the spelling a baseline trace records) when the fact is
 about the object, and the dropped or rebound spelling when it is about a spelling; ``aliases``
 are the other touched spellings that exhibit the fact. Every touched spelling the engine
@@ -89,7 +93,7 @@ class TouchedSymbol(BaseModel):
 
 
 _FACT_ADDITIONS = ("basis", "removed_in", "deprecated_in", "warns_since", "origin", "changed_in",
-                   "behavior", "vanished_at")
+                   "behavior", "vanished_at", "succession")
 
 
 class DeltaFact(BaseModel):
@@ -119,6 +123,15 @@ class DeltaFact(BaseModel):
     # resolves in the new version. The spelling itself when only its last name is gone (its
     # class or module is still there); a shorter prefix when the owner went too.
     vanished_at: dict[str, str] | None = None
+    # How the successor was named (``delta/succession.py``): ``scope`` (object | member |
+    # param), ``trust`` (identity | proof | curated | prescription | named | hint), the
+    # ``sources`` that named it, ``params`` (old -> new parameter names), the ``proof`` behind a
+    # ``proof`` trust (``{kind, locus, version, side}``), ``caveats`` (sentences that qualify
+    # it), ``candidates`` (when the evidence names several, or only offers a choice: each
+    # ``{name, source}``, for an agent or a person to choose; ``successor`` is then None) and
+    # ``rejected`` (``{name, why}``: named, but absent, private, the old symbol itself...).
+    # ``successor`` stays the public spelling (a parameter name for a parameter fact).
+    succession: dict[str, Any] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_additions(self, handler: Any) -> dict[str, Any]:

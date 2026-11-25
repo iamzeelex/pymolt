@@ -22,6 +22,13 @@
   changed default, a different result) is found by `verify` and left to you. A rule that cannot be
   checked is listed for manual review instead of applied ([plan.md](plan.md#codemods)).
 
+- **A successor named only by text, or by several texts that disagree, is left to you.** pymolt
+  names a successor from the library's warnings, docstrings and deprecation helpers, but picks
+  none when they name several objects or offer a choice (pydantic's `parse_raw`: "if your data is
+  JSON, use `model_validate_json`, otherwise use `model_validate`"). An attribute a class does not
+  have, but its `__init__` assigns on `self`, counts as existing; one made any other way does not,
+  and its successor is not named.
+
 - **A step rolled back alone keeps what came after it, within limits.** `rollback --step` undoes
   only that step's change in a file that moved on, but refuses when a later edit touched the
   step's lines or the statements right around them (a hand edit there could depend on it), and an

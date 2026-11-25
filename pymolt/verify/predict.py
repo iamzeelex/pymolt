@@ -895,6 +895,13 @@ def _rate(group: _SiteGroup, package: str, fact: dict, how: str
                 "not pass", evidence
         return None
     if kind == "DEPRECATED":
+        if param:
+            # A deprecated parameter concerns only the sites that pass it.
+            if param not in group.passed:
+                return None
+            evidence.append(f"baseline: this site passes {param}")
+            return (RiskTier.LOW, f"the parameter {param} is deprecated in the new version"
+                    + (f"; use {fact['successor']}" if fact.get("successor") else ""), evidence)
         if fact.get("deprecated_in_old"):
             return (RiskTier.LOW, "deprecated in the old version, no warning recorded at this "
                     "site", evidence)

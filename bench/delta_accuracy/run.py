@@ -369,8 +369,9 @@ def _baseline_warnings(symbols: list[str], calls_o: dict) -> list[TouchedSymbol]
 def engine_predict(units: dict, reports: list) -> dict[str, dict]:
     """The engine's facts mapped onto the bench units (every spelling a fact names).
 
-    REMOVED/MOVED → REMOVED (the spelling no longer works); SIGNATURE/DEFAULT → SIGNATURE,
-    or BASES for a bases change; DEPRECATED with new-side evidence → DEPRECATED; a baseline
+    REMOVED/MOVED → REMOVED (the spelling no longer works); SIGNATURE/DEFAULT, and a deprecated
+    parameter → SIGNATURE, or BASES for a bases change; DEPRECATED with new-side evidence →
+    DEPRECATED; a baseline
     runtime warning on a symbol that still exists → BEHAVIOR (it predicts the break).
     """
     by_spelling: dict[str, list] = {}
@@ -394,6 +395,9 @@ def engine_predict(units: dict, reports: list) -> dict[str, dict]:
                                     if e.startswith("successor:")), None))
             elif f.kind in ("SIGNATURE", "DEFAULT"):
                 cats.setdefault("BASES" if "bases" in f.evidence else "SIGNATURE", []).append(label)
+            elif f.kind == "DEPRECATED" and f.param:
+                # a deprecated parameter (the object is not): a parameter-level change
+                cats.setdefault("SIGNATURE", []).append(label)
             elif f.kind == "DEPRECATED" and any(e.startswith("deprecated-in-new:")
                                                 for e in f.evidence):
                 cats.setdefault("DEPRECATED", []).append(label)

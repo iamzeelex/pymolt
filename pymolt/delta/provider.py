@@ -56,15 +56,21 @@ def explain(fact: DeltaFact, report: DeltaReport) -> str:
     if fact.kind == "SIGNATURE":
         if fact.param is None:
             return f"{fact.symbol}: base classes change {fact.old} → {fact.new} ({window})"
-        return f"{fact.symbol}: parameter {fact.param} changes {fact.old} → {fact.new} ({window})"
+        tail = f"; use {fact.successor}" if fact.successor else ""
+        return (f"{fact.symbol}: parameter {fact.param} changes {fact.old} → {fact.new} "
+                f"({window}){tail}")
     if fact.kind == "DEPRECATED":
         when = "already in the old version" if fact.deprecated_in_old else "in the new version"
+        if fact.param:
+            tail = f"; use {fact.successor}" if fact.successor else ""
+            return f"{fact.symbol}: parameter {fact.param} is deprecated {when} ({window}){tail}"
         return f"{fact.symbol} is deprecated {when} ({window})"
     return f"{fact.symbol}: {fact.kind}"
 
 
 def _impact(fact: DeltaFact, report: DeltaReport) -> ApiImpact:
     hint = next((e.split(":", 1)[1] for e in fact.evidence if e.startswith("successor:")), None)
+    trust = (fact.succession or {}).get("trust")
     return ApiImpact(
         path=fact.symbol,
         replacement_path=fact.successor,
@@ -73,8 +79,10 @@ def _impact(fact: DeltaFact, report: DeltaReport) -> ApiImpact:
         risk=_RISK.get(fact.kind, "medium"),
         explanation=explain(fact, report),
         transition_confidence=("same-object" if fact.kind == "MOVED"
+                               else f"{trust}:{hint}" if fact.successor and hint and trust
                                else f"hint:{hint}" if fact.successor and hint else None),
         transition_reason="; ".join(fact.evidence[:3]) or None,
+        param=fact.param,
     )
 
 

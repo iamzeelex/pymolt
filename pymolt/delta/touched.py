@@ -237,6 +237,9 @@ def _project_target(name: str, module: str, names: dict[str, str],
 
 
 def _receiver_type(fact: Any) -> str | None:
+    """The class of the call's receiver as the baseline recorded it: ``self`` or ``cls``; for a
+    call recorded under a decorator's generic wrapper (``...<locals>.wrapper(*args,
+    **kwargs)``, whose own signature binds nothing), the first positional argument it got."""
     inp = getattr(fact, "input", None)
     bound = (inp or {}).get("bound") if isinstance(inp, dict) else None
     if not isinstance(bound, dict):
@@ -247,6 +250,13 @@ def _receiver_type(fact: Any) -> str | None:
             for marker in _MARKERS:
                 if isinstance(val.get(marker), str) and "." in val[marker]:
                     return val[marker]
+    symbol = getattr(fact, "symbol", None) or ""
+    if not bound and "<locals>" in symbol and isinstance(inp.get("varargs"), dict):
+        first = (inp["varargs"].get("__tuple__") or [None])[0]
+        if isinstance(first, dict):
+            for marker in _MARKERS:
+                if isinstance(first.get(marker), str) and "." in first[marker]:
+                    return first[marker]
     return None
 
 

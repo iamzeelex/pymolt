@@ -1033,6 +1033,18 @@
           "title": "Package",
           "type": "string"
         },
+        "param": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Param"
+        },
         "path": {
           "title": "Path",
           "type": "string"
