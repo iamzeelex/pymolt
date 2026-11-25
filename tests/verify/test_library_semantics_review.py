@@ -335,3 +335,47 @@ def test_class_drift_needs_the_same_top_level_package(tmp_path):
                src).verdict is FAIL
     assert run(tmp_path, [r("werkzeug.wrappers.Response")],
                [r("werkzeug.sansio.response.Response2")], src).verdict is PASS
+
+
+# ── 11. a project file that does not parse, or is too deep to walk ────────────────────────
+
+def test_an_unparsed_project_file_turns_the_projections_off(tmp_path):
+    app = "import dep\ndef main():\n    job = dep.submit()\n    return job\n"
+    worker = "def report(job, async=False):\n    return job.status\n"
+
+    def job(s):
+        return {"__object__": "dep.Job", "attrs": {"status": s}}
+
+    d = run(tmp_path, [ev("dep.submit", {}, result=job("done"))],
+            [ev("dep.submit", {}, result=job("failed"))], {"app.py": app, "worker.py": worker})
+    assert d.verdict is FAIL
+    assert d.handle_comparison.startswith("full: 1 project file(s) do not parse")
+    assert any(w.startswith("objects-compared-in-full") for w in d.warnings)
+
+
+def test_a_long_generated_expression_does_not_crash_verify(tmp_path):
+    app = "import dep\ndef main():\n    r = dep.get()\n    return r.x\n"
+    gen = "SQL = " + " + ".join(["'a'"] * 600) + "\n"
+    d = run(tmp_path, [ev("dep.get", {}, result=1)], [ev("dep.get", {}, result=1)],
+            {"app.py": app, "gen_sql.py": gen})
+    assert d.verdict is PASS
+
+
+def test_reads_in_a_file_the_post_migration_snapshot_lacks_come_from_the_checkout(tmp_path):
+    import json
+
+    from pymolt.verify.facts import DiffContext, diff_facts, load_facts
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "app.py").write_text("import dep\ndef main():\n    return dep.submit()\n")
+    (proj / "report.py").write_text("def show(job):\n    return job.status\n")
+    facts = {}
+    for side, status in (("old", "done"), ("new", "failed")):
+        p = tmp_path / f"{side}.jsonl"
+        e = ev("dep.submit", {}, result={"__object__": "dep.Job", "attrs": {"status": status}})
+        e["where"]["file"] = str(proj / "app.py")
+        p.write_text(json.dumps(e) + "\n")
+        facts[side] = load_facts(p, root=str(proj))
+    src = (proj / "app.py").read_text()
+    ctx = DiffContext(old_sources={"app.py": src}, new_sources={"app.py": src}, edits=[])
+    assert diff_facts(facts["old"], facts["new"], context=ctx).verdict is FAIL

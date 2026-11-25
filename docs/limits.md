@@ -59,6 +59,9 @@ replicate still did not settle:
   the call's own result (`r = f(); r.streaming`) is not rendered: the class change then stays a
   change. Read further away (through another variable, in another function), it is not seen. A
   `str()` or `repr()` of the object that shows its class name is not tied to the class.
+- **A project file that does not parse on the host** (a Python 2 file, `async` as a name on 3.6,
+  an expression too deep to walk): what it reads is unknown, so verify compares every dependency
+  object, result and class in full, and says so (`quality.objects`).
 - **Attributes read by a computed name** (`getattr(x, name)`, `vars(x)`, `asdict(x)`) on a
   dependency object. verify compares such an object by the attributes your code reads by name, so
   the verdict lists these places instead of comparing what they read. `verify --strict` compares

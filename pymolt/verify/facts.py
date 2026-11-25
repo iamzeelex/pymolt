@@ -2596,20 +2596,62 @@ _SEM: ContextVar[_Semantics | None] = ContextVar("pymolt_semantics", default=Non
 HANDLE_STATE = "handle-state"
 
 
-def _semantics_for(context: DiffContext | None) -> _Semantics | None:
+def _semantics_for(context: DiffContext | None, root: str | None = None
+                   ) -> tuple[_Semantics | None, str | None]:
+    """The semantics of one diff, and why there are none when snapshots exist (a project file
+    that does not parse: its reads are unknown, so every object compares in full)."""
     if context is None or not context.old_sources or not context.new_sources:
-        return None
-    old, new = _uses.source_uses(context.old_sources), _uses.source_uses(context.new_sources)
+        return None, None
+    new_sources = _whole_tree(context.new_sources, context.old_sources, root)
+    old, new = _uses.source_uses(context.old_sources), _uses.source_uses(new_sources)
     if old is None or new is None or not (old.files and new.files):
-        return None
+        return None, None
+    unparsed = sorted({*old.unparsed_files, *new.unparsed_files})
+    if unparsed:
+        shown = ", ".join(unparsed[:3]) + (f" (+{len(unparsed) - 3})" if len(unparsed) > 3
+                                           else "")
+        return None, f"full: {len(unparsed)} project file(s) do not parse here ({shown})"
     renames: dict[str, str] = {}
     for a, b in (context.successors or {}).items():
         la, lb = str(a).rsplit(".", 1)[-1], str(b).rsplit(".", 1)[-1]
         if la != lb and la.isidentifier() and lb.isidentifier():
             renames.setdefault(la, lb)
     return _Semantics(old=old, new=new,
-                      project=_uses.project_modules(context.old_sources, context.new_sources),
-                      renames=renames, strict=bool(context.strict))
+                      project=_uses.project_modules(context.old_sources, new_sources),
+                      renames=renames, strict=bool(context.strict)), None
+
+
+_TREE_FILES_MAX = 5000
+
+
+def _whole_tree(new_sources: Mapping[str, str], old_sources: Mapping[str, str] | None,
+                root: str | None) -> dict[str, str]:
+    """The post-migration side's project files for its read set: its snapshot keeps only the
+    files with facts, so a file it lacks is read from the checkout (the code the capture ran,
+    as far as staleness checks tell), else from the baseline snapshot. Reads only add names to
+    compare, so a fuller tree errs on the strict side."""
+    out = dict(new_sources)
+    if root and os.path.isdir(root):
+        from pymolt.verify.contact_map import prune_walk_dirs
+
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = prune_walk_dirs(dirpath, dirnames)
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                seen += 1
+                if seen > _TREE_FILES_MAX:
+                    break
+                rel = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+                if rel not in out:
+                    try:
+                        out[rel] = Path(dirpath, name).read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        pass
+    for rel, text in (old_sources or {}).items():
+        out.setdefault(rel, text)
+    return out
 
 
 def _project_type(name: Any) -> bool:
@@ -4336,7 +4378,10 @@ def _import_bindings(tree: ast.AST) -> dict[str, tuple[str, str]]:
 def _parse_source(text: str) -> ast.AST:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return ast.parse(text)
+        try:
+            return ast.parse(text)
+        except (RecursionError, MemoryError) as exc:   # too deep: no tree, like a bad file
+            raise SyntaxError(f"cannot parse: {type(exc).__name__}") from exc
 
 
 def _names_leaf(node: ast.AST, leaf: str) -> bool:
@@ -5348,7 +5393,7 @@ def diff_facts(
 
     ``order_causes``: known causes of dict key order changes (``OrderCause``); an order finding
     that matches one exactly is cited, and from 5 keys on the citation proves determinism."""
-    sem = _semantics_for(context)
+    sem, no_sem = _semantics_for(context, new.root)
     # Without source snapshots a receiver of operation-like calls is a handle whose state is
     # not compared (``_HANDLES``); with them, what the project reads of it decides
     # (``_Semantics``); under ``--strict``, its full state.
@@ -5377,7 +5422,11 @@ def diff_facts(
         _SEM.reset(sem_token)
         _HANDLES.reset(token)
     diff.handle_comparison = ("full" if strict else "projected" if sem is not None
-                              else "full: no source snapshot")
+                              else no_sem or "full: no source snapshot")
+    if no_sem:
+        diff.warnings.append(
+            f"objects-compared-in-full: {no_sem[6:]}: what the project reads of a dependency "
+            "object is unknown, so every object, result and class compares in full")
     if sem is not None and HANDLE_STATE in diff.absorbed:
         diff.dynamic_reads = sorted({f"{f}:{line} {what}" for uses in (sem.old, sem.new)
                                      for f, line, what in uses.dynamic})
