@@ -246,3 +246,160 @@ def test_mutation_counts_moving_between_outcome_kinds_fails(tmp_path):
     d = run(tmp_path, calls(2, 1), calls(1, 2), src)
     e = one(d, "dep.Paginator.paginate")
     assert e.fails and "outcome-kinds-moved" in e.notes
+
+
+# ── 3. the type ladder (without the MRO step) ─────────────────────────────────────────────
+
+GET_SRC = "import dep\nasync def main(s):\n    async with s.get('/x') as resp:\n        pass\n"
+
+
+def test_two_private_classes_of_one_module_are_drift(tmp_path):
+    old = [ev("dep.Session.get", {"url": "/x"}, result={"__opaque__": "dep.client._RequestCM"})]
+    new = [ev("dep.Session.get", {"url": "/x"},
+              result={"__opaque__": "dep.client._BaseRequestCM"})]
+    e = one(run(tmp_path, old, new, GET_SRC), "dep.Session.get")
+    assert e.category is FactCategory.DRIFT and e.compared_equal
+    assert e.absorbed == ["type-drift:private-same-module"]
+
+
+REDIRECT_SRC = "from dep import redirect\ndef view():\n    return redirect('/items')\n"
+
+
+def redirect(name, code=302):
+    return ev("dep.redirect", {"location": "/items"},
+              result={"__structure__": name, "status_code": code})
+
+
+def test_a_handle_class_the_project_never_checks_is_drift(tmp_path):
+    d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
+            [redirect("flask.wrappers.Response")], REDIRECT_SRC)
+    e = one(d, "dep.redirect")
+    assert not e.fails and e.absorbed == ["type-drift:unintrospected"]
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_mutation_a_handle_class_the_project_checks_with_isinstance_fails(tmp_path):
+    src = REDIRECT_SRC + "def check(r):\n    return isinstance(r, Response)\n"
+    d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
+            [redirect("flask.wrappers.Response")], src)
+    assert one(d, "dep.redirect").fails
+    named = REDIRECT_SRC + "def name(r):\n    return type(r).__name__\n"
+    d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
+            [redirect("flask.wrappers.Response")], named)
+    assert one(d, "dep.redirect").fails
+
+
+def test_mutation_a_handle_status_code_that_changes_fails(tmp_path):
+    d = run(tmp_path, [redirect("werkzeug.wrappers.Response", 302)],
+            [redirect("flask.wrappers.Response", 301)], REDIRECT_SRC)
+    assert one(d, "dep.redirect").fails
+
+
+def test_a_relocated_structure_compares_its_values(tmp_path):
+    src = "import dep\ndef main(c):\n    n = c.get_offsets()\n"
+
+    def offsets(name, values):
+        return ev("dep.Collection.get_offsets", {"self": {"__opaque__": "dep.Collection"}},
+                  result={"__structure__": name, "dtype": "float64", "shape": [2],
+                          "values": {"__list__": values}})
+
+    ok = run(tmp_path, [offsets("numpy.ma.core.MaskedArray", [1.0, 2.0])],
+             [offsets("numpy.ma.MaskedArray", [1.0, 2.0])], src)
+    e = one(ok, "dep.Collection.get_offsets")
+    assert not e.fails and any(n.startswith("relocated:") for n in e.notes)
+    bad = run(tmp_path, [offsets("numpy.ma.core.MaskedArray", [1.0, 2.0])],
+              [offsets("numpy.ma.MaskedArray", [1.0, 3.0])], src)
+    assert one(bad, "dep.Collection.get_offsets").fails
+
+
+def test_mutation_a_value_type_change_fails_even_unintrospected(tmp_path):
+    src = "import numpy as np\ndef main(v):\n    return np.round(v, 6)\n"
+    old = [ev("numpy.round", {"a": 0.38, "decimals": 6}, result=0.38)]
+    new = [ev("numpy.round", {"a": 0.38, "decimals": 6},
+              result={"__opaque__": "numpy.float32"})]
+    assert one(run(tmp_path, old, new, src), "numpy.round").fails
+
+
+DECO_SRC = ("from dep import api_view\n"
+            "@api_view(['GET'])\n"
+            "def task_list(request):\n"
+            "    return 1\n")
+
+
+def deco(result, func="app.task_list"):
+    return ev("dep.decorators.decorator", {"func": {"__callable__": func}},
+              result={"__callable__": result}, line=2)
+
+
+def test_a_decorator_wrapper_named_differently_is_drift(tmp_path):
+    d = run(tmp_path, [deco("app.WrappedAPIView")], [deco("app.View.as_view.<locals>.view")],
+            DECO_SRC)
+    e = one(d, "dep.decorators.decorator")
+    assert not e.fails and e.absorbed == ["type-drift:wrapper"]
+
+
+def test_mutation_a_wrapper_whose_name_the_project_reads_fails(tmp_path):
+    src = DECO_SRC + "print(task_list.__name__)\n"
+    d = run(tmp_path, [deco("app.WrappedAPIView")], [deco("app.View.as_view.<locals>.view")],
+            src)
+    assert one(d, "dep.decorators.decorator").fails
+
+
+def test_mutation_another_project_function_returned_for_the_same_key_fails(tmp_path):
+    src = "import dep\ndef main():\n    h = dep.lookup('save')\n"
+    old = [ev("dep.lookup", {"key": "save"}, result={"__callable__": "app.handlers.save"})]
+    new = [ev("dep.lookup", {"key": "save"}, result={"__callable__": "app.handlers.delete"})]
+    assert one(run(tmp_path, old, new, src), "dep.lookup").fails
+
+
+CARRY_OLD = "import dep\ndef fig():\n    return dep.Figure(dep.trace('heatmapgl', z=1))\n"
+CARRY_NEW = "import dep\ndef fig():\n    return dep.Figure(dep.trace('heatmap', z=1))\n"
+CARRY_TEST = "from app import fig\ndef test():\n    assert fig().data[0].z == 1\n"
+
+
+def carry(tmp_path, downstream_new):
+    old = [ev("dep.trace", {"kind": "heatmapgl"}, result={"__type__": "dep.gl.Heatmapgl"}),
+           ev("dep.Figure.data", {"self": {"__opaque__": "dep.Figure"}}, file="test_app.py",
+              result={"__tuple__": [{"__opaque__": "dep.gl.Heatmapgl"}]})]
+    new = [ev("dep.trace", {"kind": "heatmap"}, result={"__type__": "dep.hm.Heatmap"}),
+           ev("dep.Figure.data", {"self": {"__opaque__": "dep.Figure"}}, file="test_app.py",
+              result={"__tuple__": [{"__opaque__": downstream_new}]})]
+    return run(tmp_path, old, new, {"app.py": CARRY_OLD, "test_app.py": CARRY_TEST},
+               {"app.py": CARRY_NEW, "test_app.py": CARRY_TEST})
+
+
+def test_a_type_an_edited_line_produced_is_judged_with_that_edit(tmp_path):
+    d = carry(tmp_path, "dep.hm.Heatmap")
+    e = one(d, "dep.Figure.data")
+    assert not e.fails and e.review and e.review.startswith("carried from the edit")
+    assert "type-drift:carried" in e.absorbed
+    assert d.verdict is VerificationVerdict.INCONCLUSIVE
+
+
+def test_a_downstream_class_no_edit_produced_is_the_ladder_s(tmp_path):
+    e = one(carry(tmp_path, "dep.other.Contour"), "dep.Figure.data")
+    assert e.absorbed == ["type-drift:unintrospected"] and not e.review
+
+
+def test_mutation_more_than_the_carried_type_changes_fails(tmp_path):
+    d = carry(tmp_path, "dep.hm.Heatmap")
+    assert not one(d, "dep.Figure.data").fails
+    old = [ev("dep.trace", {"kind": "heatmapgl"}, result={"__type__": "dep.gl.Heatmapgl"}),
+           ev("dep.Figure.data", {"self": {"__opaque__": "dep.Figure"}}, file="test_app.py",
+              result={"__tuple__": [{"__opaque__": "dep.gl.Heatmapgl"}]})]
+    new = [ev("dep.trace", {"kind": "heatmap"}, result={"__type__": "dep.hm.Heatmap"}),
+           ev("dep.Figure.data", {"self": {"__opaque__": "dep.Figure"}}, file="test_app.py",
+              result={"__tuple__": [{"__opaque__": "dep.hm.Heatmap"},
+                                    {"__opaque__": "dep.hm.Heatmap"}]})]
+    d = run(tmp_path, old, new, {"app.py": CARRY_OLD, "test_app.py": CARRY_TEST},
+            {"app.py": CARRY_NEW, "test_app.py": CARRY_TEST})
+    assert one(d, "dep.Figure.data").fails
+
+
+def test_raises_relocate_but_a_subclass_fails(tmp_path):
+    src = "import dep\ndef main():\n    dep.load('x')\n"
+    old = [ev("dep.load", {"p": "x"}, raised="dep.core._exceptions.AxisError")]
+    moved = [ev("dep.load", {"p": "x"}, raised="dep.exceptions.AxisError")]
+    assert not one(run(tmp_path, old, moved, src), "dep.load").fails
+    sub = [ev("dep.load", {"p": "x"}, raised="dep.exceptions.AxisIndexError")]
+    assert one(run(tmp_path, old, sub, src), "dep.load").fails
