@@ -3,9 +3,11 @@ confirmed defect (most of them a false PASS) and asserts the honest verdict."""
 
 from _semantics import ev, one, run
 
+from pymolt.verify.facts import Comparison
 from pymolt.verify.models import VerificationVerdict
 
 PASS, FAIL = VerificationVerdict.PASS, VerificationVerdict.FAIL
+INCONCLUSIVE = VerificationVerdict.INCONCLUSIVE
 
 
 # ── 1. a src layout's own records are values ──────────────────────────────────────────────
@@ -119,7 +121,62 @@ def test_a_read_attribute_that_vanished_is_a_change(tmp_path):
 
     d = run(tmp_path, [ev("dep.cluster.KMeans.fit", {"X": 1}, result=km({"score_": 3}))],
             [ev("dep.cluster.KMeans.fit", {"X": 1}, result=km())], src)
-    assert one(d, "dep.cluster.KMeans.fit").fails
+    # an ``__object__`` holds instance state only (``score_`` may be a property there): the
+    # pair cannot be compared, it is not a pass
+    e = one(d, "dep.cluster.KMeans.fit")
+    assert not e.fails and e.comparison is Comparison.UNCOMPARABLE
+    assert d.verdict is INCONCLUSIVE
+    # a record rendered whole (a dataclass) that lacks it: the attribute is really gone
+    def rec(**fields):
+        return {"__dataclass__": "dep.cluster.Result",
+                "fields": [["inertia_", 1.5], *([k, v] for k, v in fields.items())]}
+
+    for old, new in ((rec(score_=3), rec()), (rec(), rec(score_=3))):
+        d = run(tmp_path, [ev("dep.cluster.KMeans.fit", {"X": 1}, result=old)],
+                [ev("dep.cluster.KMeans.fit", {"X": 1}, result=new)], src)
+        assert d.verdict is FAIL and one(d, "dep.cluster.KMeans.fit").fails
+
+
+# SQLAlchemy 1.3 -> 2.0: ``Table.c`` is a property in 1.3 (``columns`` in the instance) and is
+# cached in the instance in 2.0 (``columns`` no longer there); the project reads ``authors.c``.
+TABLE_SRC = "import dep\nauthors = dep.Table('authors')\nprint(authors.c)\n"
+
+
+def table(**attrs):
+    return {"__object__": "dep.sql.schema.Table", "attrs": {"name": "authors", **attrs}}
+
+
+def tables(tmp_path, old, new, **kw):
+    return run(tmp_path, [ev("dep.sql.schema.Table.__new__", {"name": "authors"}, result=old,
+                             line=2, func="<module>")],
+               [ev("dep.sql.schema.Table.__new__", {"name": "authors"}, result=new, line=2,
+                   func="<module>")], TABLE_SRC, **kw)
+
+
+def test_a_read_attribute_cached_on_one_side_only_is_uncomparable_both_ways(tmp_path):
+    from pymolt.verify.service import _fact_diff_causes
+
+    cols = {"__list__": ["id", "name"]}
+    for old, new, side in ((table(columns=cols), table(c=cols), "baseline"),
+                           (table(c=cols), table(columns=cols), "post-migration")):
+        d = tables(tmp_path, old, new)
+        e = one(d, "dep.sql.schema.Table.__new__")
+        assert not e.fails and e.comparison is Comparison.UNCOMPARABLE
+        assert f"read attribute not rendered: Table.c ({side})" in e.notes
+        assert d.verdict is INCONCLUSIVE
+        (found,) = [c for c in _fact_diff_causes(d.to_json_dict()) if c.cause == "uncomparable"]
+        assert found.kind.value == "needs_evidence" and f"Table.c ({side})" in found.reason
+        assert "property" in found.settle
+    # ``--strict`` compares the full state as before (no projection, so no read attribute)
+    strict = tables(tmp_path, table(columns=cols), table(c=cols), strict=True)
+    e = one(strict, "dep.sql.schema.Table.__new__")
+    assert strict.handle_comparison == "full" and e.comparison is not Comparison.UNCOMPARABLE
+
+
+def test_mutation_a_read_attribute_on_both_sides_with_another_value_fails(tmp_path):
+    d = tables(tmp_path, table(c={"__list__": ["id", "name"]}),
+               table(c={"__list__": ["id"]}))
+    assert d.verdict is FAIL and one(d, "dep.sql.schema.Table.__new__").fails
 
 
 def test_an_attribute_each_side_reads_under_its_own_name_is_counted(tmp_path):

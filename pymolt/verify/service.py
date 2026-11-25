@@ -65,12 +65,13 @@ from pymolt.state_io import (
 )
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
+    ATTR_UNRENDERED,
     AWAITED_UNRECORDED,
-    CROSS_PACKAGE_REVIEW,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
     CONTENT_UNSEEN,
+    CROSS_PACKAGE_REVIEW,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
@@ -3636,9 +3637,17 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
         causes.append(uncomparable(
             f"{unseen} edited call(s) whose attested expectation cannot be checked: only the "
             "types of their outcomes are visible, not the values", "content-unseen"))
+
+    def unrendered_of(e: dict) -> list[str]:
+        return [str(n)[len(ATTR_UNRENDERED) + 2:] for n in e.get("notes") or ()
+                if str(n).startswith(ATTR_UNRENDERED)]
+
+    unrendered = [e for e in entries if e.get("comparison") == "uncomparable"
+                  and unrendered_of(e)]
     unpaired = sum(
         1 for e in entries
         if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
+        and not unrendered_of(e)
     ) - unseen
     if unpaired:
         causes.append(uncomparable(
@@ -3666,7 +3675,13 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
                   and AWAITED_UNRECORDED in (e.get("notes") or ()))
     lost = sum(1 for e in entries if e.get("category") == "uncomparable") \
         - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries \
-        - awaited
+        - awaited - sum(1 for e in unrendered if e.get("category") == "uncomparable")
+    if unrendered:
+        attrs = sorted({a for e in unrendered for a in unrendered_of(e)})
+        causes.append(uncomparable(
+            f"{len(unrendered)} call(s) return an object whose attribute your code reads is not "
+            f"in one side's recording (a property, or a cached or class attribute): "
+            f"{', '.join(attrs[:5])}", "attribute-unrendered"))
     if awaited:
         causes.append(uncomparable(
             f"{awaited} coroutine call(s) whose awaited result is not recorded (this pymolt "
