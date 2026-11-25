@@ -65,6 +65,7 @@ from pymolt.state_io import (
 )
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
+    AWAITED_UNRECORDED,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
@@ -3643,8 +3644,16 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
         if any(str(n).startswith(CALL_SHAPE) for n in e.get("notes") or ())
         and not any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
     )
+    awaited = sum(1 for e in entries if e.get("category") == "uncomparable"
+                  and AWAITED_UNRECORDED in (e.get("notes") or ()))
     lost = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries
+        - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries \
+        - awaited
+    if awaited:
+        causes.append(uncomparable(
+            f"{awaited} coroutine call(s) whose awaited result is not recorded (this pymolt "
+            "records a coroutine call when it starts), so they cannot be compared",
+            "awaited-unrecorded"))
     if unobservable:
         causes.append(uncomparable(
             f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "

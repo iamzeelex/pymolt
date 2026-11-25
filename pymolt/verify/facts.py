@@ -718,6 +718,8 @@ class FactDiff(BaseModel):
                     reason = "rewritten-unpaired"
                 elif any(n.startswith(CONTENT_UNSEEN) for n in e.notes):
                     reason = "content-unseen"
+                elif AWAITED_UNRECORDED in e.notes:
+                    reason = "awaited-unrecorded"
                 else:
                     reason = "nondeterministic-unrecorded"
                 out.skipped_opaque.append({**_legacy_record(e, old_side=e.old is not None),
@@ -2593,6 +2595,8 @@ def _compare_outcomes(
 ) -> OutcomeComparison:
     if any(_is_unrecorded(o) for o in (*old, *new)):
         return OutcomeComparison(Comparison.UNCOMPARABLE, None, ["nondeterministic-unrecorded"])
+    if _awaited_unrecorded(old, new):
+        return OutcomeComparison(Comparison.UNCOMPARABLE, None, [AWAITED_UNRECORDED])
     o_keys = {_canon([o.kind, o.value]) for o in old}
     n_keys = {_canon([o.kind, o.value]) for o in new}
     nondet = len(o_keys) > 1 or len(n_keys) > 1
@@ -2623,6 +2627,39 @@ def _compare_outcomes(
             or _cover(old_t, new_t, _outcome_types_match))
     return _with_types(Comparison.EQUAL if same else Comparison.CHANGED, ComparisonLevel.TYPE,
                        notes, old, new)
+
+
+#: A coroutine call is recorded when it starts, with a marker for its result (``_backend``'s
+#: ``COROUTINE_RESULT``): what it returned or raised once awaited is not recorded (value
+#: format 1). Two markers say nothing about what the awaits produced.
+AWAITED_UNRECORDED = "awaited result not recorded"
+_COROUTINE_MARKER = "coroutine"
+
+
+def _is_coroutine_marker(v: Any) -> bool:
+    return isinstance(v, dict) and len(v) == 1 and v.get("__opaque__") == _COROUTINE_MARKER
+
+
+def _awaitable_like(v: Any) -> bool:
+    """A rendering that may stand for an awaitable: a library object or a type-only marker
+    (a Future, a Task, a request context manager). A plain value (None, a number, a string, a
+    container, a structure with its values) is never awaited, so against a coroutine it is a
+    change of type, compared as such."""
+    return isinstance(v, dict) and any(k in v for k in (
+        "__opaque__", "__object__", "__cycle__", "__dataclass__"))
+
+
+def _awaited_unrecorded(old: list[Outcome], new: list[Outcome]) -> bool:
+    """A coroutine marker on either side, against a marker or an awaitable-looking result on the
+    other, with the same outcome kinds: what each side's awaits produced is not recorded, so the
+    pair is UNCOMPARABLE (needs evidence), never equal by its markers. A new raise, or a plain
+    value against a coroutine, still compares (and fails)."""
+    rets = [o.value for o in (*old, *new) if o.kind == "return"]
+    if not any(_is_coroutine_marker(v) for v in rets):
+        return False
+    if _kinds(old) != _kinds(new):
+        return False
+    return all(_is_coroutine_marker(v) or _awaitable_like(v) for v in rets)
 
 
 def _with_types(comparison: Comparison, level: ComparisonLevel, notes: list[str],
