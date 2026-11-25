@@ -96,8 +96,9 @@ AGENT_REFUSAL = ("under --agent, pymolt rolls back one step (--step) on a plan a
 
 def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
                    step: str | None = None, force: bool = False, cascade: bool = False,
-                   agent: bool = False) -> RollbackResult:
-    """Roll back one step (``step``) or the run's steps in effect (module docstring). Raises
+                   agent: bool = False, shown: str = ".") -> RollbackResult:
+    """Roll back one step (``step``) or the run's steps in effect (module docstring). ``shown``:
+    the project dir as the commands in a refusal name it (``status.shown_dir``). Raises
     ``MigrationConflictError`` (exit 2) or ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if agent and (force or cascade):
         raise MigrationConflictError(
@@ -112,7 +113,7 @@ def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
         raise MigrationConflictError("--cascade goes with --step", conflict=False)
     with _migration_lock(project_dir, "rollback"):
         root = Path(project_dir).resolve()
-        _refuse_open_record(root)
+        _refuse_open_record(root, shown)
         if agent:
             from pymolt.workorder.approval import require_rollback_approval
 
@@ -122,11 +123,11 @@ def rollback_steps(project_dir: str | Path, *, run_id: str | None = None,
         return _rollback(root, run_id=run_id, force=force)
 
 
-def _refuse_open_record(root: Path) -> None:
+def _refuse_open_record(root: Path, shown: str = ".") -> None:
     from pymolt.migration_state import MigrationReceipt
     from pymolt.workorder.record import refuse_open_record
 
-    refuse_open_record(MigrationReceipt.load(root), "rollback")
+    refuse_open_record(MigrationReceipt.load(root), "rollback", shown)
 
 
 def _load(root: Path, run_id: str | None):

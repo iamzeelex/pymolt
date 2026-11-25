@@ -346,7 +346,8 @@ class Tools:
             else:
                 result = apply_steps(p, plan, step=step, through=through, dry_run=dry_run,
                                      agent=True, smoke=allow_run,
-                                     smoke_reason=None if allow_run else NO_RUN_SMOKE)
+                                     smoke_reason=None if allow_run else NO_RUN_SMOKE,
+                                     shown=shown_dir(p))
             from pymolt.status import shown_dir
 
             return views.apply_view(result, plan, p, shown_dir(p))
@@ -359,11 +360,12 @@ class Tools:
         person's: they run `pymolt rollback`.
         """
         def build(p: Path) -> dict:
+            from pymolt.status import shown_dir
             from pymolt.workorder.rollback import rollback_steps
 
             if not step:
                 raise views.AgentInputError("rollback needs a step.", "Pass step.")
-            return views.rollback_view(rollback_steps(p, step=step, agent=True))
+            return views.rollback_view(rollback_steps(p, step=step, agent=True, shown=shown_dir(p)))
 
         return self._run("rollback", project_dir, build, "status names the steps in effect.")
 
