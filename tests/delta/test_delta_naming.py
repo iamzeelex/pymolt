@@ -482,3 +482,34 @@ def test_a_denied_equivalence_is_a_caveat_not_an_equivalence():
     assert not succ_mod.asserts_equivalence([text])
     assert any("not equivalent" in c for c in succ_mod.caveats([text]))
     assert succ_mod.asserts_equivalence(["Use `errorbar=('ci', 95)` for the same effect."])
+
+
+def test_a_successor_the_baseline_warning_names_is_checked_in_the_new_version():
+    """A symbol still there but deprecated: the old version's warning, recorded at baseline,
+    names its successor. The new interpreter is asked about that name, so it is named when it
+    exists there (it used to be rejected as "does not exist" without being asked)."""
+    w = RecordedWarning(category="DeprecationWarning",
+                        message="old_api is deprecated; use pkg.new_api instead.")
+    both = {"pkg.old_api": res("pkg", step("old_api", "pkg.old_api",
+                                           shape=shape(("x", POK, None))))}
+    facts = _diff(both, both, [TouchedSymbol(path="pkg.old_api", warnings=[w])],
+                  extra=_live("pkg.new_api"))
+    (fact,) = [f for f in facts if f.kind == "DEPRECATED"]
+    assert fact.successor == "pkg.new_api"
+
+
+def test_a_candidate_the_new_version_was_not_asked_about_is_not_called_absent():
+    """``_choose`` says a candidate does not exist in the new version only when the new
+    interpreter was asked about it; otherwise the reason says it was not probed."""
+    from pymolt.delta import succession as succ_mod
+    from pymolt.delta.engine import _choose
+
+    def new_of(name):
+        return None
+    new_of.asked = frozenset({"pkg.asked"})
+    _, rec = _choose([succ_mod.Candidate(name="pkg.asked", quoted=True),
+                      succ_mod.Candidate(name="pkg.never", quoted=True)],
+                     "pkg.old", ["pkg.old"], new_of)
+    why = {r["name"]: r["why"] for r in rec.as_dict()["rejected"]}
+    assert why == {"pkg.asked": "does not exist in the new version",
+                   "pkg.never": "was not probed in the new version"}
