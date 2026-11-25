@@ -118,13 +118,15 @@ def test_planned_attribute_rename_compares_old_name_with_new(tmp_path):
     assert one(d, "dep.cluster.KMeans.fit").fails
 
 
-def test_a_read_attribute_on_one_side_only_is_drift_unless_probed(tmp_path):
+def test_a_read_attribute_on_one_side_only_is_a_change(tmp_path):
     old, new = kmeans(), kmeans(extra={"labels_": {"__list__": [0, 1]}, "score_": 3})
     d = run(tmp_path, [fit(old)], [fit(new)], KM_SRC + "print(km.score_)\n")
-    e = one(d, "dep.cluster.KMeans.fit")
-    assert not e.fails and "attribute added: score_" in e.notes
+    assert one(d, "dep.cluster.KMeans.fit").fails
     probed = run(tmp_path, [fit(old)], [fit(new)], KM_SRC + "print(hasattr(km, 'score_'))\n")
     assert one(probed, "dep.cluster.KMeans.fit").fails
+    unread = run(tmp_path, [fit(old)], [fit(new)], KM_SRC)
+    e = one(unread, "dep.cluster.KMeans.fit")
+    assert not e.fails and e.absorbed == ["handle-state"] and "score_" in " ".join(e.notes)
 
 
 def test_a_dict_attribute_read_by_literal_keys_compares_those_keys(tmp_path):

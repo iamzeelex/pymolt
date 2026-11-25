@@ -103,3 +103,31 @@ def test_a_read_the_rendering_holds_compares_and_the_class_drifts(tmp_path):
     src = "import dep\ndef main():\n    r = dep.get()\n    return r.code\n"
     d = run(tmp_path, [get("dep.http.Response")], [get("dep.http.StreamedResponse")], src)
     assert d.verdict is PASS and "type-drift:unintrospected" in one(d, "dep.get").absorbed
+
+
+# ── 5. a read attribute present on one side only ──────────────────────────────────────────
+
+def test_a_read_attribute_that_vanished_is_a_change(tmp_path):
+    src = ("import dep\ndef main(X):\n    km = dep.KMeans(3).fit(X)\n"
+           "    return km.inertia_, km.score_\n")
+
+    def km(extra=None):
+        return {"__object__": "dep.cluster.KMeans", "attrs": {"inertia_": 1.5, **(extra or {})}}
+
+    d = run(tmp_path, [ev("dep.cluster.KMeans.fit", {"X": 1}, result=km({"score_": 3}))],
+            [ev("dep.cluster.KMeans.fit", {"X": 1}, result=km())], src)
+    assert one(d, "dep.cluster.KMeans.fit").fails
+
+
+def test_an_attribute_each_side_reads_under_its_own_name_is_counted(tmp_path):
+    # a hand edit moved the read: legendHandles (old code) -> legend_handles (new code)
+    src_old = "import dep\ndef main(ax):\n    lg = ax.legend()\n    return lg.legendHandles\n"
+    src_new = src_old.replace("legendHandles", "legend_handles")
+
+    def legend(name):
+        return {"__object__": "dep.legend.Legend", "attrs": {name: 1}}
+
+    d = run(tmp_path, [ev("dep.Axes.legend", {}, result=legend("legendHandles"))],
+            [ev("dep.Axes.legend", {}, result=legend("legend_handles"))], src_old, src_new)
+    e = one(d, "dep.Axes.legend")
+    assert not e.fails and "handle-state" in e.absorbed

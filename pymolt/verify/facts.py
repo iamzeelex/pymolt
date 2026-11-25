@@ -2714,9 +2714,9 @@ def _read_pairs(xs: Mapping[str, Any], ys: Mapping[str, Any]
 
 def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str) -> bool:
     """Two dependency objects (``a`` old, ``b`` new): the same type (relocation allowed) and the
-    attributes the project reads equal; an attribute read on one side only is additive drift,
-    unless the project tests its presence (``hasattr``). Unread state that differs is absorbed
-    (``handle-state``), never compared."""
+    attributes the project reads equal; an attribute the project reads that exists on one side
+    only is a change (unknown, drift, only when a rendering was truncated). Unread state that
+    differs, or exists on one side only, is absorbed (``handle-state``), never compared."""
     sem = _SEM.get()
     assert sem is not None
     if not _handle_types_relate(ta, tb):
@@ -2727,11 +2727,23 @@ def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str)
     if a.get("__truncated__") or b.get("__truncated__"):
         if ev is not None:
             ev.type_only = True
+    truncated = bool(a.get("__truncated__") or b.get("__truncated__"))
+    moved_reads: list[str] = []
     for name in one_sided:
-        if name in sem.old.probed or name in sem.new.probed:
-            return False     # the project tests its presence: an attribute that came or went
-        if ev is not None:
-            ev.drift.append(f"attribute {'removed' if name in xs else 'added'}: {name}")
+        # the side whose object lacks it: does that side's code read it?
+        lacking_reads = sem.new.read if name in xs else sem.old.read
+        if truncated:        # a truncated rendering may have cut it: unknown, type level
+            if ev is not None:
+                ev.drift.append(f"attribute {'removed' if name in xs else 'added'}: {name}")
+        elif name in lacking_reads:
+            return False     # the code reads it there, and it came or went: a change
+        else:
+            # only the side that has it reads it (an edit moved the code to another name,
+            # ``legendHandles`` -> ``legend_handles``): not compared, counted
+            moved_reads.append(name)
+    if moved_reads and ev is not None:
+        ev.absorb(HANDLE_STATE, f"{ta.rsplit('.', 1)[-1]}: read on one side only: "
+                  + ", ".join(moved_reads[:4]))
     for x_name, y_name in paired:
         if not _read_value_match(sem, x_name, y_name, xs[x_name], ys[y_name], unread):
             return False
