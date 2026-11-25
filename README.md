@@ -31,12 +31,11 @@ DRIFT        pandas.core.frame.DataFrame.groupby  toyapp/core.py:18 summarize() 
 
 ## Install
 
-PyMolt needs Python 3.12. `assess` and `plan` need [uv](https://docs.astral.sh/uv/) on `PATH`. The PyPI release (0.1.0) is outdated, so install from source:
+PyMolt needs Python 3.12. `assess` and `plan` need [uv](https://docs.astral.sh/uv/) on `PATH`. 0.2.0rc1 is a release candidate, so ask for pre-releases:
 
 ```bash
-git clone https://github.com/iamzeelex/pymolt.git
-uv tool install ./pymolt              # or: pipx install ./pymolt
-uv tool install "./pymolt[mcp]"       # with the optional MCP server
+uv tool install --prerelease allow pymolt==0.2.0rc1          # or: pipx install --pip-args=--pre pymolt==0.2.0rc1
+uv tool install --prerelease allow "pymolt[mcp]==0.2.0rc1"   # with the optional MCP server
 ```
 
 ## Usage
