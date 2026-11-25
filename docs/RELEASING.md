@@ -85,7 +85,10 @@ Every change to `main` and `release/*`, the version bumps included, goes through
 PR; only tags are pushed directly.
 
 **1. Freeze and cut the branch.** Everything meant for 0.2 is merged into `main`
-and CI is green. Cut the branch at `main` as it is:
+and CI is green. The ruleset requires `test` and `package` to have passed on the commit a new
+`release/*` branch starts at: the CI run that merging the last PR starts on `main`
+(`gh run list --branch main --limit 1`) must have finished green, or the push is declined. Then
+cut the branch at `main` as it is:
 
 ```bash
 git switch main && git pull
