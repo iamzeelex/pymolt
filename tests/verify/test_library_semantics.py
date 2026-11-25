@@ -196,7 +196,7 @@ def test_a_library_record_receiver_is_keyed_by_its_type(tmp_path):
     old = [ev("dep.Metric.value", {"self": el(1)}, result="8")]
     new = [ev("dep.Metric.value", {"self": el(2)}, result="8")]
     e = one(run(tmp_path, old, new, src), "dep.Metric.value")
-    assert e.category is FactCategory.EQUAL and not e.notes
+    assert e.compared_equal and not e.fails and e.absorbed == ["record-input"]
 
 
 def test_dynamic_attribute_reads_are_listed_when_handle_state_was_absorbed(tmp_path):
