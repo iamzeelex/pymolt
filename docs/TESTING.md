@@ -45,13 +45,14 @@ Every report command accepts `--json` (pipe to `jq`). Caches live under
 ```bash
 pymolt scan tests/artifacts/flasgger
 ```
-Expect: **3 project roots** (`.`, `demo_app`, `etc/flasgger_package`); a **⚠ version
-divergence** (`.python-version`=3.6.1 vs `Dockerfile`=3.6 vs `tox`=3.6…3.11); **27 edges**
-(pypi:25, local:1), groups dev:20 / main:7.
+Expect: **3 project roots** (`.`, `demo_app`, `etc/flasgger_package`); Python-version evidence
+`.python-version`=3.6.1 and `Dockerfile`=3.6, one runtime, so no divergence (`tox` tests the range
+3.6…3.11); at `.`, **33 edges** from `requirements.txt`, `requirements-dev.txt` and `setup.py`
+(pypi:31, local:1, unknown:1), groups dev:20 / main:13.
 
 ```bash
 pymolt scan tests/artifacts/pyfolio      # setup.py project -> 1 root, edges from setup.py (source_file: setup.py)
-pymolt scan tests/artifacts/blaze        # many requirements-* -> roots `.`/`etc`, ~140 / ~64 edges
+pymolt scan tests/artifacts/blaze        # many requirements-* -> roots `.`/`etc`, ~17 / ~64 edges, 2 git:// warnings
 pymolt scan tests/artifacts/flasgger --json | jq '.surfaces.project_roots[].path'
 ```
 
@@ -62,7 +63,9 @@ pymolt scan tests/artifacts/flasgger --json | jq '.surfaces.project_roots[].path
 ```bash
 pymolt scan tests/artifacts/flasgger      # the "Calls into dependencies" section
 ```
-Expect: **≈60 files**, **≈230 contacts** across ≈19 deps (flask, click, werkzeug, …).
+Expect: **≈65 files**, **≈320 call sites** of ≈90 symbols across ≈22 deps (flask, click,
+werkzeug, …), and a note that `httplib` is imported only as a fallback (behind `except
+ImportError`), not a dependency.
 Counts drift with the submodule state — an order-of-magnitude check, not a pin
 (`tests/verify/test_flasgger_artifact.py`, marked `integration`, holds the floors whenever the
 submodule is initialised).
@@ -78,25 +81,51 @@ pymolt scan tests/artifacts/pyfolio --json | jq '.contact_map.by_dep | keys'
 
 No trace is committed with the artifact — capture one yourself (any command that
 imports flasgger will do; its own pytest suite is the richest source). A capture
-needs a setup, because it records the environment it ran in:
+needs a setup, because it records the environment it ran in, and an interpreter that has
+flasgger's requirements (this repo's venv has no flask):
 
 ```bash
 pymolt setup tests/artifacts/flasgger --manifest requirements.txt --tool uv \
     --base-python 3.6 --target-python 3.12
+uv venv --python 3.11 /tmp/pymolt-flasgger
+uv pip install -p /tmp/pymolt-flasgger/bin/python -r tests/artifacts/flasgger/requirements.txt
 pymolt capture baseline --mode tests \
-    --project-dir tests/artifacts/flasgger -- python -c "import flasgger"
+    --project-dir tests/artifacts/flasgger -- /tmp/pymolt-flasgger/bin/python -c "import flasgger"
 pymolt verify tests/artifacts/flasgger        # one side captured: coverage, no diff yet
 ```
-Expect: a narrow (import-time) capture → **confirmed** small, **coverage** low
-(most contacts are in code the import never runs), **recall** near 100% — that's honest. Any **dynamic-only** rows are symbols the static map *missed*
-(flasgger's heavy decorators / metaclasses → static under-approximation):
-exactly why static is the *map* and dynamic is the *confirmation*.
+Expect: `captured 4 events`, `backend=setprofile`. A narrow (import-time) capture →
+**confirmed** small (1 of **92** static symbols), **coverage** low (`2% (4 of 247 contacts ran;
+granularity function)`: most contacts are in code the import never runs), **recall** 100% (4 of
+4) — that's honest. A note leaves the test runner's 2 symbols (`pytest.fixture`,
+`pytest.raises`) out of the verdict and both numbers. The verdict is INCONCLUSIVE (exit 4),
+"Needs evidence: capture post-migration."
 
 ```bash
 pymolt verify tests/artifacts/flasgger --json \
   | jq '.contract | {static:.static_targets, confirmed, blind, dynamic_only, coverage, recall,
                      coverage_granularity}'
 ```
+
+The test suite records much more. It needs flasgger's dev requirements, and the
+`pytest --confcutdir=.` option: the artifact sits under this repo's `tests/`, whose `conftest.py`
+pytest would load otherwise. `tests/test_commands.py` errors under click 8.2, so leave it out:
+
+```bash
+uv pip install -p /tmp/pymolt-flasgger/bin/python pytest 'marshmallow<4' apispec \
+    apispec-webframeworks flask-restful flex 'urllib3<2' decorator flask-jwt 'setuptools<81' \
+    tests/artifacts/flasgger/etc/flasgger_package
+pymolt capture baseline --force --mode tests --project-dir tests/artifacts/flasgger -- \
+    /tmp/pymolt-flasgger/bin/python -m pytest -q -p no:cacheprovider --confcutdir=. \
+    --ignore tests/test_commands.py tests
+pymolt verify tests/artifacts/flasgger
+```
+Expect: ≈7,200 events (144 tests pass); ≈26 confirmed, ≈40 **dynamic-only**, and
+`Coverage: at most 62% (175 of 283 contacts ran; granularity function)   Recall: at least 81%
+(141 of 175 recorded)`. On 3.11 the executed-code record is by function, so a contact in a
+function that ran counts as ran even when its branch did not (a note counts them): coverage is
+an upper bound and recall a lower one. The **dynamic-only** rows are symbols the static map
+*missed* (flasgger's heavy decorators / metaclasses → static under-approximation): exactly why
+static is the *map* and dynamic is the *confirmation*.
 
 ---
 
@@ -113,9 +142,15 @@ printf '{"q":"yaml.safe_load","in":{"bound":{"stream":"a: 1"}},"result":{"__dict
 pymolt verify "$T" --post-migration "$T/trace.jsonl" --probe-python "$(which python)"
 rm -rf "$T"
 ```
-Expect: `yaml.safe_load` → **confirmed, probe: stable**; `yaml.dump` → **BLIND** (no inputs);
-coverage 100% and recall 50% at file granularity (a hand-written trace has no executed-code
-record, so both contacts in `app/m.py` count as run). Change the `result` in `trace.jsonl` to anything else → the probe reports **CHANGED**.
+Expect: `yaml.safe_load` → **confirmed**, probe verdict **stable** (`Probed: 1 symbol(s)
+re-invoked under target — 0 changed`); `yaml.dump` → **BLIND** (not run); `Coverage: 50% (1 of 2
+contacts ran; granularity symbol)   Recall: 100% (1 of 1 recorded)`, with one note: the trace
+records no call sites, so a contact counts as recorded when its symbol was observed anywhere,
+and whether it ran is unknown. The verdict is INCONCLUSIVE (exit 4): there is no baseline, and a
+hand-written trace has no event-loss counters.
+Change the `result` in `trace.jsonl` to anything else (`[["a",2]]`) → the probe reports
+**CHANGED** and the verdict is **FAIL** (exit 1), with a note that no version diff ran: a replay
+compares with the recording it replays, so one recording is enough.
 On a real migration, point `--probe-python` at a venv that has the **new** dependency version.
 
 ---
@@ -125,11 +160,26 @@ On a real migration, point `--probe-python` at a venv that has the **new** depen
 > Requires `uv` on PATH and (for `--risk`) network access (OSV/PyPI, cached). Can be slow.
 
 ```bash
+pymolt setup tests/artifacts/blaze --manifest requirements-strict.txt --tool uv \
+    --base-python 3.6 --target-python 3.12
 pymolt assess tests/artifacts/blaze --target-python 3.12 --json \
   | jq '{quality:.resolution_quality, target_resolved, error:.target_error}'
+```
+Expect: `"quality": "declared-only"`, `"target_resolved": true`, `"error": null`. No Python 3.6
+interpreter or container reads the base, so the base comes from the manifest's declarations and
+its 7 unpinned versions are `unknown` (`status: base-unknown`), never a floor. Without the setup,
+assess warns that no environment configuration was found and resolves the base on the
+interpreter pymolt runs on (3.12).
+
+```bash
 pymolt assess tests/artifacts/flasgger --target-python 3.12 --risk     # CVE / wheels / abandonment
 pymolt assess tests/artifacts/flasgger --target-python 3.12 --no-cache # force a fresh re-resolve
 ```
+Expect (with §C's setup): a `declared-only` base whose 7 direct dependencies are `unknown →`
+their target versions, a SILVER verdict, a risk panel for the 17 target packages (open CVEs,
+compilation, abandonment; the findings change with time), `requirements-target.txt` written, a
+`Dockerfile.pymolt-target` and the uv commands for the target env printed, and
+`next → pymolt plan tests/artifacts/flasgger`.
 
 ---
 
@@ -141,25 +191,43 @@ trace flasgger's own pytest suite under two Flask releases that both install on 
 requirements); Flask 1.0.4 does not install on the host's Pythons. pymolt stays on the host;
 the container gets only the pure-stdlib watcher bundle.
 
-On the host, write the bundle where the container sees it (the devcontainer mounts `tests/`
-at `/workspace/tests`):
+Docker must be running; one container is enough. On the host, build the image and write the
+bundle where the container sees it (the container mounts `tests/` at `/workspace/tests`, as the
+devcontainer does). The Dockerfile's `apt-get` line no longer builds: the git upgrade it
+installs is gone from bullseye-security (404), and `python:3.6` already ships git and make, so
+build without that line:
 
 ```bash
+sed '/apt-get/,/lists/d' tests/.devcontainer/Dockerfile \
+  | docker build -t pymolt-flasgger-py36 -f - tests
 python -m pymolt.verify.export_watcher tests/artifacts/flasgger/.pymolt/watcher
+docker run --rm -it --init -v "$PWD/tests:/workspace/tests" \
+    -w /workspace/tests/artifacts/flasgger pymolt-flasgger-py36 bash
 ```
 
-In the container (`/workspace/tests/artifacts/flasgger`):
+In the container (`/workspace/tests/artifacts/flasgger`). The watcher goes on the pytest runs
+only, so pip is not traced, and the `pytest --confcutdir=.` option keeps it from loading this
+repo's `tests/conftest.py`:
 
 ```bash
-export PYTHONPATH=/workspace/tests/artifacts/flasgger/.pymolt/watcher
-export PYMOLT_TRACE_TARGET=flask
+W=/workspace/tests/artifacts/flasgger/.pymolt
+rm -f $W/old*.jsonl* $W/new*.jsonl*
 pip install 'flask==1.0.4'
-PYMOLT_TRACE_OUT=/workspace/tests/artifacts/flasgger/.pymolt/old-{pid}.jsonl python -m pytest -q tests/
+PYTHONPATH=$W/watcher PYMOLT_TRACE_TARGET=flask PYMOLT_TRACE_OUT=$W/old-{pid}.jsonl \
+    python -m pytest -q --confcutdir=. tests/
 pip install 'flask==2.0.3'
-PYMOLT_TRACE_OUT=/workspace/tests/artifacts/flasgger/.pymolt/new-{pid}.jsonl python -m pytest -q tests/
-cat .pymolt/old-*.jsonl > .pymolt/old.jsonl     # one file per process: merge them
-cat .pymolt/new-*.jsonl > .pymolt/new.jsonl
+PYTHONPATH=$W/watcher PYMOLT_TRACE_TARGET=flask PYMOLT_TRACE_OUT=$W/new-{pid}.jsonl \
+    python -m pytest -q --confcutdir=. tests/
+cat $W/old-*.jsonl > $W/old.jsonl     # one file per process: merge them
+cat $W/new-*.jsonl > $W/new.jsonl
+# and gather their sidecars, which hold the event-loss counters
+python -c 'import glob, json, sys
+for side in ("old", "new"):
+    metas = [json.load(open(p)) for p in sorted(glob.glob(sys.argv[1] + "/%s-*.jsonl.meta.json" % side))]
+    json.dump({"processes": metas}, open(sys.argv[1] + "/%s.jsonl.meta.json" % side, "w"))' "$W"
+exit
 ```
+Expect: 148 tests pass on each side (Flask 1.0.4 runs with Werkzeug 2.0.3, which pip keeps).
 
 Back on the host:
 
@@ -171,7 +239,13 @@ pymolt verify tests/artifacts/flasgger \
 ```
 Expect: both recordings fold without error and hold flask boundary calls (the watcher survived
 Werkzeug's and Flask's C-level calls), and the pinned pair shows at least one behavioural
-change at the flask boundary: a non-zero `diff` count and `diff_clean: false`.
+change at the flask boundary: a non-zero `diff` count (about a dozen `result_changed`, a
+`raise_changed`, 2 `appeared`) and `diff_clean: false`. `pymolt verify` without `--json` says
+**FAIL** (exit 1), `flask.json.jsonify` at `…/flasgger/base.py:178` first. The call sites keep
+their container paths (`/workspace/tests/artifacts/flasgger/…`: a note says they lie outside the
+project root), so few static contacts join them and recall reads near 0%. Without the gathered
+`.meta.json` sidecars the same diff is INCONCLUSIVE: a recording with no event-loss counters
+needs evidence.
 
 ---
 
@@ -224,7 +298,7 @@ Expect:
   | `env-2` | person | none | build the target environment |
   | `mech-1` | pymolt | preserve | `Series.append` → `pd.concat` |
   | `beh-1` | person | preserve | `DataFrame.mean`: default `numeric_only` None → False (effort large) |
-  | `beh-2`…`beh-4` | person | preserve | `Series` `copy`, `DataFrame.groupby` `axis`, `GroupBy.sum` `numeric_only` |
+  | `beh-2`…`beh-4` | person | preserve | `Series` `copy`, `DataFrame.groupby` `axis`, `GroupBy.sum` `numeric_only` (effort medium: a call-time default) |
 
   It writes `.pymolt/PLAN.md` and no source.
 - `status`: `7 step(s): 1 present, 2 planned, 4 planned (person)` (`env-2` is present: setup
@@ -268,7 +342,7 @@ pymolt apply .
 Expect: `Applied plan <id>: mech-1` with `compile_target ok` and `smoke_import ok`; `status`:
 `1 applied, 1 present, 1 planned, 4 planned (person)`, next `pymolt apply .` for `env-1`. Then
 `Applied plan <id>: env-1`: `requirements.txt` pins `pandas==2.2.3`, and the next command is
-`pymolt apply --step beh-1 --record`.
+`pymolt apply . --step beh-1 --record`.
 
 **Record a person's edit** (`beh-1`). pandas 2.2 treats `numeric_only=None` like `False` and
 still raises, so the fix that keeps the old outcome is `numeric_only=True`. Then decline the
@@ -290,7 +364,8 @@ Expect:
   terminal it first asks the person to attest the edit (below); typed back, the panel says
   `attested (<id>)`. Otherwise the note says `recorded as an unattested person`;
 - after the skips, `status`: `2 applied, 1 recorded, 1 present, 3 skipped`, next the
-  post-migration capture.
+  post-migration capture: the baseline's `-m pytest -q -p no:cacheprovider`, run by the target
+  env's `python`.
 
 ```text
 Record step beh-1 (`DataFrame.mean`: default `numeric_only` None → False) of plan <id> as made by a person: claim preserve. Files: toyapp/core.py.
@@ -344,7 +419,9 @@ Expect:
 - **VERDICT: FAIL**, exit **1**, with two failing findings at `toyapp/core.py:24`:
   `DataFrame.mean`, `kind changed` (it returned a Series and now raises `TypeError`),
   `[finding 86395ab0c8]`; and `Series.to_dict`, `presence changed`, `[finding a197e6f0c1]`.
-  Calibration `1 hit`: `DataFrame.mean` (high);
+  Calibration `1 hit`: `DataFrame.mean` (high). The Verdict panel names the step whose sites
+  failed, `beh-1 (rolled_back)`, and a person's two options: fix the code and capture again, or
+  accept an intended change with `pymolt verify . --accept ID` on a terminal;
 - `--step beh-1`: `rolled_back`, `not in effect, so this verify does not judge it`, exit **4**;
 - the accept off a terminal: exit **2**, `verify --accept is a person's attested act: stdin is
   not a terminal`.
