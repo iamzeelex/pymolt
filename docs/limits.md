@@ -159,6 +159,12 @@ Two cases go the other way. Both still fail, although they may be noise:
   compiled call is still compared as your line's call.
 - **Warnings from C methods.** A warning raised inside a compiled method (`datetime.utcnow` on
   3.12) is not attached to that call.
+- **Code made with `exec`.** Code that runs as `<string>` in a namespace with no `__file__`
+  belongs to the module its `__name__` names. A dependency's generated method (SQLAlchemy 2.0's
+  mapped-class `__init__`) is the dependency's, so the calls it makes are internal ones. Your
+  `__main__` (`python -c`, `<stdin>`, the REPL, a notebook cell) is yours. The calls of code your
+  program runs in a namespace that names no module (`exec(src, {"__name__": "x"})`) are not
+  recorded.
 - **Implicit C-slot calls on 3.9–3.11 compiled types.** `row["name"]` on SQLAlchemy 1.3's
   `RowProxy` goes through a C slot no tracer sees.
 

@@ -397,6 +397,12 @@ def _namespace_file(ns):
     return value if type(value) is str else ""
 
 
+# Module names of namespaces that hold the user's own code when they have no ``__file__``:
+# ``python -c`` / ``<stdin>`` / the REPL / a notebook run in ``__main__``; ``code.interact``
+# runs in ``__console__``.
+_INTERACTIVE_NAMESPACES = frozenset(("__main__", "__console__"))
+
+
 def _decided(cache, module, ns):
     """The cached decision for ``module`` when it was made for the namespace ``ns``, else None."""
     ent = cache.get(module)
@@ -517,10 +523,35 @@ class AppMatcher(object):
             # Per-namespace decision from the module's own file (see SitePackagesMatcher): a
             # dependency's generated code (``"<string>"``) must not make it "our code", and a
             # script run as ``__main__`` is ours even after pytest's ``__main__`` was not.
-            filename = (_namespace_file(ns) if ns is not None else "") or frame_file
-            ok = bool(filename) and not filename.startswith(self._dep_roots)
+            filename = _namespace_file(ns) if ns is not None else ""
+            if not filename and frame_file.startswith("<"):
+                ok = self._generated_is_ours(module)
+            else:
+                filename = filename or frame_file
+                ok = bool(filename) and not filename.startswith(self._dep_roots)
         self._cache[module] = (id(ns), ok)
         return ok
+
+    def _generated_is_ours(self, module):
+        """Code with no file of its own (``"<string>"``, ``"<stdin>"``) run in a namespace with
+        no ``__file__``: the code a program made with ``exec``.
+
+        Its pseudo-file says nothing about whose it is, so it is decided by the module the
+        namespace names. SQLAlchemy 2.0 builds a mapped class's ``__init__`` and its decorated
+        methods with ``exec`` in a fresh dict whose only module mark is ``__name__`` (its own
+        module, or the decorated function's); taken for the project's, every call that code
+        made inside SQLAlchemy became a contact (71 APPEARED entries in an equivalent
+        1.3 -> 2.0 migration). The namespace of ``__main__`` (``python -c``, ``<stdin>``, the
+        REPL, a notebook cell, a doctest text file) and of ``code.interact`` is the user's.
+        Any other is decided as the module registered under its name would be: by that
+        module's file (by elimination when it has none), and it is not ours when no module
+        has the name (``collections.namedtuple``'s ``namedtuple_<name>``)."""
+        if module in _INTERACTIVE_NAMESPACES:
+            return True
+        owner = _namespace(module, None)
+        if owner is None:
+            return False
+        return not _namespace_file(owner).startswith(self._dep_roots)
 
 
 
