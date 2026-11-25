@@ -409,3 +409,16 @@ def test_a_discarded_fluent_return_of_the_receiver_is_not_observed(tmp_path):
 
     d = run(tmp_path, [bar(None)], [bar({"__opaque__": "dep.axes.AxesSubplot"})], plot)
     assert d.verdict is PASS
+
+
+# ── 13. a private field the project reads by name ─────────────────────────────────────────
+
+def test_a_private_field_read_by_name_is_compared(tmp_path):
+    src = "import dep\ndef main():\n    p = dep.page()\n    return p._cursor\n"
+
+    def page(c):
+        return {"__dataclass__": "dep.Page", "fields": [["items", 1], ["_cursor", c]]}
+
+    d = run(tmp_path, [ev("dep.page", {}, result=page("a"))],
+            [ev("dep.page", {}, result=page("b"))], src)
+    assert d.verdict is FAIL

@@ -2812,11 +2812,15 @@ def _handle_state(v: Mapping[str, Any]) -> dict[str, Any]:
     return {str(n): x for n, x in _pairs(v.get("fields"))}
 
 
+def _dunder(name: str) -> bool:
+    return name.startswith("__") and name.endswith("__")
+
+
 def _read_pairs(xs: Mapping[str, Any], ys: Mapping[str, Any]
                 ) -> tuple[list[tuple[str, str]], list[str], list[str]]:
     """``(old name, new name)`` pairs of a handle's attributes the project reads (on either side,
     a planned rename mapped), the read names present on one side only, and the names not read.
-    Private names are never compared."""
+    A private name is compared when the project reads it by name (``p._cursor``)."""
     sem = _SEM.get()
     assert sem is not None
     paired: list[tuple[str, str]] = []
@@ -2825,14 +2829,14 @@ def _read_pairs(xs: Mapping[str, Any], ys: Mapping[str, Any]
     seen_new: set[str] = set()
     for name in sorted(xs):
         new_name = sem.renames.get(name, name) if sem.renames.get(name) in ys else name
-        read = not name.startswith("_") and (name in sem.old.read or new_name in sem.new.read)
+        read = not _dunder(name) and (name in sem.old.read or new_name in sem.new.read)
         if new_name in ys:
             seen_new.add(new_name)
             (paired.append((name, new_name)) if read else unread.append(name))
         else:
             (one_sided.append(name) if read else unread.append(name))
     for name in sorted(ys.keys() - seen_new):
-        read = not name.startswith("_") and (name in sem.new.read or name in sem.old.read)
+        read = not _dunder(name) and (name in sem.new.read or name in sem.old.read)
         (one_sided.append(name) if read else unread.append(name))
     return paired, one_sided, unread
 
