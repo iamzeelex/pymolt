@@ -4022,6 +4022,8 @@ class _Provenance:
         self.no_ledger = self.ledger_known and ctx is not None and ctx.edits is None
         self._stmts: dict[tuple[int, str], dict[int, tuple] | None] = {}
         self._cover: dict[tuple[str, int], dict[int, Mapping]] | None = None
+        # (file, function) where an old-side call on an edited line raised (``_diff_facts``)
+        self.old_edit_raises: set[tuple[str, str]] = set()
 
     def status(self, file: str, line: int | None, side: int) -> str | None:
         """``same`` / ``edited`` / ``gone`` (deleted or inserted) / None (no line map)."""
@@ -5768,6 +5770,8 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _judge_record_inputs(pending, record_calls, modes)
     _mark_unobservable(old_left, new)
     _mark_vanished(old_left, new_facts, prov, ov)
+    prov.old_edit_raises = {(v.fact.file, v.fact.func) for v in ov if v.rewritten_site
+                            and any(o.kind == "raise" for o in v.fact.outcomes)}
     for v in old_left:
         entries.append(_single_entry(v, old_side=True, prov=prov))
     for v in new_left:
@@ -8647,6 +8651,13 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
         if entry is not None and entry.get("step_id"):
             e.step_id = str(entry["step_id"])
             e.step_run = str(entry.get("run_id") or "") or None
+        if (old_ed or new_ed) and n.fact.binding and not o.fact.binding:
+            # a call that no longer binds its arguments fails whatever the claim
+            e.category, e.comparison, e.review, e.accepted = (FactCategory.REWRITTEN,
+                                                             Comparison.CHANGED, None, None)
+            e.notes.append(f"now fails to bind its arguments on an edited line "
+                           f"({_binding_raise(n.fact)})")
+            continue
         if e.category in (FactCategory.EQUAL, FactCategory.CHANGED, FactCategory.REWRITTEN) \
                 and e.comparison is Comparison.EQUAL:
             e.category = FactCategory.REWRITTEN
@@ -9025,8 +9036,30 @@ def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> 
         if covering is not None and covering.get("step_id"):
             entry.step_id = str(covering["step_id"])
             entry.step_run = str(covering.get("run_id") or "") or None
-        entry.notes.append("unverified edited site")
+        why = None if old_side else _new_raise_unpaired(f, covering, prov)
+        if why:
+            # the table's "new raise -> FAIL", whether or not the call paired
+            entry.unverified, entry.comparison = False, Comparison.CHANGED
+            entry.notes.append(why)
+        else:
+            entry.notes.append("unverified edited site")
     return entry
+
+
+def _new_raise_unpaired(f: Fact, covering: Mapping | None, prov: _Provenance) -> str | None:
+    """An unpaired new-side call on an edited statement that raises: a call that fails to bind
+    fails whatever the claim; another raise fails when no call of the old statement's function
+    raised there, unless a person attested an expectation of that raise."""
+    if f.binding:
+        return f"now fails to bind its arguments on an edited line ({_binding_raise(f)})"
+    raised = sorted({_raise_name(o.value) for o in f.outcomes if o.kind == "raise"})
+    if not raised or (f.file, f.func) in getattr(prov, "old_edit_raises", set()):
+        return None
+    expect = str((covering or {}).get("expect") or "")
+    if covering is not None and _attested(covering) and expect.startswith("raise:") \
+            and all(_leaf_type(r) == _leaf_type(expect[6:]) for r in raised):
+        return None
+    return f"now raises on an edited line ({', '.join(raised)}; the old statement raised nothing)"
 
 
 def _single_entry_base(v: _V, *, old_side: bool) -> FactEntry:

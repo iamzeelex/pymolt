@@ -260,7 +260,10 @@ A line diff of the source each capture stored decides who edited a call's line:
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
   symbol from the plan or the ledger, or by a one-statement edit. An equal outcome is REWRITTEN
   equal. A different value is a review item, which makes the verdict inconclusive. A new raise
-  fails. A call with no partner is counted as an unverified edited site; it does not block PASS.
+  fails. A call with no partner is counted as an unverified edited site; it does not block PASS,
+  unless it is a new-side call that raises while no call of the old statement's function raised
+  there (it fails, as a new raise does, unless a person attested that raise), or one that
+  fails to bind its arguments (it fails whatever the claim).
 
 A ledger entry is judged by its claim, whoever made the edit: pymolt, or an agent or a person
 who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls. A
@@ -281,6 +284,8 @@ can only tighten it; loosening it needs a person's attestation.
 | different value | review | FAIL | review; FAIL if it expects `representation` | ACCEPTED if it expects `return:<Type>` and gets one; else FAIL |
 | type changed, values not visible | review | FAIL | review | ACCEPTED if it expects `return:<Type>` and gets one; not comparable if it expects `representation`; else FAIL |
 | new raise | FAIL | FAIL | FAIL | ACCEPTED if it expects `raise:<Type>` and gets one; else FAIL |
+| fails to bind its arguments | FAIL | FAIL | FAIL | FAIL |
+| no partner, new side raises (the old statement raised nothing) | FAIL | FAIL | FAIL | unverified if it expects that raise; else FAIL |
 | no partner | unverified | unverified | unverified | unverified |
 
 Values are not visible when the call was compared by type only, or when a value on either side
