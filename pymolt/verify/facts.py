@@ -350,6 +350,9 @@ class FactSet(BaseModel):
     python_versions: list[str] = Field(default_factory=list, exclude=True)
     run_windows: list[tuple[float, float]] = Field(default_factory=list, exclude=True)
     env_roots: list[str] = Field(default_factory=list, exclude=True)
+    # The interpreter prefixes the capture's processes ran (a venv's root, from ``executable``
+    # or ``prefix``/``base_prefix``): paths under them are masked like the project root.
+    env_prefixes: list[str] = Field(default_factory=list, exclude=True)
     host_capture: bool = Field(default=True, exclude=True)
     dropped_events: int | None = None
     # ``{normalized distribution name: version}`` the capture's processes loaded (one version
@@ -1723,6 +1726,15 @@ def annotate_capture_meta(fs: FactSet, meta: Mapping[str, Any]) -> FactSet:
                 roots.append(seen)
     fs.env_roots = sorted({r.rstrip("/") for r in roots if r and r.rstrip("/")},
                           key=lambda r: -len(r))
+    prefixes = set()
+    for p in procs:
+        for key in ("prefix", "base_prefix"):
+            if isinstance(p.get(key), str) and len(p[key]) > 1:
+                prefixes.add(p[key].rstrip("/"))
+        exe = p.get("executable")
+        if isinstance(exe, str) and "/bin/" in exe and exe.startswith("/"):
+            prefixes.add(exe.rsplit("/bin/", 1)[0])
+    fs.env_prefixes = sorted((x for x in prefixes if x.count("/") >= 2), key=lambda r: -len(r))
     fs.host_capture = not fs.paths_mapped
     dropped = None
     for counters in [p.get("counters") for p in procs] or [meta.get("counters")]:
@@ -4006,6 +4018,69 @@ class _Provenance:
                      for ln in range(named.lineno, (named.end_lineno or named.lineno) + 1))
         return "edited" if edited else "same"
 
+    def edited_literals(self, side: int, file: str) -> dict[Any, int]:
+        """The string literals on the side's edited lines of ``file`` -> a line."""
+        key = (side + 12, file)
+        if key not in self._stmts:
+            out: dict[Any, int] = {}
+            text = self.sources[side].get(file)
+            m = self.maps.get(file)
+            tree = None
+            if text is not None and m is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+            for node in ast.walk(tree) if tree is not None else ():
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and m[side].get(node.lineno, ("gone", None))[0] != "same"):
+                    out.setdefault(node.value, node.lineno)
+            self._stmts[key] = out  # type: ignore[assignment]
+        return self._stmts[key]  # type: ignore[return-value]
+
+    def binding_edited(self, side: int, file: str, line: int | None, symbol: str) -> bool:
+        """The call on an unedited line resolves through a name an *edited* import binds
+        (``from werkzeug.utils import safe_join`` replacing Flask's): the edit chose the
+        callee, so the call is the edit's site. The call is the one whose name is the callee's
+        leaf, or, when the line does not name the leaf, the line's only call through a name an
+        edited import binds (``_("...")`` after ``ugettext_lazy as _`` became
+        ``gettext_lazy as _``)."""
+        text = self.sources[side].get(file)
+        other = self.sources[1 - side].get(file)
+        if text is None or other is None or line is None or file not in self.maps:
+            return False
+        try:
+            tree = _parse_source(text)
+            other_tree = _parse_source(other)
+        except (SyntaxError, ValueError):
+            return False
+        mine, theirs = _import_bindings(tree), _import_bindings(other_tree)
+        # a name whose import names another object on the other side (another module, or
+        # another name behind an ``as``): the edit rebound it
+        edited_names = {n for n, src in mine.items() if theirs.get(n, src) != src}
+        if not edited_names:
+            return False
+        span = self.stmt_span(side, file, line) or (line, line)
+        leaf = _symbol_leaf(symbol)
+        roots_by_leaf: list[str] = []
+        roots_edited: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and span[0] <= node.lineno <= span[1]:
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                while isinstance(fn, ast.Attribute):
+                    fn = fn.value
+                root = fn.id if isinstance(fn, ast.Name) else None
+                if root is None:
+                    continue
+                if name == leaf:
+                    roots_by_leaf.append(root)
+                if root in edited_names:
+                    roots_edited.add(root)
+        if roots_by_leaf:
+            return all(r in edited_names for r in roots_by_leaf)
+        return len(roots_edited) == 1
+
     def attribute_read_evidence(self, side: int, file: str, line: int | None,
                                 symbol: str) -> bool:
         """The statement's AST shows the leaf is read, not called, or called with arguments the
@@ -4140,6 +4215,20 @@ class _Provenance:
                                 table[ln] = info
             self._stmts[key] = table
         return self._stmts[key]
+
+
+def _import_bindings(tree: ast.AST) -> dict[str, tuple[str, str]]:
+    """Module-level import bindings: local name -> (module, imported name)."""
+    out: dict[str, tuple[str, str]] = {}
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.ImportFrom) and not node.level:
+            for a in node.names:
+                out[a.asname or a.name] = (node.module or "", a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                out[(a.asname or a.name).split(".")[0]] = (a.name if a.asname else
+                                                           a.name.split(".")[0], "")
+    return out
 
 
 def _parse_source(text: str) -> ast.AST:
@@ -4602,7 +4691,13 @@ class _Masker:
     # aspects that differ between the two captures' recorded environments
     env_tokens: dict[str, str] = field(default_factory=dict)
 
+    prefixes: list[str] = field(default_factory=list)   # interpreter prefixes (venv roots)
+
     def __post_init__(self) -> None:
+        # a site-packages path first (its ``pythonX.Y`` is the interpreter's), then the prefix
+        self._prefixes = re.compile("|".join(
+            rf"(?<![\w.\-/]){re.escape(r)}(?:/lib/python\d+\.\d+/site-packages)?(?![\w.\-])"
+            for r in self.prefixes)) if self.prefixes else None
         self._roots = re.compile("|".join(
             rf"(?<![\w.\-/]){re.escape(r)}(?![\w.\-])" for r in self.roots)) if self.roots else None
         pys = [re.escape(v) for v in self.pythons]
@@ -4683,6 +4778,10 @@ class _Masker:
             s = self._mask_tokens(s)
         if self.window is not None:
             s = self._mask_clock(s)
+        if self._prefixes is not None and self._prefixes.search(s):
+            self._note("environment", self._prefixes.search(s).group())
+            s = self._prefixes.sub(lambda m: "⟨site-packages⟩" if m.group().endswith(
+                "site-packages") else "⟨prefix⟩", s)
         if self._roots is not None and self._roots.search(s):
             self._note("environment", self._roots.search(s).group())
             s = self._roots.sub("⟨root⟩", s)
@@ -4950,6 +5049,7 @@ def _masker_for(fs: FactSet, facts: list[Fact], stable: frozenset = frozenset(),
             for n in nums:
                 numbers.setdefault(n, "⟨src:number⟩")
     return _Masker(roots=list(fs.env_roots), pythons=list(fs.python_versions),
+                   prefixes=list(fs.env_prefixes),
                    host_capture=fs.host_capture, tokens=tokens, numbers=numbers, stable=stable,
                    versions=versions or {}, env_tokens=env_tokens or {})
 
@@ -5246,6 +5346,9 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
                 if st == "same" and prov.naming_status(
                         side, v.fact.file, v.fact.line, v.fact.symbol) == "edited":
                     v.rewritten_site = True  # the statement that names the callee was edited
+                if st == "same" and prov.binding_edited(side, v.fact.file, v.fact.line,
+                                                        v.fact.symbol):
+                    v.rewritten_site = True  # its name was rebound by an edited import
             span = prov.stmt_span(side, v.fact.file, v.fact.line)
             if span:  # key on the statement, in the new side's numbering
                 start = span[0] if side == 1 else prov.mapped_line(v.fact.file, span[0], 0)
@@ -5433,7 +5536,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
                         if len(tok) >= 8:
                             idx[tok[:8]].append(tok)
                     gstats.seed_index[side] = idx
-        changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats)
+        changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats, prov)
     order_stats = _judge_order(pending, old, new, prof, order_causes)
     protected = _protected_symbols(context)
     env_readings = _explain_env_readings(pending, envcmp, protected)
@@ -6464,7 +6567,8 @@ _NOT_INPUT_CHANGE = ("wrapper-naming", "attribution-moved")
 
 
 def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
-                         new_left: list[_V], stats: "_GroupStats") -> int:
+                         new_left: list[_V], stats: "_GroupStats",
+                         prov: "_Provenance | None" = None) -> int:
     """A pair matched modulo input on an unedited line is the same call given another input.
     When every leaf where the inputs differ is volatile on both sides (masked, a seed, a
     propagated value) the run explains it. Otherwise the input itself changed for no visible
@@ -6489,6 +6593,10 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
             continue  # downstream of an edit
         if _numeric_input(o, n, e):
             continue  # the same input within floating-point rounding: not an input change
+        if _added_none_default(o, n, e):
+            continue
+        if prov is not None and _edited_literal_input(o, n, e, prov):
+            continue
         changed, drift = _unexplained_input_leaves(o, n, stats)
         if changed is None:
             # the same argument values: only how the new version binds or names them drifted
@@ -6518,6 +6626,68 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
                         f"visible cause ({shown}); {_REPLICATE_HINT}")
         count += 1
     return count
+
+
+def _added_none_default(o: _V, n: _V, e: FactEntry) -> bool:
+    """A parameter bound on one side only, to None (numpy 2's ``linspace(device=None)``): the
+    new version added a parameter defaulting to None that the capture did not report as
+    defaulted. Drift, not an input change, when it is the only difference."""
+    def strip(inputs: Any, other: Any) -> Any:
+        if not (isinstance(inputs, dict) and isinstance(inputs.get("bound"), dict)
+                and isinstance(other, dict) and isinstance(other.get("bound"), dict)):
+            return inputs
+        bound = {k: v for k, v in inputs["bound"].items()
+                 if not (v is None and k not in other["bound"])}
+        return {**inputs, "bound": bound}
+
+    a, b = o.fact.input, n.fact.input
+    if _canon(strip(a, b)) != _canon(strip(b, a)):
+        return False
+    added = sorted(set((a or {}).get("bound", {})) ^ set((b or {}).get("bound", {})))
+    e.notes.append("added-default-none")
+    e.explained = e.explained or (
+        f"binding: a parameter bound on one side only, to None ({', '.join(added)}): an added "
+        "default, not an input change")
+    if e.comparison is Comparison.EQUAL and e.category is FactCategory.EQUAL:
+        e.category, e.drift = FactCategory.DRIFT, True
+    return True
+
+
+def _edited_literal_input(o: _V, n: _V, e: FactEntry, prov: "_Provenance") -> bool:
+    """An input on an unedited line whose every differing value is a literal of an edited line
+    in the same file, the old value on the old side and the new on the new
+    (``def line_chart(style="seaborn-v0_8-whitegrid")`` edited from ``"seaborn-whitegrid"``):
+    downstream of that hand edit, judged as one (equal: equal; a value change: a review; a new
+    raise still fails), not as an input change with no visible cause."""
+    if not prov.maps:
+        return False
+    old_leaves, new_leaves = _leaf_map(o.fact.input), _leaf_map(n.fact.input)
+    keys = old_leaves.keys() | new_leaves.keys()
+    olds = {old_leaves[k] for k in keys if k in old_leaves
+            and old_leaves.get(k) != new_leaves.get(k, _UNKNOWN)}
+    news = {new_leaves[k] for k in keys if k in new_leaves
+            and new_leaves.get(k) != old_leaves.get(k, _UNKNOWN)}
+    # strings only: a small number matches some edited line too easily
+    if not olds or not news or not all(isinstance(x, str) and len(x) >= 2 for x in olds | news):
+        return False
+    edited = [prov.edited_literals(0, o.fact.file), prov.edited_literals(1, n.fact.file)]
+    if not (olds <= edited[0].keys() and news <= edited[1].keys()):
+        return False
+    where = sorted(edited[1][v] for v in news)[0]
+    e.provenance = "hand"
+    e.notes.append(f"input from a hand-edited literal at {n.fact.file}:{where}")
+    e.explained = e.explained or (
+        f"input-substitution: the input comes from a hand-edited literal at "
+        f"{n.fact.file}:{where}")
+    if e.comparison is Comparison.EQUAL:
+        e.category = FactCategory.REWRITTEN
+    elif _kinds_match(e.old, e.new):
+        e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
+        e.review = "the value differs on a hand-edited line: review"
+        e.notes.append(e.review)
+    else:
+        e.category = FactCategory.REWRITTEN     # a new raise: stays CHANGED, fails
+    return True
 
 
 def _numeric_equal(a: Any, b: Any) -> bool:

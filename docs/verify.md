@@ -231,6 +231,9 @@ A line diff of the source each capture stored decides who edited a call's line:
   later apply of the same step replaced them, the earlier edits are judged by hand. When the
   post-migration capture predates a step (its source still has the statements from before
   the step), the report says so: capture post-migration again;
+- **a call through a name an edit rebound** (an unedited `safe_join(...)` after the import
+  changed from `flask` to `werkzeug.utils`): the edit chose the callee, so the call is judged as
+  that edit's site;
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
   symbol from the plan or the ledger, or by a one-statement edit. An equal outcome is REWRITTEN
   equal. A different value is a review item, which makes the verdict inconclusive. A new raise
@@ -291,12 +294,18 @@ layers:
 
 A value is masked as volatile when an entropy source returned it on that side (uuid4, random,
 secrets, datetime.now, tempfile names), when it is a reading of the capture's own clock, the
-project root or the Python version, or when an input carried such a value into an output.
+project root, the interpreter's prefix (a venv's `site-packages` path) or the Python version, or
+when an input carried such a value into an output.
 - **Fresh inputs.** A call site whose inputs never recur (a port, an id) is judged as one group.
   Its calls pair by their masked input and compare by value.
 - **Input changes.** On an unedited line, an input that changed with no visible cause is a review
   item: what reached the call changed, which is not proof that the dependency did. A new raise or
-  a new type still fails.
+  a new type still fails. Three causes are visible:
+  - a string literal of an edited line (`def chart(style="seaborn-v0_8-whitegrid")` edited from
+    `"seaborn-whitegrid"`): the call is judged as that hand edit;
+  - a parameter bound on one side only, to None (numpy 2's `linspace(device=None)`): an added
+    default, drift;
+  - floats within rounding: the same input (`matched-modulo-numeric`).
   - This includes an input seen on one side only, at a call both sides make with the same outcome
     kinds and types and the same signature, such as a poll that saw one more intermediate value.
 - **The replicate.** A difference is noise only where the replicate shows the same kind of
