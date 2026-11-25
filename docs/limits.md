@@ -43,10 +43,12 @@ replicate still did not settle:
 - **An input that changed with no visible cause** on an unedited line, including an input one side
   passed and the other did not, at a call both sides make.
 - **A dict whose key order changed**, unless the order is shown to be deterministic.
-- **Floats within rounding.** Differences up to 1024 ulps are drift, not a change: a computation
-  that genuinely moved by less than that (about 2e-13 relative for float64) is not caught. Set
-  `verify --float-ulps 0` to compare floats exactly. A numpy scalar is recorded by its type only,
-  so its value is not compared at all.
+- **Floats within rounding.** Differences up to 1024 ulps at a value's own precision are drift,
+  not a change: about 2.3e-13 relative for float64, 1.2e-4 for float32, and never more than
+  2^-10 (float16 compares almost exactly). A computation that genuinely moved by less is not
+  caught. A float that holds money compares like any float: a cent on 1e11 is about 650 ulps,
+  drift. Set `verify --float-ulps 0` to compare floats exactly. A numpy scalar is recorded by its
+  type only, so its value is not compared at all.
 - **A result used later through a variable.** The consumer projection reads only the
   statement that makes the call: `r = f(); r.raise_for_status()` compares `f()` in full, and
   `x = f(); a, b = x` does not erase the container type.

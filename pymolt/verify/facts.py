@@ -3524,9 +3524,12 @@ FLOAT_ULPS = 1024     # owner decision (2026-11-24): the numeric layer's default
 NUMERIC = "numeric"
 _ULPS: ContextVar[int] = ContextVar("pymolt_ulps", default=FLOAT_ULPS)
 _STRICT: ContextVar[bool] = ContextVar("pymolt_strict", default=False)
-# (scale, mantissa bits) while comparing the values of one float array: the array's largest
-# magnitude is the scale, at the array's own precision.
-_NUM_SCALE: ContextVar[tuple[float, int] | None] = ContextVar("pymolt_num_scale", default=None)
+# The mantissa bits of the float array whose values are being compared (its dtype's
+# precision); None: a Python float (float64).
+_NUM_SCALE: ContextVar[int | None] = ContextVar("pymolt_num_scale", default=None)
+# Whatever the ulps bound, two floats further apart than this relatively are never "within
+# rounding" (float16's 1024 ulps would be 100%): 2**-10.
+_NUM_REL_CAP = 2.0 ** -10
 _MANTISSA = {"float64": 52, "float32": 23, "float16": 10, "float": 52, "double": 52,
              "single": 23, "half": 10}
 
@@ -3537,48 +3540,31 @@ def _ulp(scale: float, bits: int) -> float:
 
 def _floats_close(a: float, b: float) -> float | None:
     """The distance of two different floats in units in the last place, when within the bound
-    (``_ULPS``) at their precision; None otherwise. Scalars scale by the larger magnitude, and
-    zero against non-zero is never close; inside an array the array's largest magnitude is the
-    scale. Non-finite values, and a bound of 0, are exact."""
+    (``_ULPS``) at their own precision; None otherwise. Each value scales by its own pair's
+    larger magnitude (an array element too, never by the array's largest), at the array's dtype
+    precision; zero against non-zero is never close, nor are two floats further apart than
+    2**-10 relatively, nor non-finite values; a bound of 0 is exact."""
     bound = _ULPS.get()
     if bound <= 0 or not (math.isfinite(a) and math.isfinite(b)):
         return None
     if a == b:
         return 0.0                       # +0.0 and -0.0
-    scope = _NUM_SCALE.get()
-    if scope is None:
-        if a == 0.0 or b == 0.0:
-            return None                  # zero against non-zero, with no scale to judge by
-        scale, bits = max(abs(a), abs(b)), 52
-    else:
-        scale, bits = scope
-    if scale <= 0.0:
+    if a == 0.0 or b == 0.0:
+        return None                      # zero against non-zero: no rounding makes that
+    bits = _NUM_SCALE.get() or 52
+    scale = max(abs(a), abs(b))
+    if abs(a - b) / scale > _NUM_REL_CAP:
         return None
     distance = abs(a - b) / _ulp(scale, bits)
     return distance if distance <= bound else None
 
 
-def _float_leaves(v: Any, out: list[float]) -> list[float]:
-    if isinstance(v, float):
-        out.append(v)
-    elif isinstance(v, list):
-        for x in v:
-            _float_leaves(x, out)
-    elif isinstance(v, dict):
-        for x in v.values():
-            _float_leaves(x, out)
-    return out
-
-
-def _numeric_scope(a: Mapping[str, Any], b: Mapping[str, Any]) -> tuple[float, int] | None:
-    """The scale of one float array (both sides' values, the same dtype): its largest finite
-    magnitude, at the dtype's precision."""
+def _numeric_scope(a: Mapping[str, Any], b: Mapping[str, Any]) -> int | None:
+    """The precision (mantissa bits) of one float array's values, both sides of one dtype."""
     bits = _MANTISSA.get(str(a.get("dtype")))
     if bits is None or a.get("dtype") != b.get("dtype"):
         return None
-    leaves = [abs(x) for x in _float_leaves(a.get("values"), _float_leaves(b.get("values"), []))
-              if math.isfinite(x)]
-    return (max(leaves), bits) if leaves else None
+    return bits
 
 
 def _values_match(a: Any, b: Any) -> bool:

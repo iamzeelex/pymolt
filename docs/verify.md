@@ -182,15 +182,17 @@ change what it returns, and the plan's scoring still sees that. `--strict` compa
 result.
 
 Two floats are equal when they differ by at most 1024 units in the last place (ulps), at their
-own precision: a float64 by float64 ulps, an array's float32 values by float32 ulps. A scalar
-scales by the larger of the two; the values of one array by its largest magnitude. Zero against
-a non-zero scalar, int against float, and values of different dtypes are never within rounding.
-Such a pair is DRIFT at level `numeric`, with the largest distance in ulps and relatively; the
-same holds for a call's input (`matched-modulo-numeric`: the same call given the same input). The
-verdict says how many values needed it ("k values equal within floating-point rounding (≤1024
-ulps)"), and `verification.json` keeps `numeric_drift`. `verify --float-ulps N` changes the bound
-(0 compares floats exactly); `--strict` makes each such pair a review item. Masks apply first,
-and measured run noise as before; the bound never widens with it.
+own precision: a float64 by float64 ulps, an array's float32 values by float32 ulps. Each value
+scales by the larger of its own pair, an array element too (never by the array's largest), and
+no pair further apart than 2^-10 relatively is ever within rounding (float16's 1024 ulps would
+be all of it). Zero against non-zero, int against float, and values of different dtypes are
+never within rounding. Such a pair is DRIFT at level `numeric`, with the largest distance in ulps
+and relatively; the same holds for a call's input (`matched-modulo-numeric`: the same call given
+the same input). The verdict says how many values needed it ("k values equal within
+floating-point rounding (≤1024 ulps)"), and `verification.json` keeps `numeric_drift`.
+`verify --float-ulps N` changes the bound (0 compares floats exactly); `--strict` makes each such
+pair a review item. Masks apply first, and measured run noise as before; the bound never widens
+with it.
 
 A type that changed is judged by a ladder:
 - **Values and raises**: strict. A class that moved within its package (same top-level package,

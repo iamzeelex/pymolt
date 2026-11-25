@@ -567,9 +567,9 @@ def test_zero_signs_and_scales(tmp_path):
     zero = [ev("dep.Model.score", {"self": {"__opaque__": "dep.Model"}}, result=0.0, line=2)]
     tiny = [ev("dep.Model.score", {"self": {"__opaque__": "dep.Model"}}, result=1e-300, line=2)]
     assert one(run(tmp_path, zero, tiny, src), "dep.Model.score").fails
-    # inside an array the array's largest magnitude is the scale
-    assert not one(run(tmp_path, [pred([1.0, 0.0])], [pred([1.0, 1e-17])], PRED_SRC),
-                   "dep.Model.predict").fails
+    # inside an array too: each element by its own magnitude, zero against non-zero exact
+    assert one(run(tmp_path, [pred([1.0, 0.0])], [pred([1.0, 1e-17])], PRED_SRC),
+               "dep.Model.predict").fails
     # across the sign boundary, as any distance
     assert one(run(tmp_path, [pred([1e-3])], [pred([-1e-3])], PRED_SRC),
                "dep.Model.predict").fails
