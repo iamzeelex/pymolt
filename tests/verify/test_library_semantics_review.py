@@ -235,3 +235,42 @@ def test_a_cent_on_a_1e11_float_is_rounding_and_stamped(tmp_path):
     assert run(tmp_path, [ev("dep.total", {}, result=123456789012.34)],
                [ev("dep.total", {}, result=123456789012.35)], src,
                float_ulps=0).verdict is FAIL
+
+
+# ── 8. an edit's types carry only along its data chain ────────────────────────────────────
+
+def test_a_discarded_edit_carries_nothing_to_an_unrelated_introspected_call(tmp_path):
+    app_old = "import dep\ndef init():\n    dep.connect('db', pool=False)\n"
+    app_new = "import dep\ndef init():\n    dep.connect('db', pool=True)\n"
+    test = ("import dep\nfrom dep.v1 import Engine\ndef test():\n    r = dep.engine()\n"
+            "    assert isinstance(r, Engine)\n")
+
+    def obj(t):
+        return {"__object__": t, "attrs": {"url": "db"}}
+
+    old = [ev("dep.connect", {"u": "db", "pool": False}, result=obj("dep.v1.Engine"),
+              func="init"),
+           ev("dep.engine", {}, result=obj("dep.v1.Engine"), file="test_app.py", line=4,
+              func="test")]
+    new = [ev("dep.connect", {"u": "db", "pool": True}, result=obj("dep.v2.Pool"), func="init"),
+           ev("dep.engine", {}, result=obj("dep.v2.Pool"), file="test_app.py", line=4,
+              func="test")]
+    d = run(tmp_path, old, new, {"app.py": app_old, "test_app.py": test},
+            {"app.py": app_new, "test_app.py": test})
+    assert d.verdict is FAIL and not one(d, "dep.engine").review
+
+
+def test_an_edit_s_type_is_not_carried_off_its_data_chain(tmp_path):
+    app_old = "import dep\ndef fig():\n    return dep.trace('gl')\n"
+    app_new = "import dep\ndef fig():\n    return dep.trace('hm')\n"
+    test = "import dep\ndef test():\n    other = dep.load()\n    return other\n"
+    old = [ev("dep.trace", {"k": "gl"}, result={"__type__": "dep.gl.Gl"}, func="fig"),
+           ev("dep.load", {}, result={"__tuple__": [{"__opaque__": "dep.gl.Gl"}]},
+              file="test_app.py", func="test")]
+    new = [ev("dep.trace", {"k": "hm"}, result={"__type__": "dep.hm.Hm"}, func="fig"),
+           ev("dep.load", {}, result={"__tuple__": [{"__opaque__": "dep.hm.Hm"}]},
+              file="test_app.py", func="test")]
+    d = run(tmp_path, old, new, {"app.py": app_old, "test_app.py": test},
+            {"app.py": app_new, "test_app.py": test})
+    e = one(d, "dep.load")
+    assert "type-drift:carried" not in e.absorbed     # the ladder judges it on its own

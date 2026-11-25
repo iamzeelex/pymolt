@@ -5538,7 +5538,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         entries.append(_single_entry(v, old_side=False, prov=prov))
     _lift_namespace_edits(pending, prov)
     _judge_pairs(pending, old_left, new_left, prov)
-    _carry_edit_types(pending, prov)
+    _carry_edit_types(pending, prov, ov, nv)
     _apply_noise(entries, prov, {f.symbol.split('.')[0] for f in old_facts})
     backend_only = _soften_backend(entries, old, new)
     if sampled:
@@ -8427,22 +8427,44 @@ def _edit_type_pairs(old: list[Outcome], new: list[Outcome]) -> list[tuple[str, 
     return [(x, y) for x in only_a for y in only_b]
 
 
-def _carry_edit_types(pending: list[tuple[_V, _V, FactEntry]], prov: _Provenance) -> None:
+def _carry_edit_types(pending: list[tuple[_V, _V, FactEntry]], prov: _Provenance,
+                      ov: list[_V] = (), nv: list[_V] = ()) -> None:
     """A type an edited line produced, reappearing downstream (plotly: the hand edit
     ``go.Heatmapgl`` -> ``go.Heatmap``, then ``fig.data`` on an unedited test line returns a
     Heatmap): the downstream change is judged with that edit, not on its own. When every
     difference of an unedited CHANGED pair is one of those type pairs, it takes the edit's
     judgement: a review when the edit is one, a failure when it fails, drift when the edit
-    compared equal (``type-drift:carried``)."""
+    compared equal (``type-drift:carried``). Only along the edit's data chain: the pair is on
+    the edit's own statement, or its input carries a value an edited line produced (``fig``,
+    the Figure the edited line built). Never from an edit equal only once projected (its
+    result is not used), and never onto a class the project introspects."""
     if prov.ctx is None:
         return
     carried: dict[tuple[str, str], FactEntry] = {}
+    stmts: set[Any] = set()
     for o, n, e in pending:
         if o.rewritten_site or n.rewritten_site:
+            stmts.update(x for x in (o.stmt_key, n.stmt_key) if x)
+            if any(m.startswith(f"{PROJECTED}:") for m in e.absorbed):
+                continue          # its result is not used: no type of it reaches anything
             for pair in _edit_type_pairs(o.fact.outcomes, n.fact.outcomes):
-                carried.setdefault(pair, e)
+                if not _introspected(*pair):
+                    carried.setdefault(pair, e)
     if not carried:
         return
+    produced: list[set[str]] = [set(), set()]   # labels edited lines returned, per side
+    for side, views in ((0, ov), (1, nv)):
+        for v in views:
+            if v.rewritten_site:
+                for out in v.fact.outcomes:
+                    if out.kind == "return":
+                        _type_labels(out.value, produced[side])
+
+    def on_chain(o: _V, n: _V) -> bool:
+        if o.stmt_key in stmts or n.stmt_key in stmts:
+            return True
+        return bool(_type_labels(o.fact.input, set()) & produced[0]
+                    or _type_labels(n.fact.input, set()) & produced[1])
     rel = _TYPE_RELOC.get()
     token = _TYPE_RELOC.set([*(rel.items() if isinstance(rel, Mapping) else rel), *carried])
     strict_ladder = _EDITED.set(True)   # an edit made the class: no relation-unknown drift
@@ -8452,7 +8474,8 @@ def _carry_edit_types(pending: list[tuple[_V, _V, FactEntry]], prov: _Provenance
                 m in e.absorbed for m in _LADDER_DRIFT)
             if (o.rewritten_site or n.rewritten_site
                     or not (e.category is FactCategory.CHANGED or drifted)
-                    or e.review or e.noise or e.provenance not in (None, "unedited")):
+                    or e.review or e.noise or e.provenance not in (None, "unedited")
+                    or not on_chain(o, n)):
                 continue
             cmp = compare_outcomes(o.fact.outcomes, n.fact.outcomes)
             if cmp.comparison is not Comparison.EQUAL:
