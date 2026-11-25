@@ -47,7 +47,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 9
+PROBE_VERSION = 10
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -665,15 +665,22 @@ def _params_of(node):
 
 def _returns_param(node, params):
     """The parameter a helper hands back unchanged (``return interpolation``) when every
-    ``return`` returns that one name; else None."""
+    ``return`` returns that one name and the body never rebinds it; else None."""
     found = set()
+    assigned = set()
     for n in _nodes(node):
         if isinstance(n, ast.Return):
             if isinstance(n.value, ast.Name) and n.value.id in params:
                 found.add(n.value.id)
             else:
                 return None
-    return found.pop() if len(found) == 1 else None
+        targets = n.targets if isinstance(n, ast.Assign) else (
+            [n.target] if isinstance(n, (ast.AugAssign, ast.AnnAssign)) else [])
+        for t in targets:
+            if isinstance(t, ast.Name):
+                assigned.add(t.id)
+    name = found.pop() if len(found) == 1 else None
+    return name if name is not None and name not in assigned else None
 
 
 def _helper_summary(helper):
@@ -695,6 +702,11 @@ def _helper_summary(helper):
                 summary = {"helper": _function_sym(helper), "params": params,
                            "messages": msgs[:6],
                            "returns": _returns_param(node, params)}
+                aliases = []
+                for stmt in node.body:
+                    aliases += _alias_stmt(stmt, params) or []
+                if aliases:
+                    summary["aliases"] = aliases[:8]
     except Exception:
         summary = None
     _HELPER_CACHE[key] = (helper, summary)
@@ -723,6 +735,8 @@ def _helper_warns(node, fn):
         name = _name(n.func)
         if not name or name.split(".")[0] in ("self", "cls", "super") or _is_warn_name(name):
             continue
+        if not name.split(".")[-1].startswith("_"):
+            continue                      # a public function is an API call, not a helper
         try:
             parts = name.split(".")
             obj = globs.get(parts[0])
@@ -762,6 +776,205 @@ def _rejects_kwargs(fn):
                 and any(isinstance(n, ast.Raise) for s in node.body for n in ast.walk(s))):
             return True
     return False
+
+
+def _desc(node, params):
+    """One argument of a forwarding call: ``{"p": param}`` (one of the caller's parameters),
+    ``{"star": param}`` / ``{"dstar": param}`` (passed through ``*`` / ``**``), ``{"c": literal}``,
+    else ``{"x": <what it is>}`` (an expression the host cannot rebuild)."""
+    star = getattr(ast, "Starred", None)
+    if star is not None and isinstance(node, star):
+        inner = node.value
+        if isinstance(inner, ast.Name) and inner.id in params:
+            return {"star": inner.id}
+        return {"x": "starred"}
+    if isinstance(node, ast.Name):
+        return {"p": node.id} if node.id in params else {"x": "name:" + node.id}
+    lit = _lit(node)
+    if not isinstance(lit, dict):
+        return {"c": lit}
+    return {"x": lit.get("expr")}
+
+
+def _call_desc(call, params):
+    """A forwarding call: its callee as written, its arguments (``_desc``), and the method calls
+    chained on its result (``F.len().alias("count")``)."""
+    chain = []
+    cur = call
+    while isinstance(cur, ast.Call) and isinstance(cur.func, ast.Attribute) and \
+            isinstance(cur.func.value, ast.Call):
+        chain.insert(0, [cur.func.attr, [_desc(a, params) for a in cur.args],
+                         [[k.arg, _desc(k.value, params)] for k in cur.keywords if k.arg]])
+        cur = cur.func.value
+    if not isinstance(cur, ast.Call):
+        return None
+    callee = _name(cur.func)
+    if not callee or isinstance(cur.func, ast.Call):
+        return None
+    kwargs = []
+    for k in cur.keywords:
+        if k.arg is None:
+            inner = k.value
+            kwargs.append(["**", {"dstar": inner.id} if isinstance(inner, ast.Name)
+                           and inner.id in params else {"x": "dstar"}])
+        else:
+            kwargs.append([k.arg, _desc(k.value, params)])
+    out = {"callee": callee, "args": [_desc(a, params) for a in cur.args], "kwargs": kwargs}
+    if chain:
+        out["chain"] = chain
+    return out
+
+
+def _noise(stmt, params=()):
+    """A statement a forwarding body may hold besides its forward: a docstring, a warning (or a
+    deprecation log), a message built for it (``msg = "..."``, a local that is no parameter),
+    or an ``if`` whose body is only those or a raise (a conflict check:
+    ``if new is not None: raise TypeError(...)``)."""
+    if isinstance(stmt, ast.Expr):
+        if _const_str(stmt.value) is not None:
+            return True
+        if isinstance(stmt.value, ast.Call) and _is_warn_name(_name(stmt.value.func) or ""):
+            return True
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and \
+            isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id not in params and \
+            _text_of(stmt.value, {}) is not None:
+        return True
+    if isinstance(stmt, ast.If) and not stmt.orelse and stmt.body and \
+            all(_noise(s, params) or isinstance(s, ast.Raise) for s in stmt.body):
+        return True
+    if isinstance(stmt, ast.Pass):
+        return True
+    return False
+
+
+def _alias_stmt(stmt, params):
+    """``[{old, new, how}]`` when the statement makes one parameter the other's alias: ``new =
+    old``; ``if old is not None: [warn]; new = old``; ``kwargs["new"] = kwargs.pop("old")``
+    (inside ``if "old" in kwargs:``). None for any other statement."""
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        t, v = stmt.targets[0], stmt.value
+        if isinstance(t, ast.Name) and isinstance(v, ast.Name) and t.id in params and \
+                v.id in params and t.id != v.id:
+            return [{"old": v.id, "new": t.id, "how": "assign"}]
+        if isinstance(t, ast.Subscript) and isinstance(v, ast.Call) and \
+                isinstance(v.func, ast.Attribute) and v.func.attr == "pop" and v.args:
+            new = _const_str(getattr(t.slice, "value", t.slice))
+            old = _const_str(v.args[0])
+            base_t, base_v = _name(t.value), _name(v.func.value)
+            if new and old and base_t and base_t == base_v and base_t in params and \
+                    len(v.args) == 1:
+                return [{"old": old, "new": new, "how": "pop"}]
+    if isinstance(stmt, ast.If) and not stmt.orelse:
+        names = set()
+        for n in ast.walk(stmt.test):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            text = _const_str(n)
+            if text:
+                names.add(text)
+        rest = [s for s in stmt.body if not (_noise(s, params) or isinstance(s, ast.Raise))]
+        found = []
+        for s in rest:
+            got = _alias_stmt(s, params)
+            if got is None:
+                return None
+            found += got
+        if found and all(a["old"] in names for a in found):
+            return found
+    return None
+
+
+def _setdefault_stmt(stmt, params):
+    """``{key: literal}`` for ``kwargs.setdefault("kind", "point")``: a default the body
+    materializes before forwarding. None otherwise."""
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        call = stmt.value
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "setdefault" and \
+                _name(call.func.value) in params and len(call.args) == 2:
+            key = _const_str(call.args[0])
+            value = _lit(call.args[1])
+            if key and not isinstance(value, dict):
+                return {key: value}
+    return None
+
+
+def _cond(test, params):
+    """A branch condition the call's own arguments decide: ``not p`` / ``p`` / ``p is None`` /
+    ``p is not None`` (``{"falsy": p}``...). None for any other test."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and \
+            isinstance(test.operand, ast.Name) and test.operand.id in params:
+        return {"falsy": test.operand.id}
+    if isinstance(test, ast.Name) and test.id in params:
+        return {"truthy": test.id}
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and \
+            isinstance(test.left, ast.Name) and test.left.id in params:
+        right = test.comparators[0]
+        none = (_HAS_CONSTANT and isinstance(right, ast.Constant) and right.value is None) or \
+            (not _HAS_CONSTANT and isinstance(right, getattr(ast, "NameConstant", ()))
+             and right.value is None)
+        if none and isinstance(test.ops[0], ast.Is):
+            return {"none": test.left.id}
+        if none and isinstance(test.ops[0], ast.IsNot):
+            return {"not_none": test.left.id}
+    return None
+
+
+def _body_key(stmts):
+    import hashlib
+    try:
+        dumped = "\n".join(ast.dump(s) for s in stmts)
+    except Exception:
+        return None
+    return hashlib.sha1(dumped.encode("utf-8")).hexdigest()[:16]
+
+
+def _body_summary(node):
+    """What a body proves, as raw data: ``forward`` (after its docstring, warnings and conflict
+    checks, it is one ``return f(...)``, or ``return self.x``), ``cond_forward`` (``if <test on
+    a parameter>: [warn]; return f(...)`` then another ``return``), ``aliases`` (parameters made
+    one another's alias), ``materialize`` (``kwargs.setdefault``) and ``key`` (a hash of the
+    body without its warnings: equal keys are twins)."""
+    params = _params_of(node)
+    body = [s for s in node.body if not _noise(s, params)]
+    out = {}
+    aliases, materialize, rest = [], {}, []
+    for stmt in body:
+        got = _alias_stmt(stmt, params)
+        if got is not None:
+            aliases += got
+            continue
+        got = _setdefault_stmt(stmt, params)
+        if got is not None:
+            materialize.update(got)
+            continue
+        rest.append(stmt)
+    if aliases:
+        out["aliases"] = aliases[:8]
+    if materialize:
+        out["materialize"] = materialize
+    if len(rest) == 1 and isinstance(rest[0], ast.Return) and rest[0].value is not None:
+        value = rest[0].value
+        if isinstance(value, ast.Call):
+            fwd = _call_desc(value, params)
+            if fwd:
+                out["forward"] = fwd
+        elif isinstance(value, ast.Attribute) and _name(value.value) == "self":
+            out["forward"] = {"attr": value.attr}
+    elif len(rest) == 2 and isinstance(rest[0], ast.If) and isinstance(rest[1], ast.Return) \
+            and not rest[0].orelse:
+        branch = [s for s in rest[0].body if not _noise(s, params)]
+        cond = _cond(rest[0].test, params)
+        if cond and len(branch) == 1 and isinstance(branch[0], ast.Return) and \
+                isinstance(branch[0].value, ast.Call):
+            fwd = _call_desc(branch[0].value, params)
+            if fwd:
+                out["cond_forward"] = {"cond": cond, "forward": fwd,
+                                       "warns": any(_noise(s, params)
+                                                    for s in rest[0].body)}
+    key = _body_key(body)
+    if key:
+        out["key"] = key
+    return out
 
 
 def _mine(obj):
@@ -826,7 +1039,72 @@ def _mine(obj):
             helpers = []
         if helpers:
             out["helper_warns"] = helpers
+        try:
+            body = _body_summary(node)
+        except Exception:
+            body = {}
+        if body:
+            out["body"] = body
+            fwd = body.get("forward") or (body.get("cond_forward") or {}).get("forward")
+            callee = (fwd or {}).get("callee")
+            if callee and callee.split(".")[0] not in ("self", "cls"):
+                obj = _resolve_in(fn, callee)
+                if obj is not None:
+                    out["_callee"] = (obj, callee.split(".")[-1])
+            elif callee:
+                out["_member"] = callee.split(".", 1)[1]
     return out
+
+
+def _resolve_in(fn, dotted):
+    """What ``dotted`` names in the module that defines ``fn`` (its globals, then builtins)."""
+    globs = getattr(fn, "__globals__", None)
+    if not isinstance(globs, dict):
+        return None
+    parts = dotted.split(".")
+    obj = globs.get(parts[0])
+    try:
+        for attr in parts[1:]:
+            if obj is None:
+                return None
+            obj = getattr(obj, attr)
+    except Exception:
+        return None
+    return obj
+
+
+def _callee_spellings(obj, owner, leaf):
+    """Public spellings, in this interpreter, of the very object a forward calls: beside the
+    spelling being resolved (``numpy.prod`` for ``numpy.product``), its home and its package's
+    exports (a ``functools.partial`` by its function's module)."""
+    cands = []
+    if inspect.ismodule(owner):
+        cands.append(owner.__name__ + "." + leaf)
+    import functools
+
+    module = getattr(obj, "__module__", None)
+    if isinstance(obj, functools.partial) or not isinstance(module, str):
+        # a partial's ``__module__`` is functools': its function's module is its home
+        module = getattr(getattr(obj, "func", None), "__module__", None)
+    qual = getattr(obj, "__qualname__", None)
+    if isinstance(module, str):
+        if isinstance(qual, str) and "<" not in qual:
+            cands.append(module + "." + qual)
+        parts = module.split(".")
+        for i in range(len(parts), 0, -1):
+            cands.append(".".join(parts[:i]) + "." + leaf)
+    out = []
+    for cand in cands:
+        if cand in out:
+            continue
+        try:
+            if _resolve_spelling(cand) is obj:
+                out.append(cand)
+        except _Timeout:
+            raise
+        except Exception:
+            continue
+    return sorted(out, key=lambda c: (not _public_name(c), c.count("."), c))[:6]
 
 
 def _module_getattr_warns(module, attr):
@@ -1128,6 +1406,23 @@ def resolve(path):
             return out
         step["exists"] = True
         real_next = _describe(step, nxt, not inspect.ismodule(real))
+        step["oid"] = id(real_next)
+        callee = step.pop("_callee", None)
+        member = step.pop("_member", None)
+        try:
+            if callee is not None:
+                obj, leaf = callee
+                step["callee"] = {"spellings": _callee_spellings(obj, real, leaf),
+                                  "shape": _shape(obj)}
+            elif member is not None and inspect.isclass(real) and "." not in member:
+                target = getattr(real, member, None)
+                if target is not None:
+                    step["callee"] = {"spellings": [], "shape": _shape(target),
+                                      "member": member}
+        except _Timeout:
+            raise
+        except Exception:
+            pass
         same, home = _same_object_as(real_next, spelling)
         aliases = _class_alias_spellings(real, attr, spelling)
         if aliases:

@@ -701,6 +701,9 @@ class DiffInput:
     knowledge_hint: Callable[[str, list[str]], tuple[str, str] | None] | None = None
     # new-side paths whose import raised (not "no such module"): never counted as removed
     import_failed: frozenset[str] = frozenset()
+    # paths -> results in the OLD interpreter, one run (object ids compare within it): the
+    # identity check of a named successor (``np.NaN is np.nan``)
+    resolve_old: Callable[[list[str]], Mapping[str, dict]] | None = None
 
 
 def _class_step(result: Mapping[str, Any] | None) -> dict | None:
@@ -778,6 +781,13 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
             cands = [*hints[canon], *_error_candidates(errors, canon)]
             for c in cands:
                 need.update(_successor_candidates(c.name, canon, members))
+        for m in members:  # what a forwarding body calls, to spell it in the new version
+            for side in (sp_old, sp_new):
+                step = side[m].step if m in side and side[m].exists else {}
+                callee = step.get("callee") or {}
+                need.update(callee.get("spellings") or ())
+                if callee.get("member") and "." in m:
+                    need.add(m.rsplit(".", 1)[0] + "." + callee["member"])
         for m in members:  # still there, deprecated: the new version may name its successor
             if m in sp_new and sp_new[m].exists:
                 for c in _new_candidates(sp_new[m], _leaf(canon)):
@@ -826,7 +836,70 @@ def diff(inp: DiffInput) -> dict[str, list[DeltaFact]]:
             add(fact)
     for pkg in facts:
         facts[pkg] = _dedupe(facts[pkg])
+    every = [f for fs in facts.values() for f in fs]
+    _chains(every, inp.resolve_new, new_of)
+    _owner_spellings(every, inp)
+    if inp.resolve_old is not None:
+        _identity_proofs(every, inp.resolve_old, new_of)
     return facts
+
+
+def _owner_spellings(facts: list[DeltaFact], inp: DiffInput) -> None:
+    """For a proven member: every probed spelling of the class that owns it in the old version
+    (``pydantic.BaseModel`` beside ``pydantic.main.BaseModel``), ``succession.old.owners``,
+    so a receiver recorded under any of them is one the proof covers."""
+    classes: dict[str, set[str]] = {}
+    for path, result in inp.old.items():
+        step = _class_step(result)
+        if step is not None and step.get("kind") == "class" and step.get("defined_as"):
+            classes.setdefault(step["defined_as"], set()).add(path.rsplit(".", 1)[0])
+    for f in facts:
+        rec = f.succession or {}
+        if not (rec.get("template") or {}).get("member") or not rec.get("old"):
+            continue
+        owners: set[str] = set()
+        for spelling in [*(rec["old"].get("spellings") or ()), *f.spellings()]:
+            step = _class_step(inp.old.get(spelling))
+            if step is not None and step.get("defined_as") in classes:
+                owners |= classes[step["defined_as"]]
+                owners.add(step["defined_as"])
+        if owners:
+            rec = dict(rec)
+            rec["old"] = {**rec["old"], "owners": sorted(owners)}
+            f.succession = rec
+
+
+def _identity_proofs(facts: list[DeltaFact],
+                     resolve_old: Callable[[list[str]], Mapping[str, dict]],
+                     new_of: Callable[[str], Spell | None]) -> None:
+    """A removed name whose named successor was the very same object in the old version
+    (``np.NaN is np.nan`` on numpy 1.26): identity, stamped as such. Both are resolved in one
+    old-side run, where object ids compare. A small int or string is the same object everywhere
+    without being a rename: identity counts for those only beside the text that named it."""
+    pairs = [(f, f.symbol, f.successor) for f in facts
+             if f.kind == "REMOVED" and f.successor and not f.param
+             and (f.succession or {}).get("trust") not in ("identity", "proof")]
+    if not pairs:
+        return
+    try:
+        found = resolve_old(sorted({p for _, a, b in pairs for p in (a, b)}))
+    except Exception:  # noqa: BLE001 - a check, never a crash
+        return
+
+    def oid(path: str) -> int | None:
+        steps = (found.get(path) or {}).get("steps") or []
+        return steps[-1].get("oid") if steps and steps[-1].get("exists") else None
+
+    for fact, old, new in pairs:
+        a, b = oid(old), oid(new)
+        if a is None or a != b or new_of(new) is None:
+            continue
+        rec = dict(fact.succession or {"scope": "object"})
+        rec.update(trust="identity", transfer="at-target",
+                   proof={"kind": "identity", "locus": f"{old} is {new}", "version": "old",
+                          "side": "old"})
+        rec["sources"] = list(dict.fromkeys(["identity", *rec.get("sources", [])]))
+        fact.succession = rec
 
 
 def _successor_candidates(succ: str, canon: str, members: Iterable[str] = ()) -> list[str]:
@@ -1043,6 +1116,9 @@ def _choose(cands: list[succ_mod.Candidate], canon: str, members: list[str],
                 continue
             rejected.setdefault(c.name, "does not exist in the new version")
             continue
+        if _is_member(canon):           # a member's successor is a member of its class first
+            beside = [x for x in spells if x.rsplit(".", 1)[0] in member_parents]
+            spells = beside or spells
         sp = min(spells, key=_public_first)
         target = new_of(sp)
         if sp in members or (target is not None and target.canonical == canon
@@ -1190,9 +1266,10 @@ def _group_facts(
                       *baseline_ev],
             vanished_at=where_vanished(spells),
         )
-        fact.succession = succ_mod.Succession(
-            scope="member" if _is_member(canon) else "object", trust="identity",
-            sources=["identity"]).as_dict()
+        rec = succ_mod.Succession(scope="member" if _is_member(canon) else "object",
+                                  trust="identity", sources=["identity"]).as_dict() or {}
+        rec["transfer"] = "at-target"   # the same object, reachable there under the successor
+        fact.succession = rec
         fact.detail.update(
             importable=[s for s in spells if old_steps[s].index == 0],
             successor_importable=bool(target is not None and target.index == 0),
@@ -1219,6 +1296,8 @@ def _group_facts(
             vanished_at=where_vanished(removed),
         )
         fact.succession = rec.as_dict()
+        _prove_object(fact, canon, members, any_old, None, new_of)
+        succ = fact.successor
         target = new_of(succ) if succ else None
         old_owner = old_steps[symbol].step
         fact.detail.update(
@@ -1320,6 +1399,11 @@ def _group_facts(
             fact.succession = rec.as_dict()
             if succ:
                 fact.evidence.append(f"successor:{rec.sources[0] if rec.sources else 'named'}")
+                first = sorted(spells)[0]
+                n_spell = new_of(first)
+                if n_spell is not None:
+                    _prove_param(fact, old_steps[first].step, n_spell.step,
+                                 [f for f in param_facts if f.symbol == symbol])
         if kind == "DEPRECATED" and param is None:
             pool = [e.split(": ", 1)[-1] for e in evidence]
             cands: list[succ_mod.Candidate] = succ_mod.candidates_from(pool, source="new-prose")
@@ -1337,6 +1421,10 @@ def _group_facts(
                                 identity=identity)
             fact.successor = succ
             fact.succession = rec.as_dict()
+            first = new_of(sorted(spells)[0])
+            _prove_object(fact, canon, sorted(spells), any_old,
+                          first.step if first is not None else None, new_of)
+            succ = fact.successor
             target = new_of(succ) if succ else None
             fact.detail.update(
                 importable=[x for x in sorted(spells) if old_steps[x].index == 0],
@@ -1367,6 +1455,9 @@ def _group_facts(
             successor=succ,
         )
         fact.succession = rec.as_dict()
+        here = new_of(symbol)
+        _prove_object(fact, canon, members, any_old, here.step if here is not None else None,
+                      new_of)
         out.append(fact)
 
     if not out and surviving:
@@ -1384,6 +1475,329 @@ def _group_facts(
             fact.detail["canonical"] = canon
             out.append(fact)
     return out
+
+
+# ── proofs (successors v2, stage S2) ─────────────────────────────────────────────────────
+
+
+def _own_params(shape: list | None) -> list[list]:
+    """A shape without its receiver (``self``/``cls``)."""
+    params = [list(p) for p in shape or ()]
+    if params and params[0][0] in ("self", "cls") and params[0][1] in _POSITIONAL:
+        params = params[1:]
+    return params
+
+
+def _pass_through(forward: Mapping[str, Any], shape: list | None) -> bool:
+    """The forward hands every parameter on as it came: positional ones positionally in order,
+    keyword-only ones by their own name, ``*args`` and ``**kwargs`` through ``*``/``**``."""
+    params = _own_params(shape)
+    if shape is None:
+        return False
+    args = list(forward.get("args") or ())
+    kwargs = [tuple(k) for k in forward.get("kwargs") or ()]
+    want_args: list[dict] = []
+    want_kwargs: list[tuple] = []
+    for name, kind, _default in params:
+        if kind in _POSITIONAL:
+            want_args.append({"p": name})
+        elif kind == "VAR_POSITIONAL":
+            want_args.append({"star": name})
+        elif kind == "KEYWORD_ONLY":
+            want_kwargs.append((name, {"p": name}))
+        elif kind == "VAR_KEYWORD":
+            want_kwargs.append(("**", {"dstar": name}))
+    if args == want_args and sorted(map(str, kwargs)) == sorted(map(str, want_kwargs)):
+        return True
+    # positional-or-keyword parameters handed on by keyword (``maintain_order=maintain_order``)
+    if len(args) <= len(want_args):
+        rest = want_args[len(args):]
+        if args == want_args[:len(args)] and all("p" in a for a in rest):
+            moved = [(a["p"], a) for a in rest]
+            return sorted(map(str, kwargs)) == sorted(map(str, want_kwargs + moved))
+    return False
+
+
+def _forward_of(step: Mapping[str, Any]) -> dict | None:
+    return ((step or {}).get("body") or {}).get("forward")
+
+
+def _callee_spelling(fwd: Mapping[str, Any], callee: Mapping[str, Any] | None, canon: str,
+                     members: list[str], new_of: Callable[[str], Spell | None]
+                     ) -> tuple[str | None, str | None]:
+    """``(spelling, why_not)``: the public spelling, in the new version, of what a forward
+    calls; None with the reason when there is none."""
+    name = str(fwd.get("callee") or "")
+    if fwd.get("attr"):
+        name = "self." + str(fwd["attr"])
+    if name.startswith(("self.", "cls.")):
+        leaf = name.split(".", 1)[1]
+        if "." in leaf:
+            return None, "it forwards to an attribute of an attribute"
+        spells = [m.rsplit(".", 1)[0] + "." + leaf for m in members if "." in m]
+        live = [s for s in spells if new_of(s) is not None]
+        if not live:
+            return None, f"the member {leaf} it forwards to does not exist in the new version"
+        best = min(live, key=_public_first)
+        return (best, None) if not _private(best) or not leaf.startswith("_") else (
+            None, f"it forwards to the private member {leaf}")
+    spellings = list((callee or {}).get("spellings") or ())
+    public = [s for s in spellings if not _private(s)]
+    if spellings and not public:
+        return None, f"it forwards to the private {spellings[0]}"
+    live = [s for s in public if new_of(s) is not None]
+    if not live:
+        return None, "what it forwards to has no public spelling in the new version"
+    return min(live, key=_public_first), None
+
+
+def _same_old_body(old_step: Mapping[str, Any] | None, new_step: Mapping[str, Any] | None
+                   ) -> bool:
+    """The old symbol is one implementation in both versions: its body, warnings aside, hashes
+    alike (or it forwards to the same callee there). A proof made in the target then holds for
+    the old version's calls too."""
+    a = ((old_step or {}).get("body") or {})
+    b = ((new_step or {}).get("body") or {})
+    if a.get("key") and a.get("key") == b.get("key"):
+        return True
+    fa, fb = a.get("forward") or {}, b.get("forward") or {}
+    return bool(fa) and fa.get("callee") is not None and fa == fb
+
+
+def _deprecated_at(spell: Spell | None, leaf: str) -> bool:
+    if spell is None:
+        return False
+    runtime = spell.runtime_warnings if spell.final_for else []
+    return bool(_side_deprecation(spell.step, leaf, runtime, "")
+                or _body_deprecations(spell.step, [leaf], always=True))
+
+
+def _prove_object(fact: DeltaFact, canon: str, members: list[str],
+                  old_step: Mapping[str, Any], new_step: Mapping[str, Any] | None,
+                  new_of: Callable[[str], Spell | None]) -> None:
+    """A forward, a conditional forward or a twin body that proves a removed or deprecated
+    object's successor, recorded in ``fact.succession`` (``proof``, ``transfer``,
+    ``template``). A proof that names another object than the text named, or a private one,
+    proves nothing: it is recorded as rejected, and the named successor stays named."""
+    rec = dict(fact.succession or {"scope": "member" if _is_member(canon) else "object"})
+    if rec.get("trust") == "identity":
+        # the same object in the target: nothing to prove, the spelling moves
+        rec.setdefault("transfer", "at-target")
+        fact.succession = rec
+        return
+    tried: list[tuple[str, Mapping[str, Any] | None, Mapping[str, Any]]] = []
+    if new_step is not None:
+        tried.append(("new", new_step, new_step))
+    tried.append(("old", old_step, old_step))
+    for side, step, shape_step in tried:
+        body = (step or {}).get("body") or {}
+        fwd = body.get("forward")
+        cond = body.get("cond_forward")
+        if fwd is None and cond is None:
+            continue
+        fwd_used = fwd or cond["forward"]
+        target, why = _callee_spelling(fwd_used, (step or {}).get("callee"), canon, members,
+                                       new_of)
+        if target is None:
+            rec.setdefault("rejected", []).append({"name": fwd_used.get("callee")
+                                                   or fwd_used.get("attr"),
+                                                   "why": f"no proof: {why}"})
+            fact.succession = rec
+            continue
+        if fact.successor and new_of(fact.successor) is not None and \
+                new_of(fact.successor).canonical != new_of(target).canonical:
+            rec.setdefault("rejected", []).append({
+                "name": target, "why": f"the body forwards to it, the text names "
+                                       f"{fact.successor}: no proof of either"})
+            fact.succession = rec
+            return
+        tgt = new_of(target)
+        old_shape = (step or {}).get("shape")
+        callee_old = ((step or {}).get("callee") or {}).get("shape")
+        if side == "new":
+            transfer = "at-target"
+            callee_old = tgt.step.get("shape") if tgt is not None else None
+            if not _same_old_body(old_step, step):
+                # The target's own old symbol forwards; the old version's was another
+                # implementation (pydantic 1's compiled ``.json()`` wrote other bytes): the proof
+                # says nothing about the old version, so it rewrites nothing.
+                transfer = "old-changed:the old version's own implementation differs"
+        elif _deprecated_at(tgt, _leaf(target)):
+            transfer = "successor-deprecated"
+        else:
+            transfer = "successor-unchanged" if callee_old is not None and \
+                callee_old == (tgt.step.get("shape") if tgt else None) else "per-site"
+        kind = "rename" if fwd is not None and _pass_through(fwd_used, old_shape) and \
+            not body.get("materialize") else "call"
+        rec.update(trust="proof", proof={
+            "kind": "forward" if fwd is not None else "conditional-forward",
+            "locus": canon, "version": "new" if side == "new" else "old", "side": side},
+            transfer=transfer, sources=list(dict.fromkeys(["proof", *rec.get("sources", [])])))
+        rec["template"] = {
+            "kind": kind, "callee": target, "member": fwd_used.get("callee", "").startswith(
+                ("self.", "cls.")) or bool(fwd_used.get("attr")),
+            "attr": bool(fwd_used.get("attr")),
+            "args": fwd_used.get("args") or [], "kwargs": fwd_used.get("kwargs") or [],
+            "chain": fwd_used.get("chain") or [], "materialize": body.get("materialize") or {},
+            "cond": cond.get("cond") if cond and fwd is None else None,
+            "old_shape": old_shape, "callee_old_shape": callee_old,
+            "callee_new_shape": tgt.step.get("shape") if tgt is not None else None}
+        rec["old"] = {"spelling": fact.symbol, "canonical": canon, "spellings": members}
+        rec["new"] = {"spelling": target, "canonical": tgt.canonical if tgt else target}
+        hop = _deprecated_hop(fwd_used, callee_old, tgt) if side == "old" and tgt else None
+        if hop is not None:
+            # The forward hands on a parameter the successor deprecates in the target: one more
+            # hop, named by the successor's own text (resolved after the facts, ``_chains``).
+            rec["chain"] = [hop]
+            rec["transfer"] = f"successor-changed:{target} deprecates {hop['param']}"
+        fact.successor = fact.successor or target
+        fact.succession = rec
+        return
+    # a twin: the same body as the named successor's, apart from the warning
+    if fact.successor and new_step is not None:
+        tgt = new_of(fact.successor)
+        mine = (new_step.get("body") or {}).get("key")
+        theirs = ((tgt.step.get("body") or {}).get("key") if tgt is not None else None)
+        if mine and mine == theirs and new_step.get("shape") == tgt.step.get("shape"):
+            rec.update(trust="proof", proof={"kind": "twin", "locus": canon, "version": "new",
+                                             "side": "new"},
+                       transfer="at-target" if _same_old_body(old_step, new_step) else
+                       "old-changed:the old version's own implementation differs")
+            rec["template"] = {"kind": "rename", "callee": fact.successor,
+                               "member": _is_member(canon),
+                               "attr": tgt.step.get("kind") not in ("callable", "class"),
+                               "old_shape": new_step.get("shape"),
+                               "callee_old_shape": tgt.step.get("shape"),
+                               "callee_new_shape": tgt.step.get("shape")}
+            rec["old"] = {"spelling": fact.symbol, "canonical": canon, "spellings": members}
+            rec["new"] = {"spelling": fact.successor, "canonical": tgt.canonical}
+            fact.succession = rec
+
+
+def _deprecated_hop(fwd: Mapping[str, Any], callee_old: list | None, tgt: Spell
+                    ) -> dict | None:
+    """A parameter the forward passes that the successor's own body deprecates in the target
+    (polars ``replace(default=...)``: "Use `replace_strict` instead"): ``{via, param, text,
+    names}``, the names that text gives; None when there is none."""
+    passed = {k for k, _d in fwd.get("kwargs") or () if k != "**"}
+    params = _own_params(callee_old)
+    positional = [p[0] for p in params if p[1] in _POSITIONAL]
+    passed |= {positional[i] for i, _ in enumerate(fwd.get("args") or ())
+               if i < len(positional)}
+    for text in _param_texts(tgt.step):
+        hit = next((p for p in sorted(passed) if _names_param(text, p)), None)
+        if hit and _DEPRECATES.search(text):
+            names = [c.name for c in succ_mod.candidates_from([text]) if c.role != "param"]
+            if names:
+                return {"via": tgt.spelling, "param": hit, "text": _trim(text), "names": names}
+    return None
+
+
+def _chains(facts: list[DeltaFact], resolve_new: Callable[[list[str]], Mapping[str, dict]] |
+            None, new_of: Callable[[str], Spell | None]) -> None:
+    """Resolve a chain's last hop (``_deprecated_hop``) beside the successor it came from. One
+    name that exists makes it the fact's successor, named (a text gave the hop): never a
+    rewrite. The forward's template is kept, re-aimed at it, for the agent's suggestion."""
+    todo = [f for f in facts if (f.succession or {}).get("chain")]
+    if not todo or resolve_new is None:
+        return
+    wanted: dict[str, list[str]] = {}
+    for f in todo:
+        hop = f.succession["chain"][-1]
+        parent = str(hop["via"]).rsplit(".", 1)[0]
+        wanted[id(f)] = [f"{parent}.{n.rsplit('.', 1)[-1]}" for n in hop["names"]]
+    paths = sorted({p for ps in wanted.values() for p in ps if new_of(p) is None})
+    try:
+        extra = spellings(resolve_new(paths)) if paths else {}
+    except Exception:  # noqa: BLE001
+        extra = {}
+    for f in todo:
+        live = [p for p in wanted[id(f)] if new_of(p) is not None
+                or (p in extra and extra[p].exists)]
+        live = list(dict.fromkeys(live))
+        rec = dict(f.succession)
+        hop = dict(rec["chain"][-1])
+        if len(live) != 1 or _private(live[0]):
+            hop["resolved"] = None
+            rec["chain"] = [*rec["chain"][:-1], hop]
+            f.succession = rec
+            continue
+        hop["resolved"] = live[0]
+        rec["chain"] = [*rec["chain"][:-1], hop]
+        rec["trust"] = "named"
+        rec["sources"] = list(dict.fromkeys([*rec.get("sources", []), "chain"]))
+        rec["new"] = {"spelling": live[0], "canonical": live[0]}
+        template = dict(rec.get("template") or {})
+        template["callee"] = live[0]
+        rec["template"] = template
+        f.successor = live[0]
+        f.succession = rec
+
+
+def _param_aliases(step: Mapping[str, Any] | None) -> dict[str, tuple[str, str]]:
+    """``{old: (new, how)}``: parameters a body makes one another's alias: in its own
+    statements (``height = size``, ``kwargs["height"] = kwargs.pop("size")``), or through a
+    helper that hands one back as the other (``method = _check(method, interpolation)`` with
+    ``_check`` returning ``interpolation`` unchanged), or a helper whose own body does it with
+    arguments the caller passes by the same names."""
+    out: dict[str, tuple[str, str]] = {}
+    for a in ((step or {}).get("body") or {}).get("aliases") or ():
+        out.setdefault(a["old"], (a["new"], a.get("how") or "assign"))
+    for h in (step or {}).get("helper_warns") or ():
+        params = list(h.get("params") or ())
+        fed: dict[str, str] = {}
+        for i, desc in enumerate(h.get("args") or ()):
+            if i < len(params) and isinstance(desc, dict) and "p" in desc:
+                fed[params[i]] = desc["p"]
+        for k, desc in (h.get("kwargs") or {}).items():
+            if isinstance(desc, dict) and "p" in desc:
+                fed[k] = desc["p"]
+        ret = h.get("returns")
+        if ret and h.get("assign") and ret in fed and fed[ret] != h["assign"]:
+            out.setdefault(fed[ret], (h["assign"], "helper:" + str(h.get("helper"))))
+        for a in h.get("aliases") or ():
+            if a["old"] in fed and a["new"] in fed and fed[a["old"]] == a["old"] and \
+                    fed[a["new"]] == a["new"]:
+                out.setdefault(a["old"], (a["new"], "helper:" + str(h.get("helper"))))
+    return out
+
+
+def _prove_param(fact: DeltaFact, o: Mapping[str, Any], n: Mapping[str, Any],
+                 facts_here: list[DeltaFact]) -> None:
+    """A parameter rename proven by the library's code: a registered rename helper, or an alias
+    the body makes (``_param_aliases``), on the target side or the old side. Transfer: the new
+    parameter is in the target's signature and nothing deprecates it there."""
+    param, new = fact.param, fact.successor
+    if not param or not new:
+        return
+    rec = dict(fact.succession or {"scope": "param"})
+    proof = rec.get("proof") if rec.get("trust") == "proof" else None
+    if proof is None:
+        for side, step in (("new", n), ("old", o)):
+            alias = _param_aliases(step).get(param)
+            if alias and alias[0] == new:
+                proof = {"kind": "alias", "locus": alias[1] if alias[1].startswith("helper:")
+                         else f"{fact.symbol} ({alias[1]})", "version": side, "side": side}
+                break
+    if proof is None:
+        return
+    n_params = {p[0]: p for p in n.get("shape") or ()}
+    if new not in n_params:
+        transfer = f"successor-changed:{new} is not in the new signature"
+    elif any(f.param == new and f.kind in ("DEPRECATED", "REMOVED") for f in facts_here):
+        transfer = f"successor-changed:{new} is deprecated in the new version"
+    elif proof["side"] == "new" and param in {p[0] for p in o.get("shape") or ()} and \
+            not _same_old_body(o, n):
+        # the old version still takes the old keyword, through another implementation: the
+        # target's alias says nothing about it (the old keyword still works there anyway)
+        transfer = "old-changed:the old version's own implementation differs"
+    else:
+        transfer = "at-target" if proof["side"] == "new" else "successor-unchanged"
+    rec.update(trust="proof", proof=proof, transfer=transfer, params={param: new})
+    rec["sources"] = list(dict.fromkeys([*rec.get("sources", []), "proof"]))
+    rec["template"] = {"kind": "rename-keyword", "old_shape": o.get("shape"),
+                       "new_shape": n.get("shape")}
+    fact.succession = rec
 
 
 _ACCESS_TAGS = ("getattr:", "access-warning:")
@@ -1451,8 +1865,10 @@ def _param_level(o: dict, n: dict, ev: _Evidence, spell: Any) -> list[tuple[Para
             continue
 
         def about(texts: list[str], param: str = param) -> list[str]:
+            # the text deprecates the parameter, not names it as what to use instead
             return [t for t in texts if _names_param(t, param) and _DEPRECATES.search(t)
-                    and not _mentions(t, "positional")]
+                    and not _mentions(t, "positional")
+                    and param not in {c.name for c in succ_mod.candidates_from([t])}]
 
         new_texts, old_ones = about(_param_texts(n)), about(old_texts)
         if new_texts or old_ones:
@@ -1758,6 +2174,18 @@ class _Run:
                 self.stats["second_pass_paths"] = len(paths)
                 return run2.results if run2.ok else {}
 
+            old_exe, old_runner = old_env.executable, old_env.runner
+
+            def resolve_old(paths: list[str]) -> Mapping[str, dict]:
+                if old_exe is None:
+                    return {}
+                run3 = run_probe(old_exe, self.root,
+                                 {"paths": paths, "dists": request["dists"], "any_root": True,
+                                  "contexts": [], "per_path_timeout": PER_PATH_TIMEOUT},
+                                 use_cache=self.use_cache,
+                                 **({"runner": old_runner} if old_runner is not None else {}))
+                return run3.results if run3.ok else {}
+
             t_diff = time.perf_counter()
             by_pkg = diff(DiffInput(
                 old=runs["old"].results, new=runs["new"].results, touched=touched,
@@ -1766,6 +2194,7 @@ class _Run:
                 import_failed=frozenset(
                     path for path, res in runs["new"].results.items()
                     if res.get("import_errors")),
+                resolve_old=resolve_old if not old_env.is_static else None,
             ))
             self.stats["diff_s"] = round(time.perf_counter() - t_diff
                                          - self.stats.get("second_pass_s", 0), 3)
