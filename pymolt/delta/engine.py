@@ -1589,6 +1589,7 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
     if new_step is not None:
         tried.append(("new", new_step, new_step))
     tried.append(("old", old_step, old_step))
+    named: tuple[str, str, Mapping[str, Any], Mapping[str, Any] | None] | None = None
     for side, step, shape_step in tried:
         body = (step or {}).get("body") or {}
         fwd = body.get("forward")
@@ -1597,19 +1598,12 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
             continue
         fwd_used = fwd or cond["forward"]
         incomplete = _incomplete(body)
-        if incomplete is not None:
-            # The summary does not account for the whole callable: the successor stays named.
-            rec.setdefault("rejected", []).append({
-                "name": fwd_used.get("callee") or fwd_used.get("attr"),
-                "why": f"no proof: {incomplete}"})
-            fact.succession = rec
-            continue
         target, why = _callee_spelling(fwd_used, (step or {}).get("callee"), canon, members,
                                        new_of)
         if target is None:
             rec.setdefault("rejected", []).append({"name": fwd_used.get("callee")
                                                    or fwd_used.get("attr"),
-                                                   "why": f"no proof: {why}"})
+                                                   "why": f"no proof: {incomplete or why}"})
             fact.succession = rec
             continue
         if fact.successor and new_of(fact.successor) is not None and \
@@ -1619,6 +1613,15 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
                                        f"{fact.successor}: no proof of either"})
             fact.succession = rec
             return
+        if incomplete is not None:
+            # The summary does not account for the whole callable: the library's own code
+            # names the successor, but proves nothing a rewrite could rest on.
+            rec.setdefault("rejected", []).append({"name": target,
+                                                   "why": f"no proof: {incomplete}"})
+            fact.succession = rec
+            if named is None:
+                named = (target, side, fwd_used, step)
+            continue
         tgt = new_of(target)
         old_shape = (step or {}).get("shape")
         callee_old = ((step or {}).get("callee") or {}).get("shape")
@@ -1663,6 +1666,8 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
         fact.successor = fact.successor or target
         fact.succession = rec
         return
+    if named is not None:
+        _name_from_code(fact, rec, named, new_of)
     # a twin: the same body as the named successor's, apart from the warning, in the same
     # owner (so its names resolve to the same globals), with no wrapper on either side
     if fact.successor and new_step is not None:
@@ -1695,6 +1700,24 @@ def _prove_object(fact: DeltaFact, canon: str, members: list[str],
             rec["old"] = {"spelling": fact.symbol, "canonical": canon, "spellings": members}
             rec["new"] = {"spelling": fact.successor, "canonical": tgt.canonical}
             fact.succession = rec
+
+
+def _name_from_code(fact: DeltaFact, rec: dict, named: tuple, new_of: Callable[[str],
+                    Spell | None]) -> None:
+    """An incomplete forward still names its callee: trust ``named`` (an agent decides), the
+    reason in ``rejected``. A hop the successor deprecates in the target is followed as for a
+    proof (``_chains``), so the name is the one a person would migrate to."""
+    target, side, fwd_used, step = named
+    rec["trust"] = rec.get("trust") or "named"
+    rec["sources"] = list(dict.fromkeys([*rec.get("sources", []), "code"]))
+    tgt = new_of(target)
+    if side == "old" and tgt is not None:
+        hop = _deprecated_hop(fwd_used, ((step or {}).get("callee") or {}).get("shape"), tgt)
+        if hop is not None:
+            rec["chain"] = [hop]
+            rec["transfer"] = f"successor-changed:{target} deprecates {hop['param']}"
+    fact.successor = fact.successor or target
+    fact.succession = rec
 
 
 def _incomplete(body: Mapping[str, Any] | None,
