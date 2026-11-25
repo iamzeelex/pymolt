@@ -7906,6 +7906,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         _WRAPS.reset(wraps)
         _EDITED.reset(edited)
         _COUNTED.reset(counted)
+    cmp = _unseen_reads(of, nf, cmp)
     shown = [m for m in cmp.absorbed if m != "type-drift:relocated"]
     if cmp.comparison is Comparison.EQUAL and shown and explained is None:
         note = next((x for x in cmp.notes
@@ -7962,6 +7963,54 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         review=_numeric_review(cmp),
         **_raw_samples(of, nf),
     )
+
+
+_LADDER_RULES = ("type-drift:unintrospected", "type-drift:private-same-module")
+
+
+def _top_names(outcomes: list[Outcome]) -> set[str] | None:
+    """The attribute names rendered on the returned objects (a handle's state, a record's
+    fields; nothing for a type-only rendering); None when a result is a value."""
+    out: set[str] = set()
+    for o in outcomes:
+        if o.kind != "return":
+            continue
+        v = o.value
+        if not isinstance(v, dict):
+            return None
+        if "__object__" in v:
+            out |= set(v.get("attrs") or ())
+        elif "__dataclass__" in v:
+            out |= {str(p[0]) for p in _pairs(v.get("fields"))}
+        elif not any(k in v for k in ("__opaque__", "__cycle__", "__structure__")):
+            return None
+    return out
+
+
+def _unseen_reads(of: Fact, nf: Fact, cmp: OutcomeComparison) -> OutcomeComparison:
+    """A class change the ladder made drift, while the project reads or probes off the result
+    a name neither side's rendering holds (a class attribute, a property, a method probed
+    with ``hasattr``): what it reads there is unknown, so the class change stays a change."""
+    if cmp.comparison is not Comparison.EQUAL or not any(m in cmp.absorbed
+                                                          for m in _LADDER_RULES):
+        return cmp
+    sem = _SEM.get()
+    if sem is None:
+        return cmp
+    reads = (_uses.result_reads_at(sem.old, of.file, of.line, _symbol_leaf(of.symbol))
+             | _uses.result_reads_at(sem.new, nf.file, nf.line, _symbol_leaf(nf.symbol)))
+    names_o, names_n = _top_names(of.outcomes), _top_names(nf.outcomes)
+    if not reads or names_o is None or names_n is None:
+        return cmp
+    unseen = sorted(reads - names_o - names_n)
+    if not unseen:
+        return cmp
+    out = OutcomeComparison(Comparison.CHANGED, ComparisonLevel.TYPE,
+                            [x for x in cmp.notes if not x.startswith("type drift (")]
+                            + [f"class changed and the project reads {', '.join(unseen[:4])} "
+                               "off the result, which neither rendering holds"],
+                            _distinct_types(of.outcomes), _distinct_types(nf.outcomes))
+    return out
 
 
 def _numeric_review(cmp: OutcomeComparison) -> str | None:

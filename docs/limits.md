@@ -51,9 +51,12 @@ replicate still did not settle:
   statement that makes the call: `r = f(); r.raise_for_status()` compares `f()` in full, and
   `x = f(); a, b = x` does not erase the container type.
 - **A dependency object whose class changed.** pymolt does not record class hierarchies yet, so
-  a new class your code never introspects is drift, whatever its relation to the old one. Your
-  code's calls on the object and the attributes it reads are still compared. A `str()` or
-  `repr()` of the object that shows its class name is not tied to the class.
+  a new class of the same package your code never introspects is drift, whatever its relation to
+  the old one. Your code's calls on the object are compared, and so are the attributes it reads
+  that the capture rendered (instance state). A class attribute or property your code reads off
+  the call's own result (`r = f(); r.streaming`) is not rendered: the class change then stays a
+  change. Read further away (through another variable, in another function), it is not seen. A
+  `str()` or `repr()` of the object that shows its class name is not tied to the class.
 - **Attributes read by a computed name** (`getattr(x, name)`, `vars(x)`, `asdict(x)`) on a
   dependency object. verify compares such an object by the attributes your code reads by name, so
   the verdict lists these places instead of comparing what they read. `verify --strict` compares

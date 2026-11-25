@@ -79,3 +79,27 @@ def test_a_check_of_another_package_leaves_the_drift(tmp_path):
             [query("dep.models.StreamingPage", 4)], src)
     assert d.verdict is PASS and one(d, "dep.query").absorbed == ["type-drift:unintrospected"]
 
+
+# ── 4. reads the renderings cannot see keep a class change strict ─────────────────────────
+
+def get(cls):
+    return ev("dep.get", {}, result={"__object__": cls, "attrs": {"code": 1}})
+
+
+def test_a_class_attribute_read_off_the_result_keeps_the_class_strict(tmp_path):
+    src = "import dep\ndef main():\n    r = dep.get()\n    return r.streaming\n"
+    d = run(tmp_path, [get("dep.http.Response")], [get("dep.http.StreamedResponse")], src)
+    assert d.verdict is not PASS
+
+
+def test_a_hasattr_probe_off_the_result_keeps_the_class_strict(tmp_path):
+    src = ("import dep\ndef main():\n    r = dep.get()\n"
+           "    return r.json() if hasattr(r, 'json') else None\n")
+    d = run(tmp_path, [get("dep.http.Response")], [get("dep.http.RawStream")], src)
+    assert d.verdict is not PASS
+
+
+def test_a_read_the_rendering_holds_compares_and_the_class_drifts(tmp_path):
+    src = "import dep\ndef main():\n    r = dep.get()\n    return r.code\n"
+    d = run(tmp_path, [get("dep.http.Response")], [get("dep.http.StreamedResponse")], src)
+    assert d.verdict is PASS and "type-drift:unintrospected" in one(d, "dep.get").absorbed
