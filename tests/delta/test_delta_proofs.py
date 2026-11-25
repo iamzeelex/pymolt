@@ -13,6 +13,11 @@ from ._fakes import missing, res, shape, step
 POK, KW = "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY"
 
 
+def _body(**summary):
+    """A body summary as the probe makes one: every wrapper and decorator read (none here)."""
+    return {"layers": [], "decorators": [], "loads": {}, **summary}
+
+
 def _diff(old, new, symbols=None, *, extra=None, old_extra=None):
     return diff(DiffInput(
         old=old, new=new, touched=as_touched(symbols if symbols is not None else list(old)),
@@ -43,7 +48,7 @@ def test_a_pass_through_forward_proves_a_member_rename():
     fwd = {"callee": "self.group_by", "args": [{"p": "by"}],
            "kwargs": [["maintain_order", {"p": "maintain_order"}]]}
     old = {"pkg.Frame.groupby": _member(
-        "Frame", "groupby", shape=GROUPBY, body={"forward": fwd},
+        "Frame", "groupby", shape=GROUPBY, body=_body(forward=fwd),
         callee={"member": "group_by", "shape": GROUPBY, "spellings": []},
         warns=[{"message": "`groupby` is deprecated. It has been renamed to `group_by`."}])}
     new = {"pkg.Frame.groupby": res("pkg", step("Frame", "pkg.Frame", kind="class"),
@@ -63,7 +68,7 @@ def test_negative_in1d_a_forward_to_a_private_callee_proves_nothing():
     old = {"pkg.in1d": res("pkg", step(
         "in1d", "pkg.in1d", shape=shape(("a", POK, None)),
         warns=[{"message": "`in1d` is deprecated. Use `np.isin` instead."}],
-        body={"forward": {"callee": "_in1d", "args": [{"p": "a"}], "kwargs": []}},
+        body=_body(forward={"callee": "_in1d", "args": [{"p": "a"}], "kwargs": []}),
         callee={"spellings": ["pkg._in1d"], "shape": shape(("a", POK, None))}))}
     new = {"pkg.in1d": missing("pkg", "in1d")}
     extra = {"pkg.isin": res("pkg", step("isin", "pkg.isin", shape=shape(("a", POK, None)))),
@@ -86,7 +91,7 @@ def test_negative_map_dict_a_chain_names_replace_strict_and_rewrites_nothing():
     fwd = {"callee": "self.replace", "args": [{"p": "mapping"}],
            "kwargs": [["default", {"p": "default"}]]}
     old = {"pkg.Expr.map_dict": _member(
-        "Expr", "map_dict", shape=old_replace, body={"forward": fwd},
+        "Expr", "map_dict", shape=old_replace, body=_body(forward=fwd),
         callee={"member": "replace", "shape": old_replace, "spellings": []},
         warns=[{"message": "`map_dict` is deprecated. It has been renamed to `replace`. The "
                            "default behavior has changed."}])}
@@ -106,7 +111,7 @@ def test_negative_map_dict_a_chain_names_replace_strict_and_rewrites_nothing():
 
 def test_a_twin_body_proves_a_rename_at_the_target():
     """aiohttp ``has_body``: its body, apart from the warning, is ``can_read_body``'s."""
-    body = {"key": "same-body"}
+    body = _body(key="same-body")
     old = {"pkg.Req.has_body": _member("Req", "has_body", kind="property", body=body)}
     new = {"pkg.Req.has_body": res("pkg", step("Req", "pkg.Req", kind="class"), step(
         "has_body", "pkg.Req.has_body", kind="property", body=body,
@@ -127,7 +132,7 @@ def test_a_target_side_proof_needs_the_old_implementation_unchanged():
     sig = shape(("self", POK, None))
     old = {"pkg.Model.json": _member("Model", "json", shape=sig)}
     new = {"pkg.Model.json": res("pkg", step("Model", "pkg.Model", kind="class"), step(
-        "json", "pkg.Model.json", shape=sig, body={"forward": fwd, "key": "k2"},
+        "json", "pkg.Model.json", shape=sig, body=_body(forward=fwd, key="k2"),
         callee={"member": "model_dump_json", "shape": sig, "spellings": []},
         deprecated_attr="The `json` method is deprecated; use `model_dump_json` instead."))}
     extra = {"pkg.Model.model_dump_json": _member("Model", "model_dump_json", shape=sig)}
@@ -187,8 +192,8 @@ def _param_world(old_extra=None, new_extra=None):
 
 
 def test_an_alias_in_the_old_body_proves_a_keyword_rename():
-    old, new = _param_world({"body": {"aliases": [{"old": "size", "new": "height",
-                                                   "how": "assign"}]}})
+    old, new = _param_world({"body": _body(aliases=[{"old": "size", "new": "height",
+                                                     "how": "assign"}], loads={"size": 1})})
     fact = next(f for f in _diff(old, new) if f.param == "size")
     assert fact.successor == "height"
     assert fact.succession["trust"] == "proof" and fact.succession["proof"]["kind"] == "alias"
@@ -203,12 +208,13 @@ def test_a_helper_that_hands_one_parameter_back_as_another_proves_it():
     helper = {"helper": "pkg._check", "params": ["method", "interpolation", "fname"],
               "returns": "interpolation", "assign": "method",
               "args": [{"p": "method"}, {"p": "interpolation"}, {"c": "percentile"}],
-              "kwargs": {}, "messages": ["the `interpolation=` argument to {...} was renamed "
-                                         "to `method=`"]}
+              "kwargs": {}, "guard": "not_none",
+              "messages": ["the `interpolation=` argument to {...} was renamed to `method=`"]}
     sig_old = shape(("a", POK, None), ("method", POK, "'linear'"), ("interpolation", KW, "None"))
     sig_new = shape(("a", POK, None), ("method", POK, "'linear'"))
     old = {"pkg.percentile": res("pkg", step("percentile", "pkg.percentile", shape=sig_old,
-                                             helper_warns=[helper]))}
+                                             helper_warns=[helper],
+                                             body=_body(loads={"interpolation": 2})))}
     new = {"pkg.percentile": res("pkg", step("percentile", "pkg.percentile", shape=sig_new))}
     facts = _diff(old, new)
     fact = next(f for f in facts if f.param == "interpolation")
@@ -230,8 +236,8 @@ def test_a_forwards_callee_is_spelled_in_the_new_version_without_any_text():
     callee = shape(("route", POK, None), ("view", POK, None))
     old = {"pkg.conf.url": res("pkg.conf", step(
         "url", "pkg.conf.url", shape=sig,
-        body={"forward": {"callee": "re_path", "args": [{"p": "regex"}, {"p": "view"}],
-                          "kwargs": []}},
+        body=_body(forward={"callee": "re_path", "args": [{"p": "regex"}, {"p": "view"}],
+                            "kwargs": []}),
         callee={"spellings": ["pkg.urls.re_path"], "shape": callee}))}
     new = {"pkg.conf.url": missing("pkg.conf", "url")}
     extra = {"pkg.urls.re_path": res("pkg.urls", step("re_path", "pkg.urls.re_path",

@@ -47,7 +47,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 10
+PROBE_VERSION = 11
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -707,6 +707,7 @@ def _helper_summary(helper):
                     aliases += _alias_stmt(stmt, params) or []
                 if aliases:
                     summary["aliases"] = aliases[:8]
+                    summary["loads"] = _loads(node.body, params)
     except Exception:
         summary = None
     _HELPER_CACHE[key] = (helper, summary)
@@ -723,10 +724,15 @@ def _helper_warns(node, fn):
         return []
     params = set(_params_of(node))
     targets = {}
+    guards = {}
     for n in _nodes(node):
         if isinstance(n, ast.Assign) and len(n.targets) == 1 and \
                 isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call):
             targets[id(n.value)] = n.targets[0].id
+        if isinstance(n, ast.If):
+            for stmt in n.body:
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                    guards[id(stmt.value)] = n.test
     out = []
     seen = set()
     for n in _nodes(node):
@@ -760,6 +766,10 @@ def _helper_warns(node, fn):
                                if kw.arg)
         if id(n) in targets:
             entry["assign"] = targets[id(n)]
+            fed = [a.id for a in n.args if isinstance(a, ast.Name)]
+            test = guards.get(id(n))
+            entry["guard"] = "none" if test is None else (
+                next((g for g in (_guard(test, x) for x in fed) if g != "other"), "other"))
         out.append(entry)
         if len(out) >= 6:
             break
@@ -833,7 +843,8 @@ def _noise(stmt, params=()):
     if isinstance(stmt, ast.Expr):
         if _const_str(stmt.value) is not None:
             return True
-        if isinstance(stmt.value, ast.Call) and _is_warn_name(_name(stmt.value.func) or ""):
+        if isinstance(stmt.value, ast.Call) and _is_warn_name(_name(stmt.value.func) or "") \
+                and not _receives(stmt.value, params):
             return True
     if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and \
             isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id not in params and \
@@ -847,6 +858,47 @@ def _noise(stmt, params=()):
     return False
 
 
+def _receives(call, params):
+    """The call is handed one of the caller's parameters (or ``self``) as is, so it may change
+    it (``_handle_deprecated_kwargs(kwargs)``): never a mere warning."""
+    names = set(params) | set(["self", "cls"])
+    star = getattr(ast, "Starred", None)
+    for arg in list(call.args) + [k.value for k in call.keywords]:
+        node = arg.value if star is not None and isinstance(arg, star) else arg
+        if isinstance(node, ast.Name) and node.id in names:
+            return True
+    return False
+
+
+def _slice_text(sub):
+    """The constant string a subscript indexes with (``kwargs["height"]``), on every Python:
+    3.8 and before wrap it in ``ast.Index``."""
+    sl = sub.slice
+    index = getattr(ast, "Index", None)
+    if index is not None and isinstance(sl, index):
+        sl = sl.value
+    return _const_str(sl)
+
+
+def _guard(test, old):
+    """How an ``if`` guards an alias of ``old``: ``not_none`` (``old is not None``),
+    ``sentinel`` (``old is not <a module constant>``: any value a caller passes),
+    ``in`` (``"old" in kwargs``), else ``other``."""
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        left, op, right = test.left, test.ops[0], test.comparators[0]
+        if isinstance(left, ast.Name) and left.id == old and isinstance(op, ast.IsNot):
+            none = (_HAS_CONSTANT and isinstance(right, ast.Constant) and right.value is None) \
+                or (not _HAS_CONSTANT and isinstance(right, getattr(ast, "NameConstant", ()))
+                    and right.value is None)
+            if none:
+                return "not_none"
+            if isinstance(right, (ast.Name, ast.Attribute)):
+                return "sentinel"
+        if isinstance(op, ast.In) and _const_str(left) == old:
+            return "in"
+    return "other"
+
+
 def _alias_stmt(stmt, params):
     """``[{old, new, how}]`` when the statement makes one parameter the other's alias: ``new =
     old``; ``if old is not None: [warn]; new = old``; ``kwargs["new"] = kwargs.pop("old")``
@@ -858,7 +910,7 @@ def _alias_stmt(stmt, params):
             return [{"old": v.id, "new": t.id, "how": "assign"}]
         if isinstance(t, ast.Subscript) and isinstance(v, ast.Call) and \
                 isinstance(v.func, ast.Attribute) and v.func.attr == "pop" and v.args:
-            new = _const_str(getattr(t.slice, "value", t.slice))
+            new = _slice_text(t)
             old = _const_str(v.args[0])
             base_t, base_v = _name(t.value), _name(v.func.value)
             if new and old and base_t and base_t == base_v and base_t in params and \
@@ -880,7 +932,7 @@ def _alias_stmt(stmt, params):
                 return None
             found += got
         if found and all(a["old"] in names for a in found):
-            return found
+            return [dict(a, guard=_guard(stmt.test, a["old"])) for a in found]
     return None
 
 
@@ -974,6 +1026,69 @@ def _body_summary(node):
     key = _body_key(body)
     if key:
         out["key"] = key
+    out["loads"] = _loads(body, params)
+    return out
+
+
+def _loads(stmts, params):
+    """How often each parameter is read in the statements a summary keeps (warnings left
+    out): an alias is a proof only when the old parameter has no other use."""
+    counts = {}
+    todo = list(stmts)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.stmt) and _noise(node, params):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in params:
+            counts[node.id] = counts.get(node.id, 0) + 1
+        for child in ast.iter_child_nodes(node):
+            todo.append(child)
+    return counts
+
+
+def _decorator_names(node, fn):
+    """Every decorator on a ``def``, by the function it resolves to in the defining module
+    (else as written)."""
+    out = []
+    globs = getattr(fn, "__globals__", None)
+    for dec in getattr(node, "decorator_list", []) or []:
+        expr = dec.func if isinstance(dec, ast.Call) else dec
+        name = _name(expr) or type(expr).__name__
+        qual = None
+        if isinstance(globs, dict):
+            obj = _resolve_in(fn, name)
+            if obj is None:
+                import builtins as _b
+                obj = getattr(_b, name, None) if "." not in name else None
+            import functools
+            if isinstance(obj, functools.partial):      # numpy: partial(array_function_dispatch)
+                obj = obj.func
+            if obj is not None:
+                try:
+                    qual = _qual(obj)
+                except Exception:
+                    qual = None
+        out.append(qual or name)
+    return out
+
+
+def _layers(obj):
+    """The wrappers on ``obj``'s ``__wrapped__`` chain, outermost first: each by its code
+    (``{module, code}``) or, for an object that is no Python function, by its type."""
+    out = []
+    cur = getattr(obj, "fget", None) or obj
+    for _ in range(6):
+        nxt = getattr(cur, "__wrapped__", None)
+        if nxt is None:
+            break
+        fn = getattr(cur, "__func__", cur)
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            out.append({"module": _frame_module(fn), "code": _code_qualname(fn) or code.co_name})
+        else:
+            t = type(cur)
+            out.append({"type": "%s.%s" % (t.__module__, t.__qualname__)})
+        cur = nxt
     return out
 
 
@@ -1041,19 +1156,30 @@ def _mine(obj):
             out["helper_warns"] = helpers
         try:
             body = _body_summary(node)
+            body["decorators"] = _decorator_names(node, fn)
+            body["layers"] = _layers(obj)
         except Exception:
             body = {}
         if body:
             out["body"] = body
             fwd = body.get("forward") or (body.get("cond_forward") or {}).get("forward")
-            callee = (fwd or {}).get("callee")
-            if callee and callee.split(".")[0] not in ("self", "cls"):
-                obj = _resolve_in(fn, callee)
-                if obj is not None:
-                    out["_callee"] = (obj, callee.split(".")[-1])
-            elif callee:
-                out["_member"] = callee.split(".", 1)[1]
+            callee = (fwd or {}).get("callee") or ""
+            head, _sep, rest = callee.partition(".")
+            if callee and head not in ("self", "cls"):
+                found = _resolve_in(fn, callee)
+                if found is not None:
+                    out["_callee"] = (found, callee.split(".")[-1])
+            elif rest and "." not in rest:
+                out["_member"] = rest
     return out
+
+
+def _safe_mine(obj):
+    """``_mine``, which must never lose a path's other facts to one callable it cannot read."""
+    try:
+        return _mine(obj)
+    except Exception:
+        return {}
 
 
 def _resolve_in(fn, dotted):
@@ -1230,12 +1356,12 @@ def _describe(step, nxt, in_class):
         if cells:
             step["cells"] = cells
     if isinstance(real_next, property):
-        mined = _mine(real_next)
+        mined = _safe_mine(real_next)
         if mined:
             step.update(mined)
     if kind in ("class", "callable"):
         step["shape"] = _shape(real_next)
-        step.update(_mine(real_next))
+        step.update(_safe_mine(real_next))
         doc = _doc_deprecations(real_next)
         if doc:
             step["doc"] = doc

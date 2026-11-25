@@ -64,7 +64,29 @@ irrelevant changes.
   - **alias**: the body makes one parameter the other (`height = size`,
     `kwargs["height"] = kwargs.pop("size")`, a helper handing `interpolation` back as `method`),
     or a registered rename helper says so;
-  - **twin**: its body, apart from the warning, is the successor's (aiohttp's `has_body`).
+  - **twin**: its body, apart from the warning, is the successor's, in the same module or class
+    (aiohttp's `has_body`).
+
+  A proof rewrites code only when the probe's summary of the callable is **complete**. What it
+  may contain is an allow-list:
+  - besides the forward (or the alias, or the twin's body): a docstring, warnings and
+    deprecation logs that are handed none of the parameters, the message they print, and a
+    conflict check that only raises;
+  - wrappers and decorators: builtin descriptors (`property`, `classmethod`, `staticmethod`)
+    and the registered helpers whose wrapper only warns or dispatches (for a keyword rename
+    also those that pass keywords through or rename another keyword), each layer on the
+    `__wrapped__` chain checked;
+  - a forward that is a rename hands every parameter on unchanged, with no call chained on its
+    result (`return isin(a, b).ravel()` is no rename of `isin`) and with the successor's
+    defaults equal to the ones it hands on;
+  - an alias is the old parameter's only use, under no condition, or under one any value a
+    caller passes meets (`if size is not None:` holds only for a value other than None, so only
+    such a literal is renamed), and a forward with an alias beside it is no forward;
+  - a rename helper that also maps the values (pandas `deprecate_kwarg(..., mapping=...)`)
+    proves no plain rename.
+
+  Anything else (an unknown decorator, a helper that is handed `kwargs`, a twin in another
+  module) leaves the successor named, with the reason in `succession.rejected`.
 
   A proof made in the old version holds when the successor is not deprecated in the target and
   every call binds alike against the successor's old and new signatures; one made in the target

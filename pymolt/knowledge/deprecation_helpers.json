@@ -1,96 +1,291 @@
 {
   "schema": 1,
-  "about": "Deprecation helpers whose arguments or closure cells state a rename or name a successor. Read by pymolt.delta.succession.helper_facts. kind: rename-parameter (old and new are parameter names; the helper makes the old name an alias of the new one), rename-object (new names the successor), prescription (alternative is an expression to use instead), prose (message is the deprecation text). args: roles of the positional arguments, in order (null skips one); kwargs: keyword name to role; cells: closure cell name to role, for wrappers made by the helper; call: true for a helper called in a body rather than used as a decorator. Each entry carries the fixture its test reads.",
+  "about": "Deprecation helpers whose arguments or closure cells state a rename or name a successor. Read by pymolt.delta.succession.helper_facts. kind: rename-parameter (old and new are parameter names; the helper makes the old name an alias of the new one), rename-object (new names the successor), prescription (alternative is an expression to use instead), prose (message is the deprecation text). args: roles of the positional arguments, in order (null skips one); kwargs: keyword name to role; cells: closure cell name to role, for wrappers made by the helper; call: true for a helper called in a body rather than used as a decorator. Each entry carries the fixture its test reads. wrapper: what the wrapper a decorator helper makes does to a call: warn (it warns, then calls the function with the very same arguments), keywords (it passes every keyword through unchanged, and may turn positional arguments into keywords), dispatch (numpy's __array_function__ dispatch: it calls the function), rename (it renames a keyword). A proof holds only through wrappers listed here with a wrapper kind: a forward through warn and dispatch, a keyword rename through keywords and rename too. types: the type of a wrapper that is no Python function. A rename-parameter helper that also maps values (values) proves no plain rename.",
   "helpers": [
     {
       "qualname": "polars.utils.deprecation.deprecate_renamed_parameter",
-      "aliases": ["polars._utils.deprecation.deprecate_renamed_parameter"],
+      "aliases": [
+        "polars._utils.deprecation.deprecate_renamed_parameter"
+      ],
       "kind": "rename-parameter",
-      "args": ["old", "new"],
-      "kwargs": {"old_name": "old", "new_name": "new", "version": "since"},
-      "cells": {"old_name": "old", "new_name": "new", "version": "since"},
-      "fixture": {"decorator": "deprecate_renamed_parameter(\"periods\", \"n\", version=\"0.19.11\")",
-                  "expect": {"kind": "rename-parameter", "old": "periods", "new": "n", "since": "0.19.11"}}
+      "args": [
+        "old",
+        "new"
+      ],
+      "kwargs": {
+        "old_name": "old",
+        "new_name": "new",
+        "version": "since"
+      },
+      "cells": {
+        "old_name": "old",
+        "new_name": "new",
+        "version": "since"
+      },
+      "fixture": {
+        "decorator": "deprecate_renamed_parameter(\"periods\", \"n\", version=\"0.19.11\")",
+        "expect": {
+          "kind": "rename-parameter",
+          "old": "periods",
+          "new": "n",
+          "since": "0.19.11"
+        }
+      },
+      "wrapper": "rename"
     },
     {
       "qualname": "polars.utils.deprecation.deprecate_renamed_function",
-      "aliases": ["polars._utils.deprecation.deprecate_renamed_function"],
+      "aliases": [
+        "polars._utils.deprecation.deprecate_renamed_function"
+      ],
       "kind": "rename-object",
-      "args": ["new"],
-      "kwargs": {"new_name": "new", "version": "since"},
-      "fixture": {"decorator": "deprecate_renamed_function(\"group_by\", version=\"0.19.0\")",
-                  "expect": {"kind": "rename-object", "new": "group_by", "since": "0.19.0"}}
+      "args": [
+        "new"
+      ],
+      "kwargs": {
+        "new_name": "new",
+        "version": "since"
+      },
+      "fixture": {
+        "decorator": "deprecate_renamed_function(\"group_by\", version=\"0.19.0\")",
+        "expect": {
+          "kind": "rename-object",
+          "new": "group_by",
+          "since": "0.19.0"
+        }
+      },
+      "wrapper": "warn"
     },
     {
       "qualname": "polars.utils.deprecation.deprecate_function",
-      "aliases": ["polars._utils.deprecation.deprecate_function"],
+      "aliases": [
+        "polars._utils.deprecation.deprecate_function"
+      ],
       "kind": "prose",
-      "args": ["message"],
-      "kwargs": {"message": "message", "version": "since"},
-      "cells": {"message": "message", "version": "since"},
-      "fixture": {"decorator": "deprecate_function(\"It has been renamed to `replace`.\", version=\"0.19.16\")",
-                  "expect": {"kind": "prose", "message": "It has been renamed to `replace`.", "since": "0.19.16"}}
+      "args": [
+        "message"
+      ],
+      "kwargs": {
+        "message": "message",
+        "version": "since"
+      },
+      "cells": {
+        "message": "message",
+        "version": "since"
+      },
+      "fixture": {
+        "decorator": "deprecate_function(\"It has been renamed to `replace`.\", version=\"0.19.16\")",
+        "expect": {
+          "kind": "prose",
+          "message": "It has been renamed to `replace`.",
+          "since": "0.19.16"
+        }
+      },
+      "wrapper": "warn"
     },
     {
       "qualname": "matplotlib._api.deprecation.rename_parameter",
       "kind": "rename-parameter",
-      "args": ["since", "old", "new"],
+      "args": [
+        "since",
+        "old",
+        "new"
+      ],
       "kwargs": {},
-      "cells": {"since": "since", "old": "old", "new": "new"},
-      "fixture": {"decorator": "rename_parameter(\"3.9\", \"labels\", \"tick_labels\")",
-                  "expect": {"kind": "rename-parameter", "old": "labels", "new": "tick_labels", "since": "3.9"}}
+      "cells": {
+        "since": "since",
+        "old": "old",
+        "new": "new"
+      },
+      "fixture": {
+        "decorator": "rename_parameter(\"3.9\", \"labels\", \"tick_labels\")",
+        "expect": {
+          "kind": "rename-parameter",
+          "old": "labels",
+          "new": "tick_labels",
+          "since": "3.9"
+        }
+      },
+      "wrapper": "rename"
     },
     {
       "qualname": "matplotlib._api.deprecation.deprecated",
       "kind": "prescription",
-      "args": ["since"],
-      "kwargs": {"alternative": "alternative", "message": "message"},
-      "fixture": {"decorator": "deprecated(\"3.6\", pending=True, alternative=\"``matplotlib.colormaps.register(name)``\")",
-                  "expect": {"kind": "prescription", "alternative": "``matplotlib.colormaps.register(name)``", "since": "3.6"}}
+      "args": [
+        "since"
+      ],
+      "kwargs": {
+        "alternative": "alternative",
+        "message": "message"
+      },
+      "fixture": {
+        "decorator": "deprecated(\"3.6\", pending=True, alternative=\"``matplotlib.colormaps.register(name)``\")",
+        "expect": {
+          "kind": "prescription",
+          "alternative": "``matplotlib.colormaps.register(name)``",
+          "since": "3.6"
+        }
+      },
+      "wrapper": "warn"
     },
     {
       "qualname": "pandas.util._decorators.deprecate_kwarg",
       "kind": "rename-parameter",
-      "args": ["old", "new"],
-      "kwargs": {"old_arg_name": "old", "new_arg_name": "new"},
-      "cells": {"old_arg_name": "old", "new_arg_name": "new"},
-      "fixture": {"decorator": "deprecate_kwarg(old_arg_name=\"cols\", new_arg_name=\"columns\")",
-                  "expect": {"kind": "rename-parameter", "old": "cols", "new": "columns"}}
+      "args": [
+        "old",
+        "new",
+        "values"
+      ],
+      "kwargs": {
+        "old_arg_name": "old",
+        "new_arg_name": "new",
+        "mapping": "values"
+      },
+      "cells": {
+        "old_arg_name": "old",
+        "new_arg_name": "new",
+        "mapping": "values"
+      },
+      "wrapper": "rename",
+      "fixtures": [
+        {
+          "decorator": "deprecate_kwarg(old_arg_name=\"cols\", new_arg_name=\"columns\")",
+          "expect": {
+            "kind": "rename-parameter",
+            "old": "cols",
+            "new": "columns"
+          }
+        },
+        {
+          "decorator": "deprecate_kwarg(\"take_last\", \"keep\", mapping={True: \"last\"})",
+          "expect": {
+            "kind": "rename-parameter",
+            "old": "take_last",
+            "new": "keep",
+            "values": true
+          }
+        }
+      ]
     },
     {
       "qualname": "streamlit.deprecation_util.make_deprecated_name_warning",
       "kind": "rename-object",
       "call": true,
-      "args": ["old", "new", null],
-      "kwargs": {"old_name": "old", "new_name": "new"},
-      "fixture": {"call": "make_deprecated_name_warning(\"experimental_rerun\", \"rerun\", \"2024-04-01\")",
-                  "expect": {"kind": "rename-object", "old": "experimental_rerun", "new": "rerun"}}
+      "args": [
+        "old",
+        "new",
+        null
+      ],
+      "kwargs": {
+        "old_name": "old",
+        "new_name": "new"
+      },
+      "fixture": {
+        "call": "make_deprecated_name_warning(\"experimental_rerun\", \"rerun\", \"2024-04-01\")",
+        "expect": {
+          "kind": "rename-object",
+          "old": "experimental_rerun",
+          "new": "rerun"
+        }
+      }
     },
     {
       "qualname": "sklearn.utils.deprecation.deprecated",
       "kind": "prose",
-      "args": ["message"],
-      "kwargs": {"extra": "message"},
-      "fixture": {"decorator": "deprecated(\"Function get_feature_names is deprecated; use get_feature_names_out instead.\")",
-                  "expect": {"kind": "prose", "message": "Function get_feature_names is deprecated; use get_feature_names_out instead."}}
+      "args": [
+        "message"
+      ],
+      "kwargs": {
+        "extra": "message"
+      },
+      "fixture": {
+        "decorator": "deprecated(\"Function get_feature_names is deprecated; use get_feature_names_out instead.\")",
+        "expect": {
+          "kind": "prose",
+          "message": "Function get_feature_names is deprecated; use get_feature_names_out instead."
+        }
+      },
+      "wrapper": "warn"
     },
     {
       "qualname": "typing_extensions.deprecated",
-      "aliases": ["warnings.deprecated"],
+      "aliases": [
+        "warnings.deprecated"
+      ],
       "kind": "prose",
-      "args": ["message"],
+      "args": [
+        "message"
+      ],
       "kwargs": {},
-      "fixture": {"decorator": "deprecated(\"The `dict` method is deprecated; use `model_dump` instead.\")",
-                  "expect": {"kind": "prose", "message": "The `dict` method is deprecated; use `model_dump` instead."}}
+      "fixture": {
+        "decorator": "deprecated(\"The `dict` method is deprecated; use `model_dump` instead.\")",
+        "expect": {
+          "kind": "prose",
+          "message": "The `dict` method is deprecated; use `model_dump` instead."
+        }
+      },
+      "wrapper": "warn"
     },
     {
       "qualname": "deprecated.classic.deprecated",
-      "aliases": ["deprecated.sphinx.deprecated"],
+      "aliases": [
+        "deprecated.sphinx.deprecated"
+      ],
       "kind": "prose",
       "args": [],
-      "kwargs": {"reason": "message", "version": "since"},
-      "fixture": {"decorator": "deprecated(reason=\"use `new_api` instead\", version=\"2.0\")",
-                  "expect": {"kind": "prose", "message": "use `new_api` instead", "since": "2.0"}}
+      "kwargs": {
+        "reason": "message",
+        "version": "since"
+      },
+      "fixture": {
+        "decorator": "deprecated(reason=\"use `new_api` instead\", version=\"2.0\")",
+        "expect": {
+          "kind": "prose",
+          "message": "use `new_api` instead",
+          "since": "2.0"
+        }
+      },
+      "wrapper": "warn"
+    },
+    {
+      "qualname": "numpy.core.overrides.array_function_dispatch",
+      "aliases": [
+        "numpy._core.overrides.array_function_dispatch"
+      ],
+      "kind": "transparent",
+      "wrapper": "dispatch",
+      "args": [],
+      "kwargs": {},
+      "cells": {},
+      "types": [
+        "numpy.core._multiarray_umath._ArrayFunctionDispatcher",
+        "numpy._core._multiarray_umath._ArrayFunctionDispatcher",
+        "numpy._ArrayFunctionDispatcher"
+      ],
+      "codes": [
+        "array_function_dispatch.<locals>.decorator.<locals>.public_api"
+      ],
+      "fixture": {
+        "decorator": "array_function_dispatch(_product_dispatcher, verify=False)",
+        "expect": {
+          "kind": "transparent"
+        }
+      }
+    },
+    {
+      "qualname": "seaborn._decorators._deprecate_positional_args",
+      "aliases": [],
+      "kind": "transparent",
+      "wrapper": "keywords",
+      "args": [],
+      "kwargs": {},
+      "cells": {},
+      "fixture": {
+        "bare": "_deprecate_positional_args",
+        "expect": {
+          "kind": "transparent"
+        }
+      }
     }
   ]
 }
