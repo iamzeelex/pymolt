@@ -2643,11 +2643,21 @@ _VALUE_TYPES = frozenset({"decimal.Decimal", "fractions.Fraction",
                           "pandas._libs.tslibs.nattype.NaTType", "pandas._libs.missing.NAType"})
 
 
+# Packages whose objects are data (arrays, frames, tensors, dates, paths, numbers): an opaque
+# rendering of one (past the depth cap, a type the renderer has no structure for) is a value.
+_VALUE_PACKAGES = frozenset({
+    "numpy", "pandas", "polars", "pyarrow", "torch", "jax", "jaxlib", "tensorflow", "xarray",
+    "datetime", "pathlib", "decimal", "fractions", "uuid", "ipaddress", "array", "collections",
+    "zoneinfo", "numbers", "cmath"})
+
+
 def _value_type_name(name: str) -> bool:
-    """A type-only rendering of a value (a builtin, a numpy scalar, a decimal, a pandas
-    scalar): its type is compared strictly."""
+    """A type-only rendering of a value (a builtin; a type of a data package: a numpy array or
+    scalar, a pandas frame, a tensor, a date, a path, a decimal): its type is compared
+    strictly."""
     return ("." not in name or name.startswith(_VALUE_OPAQUE_PREFIXES)
-            or bool(_NUMPY_SCALAR.match(name)) or name in _VALUE_TYPES)
+            or bool(_NUMPY_SCALAR.match(name)) or name in _VALUE_TYPES
+            or name.split(".")[0] in _VALUE_PACKAGES or name.startswith("scipy.sparse."))
 
 
 def _handle_label(v: Any) -> str | None:
@@ -2704,6 +2714,8 @@ def _handle_types_relate(ta: str, tb: str) -> bool:
     sem = _SEM.get()
     if sem is None or _EDITED.get() or not (isinstance(ta, str) and isinstance(tb, str)):
         return False   # on an edited line the edit's claim judges a new class (``_judge_pairs``)
+    if ta.split(".")[0] != tb.split(".")[0]:
+        return False   # another package's class: no relation to assume (owner decision, QA)
     if _introspected(ta, tb):
         return False
     same_module = ta.rsplit(".", 1)[0] == tb.rsplit(".", 1)[0]

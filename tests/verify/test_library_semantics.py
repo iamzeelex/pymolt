@@ -274,16 +274,22 @@ def redirect(name, code=302):
 
 def test_a_handle_class_the_project_never_checks_is_drift(tmp_path):
     d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
-            [redirect("flask.wrappers.Response")], REDIRECT_SRC)
+            [redirect("werkzeug.wrappers.response.StreamedResponse")], REDIRECT_SRC)
     e = one(d, "dep.redirect")
     assert not e.fails and e.absorbed == ["type-drift:unintrospected"]
     assert d.verdict is VerificationVerdict.PASS
 
 
+def test_mutation_a_handle_class_of_another_package_fails(tmp_path):
+    d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
+            [redirect("flask.wrappers.Response")], REDIRECT_SRC)
+    assert one(d, "dep.redirect").fails
+
+
 def test_mutation_a_handle_class_the_project_checks_with_isinstance_fails(tmp_path):
     src = REDIRECT_SRC + "def check(r):\n    return isinstance(r, Response)\n"
     d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
-            [redirect("flask.wrappers.Response")], src)
+            [redirect("werkzeug.wrappers.response.Response2")], src)
     assert one(d, "dep.redirect").fails
     named = REDIRECT_SRC + "def name(r):\n    return type(r).__name__\n"
     d = run(tmp_path, [redirect("werkzeug.wrappers.Response")],
