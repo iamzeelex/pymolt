@@ -2465,6 +2465,9 @@ def types_match(a: Any, b: Any) -> bool:
         return True
     if isinstance(b, dict) and ("nondeterministic" in b or "ambiguous" in b):
         return True
+    ca, cb = _callable_name(a, tree=True), _callable_name(b, tree=True)
+    if ca and cb and ("callable" not in a or "callable" not in b):
+        return _dependency_callables(ca, cb)
     la, lb = _handle_tree_label(a), _handle_tree_label(b)
     if la and lb:
         if _handle_type_tree(a) and _handle_type_tree(b):
@@ -2493,7 +2496,8 @@ def types_match(a: Any, b: Any) -> bool:
         return _same_type_name(a["type"], b["type"])
     if "callable" in a and "callable" in b:
         return (_same_closure(a["callable"], b["callable"])
-                or _wrapper_naming(a["callable"], b["callable"]))
+                or _wrapper_naming(a["callable"], b["callable"])
+                or _dependency_callables(a["callable"], b["callable"]))
     if _handle_type_tree(a) and _handle_type_tree(b):
         return _handle_types_match(a, b)
     if "object" in a and "object" in b:
@@ -2813,6 +2817,46 @@ def _wrapper_naming(a: Any, b: Any) -> bool:
     ev = _EVIDENCE.get()
     if ev is not None:
         ev.absorb("type-drift:wrapper", f"{a} -> {b}")
+    return True
+
+
+# Opaque renderings of a callable (a C or Cython function, a bound method): a callable too.
+_CALLABLE_OPAQUES = ("cython_function_or_method", "fused_cython_function",
+                     "builtin_function_or_method", "method_descriptor", "method-wrapper",
+                     "function", "method", "functools.partial")
+CALLABLE_DRIFT = "type-drift:callable"
+
+
+def _callable_name(v: Any, tree: bool = False) -> str | None:
+    """The label of a callable's rendering (``__callable__``, or an opaque callable type), or
+    of its ``value_type`` tree (``tree``)."""
+    if not isinstance(v, dict):
+        return None
+    name = v.get("callable" if tree else "__callable__")
+    if isinstance(name, str):
+        return name
+    name = v.get("opaque" if tree else "__opaque__")
+    if isinstance(name, str) and (name.rsplit(".", 1)[-1] in _CALLABLE_OPAQUES
+                                  or name in _CALLABLE_OPAQUES):
+        return name
+    return None
+
+
+def _dependency_callables(a: str | None, b: str | None) -> bool:
+    """Two callables a dependency returned (neither a function of the project's own): a
+    handle whose behaviour shows in the calls that apply it (facts of their own), so on any
+    line, edited or not, two of them are equal as callables (``type-drift:callable``,
+    counted), unless the project reads a callable's name (``__name__``, ``__qualname__``). A
+    project callable keeps its identity (``lookup('save')`` returning another of the project's
+    functions fails)."""
+    sem = _SEM.get()
+    if (sem is None or sem.strict or not a or not b or a == b
+            or _project_type(a) or _project_type(b)
+            or any(n in sem.old.read or n in sem.new.read for n in _NAME_READS)):
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        ev.absorb(CALLABLE_DRIFT, f"{a} -> {b}")
     return True
 
 
@@ -3490,6 +3534,9 @@ def _absorbed_note(mechanism: str, details: list[str]) -> str:
     if mechanism == NUMERIC:
         return (f"numeric drift: floats equal within floating-point rounding "
                 f"(<= {_ULPS.get()} ulps): {shown}")
+    if mechanism == CALLABLE_DRIFT:
+        return ("type drift (a callable a dependency returned, applied in calls of its own): "
+                f"{shown}")
     if mechanism == CROSS_PACKAGE:
         return f"type drift (a class of another package, relation unknown): {shown}"
     if mechanism.startswith("type-drift:"):
@@ -3819,6 +3866,10 @@ def _values_match(a: Any, b: Any) -> bool:
     ha, hb = _handle_name(a), _handle_name(b)
     if ha and hb:
         return _handles_match(a, b, ha, hb)
+    ca, cb = _callable_name(a), _callable_name(b)
+    if ca and cb and ("__callable__" not in a or "__callable__" not in b):
+        # a callable rendered opaque (a Cython function) against one rendered by name
+        return _dependency_callables(ca, cb)
     la, lb = _handle_label(a), _handle_label(b)
     if la and lb:
         if not _handle_types_relate(la, lb):
@@ -3838,7 +3889,8 @@ def _values_match(a: Any, b: Any) -> bool:
         return _same_type_name(a["__type__"], b["__type__"])
     if "__callable__" in a and "__callable__" in b:
         return (_same_closure(a["__callable__"], b["__callable__"])
-                or _wrapper_naming(a["__callable__"], b["__callable__"]))
+                or _wrapper_naming(a["__callable__"], b["__callable__"])
+                or _dependency_callables(a["__callable__"], b["__callable__"]))
     if "__object__" in a and "__object__" in b:
         if a.get("__truncated__") or b.get("__truncated__"):  # truncated object: type level
             return types_match(value_type(a), value_type(b))

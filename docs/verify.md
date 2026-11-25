@@ -222,6 +222,11 @@ A type that changed is judged by a ladder:
   (`WrappedAPIView` vs `View.as_view.<locals>.view`: a closure, or a name your code defines
   nowhere; never another function of yours), is drift unless your code reads a
   callable's `__name__` or `__qualname__`.
+- **A callable a dependency returned** (a decorator factory's `dec`, a Cython function) against
+  another one is drift (`type-drift:callable`), on an edited line too: what it does shows in the
+  calls that apply it, compared as facts of their own. It fails when your code reads a
+  callable's `__name__` or `__qualname__`, when the other side returned a value, and for a
+  callable of yours (another of your functions is never the same one).
 - **A type an edited line produced** (`go.Heatmapgl(...)` edited to `go.Heatmap(...)`) that
   reappears at an unedited call along the edit's data chain (`fig.data`, on the figure the
   edited line built) is judged with that edit: a review when the edit is one, a failure when it

@@ -4,7 +4,7 @@ returned callable compares as a handle on edited lines too."""
 
 from _semantics import ev, one, run
 
-from pymolt.verify.facts import FactCategory
+from pymolt.verify.facts import Comparison, FactCategory
 from pymolt.verify.models import VerificationVerdict
 
 PASS, FAIL = VerificationVerdict.PASS, VerificationVerdict.FAIL
@@ -105,3 +105,44 @@ def test_mutation_a_count_change_with_another_value_at_an_edited_statement_fails
 def test_an_unedited_statement_keeps_the_strict_count_rule(tmp_path):
     d = run(tmp_path, mk(2), mk(1), MK_OLD)
     assert one(d, "dep.Markup.__new__").fails
+
+
+# ── a callable a dependency returned is a handle, on edited lines too ─────────────────────
+
+VAL_OLD = ("from dep import validator\nclass M:\n    @validator('name')\n"
+           "    def v(cls, x):\n        return x\n")
+VAL_NEW = VAL_OLD.replace("validator", "field_validator")
+VAL_EDIT = {"file": "app.py", "located": {"old": [1, 3], "new": [1, 3]}, "claim": "preserve",
+            "basis": "manual", "step_id": "sig-2", "old_symbol": "dep.validator",
+            "new_symbol": "dep.field_validator"}
+
+
+def deco(symbol, result, **kw):
+    return ev(symbol, {"field": "name"}, result=result, line=3, func="M", **kw)
+
+
+def test_a_decorator_factory_returning_another_callable_on_an_edited_line_is_drift(tmp_path):
+    edit = VAL_EDIT
+    old = [deco("dep.validator", {"__opaque__": "_cython_3_3_0.cython_function_or_method"})]
+    new = [deco("dep.field_validator", {"__callable__": "dep.field_validator.<locals>.dec"})]
+    d = run(tmp_path, old, new, VAL_OLD, VAL_NEW, edits=[edit])
+    e = one(d, "dep.validator")
+    assert not e.fails and "type-drift:callable" in e.absorbed
+    strict = run(tmp_path, old, new, VAL_OLD, VAL_NEW, edits=[edit], strict=True)
+    assert one(strict, "dep.validator").fails
+
+
+def test_mutation_a_callable_against_a_value_still_fails(tmp_path):
+    old = [deco("dep.validator", {"__callable__": "dep.validator.<locals>.dec"})]
+    new = [deco("dep.validator", None)]
+    assert run(tmp_path, old, new, VAL_OLD).verdict is FAIL
+
+
+def test_mutation_a_dependency_callable_whose_name_the_project_reads_fails(tmp_path):
+    edit = VAL_EDIT
+    reads = "print(M.v.__name__)\n"
+    old = [deco("dep.validator", {"__opaque__": "_cython_3_3_0.cython_function_or_method"})]
+    new = [deco("dep.field_validator", {"__callable__": "dep.field_validator.<locals>.dec"})]
+    d = run(tmp_path, old, new, VAL_OLD + reads, VAL_NEW + reads, edits=[edit])
+    e = one(d, "dep.validator")
+    assert e.fails and e.comparison is Comparison.CHANGED
