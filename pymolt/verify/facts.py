@@ -5693,6 +5693,45 @@ def _names(name: str, text: str) -> bool:
     return re.search(rf"(?<![\w.]){re.escape(name)}\b|\.{re.escape(name)}\b", text) is not None
 
 
+def _file_aliases(text: str | None) -> tuple[dict[str, set[str]], set[str]]:
+    """A file's names that may stand for a callable of another name: ``{name: {leaves}}``
+    from its imports (``from dep.metrics import mean_squared_error as mse``) and plain
+    assignments (``f = np.concatenate``, ``g = functools.partial(dep.f, 1)``); and the names it
+    binds to something else (a parameter, a call's result, a loop variable): a call through
+    one of those may be any callable."""
+    if not text:
+        return {}, set()
+    try:
+        tree = _parse_source(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}, set()
+    aliases: dict[str, set[str]] = defaultdict(set)
+    for name, full in _uses.import_bindings(tree).items():
+        aliases[name].add(full.rsplit(".", 1)[-1])
+    defined: set[str] = set()
+    bound: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            defined.add(n.name)
+        elif isinstance(n, ast.arg):
+            bound.add(n.arg)
+        elif isinstance(n, ast.Assign) and len(n.targets) == 1 \
+                and isinstance(n.targets[0], ast.Name):
+            v = n.value
+            if isinstance(v, ast.Call) and _uses._leaf(v.func) == "partial" and v.args:
+                v = v.args[0]
+            if isinstance(v, ast.Name | ast.Attribute):
+                leaf = v.id if isinstance(v, ast.Name) else v.attr
+                aliases[n.targets[0].id].add(leaf)
+                aliases[n.targets[0].id] |= aliases.get(leaf, set())
+            else:
+                bound.add(n.targets[0].id)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            bound.add(n.id)
+    unknown = {b for b in bound if b not in aliases and b not in defined}
+    return dict(aliases), unknown
+
+
 def _drop_via(old_facts: list[Fact], new_facts: list[Fact], context: DiffContext | None
               ) -> tuple[list[Fact], list[Fact], int]:
     """Calls the project's line did not make (the design's ``via``; host fallback until the
@@ -5700,13 +5739,20 @@ def _drop_via(old_facts: list[Fact], new_facts: list[Fact], context: DiffContext
     the statement does name ran there on the same side (a C function or type calling back into
     Python with no frame of its own: RandomState(0) -> concatenate, markupsafe's C escape ->
     Markup.__new__), or a numpy dispatcher (``_round_dispatcher``, called by numpy's C
-    dispatch). A dunder is an implicit protocol, judged elsewhere. Decided per (file, line text,
-    callee name) on either side and applied to both, so the two sides stay symmetric. Returns
+    dispatch). "Names" goes through the file's import and assignment aliases
+    (``mse(y, p)`` names ``mean_squared_error``), and a statement that calls through a name
+    bound to anything else (a parameter, a variable) may make any call: nothing is dropped
+    there. A dunder is an implicit protocol, judged elsewhere. Never under ``--strict``.
+    Decided per (file, line text, callee name) on either side and applied to both (by line
+    number for a side that recorded no line text), so the two sides stay symmetric. Returns
     the kept facts and how many were dropped."""
+    if context is not None and context.strict:
+        return old_facts, new_facts, 0
     keys: set[tuple] = set()
     for facts, sources in ((old_facts, context.old_sources if context else None),
                            (new_facts, context.new_sources if context else None)):
         cache: dict[str, Any] = {}
+        aliases_of: dict[str, tuple[dict[str, set[str]], set[str]]] = {}
         by_stmt: dict[tuple, list[Fact]] = defaultdict(list)
         texts: dict[tuple, str | None] = {}
         for f in facts:
@@ -5716,25 +5762,40 @@ def _drop_via(old_facts: list[Fact], new_facts: list[Fact], context: DiffContext
             texts[k] = stmt
         for (file, _s), group in by_stmt.items():
             stmt = texts[(file, _s)]
+            if file not in aliases_of:
+                aliases_of[file] = _file_aliases((sources or {}).get(file))
+            aliases, unknown = aliases_of[file]
+
+            def named(leaf: str, stmt: str = stmt or "") -> bool:
+                return _names(leaf, stmt) or any(
+                    leaf in targets and _names(a, stmt) for a, targets in aliases.items())
+
+            called = set(re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", stmt or ""))
+            if called & unknown:
+                continue     # a call through a variable or parameter: it may be any callable
             compiled = any(
                 isinstance(g.input, dict) and g.input.get("__c_call__") is True and stmt
-                and _names(_symbol_leaf(g.symbol), stmt) for g in group)
+                and named(_symbol_leaf(g.symbol)) for g in group)
             for f in group:
                 leaf = _symbol_leaf(f.symbol)
                 if leaf.startswith("__") and leaf.endswith("__"):
                     continue
                 dispatcher = (f.symbol.split(".")[0] == "numpy"
                               and bool(_DISPATCHER.match(f.symbol.rsplit(".", 1)[-1])))
-                if dispatcher or (compiled and stmt and not _names(leaf, stmt)
+                if dispatcher or (compiled and stmt and not named(leaf)
                                   and not (isinstance(f.input, dict)
                                            and f.input.get("__c_call__") is True)):
-                    keys.add((f.file, f.text if f.text is not None else f.line, leaf))
+                    keys.add((f.file, "text", f.text, leaf) if f.text is not None
+                             else (f.file, "line", f.line, leaf))
+                    keys.add((f.file, "line", f.line, leaf))
     if not keys:
         return old_facts, new_facts, 0
 
     def keep(f: Fact) -> bool:
-        return (f.file, f.text if f.text is not None else f.line,
-                _symbol_leaf(f.symbol)) not in keys
+        leaf = _symbol_leaf(f.symbol)
+        if f.text is not None:
+            return (f.file, "text", f.text, leaf) not in keys
+        return (f.file, "line", f.line, leaf) not in keys
 
     old_kept = [f for f in old_facts if keep(f)]
     new_kept = [f for f in new_facts if keep(f)]

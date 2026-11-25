@@ -366,7 +366,9 @@ Two captures from different Python versions are compared fairly:
 - a call compiled code made while another call on your line ran (a C function or type calling
   back into Python: `RandomState(0)` calling `concatenate`, markupsafe's C `escape` building a
   `Markup`), and numpy's dispatchers (`_round_dispatcher`), are not calls your code made: they
-  are not compared, only counted (`via`). A call your line names is always compared;
+  are not compared, only counted (`via`). A call your line names, directly or through an
+  import or assignment alias (`mse(y, p)` for `mean_squared_error`), is always compared, and so
+  is every call on a line that calls through a variable or parameter. `--strict` drops nothing;
 - an inherited constructor (`Response.__init__` for `PlainTextResponse(...)`) also confirms the
   subclass's static contact.
 
