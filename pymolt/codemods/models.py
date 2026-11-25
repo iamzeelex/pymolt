@@ -1,9 +1,9 @@
 """
 pymolt/codemods/models.py
 
-Local models for the codemod loop. CodemodPattern mirrors the Axiom Graph API's
-Tier-1 response unit (flat old → new); CodemodRule (pymolt.codemods.rules,
-imported here) is the Tier-2 declarative successor — a metavariable match/
+Local models for the codemod loop. DependencyMigration is one dependency to move
+(versions only); CodemodPattern is the Tier-1 unit (flat old → new); CodemodRule
+(pymolt.codemods.rules, imported here) is the Tier-2 declarative successor — a metavariable match/
 rewrite template with its own honest advisory channel. FileChange /
 CodemodRunResult describe what was rewritten on disk; FilePreview is the
 reviewable before/after unit the interface renders.
@@ -17,28 +17,61 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory
 
 
+class DependencyMigration:
+    """One dependency to move: its name and the from and to versions."""
+
+    def __init__(self, name: str, from_version: str, to_version: str) -> None:
+        self.name = name
+        self.from_version = from_version
+        self.to_version = to_version
+
+
 class CodemodPattern(BaseModel):
-    """A symbol replacement received from Axiom Graph: old → new."""
+    """A symbol replacement the delta engine derived: old → new."""
 
     old_qualname: str
     new_qualname: str
     kind: str
-    """'rewrite-import' (module moved) | 'rename-call' (symbol renamed)."""
+    """'rewrite-import' (module moved) | 'rename-call' (symbol renamed) | 'rewrite-attr' (a
+    module segment inserted into an attribute chain) | 'replace-attr-path' (a cross-module
+    rename such as ``imp.reload`` → ``importlib.reload``) | 'rewrite-module'."""
     confidence: str = "medium"
     evidence: list[str] = Field(default_factory=list)
+    requires_import: str | None = None
+    """A module the rewritten code needs imported, e.g. ``collections.abc``."""
+    scope: str = "dependency"
+    """``"dependency"`` (a package's API) or ``"python"`` (a stdlib fix for the Python move)."""
+    runs_on_base: bool | None = None
+    """Whether the rewritten code also runs on the base Python (None: not known/applicable)."""
+    # Successor kinds (``rename-keyword``, ``rename-member``, ``forward-template``: made only from
+    # a proof in the library's own code, ``pymolt.codemods.successors``):
+    params: dict[str, str] | None = None
+    """``rename-keyword``: old keyword -> new keyword."""
+    receivers: list[str] | None = None
+    """The receiver classes the baseline recorded at the sites (a member's rewrite is gated on
+    them)."""
+    template: dict[str, Any] | None = None
+    """What the rewrite needs from its proof: the old and new signatures, the forward's
+    arguments (``forward-template``), the member name, the other changed parameters."""
+    sites: list[Any] | None = None
+    """The statements the pattern may rewrite, as anchors (``pymolt.anchors.Anchor``), re-resolved
+    on the text it runs on; None: wherever its binding holds."""
+    aliases: list[str] = Field(default_factory=list)
+    """Other spellings of the old callee (the binding check accepts any of them)."""
 
     def summary(self) -> str:
         return f"[{self.kind}] {self.old_qualname} → {self.new_qualname}  ({self.confidence})"
 
 
 class ApiImpact(BaseModel):
-    """A changed dependency API path returned by Axiom Graph.
+    """A changed dependency API path the delta engine found.
 
     The package name is supplied by the surrounding ``CodemodBundle`` map and
     is added only when impacts are frozen into a migration plan.
@@ -52,6 +85,9 @@ class ApiImpact(BaseModel):
     explanation: str
     transition_confidence: str | None = None
     transition_reason: str | None = None
+    param: str | None = None
+    """The parameter a parameter-level change is about (``replacement_path`` is then the
+    parameter that replaces it)."""
 
 
 class CodemodBundle(BaseModel):
@@ -68,9 +104,9 @@ class CodemodBundle(BaseModel):
     impacts: list[ApiImpact] = Field(default_factory=list)
     """Changed public API paths used to scope local ContactMap verification."""
     downgraded: list[str] = Field(default_factory=list)
-    """Short summaries of rules the client downgraded: the server claimed
-    `verified` but local re-verification (the sole verification authority)
-    failed — see `client.AxiomGraphClient.fetch_bundle`."""
+    """Short summaries of rules the provider downgraded: their golden pair did not
+    verify, or the environment lacks what they need — see
+    `pymolt.delta.provider.LocalDeltaProvider.fetch_bundle`."""
 
 
 class FileChange(BaseModel):
@@ -97,10 +133,6 @@ class CodemodRunResult(BaseModel):
     """Every file that raised >=1 advisory, INCLUDING files with zero rewrites
     (e.g. a file whose sole deprecated call is `return df.lookup(...)`: 0
     sites, 1 advisory) — an advisory-only file must surface here, not vanish."""
-    downgraded: list[str] = Field(default_factory=list)
-    """Summaries of rules the client downgraded during fetch (threaded up from
-    CodemodBundle.downgraded, merged across packages) so interfaces can show
-    them."""
 
     @property
     def files_changed(self) -> int:
@@ -117,6 +149,9 @@ def recipe_key(item: CodemodPattern | CodemodRule) -> str:
     kind = getattr(item, "kind", None) or "template"
     old = getattr(item, "old_qualname", None)
     new = getattr(item, "new_qualname", None)
+    params = getattr(item, "params", None)
+    if params:                         # rename-keyword: one recipe per renamed keyword set
+        kind += "[" + ",".join(f"{a}={b}" for a, b in sorted(params.items())) + "]"
     if old and new:
         return f"{kind}:{old}→{new}"
     match = getattr(item, "match", "") or ""
@@ -146,6 +181,35 @@ class PreviewProgress:
 ProgressSink = Callable[[PreviewProgress], None] | None
 
 
+@dataclass(frozen=True)
+class MoveGroup:
+    """The import-move patterns ``apply_patterns`` applies together: those that share an old and
+    a new module (``MoveNamesCodemod``), so ``from OLD import a, b`` becomes one statement per
+    target module. ``hits``: ``(recipe_key, sites)`` of each member that changed something."""
+
+    old_module: str
+    new_module: str
+    members: tuple[CodemodPattern, ...]
+    hits: tuple[tuple[str, int], ...] = ()
+
+
+#: Observer of one recipe's change to one text: ``(recipe, before, after)``. The recipe is a
+#: ``CodemodRule``, a ``CodemodPattern`` or a ``MoveGroup``; it is called each time one of them
+#: changes the text, in application order, and changes nothing the caller returns.
+StepObserver = Callable[[Any, str, str], None] | None
+#: The same with the file: ``(recipe, path, before, after)`` (the plan's step builder).
+FileStepObserver = Callable[[Any, str, str, str], None] | None
+
+
+class BlockedRewrite(BaseModel):
+    """A rule that matched in a file but was not adopted: it is not verified, and only verified
+    rules are applied automatically. ``lines``: the 1-based lines its rewrite would change."""
+
+    rule: CodemodRule
+    sites: int
+    lines: list[int] = Field(default_factory=list)
+
+
 class FilePreview(BaseModel):
     """Before/after for one file — the unit the engineer reviews and decides on."""
 
@@ -162,3 +226,14 @@ class FilePreview(BaseModel):
     """Advisories raised on this file. A file with advisories but no rewrite
     (old_source == new_source, sites == 0) still yields a preview — the
     manual-review card."""
+    blocked: list[BlockedRewrite] = Field(default_factory=list)
+    """Rules that matched here but were not adopted (``verified_only``): they changed
+    nothing, and the plan lists them for a person. Their keys are not among the recipes
+    that changed the file (``applied_recipes``)."""
+
+    def applied_recipes(self) -> list[CodemodPattern | CodemodRule]:
+        """The patterns and rules that changed this file or advised on it: ``rules`` and
+        ``patterns`` without the blocked ones."""
+        blocked = {recipe_key(b.rule) for b in self.blocked}
+        return [item for item in [*self.rules, *self.patterns]
+                if recipe_key(item) not in blocked]

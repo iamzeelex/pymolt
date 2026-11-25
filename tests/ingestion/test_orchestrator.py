@@ -39,7 +39,12 @@ source = { registry = "https://pypi.org/simple" }
     assert report.source_fixation == "pinned"
 
 
-def test_orchestrate_conda_ingestion(tmp_path):
+def test_env_file_without_a_solver_is_a_declared_only_reconstruction(tmp_path, monkeypatch):
+    """No conda/mamba to solve with and no lock: the environment file is read statically and
+    the graph says it is a reconstruction (never the host's real conda)."""
+    import pymolt.ingestion.conda_ingest as conda_ingest
+
+    monkeypatch.setattr(conda_ingest, "find_conda_executable_on_host", lambda: None)
     env_file = tmp_path / "environment.yml"
     env_file.write_text("""
 name: test-env

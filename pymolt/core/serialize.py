@@ -15,9 +15,9 @@ def deserialize_graph(json_str: str) -> DependencyGraph:
 
 def save_graph_to_file(graph: DependencyGraph, file_path: Union[str, Path]) -> None:
     """Save the DependencyGraph to a JSON file."""
-    path = Path(file_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialize_graph(graph), encoding="utf-8")
+    from pymolt.state_io import atomic_write_text
+
+    atomic_write_text(file_path, serialize_graph(graph))
 
 
 def load_graph_from_file(file_path: Union[str, Path]) -> DependencyGraph:

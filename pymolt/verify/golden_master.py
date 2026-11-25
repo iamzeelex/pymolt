@@ -10,7 +10,8 @@ Auto-discovery of good snapshot points is out of scope (Known gaps).
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from pymolt.verify._normalize import normalize
+from pymolt.verify import dict_order
+from pymolt.verify._normalize import normalize, value_format
 from pymolt.verify.models import GoldenDiff
 
 Point = Any | Callable[[], Any]  # a value, or a zero-arg callable producing one
@@ -29,18 +30,31 @@ def snapshot(points: Mapping[str, Point], version: str) -> dict[str, Any]:
             values[name] = normalize(raw)
         except Exception as exc:
             values[name] = {"__opaque__": "raised:" + type(exc).__name__}
-    return {"version": version, "values": values}
+    return {"version": version, "values": values, "value_format": value_format()}
 
 
 def _undecidable(value: Any) -> bool:
     return isinstance(value, dict) and ("__nondeterministic__" in value or "__opaque__" in value)
 
 
+def _orders_recorded(snap: dict[str, Any]) -> bool:
+    return (snap.get("value_format") or {}).get("dict_order") == 1
+
+
+def _without_order(values: dict[str, Any]) -> dict[str, Any]:
+    return {name: dict_order.strip(v)[0] for name, v in values.items()}
+
+
 def diff_snapshots(old: dict[str, Any], new: dict[str, Any]) -> GoldenDiff:
-    """Value-level diff of two snapshots, reusing the tracer's normalization semantics."""
+    """Value-level diff of two snapshots, reusing the tracer's normalization semantics.
+
+    Dict key order (``__order__``) is part of a value only when both snapshots recorded it: a
+    snapshot taken before the order was recorded, or with it switched off, is not a reorder."""
     diff = GoldenDiff()
     old_vals = old.get("values", {})
     new_vals = new.get("values", {})
+    if not (_orders_recorded(old) and _orders_recorded(new)):
+        old_vals, new_vals = _without_order(old_vals), _without_order(new_vals)
     for name, ov in old_vals.items():
         if name not in new_vals:
             diff.missing.append(name)

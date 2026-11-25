@@ -1,9 +1,9 @@
-from pymolt.verify.contact_map import Contact, build_contact_map
+from pymolt.verify.contact_map import Contact, build_contact_map, contact_class
 
 
 def _project(tmp_path):
     app = tmp_path / "myapp"
-    app.mkdir()
+    app.mkdir(parents=True)
     (app / "__init__.py").write_text("", encoding="utf-8")
     (app / "views.py").write_text(
         "import os\n"
@@ -168,3 +168,124 @@ def test_protocol_operations_are_named_when_import_target_is_resolvable(tmp_path
     assert ("toolkit.RIGHT.__contains__", "protocol") in targets
     assert ("toolkit.LEFT.__len__", "protocol") in targets
     assert ("toolkit.WAITABLE.__await__", "protocol") in targets
+
+
+def test_contact_map_skips_hidden_dirs_and_nested_checkouts(tmp_path):
+    root = _project(tmp_path)
+    src = "import django\n\ndef f():\n    return django.setup()\n"
+    wt = root / ".claude" / "worktrees" / "x"
+    wt.mkdir(parents=True)
+    (wt / "mod.py").write_text(src, encoding="utf-8")
+    nested = root / "vendored_checkout"  # not hidden, but its own git checkout
+    nested.mkdir()
+    (nested / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    (nested / "mod.py").write_text(src, encoding="utf-8")
+
+    cmap = build_contact_map(root)
+
+    assert "django" not in cmap.by_dep
+    assert set(cmap.by_dep) == {"flask", "requests"}
+
+
+def test_contact_map_root_that_is_a_git_checkout_is_still_scanned(tmp_path):
+    root = _project(tmp_path)
+    (root / ".git").mkdir()
+
+    assert "flask" in build_contact_map(root).by_dep
+
+
+def test_contact_classes_split_trace_evidence_from_import_evidence():
+    for kind in ("call", "decorator", "context-manager", "protocol"):
+        assert contact_class(kind) == "behavioural"
+    for kind in ("attribute-read", "class-base", "imported-constant"):
+        assert contact_class(kind) == "existence"
+
+
+def _many_files(tmp_path, count=30):
+    pkg = tmp_path / "bigapp"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    for i in range(count):
+        (pkg / f"m{i:02d}.py").write_text(
+            f"import requests\nimport flask\n\ndef f{i}():\n    return requests.get('u{i}')\n",
+            encoding="utf-8",
+        )
+    (pkg / "broken.py").write_text("def (:\n", encoding="utf-8")
+    return tmp_path
+
+
+def _dump(cmap):
+    data = cmap.model_dump()
+    data["root"] = ""
+    return data
+
+
+def _cache_files(root):
+    cache = root / ".pymolt" / "cache" / "contacts"
+    return sorted((p.name, p.read_text(encoding="utf-8")) for p in cache.glob("*.json"))
+
+
+def test_parallel_scan_equals_serial(tmp_path, monkeypatch):
+    import shutil
+
+    serial_dir = _many_files(tmp_path / "s")
+    parallel_dir = tmp_path / "p"
+    shutil.copytree(serial_dir, parallel_dir)
+
+    monkeypatch.setenv("PYMOLT_SCAN_WORKERS", "1")
+    serial = build_contact_map(serial_dir)
+    monkeypatch.setenv("PYMOLT_SCAN_WORKERS", "4")
+    parallel = build_contact_map(parallel_dir)
+
+    assert _dump(parallel) == _dump(serial)
+    assert any("scan failed for bigapp/broken.py" in n for n in parallel.notes)
+    assert _cache_files(parallel_dir) == _cache_files(serial_dir)
+    assert len(_cache_files(serial_dir)) == 31  # the broken file is not cached
+
+
+def test_pool_is_used_for_many_misses_and_not_for_few(tmp_path, monkeypatch):
+    from pymolt.verify import contact_map as cm
+
+    created = []
+
+    class Spy:
+        def __init__(self, max_workers):
+            created.append(max_workers)
+            raise OSError("no pool here")
+
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", Spy)
+    monkeypatch.setenv("PYMOLT_SCAN_WORKERS", "3")
+    few = _project(tmp_path / "few")
+    build_contact_map(few)
+    assert created == []  # fewer than the threshold: serial, no pool
+
+    many = _many_files(tmp_path / "many")
+    cmap = build_contact_map(many)  # pool creation fails -> serial fallback
+    assert created == [3]
+    assert len(cmap.contacts) > 0
+    assert cm._PARALLEL_MIN_MISSES <= 31
+
+
+def test_env_override_forces_serial(tmp_path, monkeypatch):
+    created = []
+
+    class Spy:
+        def __init__(self, max_workers):
+            created.append(max_workers)
+            raise AssertionError("pool must not be created")
+
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", Spy)
+    monkeypatch.setenv("PYMOLT_SCAN_WORKERS", "1")
+    build_contact_map(_many_files(tmp_path))
+    assert created == []
+
+
+def test_worker_count_defaults_and_cap(monkeypatch):
+    from pymolt.verify.contact_map import _worker_count
+
+    monkeypatch.delenv("PYMOLT_SCAN_WORKERS", raising=False)
+    assert 1 <= _worker_count() <= 8
+    monkeypatch.setenv("PYMOLT_SCAN_WORKERS", "junk")
+    assert 1 <= _worker_count() <= 8
+    monkeypatch.setenv("PYMOLT_SCAN_WORKERS", "0")
+    assert _worker_count() == 1

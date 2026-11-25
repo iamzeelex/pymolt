@@ -1,0 +1,218 @@
+{
+  "name": "requests",
+  "ecosystem": "http-client (requests over urllib3, offline)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "requests==2.28.2",
+      "urllib3==1.26.20",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "requests==2.34.2",
+      "urllib3==2.8.0",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "requests",
+    "urllib3"
+  ],
+  "target_manifest": [
+    "requests==2.34.2",
+    "urllib3==2.8.0"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/client.py": "\"\"\"Client for the inventory service.\"\"\"\nfrom app.policy import make_session\n\n\nclass InventoryClient:\n    def __init__(self, base_url, session=None):\n        self.base_url = base_url.rstrip(\"/\")\n        self.session = session or make_session()\n\n    def _url(self, path):\n        return self.base_url + path\n\n    def list_items(self, **filters):\n        resp = self.session.get(self._url(\"/items\"), params=filters, timeout=5)\n        resp.raise_for_status()\n        return resp.json()[\"items\"]\n\n    def create_item(self, item):\n        resp = self.session.post(self._url(\"/items\"), json=item, timeout=5)\n        return resp.status_code, resp.json()\n\n    def health(self):\n        resp = self.session.get(self._url(\"/health\"), timeout=2)\n        return resp.status_code\n\n    def export_csv(self):\n        resp = self.session.get(self._url(\"/export.csv\"), stream=True, timeout=10)\n        resp.raise_for_status()\n        return b\"\".join(resp.iter_content(chunk_size=64)).decode(\"utf-8\")\n",
+    "app/policy.py": "\"\"\"Retry and connection-pool policy shared by every outbound call.\"\"\"\nimport requests\nfrom requests.adapters import HTTPAdapter\nfrom requests.packages.urllib3.util.retry import Retry\n\nIDEMPOTENT = [\"GET\", \"HEAD\", \"PUT\", \"DELETE\"]\nRETRY_STATUSES = [429, 502, 503, 504]\n\n\ndef retry_policy(total=3, backoff=0.5):\n    return Retry(\n        total=total,\n        backoff_factor=backoff,\n        status_forcelist=RETRY_STATUSES,\n        method_whitelist=IDEMPOTENT,\n        raise_on_status=False,\n    )\n\n\ndef worst_case_wait(retry):\n    \"\"\"The longest single sleep this policy can ask for, capped the way urllib3 caps it.\"\"\"\n    if not retry.total or retry.total < 2:\n        return 0.0\n    return min(retry.backoff_factor * (2 ** (retry.total - 1)), Retry.BACKOFF_MAX)\n\n\ndef make_session(adapter=None, retries=None):\n    session = requests.Session()\n    adapter = adapter or HTTPAdapter(max_retries=retries or retry_policy(),\n                                     pool_connections=4, pool_maxsize=8)\n    session.mount(\"http://\", adapter)\n    session.mount(\"https://\", adapter)\n    session.headers.update({\"User-Agent\": \"inventory-client/1.4\", \"Accept\": \"application/json\"})\n    return session\n",
+    "app/tls.py": "\"\"\"TLS settings for the legacy partner endpoint, which only speaks a few cipher suites.\"\"\"\nimport requests\nfrom requests.adapters import HTTPAdapter\nfrom requests.packages.urllib3.exceptions import SubjectAltNameWarning\nfrom requests.packages.urllib3.util import ssl_\n\n\ndef partner_cipher_string():\n    \"\"\"urllib3's default suites minus the weak ones, the recipe the partner's docs give.\"\"\"\n    return ssl_.DEFAULT_CIPHERS + \":!aNULL:!eNULL:!MD5:!DSS\"\n\n\nclass PartnerTLSAdapter(HTTPAdapter):\n    def init_poolmanager(self, *args, **kwargs):\n        kwargs[\"ssl_context\"] = ssl_.create_urllib3_context(ciphers=partner_cipher_string())\n        return super().init_poolmanager(*args, **kwargs)\n\n\ndef quiet_partner_warnings():\n    \"\"\"The partner's certificate has no subjectAltName; silence urllib3's warning about it.\"\"\"\n    requests.packages.urllib3.disable_warnings(SubjectAltNameWarning)\n    return True\n",
+    "app/transport.py": "\"\"\"Offline transport: answers requests from recorded responses (a cassette), for demos and tests.\"\"\"\nimport io\n\nfrom requests.adapters import HTTPAdapter\nfrom urllib3.exceptions import MaxRetryError\nfrom urllib3.response import HTTPResponse\n\n\nclass ReplayPool:\n    \"\"\"Stands in for a urllib3 connection pool: urlopen() replays the recorded responses, and\n    retries the way urllib3 does (without sleeping).\"\"\"\n\n    def __init__(self, cassette):\n        self.cassette = {key: list(answers) for key, answers in cassette.items()}\n        self.log = []\n\n    def urlopen(self, method, url, body=None, headers=None, retries=None, **kwargs):\n        answers = self.cassette.get((method, url)) or [(404, {}, b\"\")]\n        while True:\n            self.log.append((method, url))\n            status, resp_headers, payload = answers.pop(0) if len(answers) > 1 else answers[0]\n            if retries is not None and retries.is_retry(method, status):\n                try:\n                    retries = retries.increment(method, url)\n                    continue\n                except MaxRetryError:\n                    if retries.raise_on_status:\n                        raise\n            return HTTPResponse(body=io.BytesIO(payload), headers=resp_headers, status=status,\n                                reason=\"Replayed\", preload_content=False,\n                                decode_content=kwargs.get(\"decode_content\", True))\n\n\nclass ReplayAdapter(HTTPAdapter):\n    \"\"\"An HTTPAdapter whose connection pool is the replay pool.\"\"\"\n\n    def __init__(self, cassette, **kwargs):\n        self.pool = ReplayPool(cassette)\n        super().__init__(**kwargs)\n\n    def get_connection(self, url, proxies=None):\n        return self.pool\n",
+    "tests/test_client.py": "import gzip\nimport json\nimport ssl\n\nimport pytest\n\nfrom app import policy, transport\nfrom app.client import InventoryClient\n\nITEMS = [{\"sku\": \"A-1\", \"name\": \"hammer\", \"kind\": \"tool\"}, {\"sku\": \"B-7\", \"name\": \"saw\", \"kind\": \"tool\"}]\nCSV = \"sku,name\\n\" + \"\".join(f\"X-{i},item {i}\\n\" for i in range(40))\n\n\ndef _json(status, payload):\n    return (status, {\"Content-Type\": \"application/json\"}, json.dumps(payload).encode())\n\n\n@pytest.fixture\ndef cassette():\n    return {\n        (\"GET\", \"/items?kind=tool\"): [_json(200, {\"items\": ITEMS})],\n        (\"POST\", \"/items\"): [_json(503, {\"error\": \"busy\"}), _json(201, {\"sku\": \"C-3\"})],\n        (\"GET\", \"/health\"): [_json(503, {}), _json(502, {}), _json(200, {\"ok\": True})],\n        (\"GET\", \"/export.csv\"): [(200, {\"Content-Type\": \"text/csv\", \"Content-Encoding\": \"gzip\"},\n                                  gzip.compress(CSV.encode(), mtime=0))],\n    }\n\n\n@pytest.fixture\ndef client(cassette):\n    adapter = transport.ReplayAdapter(cassette, max_retries=policy.retry_policy())\n    return InventoryClient(\"http://inventory.test/\", session=policy.make_session(adapter=adapter))\n\n\ndef test_retry_policy():\n    retry = policy.retry_policy()\n    assert retry.total == 3\n    assert retry.is_retry(\"GET\", 503) and not retry.is_retry(\"POST\", 503)\n    assert policy.worst_case_wait(retry) == 2.0\n    assert policy.worst_case_wait(policy.retry_policy(total=12, backoff=1)) == 120\n\n\ndef test_session_defaults():\n    session = policy.make_session()\n    assert session.headers[\"User-Agent\"] == \"inventory-client/1.4\"\n    assert session.get_adapter(\"https://x.test\").max_retries.total == 3\n\n\ndef test_list_items(client):\n    assert [i[\"sku\"] for i in client.list_items(kind=\"tool\")] == [\"A-1\", \"B-7\"]\n\n\ndef test_get_is_retried_until_healthy(client):\n    assert client.health() == 200\n    assert client.session.get_adapter(\"http://x\").pool.log.count((\"GET\", \"/health\")) == 3\n\n\ndef test_post_is_not_retried(client):\n    assert client.create_item({\"name\": \"drill\"}) == (503, {\"error\": \"busy\"})\n\n\ndef test_export_is_decompressed(client):\n    assert client.export_csv() == CSV\n\n\ndef test_partner_tls():\n    from app import tls\n\n    assert tls.quiet_partner_warnings() is True\n    assert tls.partner_cipher_string().endswith(\":!aNULL:!eNULL:!MD5:!DSS\")\n    adapter = tls.PartnerTLSAdapter()\n    ctx = adapter.poolmanager.connection_pool_kw[\"ssl_context\"]\n    assert isinstance(ctx, ssl.SSLContext)\n    assert not [c for c in ctx.get_ciphers() if \"MD5\" in c[\"name\"] or \"NULL\" in c[\"name\"]]\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/policy.py",
+      "old": "method_whitelist=IDEMPOTENT",
+      "new": "allowed_methods=IDEMPOTENT"
+    },
+    {
+      "file": "app/policy.py",
+      "old": "Retry.BACKOFF_MAX",
+      "new": "Retry.DEFAULT_BACKOFF_MAX"
+    },
+    {
+      "file": "app/transport.py",
+      "old": "def get_connection(self, url, proxies=None):",
+      "new": "def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):"
+    },
+    {
+      "file": "app/tls.py",
+      "old": "from requests.packages.urllib3.exceptions import SubjectAltNameWarning\n",
+      "new": "",
+      "if_present": true
+    },
+    {
+      "file": "app/tls.py",
+      "old": "from requests.packages.urllib3.util import ssl_\n",
+      "new": "from requests.packages.urllib3.util import ssl_\n\n# urllib3 2 no longer exports its cipher string; keep the 1.26 list the partner was tested with.\nURLLIB3_1_CIPHERS = (\"ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:ECDH+AESGCM:DH+AESGCM:\"\n                     \"ECDH+AES:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!eNULL:!MD5:!DSS\")\n"
+    },
+    {
+      "file": "app/tls.py",
+      "old": "return ssl_.DEFAULT_CIPHERS + \":!aNULL:!eNULL:!MD5:!DSS\"",
+      "new": "return URLLIB3_1_CIPHERS + \":!aNULL:!eNULL:!MD5:!DSS\""
+    },
+    {
+      "file": "app/tls.py",
+      "old": "    requests.packages.urllib3.disable_warnings(SubjectAltNameWarning)\n",
+      "new": "",
+      "if_present": true
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/client.py",
+          "append": "\n\n    def peek(self, path, size=16):\n        \"\"\"The first bytes of a (possibly compressed) body, without downloading all of it.\"\"\"\n        resp = self.session.get(self._url(path), stream=True, timeout=5)\n        try:\n            return resp.raw.read(size, decode_content=True)\n        finally:\n            resp.close()\n"
+        },
+        {
+          "file": "tests/test_client.py",
+          "append": "\n\ndef test_peek_reads_at_most_size(client):\n    # A weak test, as real suites often are: it only checks the bound.\n    assert len(client.peek(\"/export.csv\", size=16)) <= 16\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "urllib3.response.HTTPResponse.read"
+      ],
+      "behaviour": "peek(): resp.raw.read(16, decode_content=True) on a gzip body. urllib3 1.26.20 applies amt to the compressed bytes, so the first 16 raw bytes (the gzip header) decode to b''; urllib3 2.8.0 applies amt to the decoded bytes and returns b'sku,name\\nX-0,ite'. The test only checks len(...) <= 16."
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "urllib3.util.retry.Retry",
+      "kind": "SIGNATURE",
+      "param": "method_whitelist",
+      "site": "app/policy.py:15",
+      "breaks": "TypeError: Retry.__init__() got an unexpected keyword argument 'method_whitelist'",
+      "successor": "allowed_methods",
+      "fixable": "auto",
+      "source": "urllib3 2.0 changelog (removed Retry(method_whitelist=), deprecated since 1.26.0)",
+      "verified": {
+        "old": "urllib3 1.26.20 (spelled requests.packages.urllib3.util.retry.Retry, the same module object): works, DeprecationWarning \"Using 'method_whitelist' with Retry is deprecated and will be removed in v2.0. Use 'allowed_methods' instead\"",
+        "new": "urllib3 2.8.0: TypeError at construction; allowed_methods= works on both"
+      }
+    },
+    {
+      "symbol": "urllib3.util.retry.Retry.BACKOFF_MAX",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/policy.py:24",
+      "breaks": "AttributeError: type object 'Retry' has no attribute 'BACKOFF_MAX'",
+      "successor": "urllib3.util.retry.Retry.DEFAULT_BACKOFF_MAX",
+      "fixable": "auto",
+      "source": "urllib3 2.0 changelog (removed Retry.BACKOFF_MAX, deprecated in 1.26.9)",
+      "verified": {
+        "old": "1.26.20: Retry.BACKOFF_MAX == 120 through a deprecated metaclass property, DeprecationWarning \"Using 'Retry.BACKOFF_MAX' is deprecated and will be removed in v2.0. Use 'Retry.DEFAULT_BACKOFF_MAX' instead\"; identity check `Retry.BACKOFF_MAX is Retry.DEFAULT_BACKOFF_MAX` -> True (the property returns the class attribute)",
+        "new": "2.8.0: AttributeError; DEFAULT_BACKOFF_MAX == 120 on both. Note: assigning Retry.BACKOFF_MAX = n (a common way to cap backoff) silently has no effect in 2.x (DEFAULT_BACKOFF_MAX stays 120); the toy only reads it"
+      }
+    },
+    {
+      "symbol": "urllib3.util.ssl_.DEFAULT_CIPHERS",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/tls.py:10",
+      "breaks": "AttributeError: module 'urllib3.util.ssl_' has no attribute 'DEFAULT_CIPHERS'",
+      "successor": null,
+      "fixable": "manual",
+      "source": "urllib3 2.0 changelog (removed DEFAULT_CIPHERS; the ssl module's defaults are used unless ciphers= is passed)",
+      "verified": {
+        "old": "1.26.20: 'ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:...:!aNULL:!eNULL:!MD5:!DSS', no warning",
+        "new": "2.8.0: AttributeError (raised when partner_cipher_string() runs, not at import). No replacement constant; manual_migration inlines the 1.26 string so the SSL context gets the same ciphers"
+      }
+    },
+    {
+      "symbol": "urllib3.exceptions.SubjectAltNameWarning",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/tls.py:4",
+      "sites": [
+        "app/tls.py:4",
+        "app/tls.py:21"
+      ],
+      "breaks": "ImportError: cannot import name 'SubjectAltNameWarning' from 'urllib3.exceptions' (at import of app.tls)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "urllib3 2.0 changelog (removed SubjectAltNameWarning and SNIMissingWarning; a certificate without subjectAltName is now rejected)",
+      "verified": {
+        "old": "1.26.20: class exists (spelled requests.packages.urllib3.exceptions.SubjectAltNameWarning); disable_warnings(...) returns None",
+        "new": "2.8.0: ImportError; nothing to silence any more, so manual_migration deletes the import and the call"
+      }
+    },
+    {
+      "symbol": "requests.adapters.HTTPAdapter.get_connection",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/transport.py:41",
+      "breaks": "an HTTPAdapter subclass that overrides get_connection() is silently bypassed: send() calls get_connection_with_tls_context() instead, so the replay pool is never used and every request goes to the network: requests.exceptions.ConnectionError: HTTPConnectionPool(host='inventory.test', port=80): Max retries exceeded with url: /items?kind=tool (Caused by NameResolutionError(...))",
+      "successor": "requests.adapters.HTTPAdapter.get_connection_with_tls_context",
+      "fixable": "manual",
+      "source": "requests 2.32.2 changelog (get_connection deprecated in favour of get_connection_with_tls_context; custom adapters must migrate). This is the break docker-py hit with requests 2.32",
+      "verified": {
+        "old": "requests 2.28.2: send() calls self.get_connection(request.url, proxies); calling it directly gives no warning; get_connection_with_tls_context does not exist",
+        "new": "requests 2.34.2: get_connection still resolves and calling it warns DeprecationWarning '`get_connection` has been deprecated in favor of `get_connection_with_tls_context`. Custom HTTPAdapter subclasses will need to migrate for Requests>=2.32.2...'; send() never calls it (an override recording its calls saw 0 calls)"
+      }
+    },
+    {
+      "symbol": "requests.adapters.HTTPAdapter.send",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/transport.py:41",
+      "breaks": "same API, different hook: send() no longer calls a subclass's get_connection() (see the entry above)",
+      "successor": null,
+      "fixable": "manual",
+      "source": "requests 2.32.0/2.32.2 changelog",
+      "verified": {
+        "old": "2.28.2: the override is called once per request",
+        "new": "2.34.2: the override is never called"
+      }
+    },
+    {
+      "symbol": "urllib3.response.HTTPResponse.read",
+      "kind": "BEHAVIOR",
+      "param": "amt",
+      "site": "app/client.py:36",
+      "scenario": "change",
+      "breaks": "no raise: read(amt, decode_content=True) on a compressed body returns amt DECODED bytes in 2.x, and decodes only the first amt RAW bytes in 1.26",
+      "successor": null,
+      "fixable": "manual",
+      "source": "urllib3 2.0 changelog (HTTPResponse.read(amt) now returns amt bytes of decoded data)",
+      "verified": {
+        "old": "1.26.20: peek(size=16) -> b''; size=64 -> b'sku,name\\nX-0,item 0\\nX-1,item 1\\nX-2'",
+        "new": "2.8.0: peek(size=16) -> b'sku,name\\nX-0,ite'; size=64 -> 64 decoded bytes"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "urllib3.util.retry.Retry",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "urllib3.util.retry.Retry.BACKOFF_MAX",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old (raised in a metaclass property getter)"
+    }
+  ],
+  "notes": "Requests itself barely changed between 2.28.2 and 2.34.2 (an API diff of every public signature, annotations stripped, found only Session.get gaining an explicit params=); what breaks a requests user is urllib3 1 -> 2 and the 2.32 adapter hook. Old side pinned to urllib3 1.26.20 (the common 'urllib3<2' pin); new side is the newest of both (requests 2.34.2, urllib3 2.8.0). Imports use the old StackOverflow spelling requests.packages.urllib3..., which is the same module object as urllib3 on both versions. Offline: ReplayAdapter/ReplayPool (app/transport.py) stand in for the connection pool, the way a cassette/replay transport does, and replay urllib3 HTTPResponse objects (gzip decoding and Retry.is_retry/increment run for real; no socket, no sleep). The equiv scenario never reads a partial compressed body, so its behaviour is equal after migration. Checked and deliberately NOT ground truth: HTTPResponse.getheader/getheaders warn on 1.26.20 but are no longer deprecated in 2.8.0 (the toy does not use them); Retry.DEFAULT_METHOD_WHITELIST and urllib3.get_host are covered by the urllib3 toy; Retry.get_backoff_time() returns int 120 on 1.26 and float 120.0 on 2.x when capped (equal under ==, not used); HTTPAdapter(max_retries=int), Retry.is_retry/increment, make_headers, create_urllib3_context(ciphers=) behave the same. Leave-one-out check: each manual_migration edit alone left out reproduces its own break text in the new env (the get_connection one takes ~12 s: DNS failure plus urllib3's real retries and backoff)."
+}

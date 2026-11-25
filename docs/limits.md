@@ -1,0 +1,307 @@
+# Limits and status
+
+## Where pymolt cannot help yet
+
+### Getting to a comparison
+
+- **Targets that do not build or import.** `assess` stops at resolution. When a dependency fails to
+  build or import on the target (for example hyperframe < 4, `numpy.distutils`, a Cython extension
+  built against numpy 2, Theano), there is no post-migration capture and nothing to compare. All six
+  legacy projects stop here today ([below](#where-it-was-tried)).
+- **Code no run exercises.** Only calls the tests or the app make are compared. A dependency symbol
+  no run reaches is BLIND, and the verdict stays INCONCLUSIVE. This holds after `apply` too, whether
+  or not the plan changed that symbol ([verify.md](verify.md#scope-after-apply)).
+- **Python 2.7** is not supported: a capture reports that the tracer failed to start.
+- **Tests that race.** A capture slows the program it traces ([overhead](#overhead)), so a timing
+  race in the project or its test harness that a normal run wins can fail under capture. For
+  example, Streamlit 1.28's `AppTest` stops waiting at the first finished script run: an app that
+  calls `st.rerun()` fails with `KeyError: 'client_state'` once that first run takes longer than
+  AppTest's 0.1 s poll. Later Streamlit versions wait for the script thread. As with any failing
+  run, such a capture is not accepted as the baseline: fix the race, deselect the test, or keep the
+  failing baseline with `--accept-failing`.
+- **Golden snapshots, canary gates and shadow operations** are not offered in 0.2: no command
+  makes their input files yet, so `verify` hides those options until 0.3.
+
+### Fixing what it finds
+
+- **`apply` rewrites names, not behaviour.** It applies checked rewrite templates for moved, renamed
+  and removed APIs, and fixes for Python-version breakage. A behaviour change (a new exception, a
+  changed default, a different result) is found by `verify` and left to you. A rule that cannot be
+  checked is listed for manual review instead of applied ([plan.md](plan.md#codemods)).
+
+- **A successor named only by text, or by several texts that disagree, is left to you.** pymolt
+  names a successor from the library's warnings, docstrings and deprecation helpers, but picks
+  none when they name several objects or offer a choice (pydantic's `parse_raw`: "if your data is
+  JSON, use `model_validate_json`, otherwise use `model_validate`"). An attribute a class does not
+  have, but its `__init__` assigns on `self`, counts as existing; one made any other way does not,
+  and its successor is not named.
+
+- **A proof covers only what the probe can read.** A body summarised completely (see
+  [plan.md](plan.md#dependency-api-changes)) is the only one that rewrites: a decorator pymolt
+  does not know, a body it cannot read (a compiled function), or an alias with other uses
+  leaves the successor named for an agent.
+
+- **A proven rewrite rests on signatures, not on behaviour.** A successor proven in the old
+  version (a forward, an alias) is rewritten when the successor keeps its signature in the
+  target; a successor that changes behaviour without changing its signature makes verify fail
+  the rewritten line, with the proof named beside it. A method is rewritten only where the
+  baseline ran it; its other sites, and a keyword rename next to another changed parameter, stay
+  with the agent.
+
+- **A step rolled back alone keeps what came after it, within limits.** `rollback --step` undoes
+  only that step's change in a file that moved on, but refuses when a later edit touched the
+  step's lines or the statements right around them (a hand edit there could depend on it), and an
+  import the step wrote stays while anything uses it. Applying the step again re-bases it, and an
+  import its recipe inserts may then land in another place among the imports than in a straight
+  apply ([commands.md](commands.md#pymolt-rollback-dir)).
+
+### Judging a difference
+
+Each of these makes the verdict INCONCLUSIVE, and the verdict says who settles it
+([verify.md](verify.md#run-noise)): a person for a hand edit's new value; more evidence for the
+others (a baseline replicate, or captures on the same platform), and a person for what a measured
+replicate still did not settle:
+- **A hand edit's new value.** When you changed a line and its call now returns something else,
+  pymolt cannot tell whether you meant it. Only a new exception fails.
+- **A value that varies between runs**, when no baseline replicate measured the noise. Capture the
+  baseline with `--runs 2`. A replicate still cannot vouch for an outcome too rare for it to have
+  shown (1 raise in 76 calls).
+- **An input that changed with no visible cause** on an unedited line, including an input one side
+  passed and the other did not, at a call both sides make.
+- **A dict whose key order changed**, unless the order is shown to be deterministic.
+- **Floats within rounding.** Differences up to 1024 ulps at a value's own precision are drift,
+  not a change: about 2.3e-13 relative for float64, 1.2e-4 for float32, and never more than
+  2^-10 (float16 compares almost exactly). A computation that genuinely moved by less is not
+  caught. A float that holds money compares like any float: a cent on 1e11 is about 650 ulps,
+  drift. Set `verify --float-ulps 0` to compare floats exactly. A numpy scalar is recorded by its
+  type only, so its value is not compared at all.
+- **A result used later through a variable.** The consumer projection reads only the
+  statement that makes the call: `r = f(); r.raise_for_status()` compares `f()` in full, and
+  `x = f(); a, b = x` does not erase the container type.
+- **A dependency object whose class changed.** pymolt does not record class hierarchies yet, so
+  a new class of the same package your code never introspects is drift, whatever its relation to
+  the old one; one of another package is a review item. Your code's calls on the object are compared, and so are the attributes it reads
+  that the capture rendered (instance state). A class attribute or property your code reads off
+  the call's own result (`r = f(); r.streaming`) is not rendered: the class change then stays a
+  change. Read further away (through another variable, in another function), it is not seen. A
+  `str()` or `repr()` of the object that shows its class name is not tied to the class.
+- **A project file that does not parse on the host** (a Python 2 file, `async` as a name on 3.6,
+  an expression too deep to walk): what it reads is unknown, so verify compares every dependency
+  object, result and class in full, and says so (`quality.objects`).
+- **Attributes read by a computed name** (`getattr(x, name)`, `vars(x)`, `asdict(x)`) on a
+  dependency object. verify compares such an object by the attributes your code reads by name, so
+  the verdict lists these places instead of comparing what they read. `verify --strict` compares
+  the full state. A dependency's namedtuple your code indexes later (`parts = f(); parts[1]`) is
+  projected the same way: name its fields, or use `--strict`. One unpacked or iterated on the
+  call's own statement (`t, p = stats.ttest_ind(...)`) compares every field.
+- **An environment difference** between the two captures (OS, resource limits, privileges) at a
+  call that reads it. Capture both sides on the same platform.
+
+Two cases go the other way. Both still fail, although they may be noise:
+- a change in the *kind* of a rare outcome (a call that raised once in 76 now returns);
+- a value that depends on timing (a poll, a count of reports), when the replicate records the
+  call's input in full and both baseline runs agreed on it. The replicate runs at the baseline's
+  timing, and a different Python or tracer shifts it. The report then calls the difference
+  reproducible in the replicate, not deterministic.
+
+- **Attestations stop accidents, not an adversarial agent.** An agent with a pseudo-terminal can
+  type the nonce, and one that can read your home directory can read the attestation key
+  ([agents.md](agents.md#what-a-person-attests)). Attestations are per machine: on another
+  machine an attested change is judged as unattested.
+
+### What the tracer does not see
+
+- **Some exception types on 3.6–3.11 test suites.** `setprofile` does not pass the exception to the
+  tracer, so pymolt reads it from a one-off `sys.settrace` event when the exception reaches the
+  frame that called the dependency. A raise that C code swallows before any Python frame sees it
+  (`hasattr`, `getattr` or `next` with a default, `list()` over an iterator) is recorded without
+  its type. While another tool owns `sys.settrace` (coverage on 3.6–3.11, a debugger), pymolt
+  leaves it alone and reads the type only when the code that handles the exception makes a call,
+  so a raise handled without any call (`except ValueError: pass`) is recorded without its type.
+  On 3.6 and 3.7, a `return None` inside a `with` or `try`/`finally` block stays "return or raise".
+  On Flask's test suite every raise was typed: 203 on 3.8 and 3.11, 214 on 3.6 (Flask 2.0.3).
+  Under `coverage run` on 3.11, 106 of the 203 were. Long runs record the type once the targeted
+  wrappers take over. 3.12+ always records it.
+- **Compiled calls.** A C function, a private Cython function, or a method of a Cython extension type
+  is recorded without its result, and its arguments are not compared. Past 2,000 calls per call
+  site, such calls are only counted. The public Cython functions of dependency modules are wrapped
+  and recorded in full, except those a wrapper would change: a fused function (it is indexed,
+  `f[double]`), a coroutine or generator function, and a static one stored bare in a class. These
+  are left alone, so they are recorded like a private one on 3.12 and not at all below.
+- **Late dunder contacts in long runs (3.12+).** Watching for dunder, property and generator calls
+  turns off 30 s after the last new contact. A line of your code that runs for the first time turns
+  it back on until nothing new happened for 5 s (`PYMOLT_TRACE_INCREMENTAL_REOPEN`; 0 keeps it off).
+  Still missed:
+  - such a call on a line that already ran with other objects (`x[k]` on dicts for an hour, then
+    on a DataFrame);
+  - one made more than 5 s after the last new line or contact (`dep.slow()[k]` when `slow()` takes
+    longer);
+  - code of yours imported after the 30 s through a line that already ran
+    (`importlib.import_module(name)`) and called only by a dependency;
+  - on 3.12, a function of yours over about 8,000 bytecode instructions: watching its lines would
+    make its first run slow there.
+- **Values behind a proxy or a lazy object** (werkzeug's `LocalProxy`, Django's `SimpleLazyObject`)
+  are recorded as the proxy's type: reading through it would evaluate it. A dict or list subclass
+  whose own methods compute what they return (werkzeug's `MultiDict`) is recorded from what it
+  stores (every value list). One that keeps its items elsewhere and defines its own `__len__`
+  (werkzeug's `CombinedMultiDict`) is recorded like any object, from its attributes.
+- **Classes made at run time (3.12+).** A dependency class created without an import, whose
+  instances reach only a call site that stopped being watched before the class existed, is missed.
+- **Values inside a stream.** A generator or iterator a dependency returns is recorded as a
+  generator: what it yields is not compared (urllib3's `stream()` chunks, `yaml.load_all`).
+- **Awaited results.** A coroutine call is recorded when it starts, with a marker for its result:
+  what the `await` returned or raised is not recorded. Two such calls are not comparable, so the
+  verdict is INCONCLUSIVE (needs evidence), never PASS on the markers alone. A call that now raises
+  when it starts, or a plain value that became a coroutine, still fails.
+- **Calls made by compiled code (host fallback).** Until the watcher marks them, verify drops a
+  call whose name its line never mentions only when a compiled call the line does name ran there
+  (or it is a numpy dispatcher). A callback compiled code makes on a line with no recorded
+  compiled call is still compared as your line's call.
+- **Warnings from C methods.** A warning raised inside a compiled method (`datetime.utcnow` on
+  3.12) is not attached to that call.
+- **Code made with `exec`.** Code that runs as `<string>` in a namespace with no `__file__`
+  belongs to the module its `__name__` names. A dependency's generated method (SQLAlchemy 2.0's
+  mapped-class `__init__`) is the dependency's, so the calls it makes are internal ones. Your
+  `__main__` (`python -c`, `<stdin>`, the REPL, a notebook cell) is yours. The calls of code your
+  program runs in a namespace that names no module (`exec(src, {"__name__": "x"})`) are not
+  recorded.
+- **Implicit C-slot calls on 3.9–3.11 compiled types.** `row["name"]` on SQLAlchemy 1.3's
+  `RowProxy` goes through a C slot no tracer sees.
+
+### What the static map does not see
+
+- **Keyword arguments a callable only forwards** through `**kwargs` (click's
+  `argument(autocompletion=)`) are invisible to the signature comparison.
+- **Dotted names written inside strings** (jinja2's `extensions=["jinja2.ext.with_"]`) are not
+  contacts.
+- **Attributes of a removed function's result.** `inspect.getargspec(...).keywords` is not probed,
+  because `getargspec` itself is gone.
+
+### PyMolt itself
+
+- It runs on 3.12. On 3.13, 14 of its tests fail, so CI tests on 3.12 only. Two groups of them
+  touch results:
+  - pymolt on 3.13 anchors 3.6-era code (such as `async` used as a name) by tokens instead of
+    its syntax tree, which survives less reformatting;
+  - on a 3.13 target under `sys.monitoring`, a raise from C code is recorded without its type,
+    and a call that fails to bind is not recorded.
+
+  Neither has been looked into yet.
+- The tracer is written to load on Python 3.4–3.5. That is not tested.
+
+## Overhead
+
+| Workload | Measured |
+|---|---|
+| Test suites, Python 3.6 in emulated containers (`setprofile`), legacy projects | 2.3–10.8× slower on five of the six; lasagne's run was disturbed ([scorecard](../bench/legacy_eval/results/release-0.2/scorecard.md)) |
+| A Flask + SQLAlchemy + pydantic service on Python 3.12 (`sys.monitoring`), saturated | 19–20.5% lower throughput once steady (median 19.3%); 71–72% of normal throughput in the first 30 s; 0 dropped calls |
+| Same service at 200 requests/s | p99 latency ×1.05; output about 1.2 MB per day |
+| Your code calling a Cython function in a hot loop, 3.12 | 13–16 µs per call, every call recorded |
+
+The service numbers are from the load gate on the 0.2 release code, on a quiet host, 2026-11-20
+([bench/load/RESULTS.md](../bench/load/RESULTS.md)). The saturated loss passes the 20% gate by
+0.7 points; one of its three repeats measured 20.5%.
+The cost of capturing a loaded service on Python 3.6–3.11 (`setprofile`, then targeted wrappers)
+has not been measured.
+
+In long runs, pymolt records the structure of arguments and results by default, not their values.
+It records them for the first 32 calls at each call site and for 10% of the rest, and it counts
+every call ([verify.md](verify.md#sampling-and-counting)). A test-suite capture whose trace writer
+falls behind makes the program wait rather than drop events.
+
+## Where it was tried
+
+### Libraries
+
+`bench/generalization` has one small project per library, upgraded across one major version
+(the Python moves to 3.12 too), with hand-listed ground truth: the API changes the project uses,
+from the library's changelog, and the replacement for each. Every project is migrated twice:
+`equiv` keeps its behaviour, `change` adds one real change that `verify` must fail on, at that
+call. Measured on the 0.2 code (2026-11-25); `python bench/generalization/run.py run` repeats it.
+
+| Library | Versions | API changes found | Replacements named | Sites rewritten | Equivalent migration | Real change caught |
+|---|---|---|---|---|---|---|
+| numpy | 1.26 → 2.5 | 9 / 10 | 6 / 10 | 6 | PASS | yes |
+| pandas | 1.5 → 2.2 | 2 / 2 | 1 / 1 | 1 | PASS | yes |
+| Polars | 0.19 → 1.44 | 8 / 8 | 8 / 8 | 5 | PASS | yes |
+| Matplotlib | 3.6 → 3.10 | 4 / 7 | 3 / 7 | 0 | PASS | yes |
+| seaborn | 0.11 → 0.13 | 5 / 6 | 3 / 5 | 1 | PASS | yes |
+| Plotly | 5.24 → 6.9 | 4 / 4 | 3 / 4 | 0 | INCONCLUSIVE (2) | yes |
+| scikit-learn | 1.1 → 1.6 | 7 / 7 | 1 / 5 | 0 | PASS | yes |
+| FastAPI | 0.95 → 0.165, pydantic 1 → 2 | 7 / 10 | 6 / 10, 1 wrong | 1 | INCONCLUSIVE (2) | yes |
+| Django | 2.2 → 4.2 | 7 / 7 | 5 / 7 | 9 | PASS | yes |
+| Django REST framework | 3.12 → 3.18, Django 3.2 → 5.2 | 4 / 7 | 4 / 7 | 8 | INCONCLUSIVE (2) | yes |
+| Flask | 2.0 → 3.1 | 9 / 11 | 5 / 10 | 2 | INCONCLUSIVE (2, 3) | yes |
+| Requests | 2.28 → 2.34 | 3 / 5 | 2 / 3 | 0 | PASS | yes |
+| httpx | 0.23 → 0.28 | 2 / 3 | 0 / 3 | 0 | INCONCLUSIVE (1) | yes |
+| aiohttp | 3.8 → 3.14 | 6 / 6 | 3 / 6 | 1 | INCONCLUSIVE (1) | no (1) |
+| Streamlit | 1.28 → 1.67 | 6 / 6 | 3 / 6 | 0 | FAIL (4) | yes |
+| Starlette | 0.27 → 1.10 | 7 / 7 | 1 / 7 | 0 | INCONCLUSIVE (1) | yes |
+| asyncio | Python 3.8 → 3.12 | 7 / 8 | 2 / 3 | 2 | INCONCLUSIVE (1) | on another call |
+| SQLAlchemy | 1.3 → 2.0 | 8 / 9 | 1 / 9 | 0 | INCONCLUSIVE (5) | yes |
+| pydantic | 1.10 → 2.14 | 9 / 9 | 8 / 9 | 0 | PASS | yes |
+| Jinja2 | 2.11 → 3.1 | 4 / 5 | 2 / 4 | 0 | INCONCLUSIVE (2) | yes |
+| NetworkX | 2.3 → 3.7 | 7 / 7 | 2 / 7 | 0 | PASS | yes |
+| Click | 7.1 → 8.5 | 2 / 3 | 1 / 3 | 0 | PASS | yes |
+| PyYAML | 5.4 → 6.0 | 4 / 4 | — | 0 | PASS | yes |
+| urllib3 | 1.26 → 2.2 | 5 / 5 | 5 / 5 | 0 | INCONCLUSIVE (2) | on another call |
+| standard library | Python 3.8 → 3.12 | 10 / 11 | 2 / 8 | 4 | INCONCLUSIVE (1, 2) | yes |
+| **Total** | | **146 / 167** | **77 / 147** | **40, none wrong** | **12 PASS** | **22 / 25** |
+
+- **Replacements named** counts a replacement the plan names in a step: from the library's own
+  code, data or deprecation text, or a curated fact. A replacement that is an expression rather
+  than a name (`str(G)` for `networkx.info`, SQLAlchemy 2.0's `with engine.begin() as conn:`)
+  is never named today; a parameter renamed or moved (`sparse` → `sparse_output`), and a
+  replacement whose text exists only in releases between the two versions, are named only
+  sometimes. That is most of what is missing.
+- **Sites rewritten** are the codemods `apply` wrote. Each one was compared after the migration:
+  35 calls compared equal, the rest had nothing to compare against, none changed.
+- Why an equivalent migration does not PASS (the numbers in the table):
+  1. a coroutine's awaited result is not recorded yet (aiohttp, httpx, Starlette, asyncio): the
+     verdict says the evidence is missing;
+  2. a hand edit gave a call another value (`conlist`, `safe_join`, `Markup`, `get_host`): a
+     person reviews it, or accepts it with `verify --accept`;
+  3. a class changed across packages (Flask's `redirect` now returns `flask.wrappers.Response`
+     instead of werkzeug's): verify cannot judge it without the class hierarchy;
+  4. Streamlit's FAIL is real: `AppTest.query_params` values changed from a list to a string,
+     which code that indexes them sees;
+  5. an attribute the code reads was not recorded on one side: SQLAlchemy 1.3's `Table.c` is a
+     property, which a capture does not render, so the two `Table` objects cannot be compared
+     there.
+
+### Real projects
+
+**Six legacy projects**, Python 3.6 → 3.12: hyper, vibora, theano, lasagne, alphalens, zipline.
+- All six capture a baseline.
+- Plans with rewrites were applied to five of them. lasagne's plan has none.
+- None reaches a compared post-migration capture. The target fails to import on five. alphalens
+  imports, but its post-migration test run was refused.
+
+Details: [scorecard](../bench/legacy_eval/results/release-0.2/scorecard.md) (0.2 release code),
+[issues](../bench/legacy_eval/KEY_ISSUES.md).
+
+**locust** (gevent, 3.8 → 3.12, no code change) is the noisy real-project pilot:
+- without noise handling, the diff reported 14,065 failing entries;
+- the first run with masks and a replicate left 2 findings, but its post side lost 43% of its
+  events.
+- A full re-capture with every event-loss and recall fix in place (2026-11-17) lost no events on
+  any of its three runs. The post side waited 1.4 s in total for its trace writer.
+- That re-capture's verdict is FAIL. Verified again with the two fixes below, the same captures
+  fail on one finding: msgpack bytes reordered because Python 3.9 changed a TypedDict's key
+  order. This is a real change.
+- Two `verify` bugs gave three more FAILs, now fixed:
+  - Two `@app.route` decorators on one function. 3.8 attributes both calls to the `def` line and
+    3.12 each to its own `@` line, and `verify` did not pair them.
+  - Two values from one timing-sensitive test, which shift with the tracer's overhead. Both
+    baseline runs agreed on them, so `verify` called them deterministic. One is now measured
+    noise. The other, a polled value one side never saw, is a review item.
+- 4 review items and 2 not-comparable entries remain:
+  - three timing-dependent test values;
+  - `typing_extensions.final`, which is the stdlib's `typing.final` on 3.12, so it is not traced;
+  - a compiled gevent method whose raise only `sys.monitoring` sees.
+- The replicate explains the per-run msgpack differences (node ids) and 409 differences in
+  all. The rare gevent outcome raised on both sides this time.
+- 121 of 175 static symbols are BLIND under this test subset.
+
+Details: [scorecard](../bench/legacy_eval/results/pilot-locust-recapture/scorecard.md),
+[findings](../bench/legacy_eval/locust.md).

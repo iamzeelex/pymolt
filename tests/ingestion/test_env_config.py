@@ -1,6 +1,9 @@
 import json
 
+import pytest
+
 from pymolt.ingestion.config import CONFIG_SCHEMA_VERSION, EnvConfig, ToolChoice
+from pymolt.state_io import StateFileError
 
 
 def test_envconfig_defaults_and_roundtrip(tmp_path):
@@ -46,10 +49,13 @@ def test_envconfig_migrates_legacy_file(tmp_path):
 def test_envconfig_load_missing_and_invalid(tmp_path):
     assert EnvConfig.load(tmp_path / "nope.json") is None
 
+    # A damaged config is refused, never read as missing (defaults would steer every phase).
     bad = tmp_path / "bad.json"
     bad.write_text("{ not json", encoding="utf-8")
-    assert EnvConfig.load(bad) is None
+    with pytest.raises(StateFileError, match="is damaged: it is not JSON"):
+        EnvConfig.load(bad)
 
     invalid_tool = tmp_path / "invalid.json"
     invalid_tool.write_text(json.dumps({"selected_tool": "pixi"}), encoding="utf-8")
-    assert EnvConfig.load(invalid_tool) is None
+    with pytest.raises(StateFileError, match="is damaged: selected_tool: "):
+        EnvConfig.load(invalid_tool)

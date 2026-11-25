@@ -1,0 +1,809 @@
+{
+ "meta": {
+  "pymolt": ".venv/bin/pymolt",
+  "pymolt_version": "27e0790+dirty",
+  "started": "2026-11-15T21:09:39+00:00",
+  "parallel": 3,
+  "projects": [
+   "zipline",
+   "vibora",
+   "alphalens",
+   "theano",
+   "lasagne",
+   "hyper"
+  ],
+  "host": "darwin",
+  "total_wall_s": 1634.3
+ },
+ "projects": {
+  "hyper": {
+   "prep": {
+    "outcome": "skipped",
+    "note": "marker present, probe passed",
+    "wall_s": 2.9,
+    "project_wall_s": 247.2
+   },
+   "phases": {
+    "scan": {
+     "outcome": "ok",
+     "wall_s": 10.7,
+     "rc": 0,
+     "numbers": {
+      "roots": 1,
+      "edges": 13,
+      "contacts": 238,
+      "symbols": 72,
+      "deps": 15
+     }
+    },
+    "setup": {
+     "outcome": "ok",
+     "wall_s": 2.4,
+     "rc": 0,
+     "numbers": {
+      "manifest": "requirements-pymolt-eval.txt",
+      "saved": true
+     }
+    },
+    "assess": {
+     "outcome": "ok",
+     "wall_s": 118.1,
+     "rc": 0,
+     "numbers": {
+      "tier": "bronze",
+      "resolved": true,
+      "verdict": "unproven",
+      "packages": 2,
+      "counts": {
+       "unchanged": 5,
+       "upgrade": 2
+      },
+      "manual_zone": 0,
+      "target_manifest": true
+     }
+    },
+    "capture_baseline": {
+     "outcome": "ok",
+     "wall_s": 59.3,
+     "rc": 0,
+     "numbers": {
+      "accepted": true,
+      "events": 1496,
+      "tests_rc": 0,
+      "validity": "valid",
+      "duration_s": 58.095718,
+      "dropped": 0,
+      "red": false,
+      "uncaptured_s": 11.6,
+      "uncaptured_rc": 0,
+      "overhead_x": 5.0
+     }
+    },
+    "target_env": {
+     "outcome": "degraded",
+     "wall_s": 0.6,
+     "rc": 0,
+     "numbers": {
+      "python_exists": true,
+      "optional_step_failed": false,
+      "import_hyper": false
+     }
+    },
+    "plan": {
+     "outcome": "degraded",
+     "wall_s": 9.0,
+     "rc": 0,
+     "numbers": {
+      "files": 0,
+      "rewrite_sites": 0,
+      "deps_moved": 2,
+      "api_deltas": 2,
+      "inconclusive": 2,
+      "need_attention": 0,
+      "fixed": 0,
+      "risks_status": "partial",
+      "baseline_bound": true
+     }
+    },
+    "apply": {
+     "outcome": "ok",
+     "wall_s": 0.8,
+     "rc": 0,
+     "numbers": {
+      "files_changed": 0,
+      "rewrite_sites": null,
+      "noop": true
+     }
+    },
+    "capture_post": {
+     "outcome": "failed",
+     "wall_s": 9.6,
+     "rc": 1,
+     "numbers": {
+      "accepted": false,
+      "events": 0,
+      "tests_rc": 2,
+      "validity": "command-failed",
+      "duration_s": 1.455099,
+      "dropped": 0,
+      "red": false,
+      "reason": "command exited with code 2"
+     }
+    },
+    "verify": {
+     "outcome": "degraded",
+     "wall_s": 8.3,
+     "rc": 4,
+     "numbers": {
+      "verdict": "inconclusive",
+      "static": 0,
+      "confirmed": 0,
+      "blind": 0,
+      "dynamic_only": 0,
+      "trust_pct": 0,
+      "compared": false,
+      "reason": "contract: no post-migration capture yet (only the baseline is recorded)"
+     }
+    }
+   }
+  },
+  "lasagne": {
+   "prep": {
+    "outcome": "skipped",
+    "note": "marker present, probe passed",
+    "wall_s": 14.7,
+    "project_wall_s": 539.4
+   },
+   "phases": {
+    "scan": {
+     "outcome": "ok",
+     "wall_s": 20.7,
+     "rc": 0,
+     "numbers": {
+      "roots": 1,
+      "edges": 18,
+      "contacts": 1703,
+      "symbols": 293,
+      "deps": 8
+     }
+    },
+    "setup": {
+     "outcome": "ok",
+     "wall_s": 2.3,
+     "rc": 0,
+     "numbers": {
+      "manifest": "requirements-pymolt-eval.txt",
+      "saved": true
+     }
+    },
+    "assess": {
+     "outcome": "ok",
+     "wall_s": 110.1,
+     "rc": 0,
+     "numbers": {
+      "tier": "bronze",
+      "resolved": true,
+      "verdict": "unproven",
+      "packages": 2,
+      "counts": {
+       "upgrade": 2,
+       "unchanged": 1
+      },
+      "manual_zone": 0,
+      "target_manifest": true
+     }
+    },
+    "capture_baseline": {
+     "outcome": "ok",
+     "wall_s": 210.7,
+     "rc": 0,
+     "numbers": {
+      "accepted": true,
+      "events": 1961,
+      "tests_rc": 0,
+      "validity": "valid",
+      "duration_s": 209.648975,
+      "dropped": 0,
+      "red": false,
+      "uncaptured_s": 78.7,
+      "uncaptured_rc": 0,
+      "overhead_x": 2.7
+     }
+    },
+    "target_env": {
+     "outcome": "degraded",
+     "wall_s": 0.4,
+     "rc": 0,
+     "numbers": {
+      "python_exists": true,
+      "optional_step_failed": false,
+      "import_lasagne": false
+     }
+    },
+    "plan": {
+     "outcome": "degraded",
+     "wall_s": 15.0,
+     "rc": 0,
+     "numbers": {
+      "files": 0,
+      "rewrite_sites": 0,
+      "deps_moved": 2,
+      "api_deltas": 2,
+      "inconclusive": 2,
+      "need_attention": 1,
+      "fixed": 0,
+      "risks_status": "partial",
+      "baseline_bound": true
+     }
+    },
+    "apply": {
+     "outcome": "ok",
+     "wall_s": 0.5,
+     "rc": 0,
+     "numbers": {
+      "files_changed": 0,
+      "rewrite_sites": null,
+      "noop": true
+     }
+    },
+    "capture_post": {
+     "outcome": "failed",
+     "wall_s": 12.5,
+     "rc": 1,
+     "numbers": {
+      "accepted": false,
+      "events": 0,
+      "tests_rc": 4,
+      "validity": "command-failed",
+      "duration_s": 0.426331,
+      "dropped": 0,
+      "red": false,
+      "reason": "command exited with code 4"
+     }
+    },
+    "verify": {
+     "outcome": "degraded",
+     "wall_s": 12.4,
+     "rc": 4,
+     "numbers": {
+      "verdict": "inconclusive",
+      "static": 132,
+      "confirmed": 0,
+      "blind": 132,
+      "dynamic_only": 9,
+      "trust_pct": 0,
+      "compared": false,
+      "reason": "contract: no post-migration capture yet (only the baseline is recorded)"
+     }
+    }
+   }
+  },
+  "theano": {
+   "prep": {
+    "outcome": "skipped",
+    "note": "marker present, probe passed",
+    "wall_s": 10.1,
+    "project_wall_s": 781.3
+   },
+   "phases": {
+    "scan": {
+     "outcome": "ok",
+     "wall_s": 209.2,
+     "rc": 0,
+     "numbers": {
+      "roots": 2,
+      "edges": 21,
+      "contacts": 7272,
+      "symbols": 871,
+      "deps": 30
+     }
+    },
+    "setup": {
+     "outcome": "ok",
+     "wall_s": 3.2,
+     "rc": 0,
+     "numbers": {
+      "manifest": "requirements.txt",
+      "saved": true
+     }
+    },
+    "assess": {
+     "outcome": "ok",
+     "wall_s": 194.8,
+     "rc": 0,
+     "numbers": {
+      "tier": "bronze",
+      "resolved": true,
+      "verdict": "unproven",
+      "packages": 11,
+      "counts": {
+       "upgrade": 10,
+       "unchanged": 4,
+       "added": 1
+      },
+      "manual_zone": 0,
+      "target_manifest": true
+     }
+    },
+    "capture_baseline": {
+     "outcome": "ok",
+     "wall_s": 90.6,
+     "rc": 0,
+     "numbers": {
+      "accepted": true,
+      "events": 830,
+      "tests_rc": 0,
+      "validity": "valid",
+      "duration_s": 89.54209,
+      "dropped": 0,
+      "red": false,
+      "uncaptured_s": 35.4,
+      "uncaptured_rc": 0,
+      "overhead_x": 2.5
+     }
+    },
+    "target_env": {
+     "outcome": "degraded",
+     "wall_s": 1.4,
+     "rc": 0,
+     "numbers": {
+      "python_exists": true,
+      "optional_step_failed": false,
+      "import_theano": false
+     }
+    },
+    "plan": {
+     "outcome": "degraded",
+     "wall_s": 107.0,
+     "rc": 0,
+     "numbers": {
+      "files": 0,
+      "rewrite_sites": 0,
+      "deps_moved": 11,
+      "api_deltas": 11,
+      "inconclusive": 11,
+      "need_attention": 0,
+      "fixed": 0,
+      "risks_status": "partial",
+      "baseline_bound": true
+     }
+    },
+    "apply": {
+     "outcome": "ok",
+     "wall_s": 0.4,
+     "rc": 0,
+     "numbers": {
+      "files_changed": 0,
+      "rewrite_sites": null,
+      "noop": true
+     }
+    },
+    "capture_post": {
+     "outcome": "failed",
+     "wall_s": 1.2,
+     "rc": 1,
+     "numbers": {
+      "accepted": false,
+      "events": 4,
+      "tests_rc": 2,
+      "validity": "command-failed",
+      "duration_s": 0.822518,
+      "dropped": 0,
+      "red": false,
+      "reason": "command exited with code 2"
+     }
+    },
+    "verify": {
+     "outcome": "degraded",
+     "wall_s": 90.4,
+     "rc": 4,
+     "numbers": {
+      "verdict": "inconclusive",
+      "static": 666,
+      "confirmed": 2,
+      "blind": 664,
+      "dynamic_only": 15,
+      "trust_pct": 1,
+      "compared": false,
+      "reason": "contract: no post-migration capture yet (only the baseline is recorded)"
+     }
+    }
+   }
+  },
+  "alphalens": {
+   "prep": {
+    "outcome": "skipped",
+    "note": "marker present, probe passed",
+    "wall_s": 7.7,
+    "project_wall_s": 913.5
+   },
+   "phases": {
+    "scan": {
+     "outcome": "ok",
+     "wall_s": 3.8,
+     "rc": 0,
+     "numbers": {
+      "roots": 1,
+      "edges": 23,
+      "contacts": 319,
+      "symbols": 109,
+      "deps": 13
+     }
+    },
+    "setup": {
+     "outcome": "ok",
+     "wall_s": 1.6,
+     "rc": 0,
+     "numbers": {
+      "manifest": "requirements-pymolt-eval.txt",
+      "saved": true
+     }
+    },
+    "assess": {
+     "outcome": "ok",
+     "wall_s": 187.9,
+     "rc": 0,
+     "numbers": {
+      "tier": "bronze",
+      "resolved": true,
+      "verdict": "unproven",
+      "packages": 56,
+      "counts": {
+       "added": 14,
+       "removed": 11,
+       "upgrade": 31,
+       "unchanged": 6
+      },
+      "manual_zone": 0,
+      "target_manifest": true
+     }
+    },
+    "capture_baseline": {
+     "outcome": "ok",
+     "wall_s": 453.2,
+     "rc": 0,
+     "numbers": {
+      "accepted": true,
+      "events": 11697,
+      "tests_rc": 0,
+      "validity": "valid",
+      "duration_s": 451.46903,
+      "dropped": 0,
+      "red": false,
+      "uncaptured_s": 66.8,
+      "uncaptured_rc": 0,
+      "overhead_x": 6.8
+     }
+    },
+    "target_env": {
+     "outcome": "ok",
+     "wall_s": 23.2,
+     "rc": 0,
+     "numbers": {
+      "python_exists": true,
+      "optional_step_failed": false,
+      "import_alphalens": true
+     }
+    },
+    "plan": {
+     "outcome": "degraded",
+     "wall_s": 37.5,
+     "rc": 0,
+     "numbers": {
+      "files": 0,
+      "rewrite_sites": 0,
+      "deps_moved": 20,
+      "api_deltas": 31,
+      "inconclusive": 31,
+      "need_attention": 0,
+      "fixed": 0,
+      "risks_status": "partial",
+      "baseline_bound": true
+     }
+    },
+    "apply": {
+     "outcome": "ok",
+     "wall_s": 1.3,
+     "rc": 0,
+     "numbers": {
+      "files_changed": 0,
+      "rewrite_sites": null,
+      "noop": true
+     }
+    },
+    "capture_post": {
+     "outcome": "failed",
+     "wall_s": 17.9,
+     "rc": 1,
+     "numbers": {
+      "accepted": false,
+      "events": 0,
+      "tests_rc": 2,
+      "validity": "command-failed",
+      "duration_s": 10.466765,
+      "dropped": 0,
+      "red": false,
+      "reason": "command exited with code 2"
+     }
+    },
+    "verify": {
+     "outcome": "degraded",
+     "wall_s": 8.4,
+     "rc": 4,
+     "numbers": {
+      "verdict": "inconclusive",
+      "static": 88,
+      "confirmed": 4,
+      "blind": 84,
+      "dynamic_only": 102,
+      "trust_pct": 7,
+      "compared": false,
+      "reason": "contract: no post-migration capture yet (only the baseline is recorded)"
+     }
+    }
+   }
+  },
+  "vibora": {
+   "prep": {
+    "outcome": "ok",
+    "wall_s": 555.9,
+    "project_wall_s": 853.0
+   },
+   "phases": {
+    "scan": {
+     "outcome": "ok",
+     "wall_s": 5.4,
+     "rc": 0,
+     "numbers": {
+      "roots": 1,
+      "edges": 6,
+      "contacts": 16,
+      "symbols": 13,
+      "deps": 8
+     }
+    },
+    "setup": {
+     "outcome": "ok",
+     "wall_s": 1.9,
+     "rc": 0,
+     "numbers": {
+      "manifest": "requirements.txt",
+      "saved": true
+     }
+    },
+    "assess": {
+     "outcome": "ok",
+     "wall_s": 79.6,
+     "rc": 0,
+     "numbers": {
+      "tier": "gold",
+      "resolved": true,
+      "verdict": "resolves",
+      "packages": 0,
+      "counts": {
+       "unchanged": 1
+      },
+      "manual_zone": 0,
+      "target_manifest": true
+     }
+    },
+    "capture_baseline": {
+     "outcome": "failed",
+     "wall_s": 89.0,
+     "rc": 4,
+     "numbers": {
+      "accepted": false,
+      "events": 0,
+      "tests_rc": 0,
+      "validity": "empty",
+      "duration_s": 79.30555,
+      "dropped": 0,
+      "red": false,
+      "uncaptured_s": 34.3,
+      "uncaptured_rc": 0,
+      "overhead_x": 2.3,
+      "reason": "capture produced zero events"
+     }
+    },
+    "target_env": {
+     "outcome": "degraded",
+     "wall_s": 31.2,
+     "rc": 0,
+     "numbers": {
+      "python_exists": true,
+      "optional_step_failed": true,
+      "import_vibora": false
+     }
+    },
+    "plan": {
+     "outcome": "ok",
+     "wall_s": 0.9,
+     "rc": 0,
+     "numbers": {
+      "files": 0,
+      "rewrite_sites": 0,
+      "deps_moved": 0,
+      "api_deltas": 0,
+      "inconclusive": 0,
+      "need_attention": 0,
+      "fixed": 0,
+      "risks_status": null,
+      "baseline_bound": false
+     }
+    },
+    "apply": {
+     "outcome": "failed",
+     "wall_s": 0.8,
+     "rc": 4,
+     "numbers": {
+      "files_changed": null,
+      "rewrite_sites": null,
+      "error": "migration plan needs evidence: a valid baseline capture is required before apply"
+     }
+    },
+    "capture_post": {
+     "outcome": "failed",
+     "wall_s": 9.7,
+     "rc": 1,
+     "numbers": {
+      "accepted": false,
+      "events": 0,
+      "tests_rc": 2,
+      "validity": "command-failed",
+      "duration_s": 1.123122,
+      "dropped": 0,
+      "red": false,
+      "reason": "command exited with code 2"
+     }
+    },
+    "verify": {
+     "outcome": "degraded",
+     "wall_s": 9.6,
+     "rc": 4,
+     "numbers": {
+      "verdict": "inconclusive",
+      "static": 13,
+      "confirmed": 0,
+      "blind": 13,
+      "dynamic_only": 0,
+      "trust_pct": 0,
+      "compared": false,
+      "reason": "contract: no current trace is available"
+     }
+    }
+   }
+  },
+  "zipline": {
+   "prep": {
+    "outcome": "skipped",
+    "note": "marker present, probe passed",
+    "wall_s": 8.2,
+    "project_wall_s": 1168.4
+   },
+   "phases": {
+    "scan": {
+     "outcome": "ok",
+     "wall_s": 40.8,
+     "rc": 0,
+     "numbers": {
+      "roots": 2,
+      "edges": 269,
+      "contacts": 3917,
+      "symbols": 654,
+      "deps": 45
+     }
+    },
+    "setup": {
+     "outcome": "ok",
+     "wall_s": 1.3,
+     "rc": 0,
+     "numbers": {
+      "manifest": "requirements-pymolt-eval.txt",
+      "saved": true
+     }
+    },
+    "assess": {
+     "outcome": "ok",
+     "wall_s": 332.2,
+     "rc": 0,
+     "numbers": {
+      "tier": "bronze",
+      "resolved": true,
+      "verdict": "unproven",
+      "packages": 64,
+      "counts": {
+       "upgrade": 29,
+       "added": 27,
+       "removed": 8,
+       "unchanged": 12
+      },
+      "manual_zone": 0,
+      "target_manifest": true
+     }
+    },
+    "capture_baseline": {
+     "outcome": "ok",
+     "wall_s": 367.0,
+     "rc": 0,
+     "numbers": {
+      "accepted": true,
+      "events": 50244,
+      "tests_rc": 0,
+      "validity": "valid",
+      "duration_s": 364.570811,
+      "dropped": 0,
+      "red": false,
+      "uncaptured_s": 49.3,
+      "uncaptured_rc": 0,
+      "overhead_x": 7.4
+     }
+    },
+    "target_env": {
+     "outcome": "degraded",
+     "wall_s": 5.9,
+     "rc": 0,
+     "numbers": {
+      "python_exists": true,
+      "optional_step_failed": false,
+      "import_zipline": false
+     }
+    },
+    "plan": {
+     "outcome": "degraded",
+     "wall_s": 138.0,
+     "rc": 0,
+     "numbers": {
+      "files": 1,
+      "rewrite_sites": 1,
+      "deps_moved": 20,
+      "api_deltas": 41,
+      "inconclusive": 41,
+      "need_attention": 4,
+      "fixed": 0,
+      "risks_status": "partial",
+      "baseline_bound": true
+     }
+    },
+    "apply": {
+     "outcome": "ok",
+     "wall_s": 2.0,
+     "rc": 0,
+     "numbers": {
+      "files_changed": 1,
+      "rewrite_sites": null
+     }
+    },
+    "capture_post": {
+     "outcome": "failed",
+     "wall_s": 78.5,
+     "rc": 1,
+     "numbers": {
+      "accepted": false,
+      "events": 0,
+      "tests_rc": 2,
+      "validity": "command-failed",
+      "duration_s": 3.605798,
+      "dropped": 0,
+      "red": false,
+      "reason": "command exited with code 2"
+     }
+    },
+    "verify": {
+     "outcome": "degraded",
+     "wall_s": 82.9,
+     "rc": 4,
+     "numbers": {
+      "verdict": "inconclusive",
+      "static": 550,
+      "confirmed": 6,
+      "blind": 544,
+      "dynamic_only": 150,
+      "trust_pct": 2,
+      "compared": false,
+      "reason": "contract: no post-migration capture yet (only the baseline is recorded)"
+     }
+    }
+   }
+  }
+ }
+}

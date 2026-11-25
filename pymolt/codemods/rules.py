@@ -2,9 +2,8 @@
 pymolt/codemods/rules.py
 
 Structured codemod RULES — the declarative, data-only successor to the flat
-`old → new` CodemodPattern. A rule is pure JSON (it crosses the Axiom Graph
-boundary as data); the *executor* lives here in pymolt and is trusted/versioned
-with the client. No code is ever shipped from the server.
+`old → new` CodemodPattern. A rule is pure JSON (curated in ``pymolt/knowledge``);
+the *executor* lives here, so a rule carries no code.
 
 A rule carries a metavariable `match` pattern and a `rewrite` template (a list of
 statements). The engine binds `$METAVARS` from the match and substitutes them
@@ -110,6 +109,8 @@ class RuleAdvisory(BaseModel):
     `precondition` (applied, but a runtime caveat must be verified)."""
     reason: str
     snippet: str | None = None
+    # The rule that raised it (``recipe_key``), set by ``apply_rules``; None when not known.
+    rule: str | None = None
 
 
 class RuleApplication(BaseModel):
@@ -262,13 +263,6 @@ def _match(pattern, target, binds: dict[str, cst.CSTNode]) -> bool:
 
 def _first_statement(source: str) -> cst.BaseStatement:
     return cst.parse_module(_encode_metavars(source)).body[0]
-
-
-def match_statement(pattern_src: str, node: cst.CSTNode) -> dict[str, cst.CSTNode] | None:
-    """Return metavar bindings if `node` matches the pattern, else None."""
-    pattern = _first_statement(pattern_src)
-    binds: dict[str, cst.CSTNode] = {}
-    return binds if _match(pattern, node, binds) else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

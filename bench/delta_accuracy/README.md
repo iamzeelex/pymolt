@@ -1,0 +1,57 @@
+# Delta accuracy: the local API-change engine against ground truth
+
+How well does PyMolt produce the API-change facts a migration needs, locally and on the
+spot, from the two environments it already builds and scoped to the symbols the project
+touches? This harness measures that for concrete version pairs and writes the evidence to
+`results/`. The latest numbers are in [RESULTS.md](RESULTS.md).
+
+## What it compares
+
+| side | what it is |
+|---|---|
+| **local** | the shipped engine, `pymolt.delta` (`run.py` calls `compute_deltas`; it no longer uses the prototype's own predictor). Its probe runs inside the old and the new interpreter and reports, per touched symbol: existence, owner, signature, bases, `warnings.warn` prose (own body, or the PEP 562 `__getattr__` branch that serves the name), warnings raised on access, and the forwarding target. Old vs new are then diffed. It adds the warnings the baseline run emits (`calls_*.py` in the **old** env only), which is what tier 1's baseline capture records. For symbols that are removed with no local successor hint, an **intermediate fetch** scans PyPI releases between old and new, newest first. It range-requests one module file per wheel (versions only cross the wire) and mines its deprecation prose. |
+| **ground truth** | introspection in both envs, **plus use**: `calls_<pair>.py` exercises each symbol the way the project does (flasgger's argument shapes, the toy app's calls) in both envs. A removal counts only if use also breaks. A behaviour change is any use whose outcome differs. |
+
+Categories scored: `REMOVED`, `SIGNATURE` (parameter removed, kind or default changed, new
+required parameter), `BASES`, `DEPRECATED` (still there but warns), and `BEHAVIOR` (use
+outcome differs). The "use" view keeps only the categories that change what the project's
+code does: `REMOVED`, `DEPRECATED`, `BEHAVIOR`.
+
+Pairs:
+- `flask`: the flasgger fixture's flask/werkzeug contact symbols. These are the static
+  contact map plus the instance methods flasgger calls or overrides (listed in `run.py`).
+  Versions are flask 2.0.3 + werkzeug 2.0.0 (py3.9) → flask 3.0.0 + werkzeug 3.0.0 (py3.12).
+- `pandas`: the e2e toy app's 14 baseline symbols, pandas 1.5.3 (py3.11) → 2.2.3 (py3.12),
+  reusing `bench/e2e_pandas/.envs`.
+
+## Engine
+
+`run.py` runs the shipped `pymolt.delta` engine on a scratch project whose baseline capture carries the symbols and warnings. The recall and precision in RESULTS.md were reproduced with it (pooled recall 0.95, precision 1.00; flask 0.89 / 1.00, pandas 1.00 / 1.00).
+
+## Run
+
+```bash
+python bench/e2e_pandas/run.py setup                  # once, for the pandas envs
+.venv/bin/python bench/delta_accuracy/run.py          # both pairs
+.venv/bin/python bench/delta_accuracy/run.py --pair flask --offline   # no intermediate fetch
+```
+
+- `uv` must be on PATH. The flask envs are built into `.cache/envs/` (gitignored) on the
+  first run. They are ~2 MB of wheels from PyPI and are reused afterwards.
+- The intermediate fetch needs network. Release JSON and fetched module files are cached
+  in `.cache/pypi/`; delete it to measure a cold fetch.
+- Outputs:
+  - `results/<pair>_accuracy.json`: per-unit ground truth and local, plus scores, hints and
+    timing;
+  - `results/<pair>_symbols.json`;
+  - `results/last_run.txt`, if you redirect the run's stdout there.
+
+## Honesty notes
+
+- For the API-level categories, ground truth and the local probe share a mechanism
+  (introspection in the env). The independent evidence is **use**: it refutes or confirms
+  every `REMOVED` claim, and it is the only thing that finds `BEHAVIOR` changes.
+- The local `DEPRECATED` rule counts only unconditional evidence (PEP 562 branch, or a
+  warning on access). A looser variant that counts every body warning naming the symbol is
+  scored too (`local_any_static_warn`). It was added after the pandas run showed that most
+  such warnings are argument-conditional.

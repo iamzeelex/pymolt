@@ -37,8 +37,9 @@ def read(cache_root: Path, namespace: str, key: str, ttl: float) -> Any | None:
 def write(cache_root: Path, namespace: str, key: str, obj: Any) -> None:
     """Persist ``obj`` as JSON (best-effort; never raises)."""
     path = _path(cache_root, namespace, key)
+    from pymolt.state_io import atomic_write_json
+
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(obj), encoding="utf-8")
-    except (OSError, TypeError) as e:
+        atomic_write_json(path, obj, indent=None)
+    except (OSError, TypeError, ValueError) as e:
         logger.debug("Could not write risk cache %s: %s", path, e)

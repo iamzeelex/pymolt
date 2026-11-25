@@ -1,0 +1,216 @@
+{
+ "name": "streamlit",
+ "ecosystem": "data apps",
+ "old": {
+  "python": "3.11",
+  "requirements": [
+   "streamlit==1.28.2",
+   "numpy==1.26.4",
+   "pandas==2.1.4",
+   "pyarrow==14.0.2",
+   "altair==5.1.2",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "streamlit==1.67.0",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "streamlit"
+ ],
+ "target_manifest": [
+  "streamlit==1.67.0"
+ ],
+ "files": {
+  "app/__init__.py": "",
+  "app/data.py": "\"\"\"Sales data and the pure helpers the dashboard uses (no streamlit here).\"\"\"\n\nSALES = [\n    {\"order\": 1, \"region\": \"North\", \"product\": \"mug\", \"amount\": 120.0},\n    {\"order\": 2, \"region\": \"South\", \"product\": \"pen\", \"amount\": 35.5},\n    {\"order\": 3, \"region\": \"North\", \"product\": \"lamp\", \"amount\": 260.0},\n    {\"order\": 4, \"region\": \"East\", \"product\": \"mug\", \"amount\": 80.0},\n    {\"order\": 5, \"region\": \"South\", \"product\": \"desk\", \"amount\": 410.0},\n    {\"order\": 6, \"region\": \"North\", \"product\": \"pen\", \"amount\": 40.0},\n    {\"order\": 7, \"region\": \"East\", \"product\": \"lamp\", \"amount\": 240.0},\n    {\"order\": 8, \"region\": \"South\", \"product\": \"chair\", \"amount\": 200.0},\n]\n\n\ndef make_sales():\n    return [dict(row) for row in SALES]\n\n\ndef regions(rows):\n    return sorted({r[\"region\"] for r in rows})\n\n\ndef filter_sales(rows, region, minimum):\n    return [r for r in rows\n            if (region == \"All\" or r[\"region\"] == region) and r[\"amount\"] >= minimum]\n\n\ndef totals_by_region(rows):\n    out = {}\n    for r in rows:\n        out[r[\"region\"]] = out.get(r[\"region\"], 0.0) + r[\"amount\"]\n    return [{\"region\": k, \"total\": round(v, 2)} for k, v in sorted(out.items())]\n",
+  "app/streamlit_app.py": "import streamlit as st\n\nfrom app import data\n\nst.set_page_config(page_title=\"Sales\", layout=\"wide\")\n\n\n@st.cache(allow_output_mutation=True)\ndef load_sales():\n    return data.make_sales()\n\n\n@st.experimental_memo\ndef region_totals(rows):\n    return data.totals_by_region(rows)\n\n\n@st.experimental_singleton\ndef visit_counter():\n    return {\"visits\": 0}\n\n\ndef share_view():\n    st.experimental_set_query_params(region=st.session_state.region)\n\n\nif \"ready\" not in st.session_state:\n    params = st.experimental_get_query_params()\n    st.session_state.region = params.get(\"region\", [\"All\"])[0]\n    st.session_state.ready = True\n    visit_counter()[\"visits\"] += 1\n    st.experimental_rerun()\n\nsales = load_sales()\nst.title(\"Sales dashboard\")\nst.selectbox(\"Region\", [\"All\"] + data.regions(sales), key=\"region\")\nminimum = st.slider(\"Minimum amount\", 0, 300, 0, step=50)\nview = data.filter_sales(sales, st.session_state.region, minimum)\nst.metric(\"Orders\", len(view))\nst.metric(\"Revenue\", round(sum(r[\"amount\"] for r in view), 2))\nst.table(region_totals(view))\nst.button(\"Share this view\", on_click=share_view)\nst.caption(\"visits: %d\" % visit_counter()[\"visits\"])\n",
+  "tests/conftest.py": "\"\"\"Make AppTest wait for the whole script run, the st.rerun() inside it included.\n\nStreamlit 1.28's AppTest stops waiting at the first SCRIPT_STOPPED_* event. The\napp reruns itself once on its first run, so AppTest can return while that rerun\nis still going and then read the SHUTDOWN event that has not come yet:\nKeyError: 'client_state'. That happens whenever the first run takes longer than\nAppTest's 0.1 s poll (a tracer, a coverage tool or a busy host). Later Streamlit\nwaits for SHUTDOWN and joins the script thread; this does the same on both.\n\"\"\"\nfrom streamlit.testing.v1 import local_script_runner\n\n_require_widgets_deltas = local_script_runner.require_widgets_deltas\n\n\ndef _wait_for_shutdown(runner, timeout=3):\n    _require_widgets_deltas(runner, timeout)\n    runner.join()\n\n\nlocal_script_runner.require_widgets_deltas = _wait_for_shutdown\n",
+  "tests/test_dashboard.py": "from streamlit.testing.v1 import AppTest\n\nfrom app import data\n\nAPP = \"app/streamlit_app.py\"\n\n\ndef start(**query):\n    at = AppTest.from_file(APP, default_timeout=30)\n    for key, value in query.items():\n        at.query_params[key] = value\n    return at.run()\n\n\ndef test_data_helpers():\n    rows = data.make_sales()\n    assert data.regions(rows) == [\"East\", \"North\", \"South\"]\n    north = data.filter_sales(rows, \"North\", 100)\n    assert data.totals_by_region(north) == [{\"region\": \"North\", \"total\": 380.0}]\n\n\ndef test_default_view():\n    at = start()\n    assert not at.exception\n    assert at.title[0].value == \"Sales dashboard\"\n    assert at.selectbox[0].value == \"All\"\n    assert [m.value for m in at.metric] == [\"8\", \"1385.5\"]\n    assert at.caption[0].value.startswith(\"visits: \")\n\n\ndef test_region_from_link():\n    at = start(region=\"North\")\n    assert not at.exception\n    assert at.selectbox[0].value == \"North\"\n    assert [m.value for m in at.metric] == [\"3\", \"420.0\"]\n\n\ndef test_minimum_amount_filter():\n    at = start()\n    at.slider[0].set_value(200).run()\n    assert [m.value for m in at.metric] == [\"4\", \"1110.0\"]\n\n\ndef test_share_view_updates_link():\n    at = start()\n    at.selectbox[0].set_value(\"South\").run()\n    at.button[0].click().run()\n    assert not at.exception\n    assert at.query_params[\"region\"] in (\"South\", [\"South\"])\n    assert [m.value for m in at.metric] == [\"3\", \"645.5\"]\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/streamlit_app.py",
+   "old": "@st.cache(allow_output_mutation=True)",
+   "new": "@st.cache_resource",
+   "if_present": true
+  },
+  {
+   "file": "app/streamlit_app.py",
+   "old": "@st.experimental_memo",
+   "new": "@st.cache_data",
+   "if_present": true
+  },
+  {
+   "file": "app/streamlit_app.py",
+   "old": "@st.experimental_singleton",
+   "new": "@st.cache_resource",
+   "if_present": true
+  },
+  {
+   "file": "app/streamlit_app.py",
+   "old": "    st.experimental_set_query_params(region=st.session_state.region)",
+   "new": "    st.query_params[\"region\"] = st.session_state.region"
+  },
+  {
+   "file": "app/streamlit_app.py",
+   "old": "    params = st.experimental_get_query_params()\n    st.session_state.region = params.get(\"region\", [\"All\"])[0]\n",
+   "new": "    st.session_state.region = st.query_params.get(\"region\", \"All\")\n"
+  },
+  {
+   "file": "app/streamlit_app.py",
+   "old": "st.experimental_rerun()",
+   "new": "st.rerun()",
+   "if_present": true
+  },
+  {
+   "file": "tests/test_dashboard.py",
+   "old": "from streamlit.testing.v1 import AppTest\n\nfrom app import data\n\nAPP = \"app/streamlit_app.py\"\n",
+   "new": "from pathlib import Path\n\nfrom streamlit.testing.v1 import AppTest\n\nfrom app import data\n\nAPP = str(Path(__file__).resolve().parent.parent / \"app\" / \"streamlit_app.py\")\n"
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "app/streamlit_app.py",
+     "append": "\n\ndef api_key():\n    try:\n        if \"SALES_API_KEY\" in st.secrets:\n            return st.secrets[\"SALES_API_KEY\"]\n        return \"\"\n    except FileNotFoundError as exc:  # no secrets.toml on a developer machine\n        return \"none (%s)\" % type(exc).__name__\n\n\nst.caption(\"api key: %s\" % api_key())\n"
+    },
+    {
+     "file": "tests/test_dashboard.py",
+     "append": "\n\ndef test_runs_without_secrets():\n    at = start()\n    assert not at.exception\n    assert any(c.value.startswith(\"api key: \") for c in at.caption)\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "streamlit.runtime.secrets.Secrets.__contains__"
+   ],
+   "behaviour": "With no secrets.toml, `\"KEY\" in st.secrets` raises FileNotFoundError ('No secrets files found...') on 1.28.2 and StreamlitSecretNotFoundError (a FileNotFoundError subclass, another message) on 1.67.0. The app catches FileNotFoundError, so the caption reads 'api key: none (FileNotFoundError)' vs 'none (StreamlitSecretNotFoundError)'; the test only checks the prefix. Depends on the host having no ~/.streamlit/secrets.toml."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "streamlit.cache",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/streamlit_app.py:8",
+   "breaks": "AttributeError: module 'streamlit' has no attribute 'cache'. st.cache has been removed. Use st.cache_data or st.cache_resource instead.",
+   "successor": "streamlit.cache_resource",
+   "fixable": "manual",
+   "source": "Streamlit 1.18 (deprecated) and the 2024 removal of the legacy cache; allow_output_mutation=True maps to st.cache_resource",
+   "verified": {
+    "old": "1.28.2: streamlit.runtime.legacy_caching.caching.cache; works; the deprecation is an st.warning element in the app plus a log line, not a Python warning",
+    "new": "1.67.0: module __getattr__ raises the AttributeError above (the message names both successors)"
+   }
+  },
+  {
+   "symbol": "streamlit.experimental_memo",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/streamlit_app.py:13",
+   "breaks": "AttributeError: module 'streamlit' has no attribute 'experimental_memo'. st.experimental_memo has been removed. Use st.cache_data instead.",
+   "successor": "streamlit.cache_data",
+   "fixable": "codemod",
+   "source": "Streamlit 1.18 (renamed to st.cache_data), removed later",
+   "verified": {
+    "old": "1.28.2: a separate CacheDataAPI instance (`st.experimental_memo is st.cache_data` -> False) that shows an st.warning deprecation element; same caching behaviour",
+    "new": "1.67.0: AttributeError naming st.cache_data"
+   }
+  },
+  {
+   "symbol": "streamlit.experimental_singleton",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/streamlit_app.py:18",
+   "breaks": "AttributeError: module 'streamlit' has no attribute 'experimental_singleton'. st.experimental_singleton has been removed. Use st.cache_resource instead.",
+   "successor": "streamlit.cache_resource",
+   "fixable": "codemod",
+   "source": "Streamlit 1.18 (renamed to st.cache_resource), removed later",
+   "verified": {
+    "old": "1.28.2: a separate CacheResourceAPI instance (`is st.cache_resource` -> False), st.warning deprecation element",
+    "new": "1.67.0: AttributeError naming st.cache_resource"
+   }
+  },
+  {
+   "symbol": "streamlit.experimental_set_query_params",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/streamlit_app.py:24",
+   "breaks": "AttributeError: module 'streamlit' has no attribute 'experimental_set_query_params'. st.experimental_set_query_params has been removed. Use st.query_params instead.",
+   "successor": "streamlit.query_params",
+   "fixable": "manual",
+   "source": "Streamlit 1.30 (st.query_params), experimental API removed later",
+   "verified": {
+    "old": "1.28.2: st.experimental_set_query_params(region=...) works, no warning; AppTest.query_params then holds {'region': ['South']}",
+    "new": "1.67.0: AttributeError; st.query_params['region'] = ... (a dict-like proxy with str values, not a function)"
+   }
+  },
+  {
+   "symbol": "streamlit.experimental_get_query_params",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/streamlit_app.py:28",
+   "breaks": "AttributeError: module 'streamlit' has no attribute 'experimental_get_query_params'. st.experimental_get_query_params has been removed. Use st.query_params instead.",
+   "successor": "streamlit.query_params",
+   "fixable": "manual",
+   "source": "Streamlit 1.30 (st.query_params)",
+   "verified": {
+    "old": "1.28.2: returns {'region': ['North']} (lists of str)",
+    "new": "1.67.0: AttributeError; st.query_params.get('region', 'All') returns 'North' (a str, so the [0] indexing goes too)"
+   }
+  },
+  {
+   "symbol": "streamlit.experimental_rerun",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/streamlit_app.py:32",
+   "breaks": "AttributeError: module 'streamlit' has no attribute 'experimental_rerun'. st.experimental_rerun has been removed. Use st.rerun instead.",
+   "successor": "streamlit.rerun",
+   "fixable": "codemod",
+   "source": "Streamlit 1.27 (st.rerun; 'experimental_rerun will be removed after 2024-04-01')",
+   "verified": {
+    "old": "1.28.2: a separate function from st.rerun (not the same object); logs 'Please replace st.experimental_rerun with st.rerun' (no Python warning)",
+    "new": "1.67.0: AttributeError naming st.rerun"
+   }
+  },
+  {
+   "symbol": "streamlit.testing.v1.AppTest.from_file",
+   "kind": "BEHAVIOR",
+   "param": "script_path",
+   "site": "tests/test_dashboard.py:9",
+   "breaks": "FileNotFoundError: AppTest script not found at <project>/tests/app/streamlit_app.py. Relative paths are resolved against the file that calls AppTest.from_file",
+   "successor": "an absolute path (Path(__file__).parent...)",
+   "fixable": "manual",
+   "source": "Streamlit AppTest changelog (relative script paths resolve against the calling file)",
+   "verified": {
+    "old": "1.28.2: AppTest.from_file('app/streamlit_app.py') resolves against the working directory",
+    "new": "1.67.0: resolves against tests/ and raises; an absolute path works on both"
+   }
+  },
+  {
+   "symbol": "streamlit.runtime.secrets.Secrets.__contains__",
+   "kind": "BEHAVIOR",
+   "param": null,
+   "site": "app/streamlit_app.py:48",
+   "scenario": "change",
+   "breaks": "Only the change scenario: with no secrets.toml, `KEY in st.secrets` raises FileNotFoundError on 1.28.2 and StreamlitSecretNotFoundError (FileNotFoundError subclass) on 1.67.0",
+   "successor": null,
+   "fixable": "manual",
+   "source": "Streamlit 1.4x secrets errors (StreamlitSecretNotFoundError)",
+   "verified": {
+    "old": "caption 'api key: none (FileNotFoundError)'",
+    "new": "caption 'api key: none (StreamlitSecretNotFoundError)'"
+   }
+  }
+ ],
+ "expected_warnings": [],
+ "notes": "Streamlit 1.28.2 on 3.11 (the first releases with streamlit.testing.v1.AppTest; numpy 1.26.4, pandas 2.1.4, pyarrow 14.0.2, altair 5.1.2 pinned as a 2023 lock file would) -> 1.67.0 on 3.12 (pulls pandas 3, numpy 2, pyarrow 26). The app keeps its data in plain lists of dicts so pandas 2 -> 3 does not leak into the comparison; streamlit converts them internally for st.table. Tests drive the script with AppTest (the script runs in a ScriptRunner thread, by exec of its compiled code), plus one plain-function test. Old side emits NO Python warning for any of the removed APIs: Streamlit reports its deprecations as st.warning elements inside the app and as log lines (st.cache, experimental_memo/singleton, experimental_rerun), so expected_warnings is empty; the only Python warnings are 'invalid escape sequence' DeprecationWarnings from compiling streamlit's own docstrings. New side: every removed st.* name raises AttributeError from streamlit's module __getattr__ with a message that names the successor. experimental_rerun is guarded by session_state (one rerun on the first run): AppTest 1.28 recurses forever when a clicked button reruns. AppTest itself changed: relative script paths now resolve against the calling test file (a test-code break), and AppTest.query_params values are str instead of lists (the test accepts both). The change scenario depends on the host having no ~/.streamlit/secrets.toml. tests/conftest.py makes AppTest wait for the script thread, as Streamlit does from a later release on: 1.28's AppTest returns at the first SCRIPT_STOPPED_* event, so after the app's one rerun it can read the SHUTDOWN event before it is sent (KeyError: 'client_state') whenever the first run outlasts its 0.1 s poll. A capture slows that run past the poll (about 35 ms uncaptured, 140 ms captured), and so does any pure-Python profiler; without the conftest the old-side baseline capture failed test_default_view in 18 of 80 runs (0 of 12 one at a time, 14 of 24 two at a time), and 0 of 68 with it."
+}

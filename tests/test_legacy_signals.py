@@ -8,8 +8,9 @@ the information and threw it away, or asserted a guess as a fact.
 from __future__ import annotations
 
 from pymolt.core.legacy_stdlib import describe, is_py2_stdlib, py3_replacement
+from pymolt.ingestion.detect import pick_default_source as _pick_default_manifest
 from pymolt.inventory.edges import build_inventory
-from pymolt.setup.service import _pick_default_manifest, gather_setup_options
+from pymolt.setup.service import gather_setup_options
 
 # ── Python-2 stdlib is evidence, not a dependency ─────────────────────────────
 
@@ -44,6 +45,43 @@ class TestPy2Stdlib:
         assert "flask" in cmap.by_dep                # the real one still counts
         assert any("not been ported to Python 3" in n for n in cmap.notes)
 
+    def test_a_fallback_import_is_not_evidence_of_unported_code(self, tmp_path):
+        """flasgger and pyfolio import httplib/urllib2 only in ``except ImportError``
+        fallbacks: Python-3 code, which the note called "not ported to Python 3 yet"."""
+        from pymolt.verify.contact_map import build_contact_map
+
+        (tmp_path / "compat.py").write_text(
+            "import sys\n"
+            "try:\n    from urllib.request import urlopen\n"
+            "except ImportError:\n    from urllib2 import urlopen\n"
+            "try:\n    import httplib\nexcept ImportError:\n    import http.client as httplib\n"
+            "if sys.version_info[0] == 2:\n    import cPickle as pickle\n"
+            "def get(url):\n    return urlopen(url)\n",
+            encoding="utf-8",
+        )
+
+        notes = build_contact_map(tmp_path).notes
+
+        assert not any("not been ported" in n for n in notes), notes
+        fallback = [n for n in notes if "only as a fallback (3)" in n]
+        assert len(fallback) == 1 and "not dependencies" in fallback[0]
+
+    def test_one_unguarded_import_is_enough_for_the_claim(self, tmp_path):
+        from pymolt.verify.contact_map import build_contact_map
+
+        (tmp_path / "a.py").write_text(
+            "try:\n    import urllib2\nexcept ImportError:\n    urllib2 = None\n",
+            encoding="utf-8")
+        (tmp_path / "b.py").write_text("import urllib2\nimport httplib\n", encoding="utf-8")
+        (tmp_path / "c.py").write_text(
+            "try:\n    import cPickle\nexcept ImportError:\n    import pickle as cPickle\n",
+            encoding="utf-8")
+
+        notes = build_contact_map(tmp_path).notes
+
+        assert any("imported (2)" in n and "not been ported" in n for n in notes), notes
+        assert any("only as a fallback (1)" in n for n in notes), notes
+
 
 # ── a VCS dependency has a name, and git:// no longer works ───────────────────
 
@@ -76,10 +114,11 @@ class TestVcsEdges:
 # ── which manifest is "the project"? ──────────────────────────────────────────
 
 class _Src:
-    def __init__(self, name, is_lock=False):
+    def __init__(self, name, is_lock=False, subroot=False):
         from pathlib import Path
         self.path = Path(name)
         self.is_lock = is_lock
+        self.subroot = subroot
 
 
 class TestManifestRanking:
@@ -103,8 +142,9 @@ class TestManifestRanking:
         assert picked.path.name == "uv.lock"
 
     def test_setup_py_is_a_last_resort(self):
-        # pymolt does not classify setup.py's edges yet, so it must not be the
-        # assumed source of truth when a real manifest is present.
+        # setup.py's requirements are read statically and can be computed (not
+        # read at all), so it is not the assumed source of truth when a real
+        # manifest is present.
         assert self._pick("setup.py", "requirements-strict.txt") == "requirements-strict.txt"
         assert self._pick("setup.py", "setup.cfg") == "setup.py"   # nothing better
 

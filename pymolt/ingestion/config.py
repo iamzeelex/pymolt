@@ -6,16 +6,20 @@ missing keys, silent dropping of unknown keys (forward/backward migration), and
 a ``schema_version`` so future changes can be migrated deliberately.
 """
 
-import json
 import logging
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+from pymolt.adapters.python_runner import RunnerSpec
+from pymolt.state_io import atomic_write_json, load_state, rebuild_remedy
 
 logger = logging.getLogger(__name__)
 
 CONFIG_SCHEMA_VERSION = 1
+CONFIG_KIND = "setup choices"
+CONFIG_REMEDY = rebuild_remedy("run `pymolt setup .` to choose again")
 
 
 class ToolChoice(str, Enum):
@@ -50,6 +54,9 @@ class EnvConfig(BaseModel):
     # ("unknown") so configs written before this field still load.
     base_python_source: str | None = None
     container_id: str | None = None
+    # How to reach the container's interpreter again (name, mounts, platform); filled by
+    # `setup --container`. None on configs written before it existed, or for non-container tools.
+    runner: RunnerSpec | None = None
     # Chosen interpreter for the `system` toolset (path or version); None = auto-detect.
     system_python: str | None = None
     target_python: str | None = None
@@ -81,27 +88,13 @@ class EnvConfig(BaseModel):
 
     @classmethod
     def load(cls, path: Path) -> "EnvConfig | None":
-        """Read and validate the config file.
-
-        Returns ``None`` when the file is missing or its contents are unreadable/
-        invalid (the caller decides how to degrade); never raises.
-        """
-        if not path.is_file():
-            return None
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not read env config %s: %s", path, e)
-            return None
-        try:
-            return cls.model_validate(raw)
-        except ValidationError as e:
-            logger.warning("env config %s failed validation, ignoring: %s", path, e)
-            return None
+        """Read and validate the config file: None when it is missing. A damaged file, or
+        one written by a newer pymolt, raises ``StateFileError`` (``pymolt.state_io``): every
+        later phase resolves against these choices, so defaults would steer it silently."""
+        return load_state(path, cls, kind=CONFIG_KIND, newest=CONFIG_SCHEMA_VERSION,
+                          remedy=CONFIG_REMEDY)
 
     def save(self, path: Path) -> None:
-        """Write the config as JSON (creating the parent directory if needed)."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.model_dump(mode="json"), f, indent=2)
+        """Write the config as JSON, atomically (creating the parent directory if needed). A
+        caller that read the config to change it holds ``state_lock`` around both."""
+        atomic_write_json(path, self.model_dump(mode="json"))

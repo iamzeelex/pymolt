@@ -103,6 +103,68 @@ class TestConfigModelIsTheLastLineOfDefence:
         assert EnvConfig(target_python="").target_python == ""
 
     def test_a_corrupt_file_on_disk_does_not_load(self, tmp_path):
+        from pymolt.state_io import StateFileError
+
         path = tmp_path / "env_config.json"
         path.write_text(json.dumps({"base_python": "q"}), encoding="utf-8")
-        assert EnvConfig.load(path) is None
+        with pytest.raises(StateFileError, match="is not a Python version"):
+            EnvConfig.load(path)
+
+
+class TestOptions:
+    """Every choice can be given up front, so setup runs without a terminal (CI, agents)."""
+
+    @pytest.fixture
+    def headless(self, tmp_path, monkeypatch):
+        import sys
+
+        (tmp_path / "requirements.txt").write_text("flask==2.0.3\n", encoding="utf-8")
+        (tmp_path / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+        return tmp_path
+
+    def test_given_values_are_saved_as_given(self, headless):
+        result = runner.invoke(app, [
+            "setup", str(headless), "--manifest", "requirements-dev.txt", "--tool", "system",
+            "--base-python", "3.8", "--target-python", "3.12", "--target-env", ".venv-target",
+        ])
+
+        assert result.exit_code == 0, result.output
+        saved = _saved(headless)
+        assert saved["selected_manifest"] == "requirements-dev.txt"
+        assert saved["selected_tool"] == "system"
+        assert saved["base_python"] == "3.8"
+        assert saved["target_python"] == "3.12"
+        assert saved["target_env_path"] == ".venv-target"
+        assert "Detected defaults" not in result.output
+
+    def test_values_not_given_are_named_as_defaults(self, headless):
+        result = runner.invoke(app, ["setup", str(headless), "--target-python", "3.12"])
+
+        assert result.exit_code == 0, result.output
+        assert "Detected defaults used for: manifest, tool, base Python." in result.output
+        assert _saved(headless)["target_python"] == "3.12"
+
+    @pytest.mark.parametrize("argv, message", [
+        (["--manifest", "nope.txt"], "unknown manifest"),
+        (["--base-python", "q"], "not a Python version"),
+        (["--target-python", "latest"], "not a Python version"),
+        (["--tool", "container"], "container"),
+    ])
+    def test_a_value_pymolt_cannot_act_on_is_refused(self, headless, argv, message):
+        result = runner.invoke(app, ["setup", str(headless), *argv])
+
+        assert result.exit_code == 2
+        assert message in result.output
+        assert not (headless / ".pymolt" / "env_config.json").exists()
+
+    def test_given_values_are_not_asked_for_in_a_terminal(self, project):
+        result = runner.invoke(app, [
+            "setup", str(project), "--manifest", "requirements.txt", "--tool", "system",
+            "--base-python", "3.8", "--target-python", "3.12",
+        ], input="")
+
+        assert result.exit_code == 0, result.output
+        assert _saved(project)["selected_manifest"] == "requirements.txt"
+        assert _saved(project)["target_env_path"] is None
+

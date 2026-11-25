@@ -106,7 +106,7 @@ case "$installer" in
   uv)
     ensure_uv
     step "Installing $SPEC via uv"
-    uv tool install --upgrade "$SPEC"
+    uv tool install --upgrade --python 3.12 "$SPEC"
     BIN_HINT="$(uv tool dir 2>/dev/null || echo "$HOME/.local/bin")"
     ;;
   pipx)

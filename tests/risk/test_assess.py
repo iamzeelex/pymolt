@@ -100,3 +100,45 @@ def test_assess_risk_skips_unpinned(tmp_path, monkeypatch):
     report = assess_risk(g, g, "3.12", tmp_path)
     assert report.skipped == 1
     assert "unpinned" in report.packages[0].reasons[0]
+
+
+def test_an_unresolved_target_is_not_rated_with_the_base_pins(tmp_path, monkeypatch):
+    """QA I8, zipline: with no target, `--risk` printed numpy 1.19.1 "no binary wheel for
+    target Python" and pillow 7.2.0's CVEs under "Target" — the base pins, not a target."""
+    asked = []
+    monkeypatch.setattr(osv_mod, "query_vulns", lambda *a: asked.append(a) or [])
+    monkeypatch.setattr(pypi_mod, "fetch_release_json", lambda *a: asked.append(a) or {})
+    monkeypatch.setattr(pypi_mod, "fetch_package_json", lambda *a: asked.append(a) or {})
+
+    report = assess_risk(_graph([_node("numpy", "1.19.1")]), None, "3.12", tmp_path)
+
+    assert report.packages == [] and asked == []
+    assert "the target did not resolve" in report.not_rated
+
+
+def test_a_package_the_target_drops_is_not_rated_at_its_base_pin(tmp_path, monkeypatch):
+    monkeypatch.setattr(osv_mod, "query_vulns", _fake_osv)
+    monkeypatch.setattr(pypi_mod, "fetch_release_json", _fake_release)
+    monkeypatch.setattr(pypi_mod, "fetch_package_json", _fake_package)
+
+    report = assess_risk(_graph([_node("vulnlib", "1.0")]), _graph([]), "3.12", tmp_path)
+
+    (risk,) = report.packages
+    assert risk.target_version is None and risk.open_cves == []
+    assert risk.reasons == ["not in the target — not assessed"]
+    assert report.skipped == 1
+
+
+def test_the_agent_view_says_risk_was_not_rated(tmp_path):
+    from pymolt.assess.service import AssessResult
+    from pymolt.interfaces import views
+    from pymolt.risk.models import RiskReport
+
+    result = AssessResult(project_dir=str(tmp_path), source_manifest="requirements.txt",
+                          target_python="3.12", target_error="No solution found",
+                          risk=RiskReport(not_rated="the target did not resolve"))
+
+    view = views.assess_view(result, tmp_path, risk_requested=True)
+
+    assert view["data"]["risk"]["not_rated"] == "the target did not resolve"
+    assert "risk not rated: the target did not resolve." in view["data"]["warnings"]

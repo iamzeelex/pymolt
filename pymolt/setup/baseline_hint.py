@@ -31,7 +31,7 @@ CMD ["sleep", "infinity"]
 
 
 class BaselineHint(BaseModel):
-    """How to establish the legacy baseline environment pymolt could not resolve."""
+    """How to build the base environment pymolt could not resolve."""
 
     base_python: str
     reason: str
@@ -49,7 +49,7 @@ def build_baseline_hint(
     proj = Path(project_dir).resolve()
     tag = f"pymolt-legacy-py{base_python}"
     dockerfile = _DOCKERFILE_TEMPLATE.format(base=base_python)
-    rerun = f"pymolt assess {proj} --current-python {base_python} --container {tag}"
+    rerun = f"pymolt assess {proj} --base-python {base_python} --container {tag}"
     commands = [
         f"# 1) save the Dockerfile below as Dockerfile.pymolt-legacy in {proj}",
         f"docker build -f Dockerfile.pymolt-legacy -t {tag} {proj}",

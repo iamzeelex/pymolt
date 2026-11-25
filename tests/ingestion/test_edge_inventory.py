@@ -33,11 +33,11 @@ def test_requirements_edges_and_directives(tmp_path):
     assert by["wheelpkg"].kind == EdgeKind.URL
     # flask extras + marker preserved
     assert by["flask"].extras == ["async"]
-    assert by["flask"].marker is not None
+    assert by["flask"].marker == 'python_version >= "3.8"'      # packaging's canonical spelling
 
-    # editable local edges
+    # both `-e` lines are editable local edges
     locals_ = [e for e in inv.edges if e.kind == EdgeKind.LOCAL]
-    assert any(e.editable for e in locals_)
+    assert sorted((e.raw, e.editable) for e in locals_) == [(".", True), ("../sibling", True)]
 
     # directives captured
     assert "constraints.txt" in inv.constraints

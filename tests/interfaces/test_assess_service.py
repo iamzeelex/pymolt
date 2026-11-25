@@ -46,25 +46,42 @@ def test_build_comparison_rows_classifies_status():
     assert rows["old"]["status"] == "removed"
 
 
-def test_build_comparison_rows_conflict_on_target_error():
+def test_build_comparison_rows_only_culprits_conflict_on_target_error():
+    baseline = _graph({"requests": _node("requests", "2.31.0"), "bcolz": _node("bcolz", "1.2.1")})
+    rows = {r["name"]: r["status"] for r in build_comparison_rows(
+        baseline, None, "3.12", "resolution failed", target_culprits=["bcolz"])}
+    assert rows == {"bcolz": "conflict", "requests": "unresolved"}
+
+
+def test_build_comparison_rows_no_culprits_means_all_unresolved():
     baseline = _graph({"requests": _node("requests", "2.31.0")})
     rows = build_comparison_rows(baseline, None, "3.12", "resolution failed")
-    assert all(r["status"] == "conflict" for r in rows)
+    assert all(r["status"] == "unresolved" for r in rows)
 
 
-def test_resolve_chosen_source_missing_raises():
-    class Src:
-        def __init__(self, name, is_lock=False):
-            self.path = type("P", (), {"name": name})()
-            self.is_lock = is_lock
+def _manifest_and_lock(tmp_path):
+    from pymolt.ingestion.detect import detect_sources
 
-    sources = [Src("requirements.txt"), Src("uv.lock", is_lock=True)]
-    # Named -> exact match.
-    assert resolve_chosen_source(sources, "requirements.txt").path.name == "requirements.txt"
-    # Default -> first lock.
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / "uv.lock").write_text('version = 1\n[[package]]\nname = "flask"\nversion = "1.0"\n')
+    return detect_sources(tmp_path)
+
+
+def test_resolve_chosen_source_takes_the_named_manifest(tmp_path):
+    sources = _manifest_and_lock(tmp_path)
+    chosen = resolve_chosen_source(sources, "requirements.txt", tmp_path)
+    assert chosen.path.name == "requirements.txt"
+
+
+def test_resolve_chosen_source_defaults_to_the_lock(tmp_path):
+    sources = _manifest_and_lock(tmp_path)
     assert resolve_chosen_source(sources, None).path.name == "uv.lock"
-    with pytest.raises(ValueError):
-        resolve_chosen_source(sources, "nope.txt")
+
+
+def test_resolve_chosen_source_missing_raises(tmp_path):
+    sources = _manifest_and_lock(tmp_path)
+    with pytest.raises(ValueError, match="Manifest 'nope.txt' not found"):
+        resolve_chosen_source(sources, "nope.txt", tmp_path)
 
 
 def test_run_assess_resolves_and_compares(tmp_path):
@@ -84,3 +101,19 @@ def test_run_assess_resolves_and_compares(tmp_path):
     assert result.target_python == "3.12"
     assert result.counts_by_status().get("upgrade") == 1
     assert orch.call_count == 2  # baseline + target
+
+
+def test_assess_picks_a_manifest_in_a_subroot(tmp_path):
+    """B4: setup saves ``etc/requirements_x.txt``; assess must find it, not 'not found'."""
+    from pymolt.assess.service import resolve_chosen_source
+    from pymolt.ingestion.detect import detect_sources
+
+    (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+    (tmp_path / "requirements.txt").write_text("flask\n")
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "requirements_x.txt").write_text("flask==1.0\n")
+
+    sources = detect_sources(tmp_path, include_subroots=True)
+    chosen = resolve_chosen_source(sources, "etc/requirements_x.txt", tmp_path)
+
+    assert chosen.path.resolve() == (tmp_path / "etc" / "requirements_x.txt").resolve()

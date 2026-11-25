@@ -179,7 +179,8 @@ class TestAdvisorySurfacing:
         assert result.changes == []
         assert len(result.advisories_by_file) == 1
         advisories = next(iter(result.advisories_by_file.values()))
-        assert advisories[0].severity in ("not-applied", "precondition")
+        # not rewritten, so advised: never the caveat of a site that was applied
+        assert [(a.severity, a.site_kind) for a in advisories] == [("not-applied", "return")]
 
     def test_runtime_precondition_applies_with_caveat_advisory(self, tmp_path):
         (tmp_path / "app.py").write_text("vals = df.lookup(rows, cols)\n")
@@ -211,3 +212,33 @@ class TestPreviewRulesRepo:
     def test_untouched_file_yields_no_preview(self, tmp_path):
         (tmp_path / "app.py").write_text("y = 1 + 2\n")
         assert preview_rules_repo(tmp_path, [LOOKUP_RULE]) == []
+
+
+class TestBlockedRewrites:
+    """A rule that matches but is not verified is never adopted: the preview says where."""
+
+    def test_preview_records_the_blocked_match_and_its_lines(self, tmp_path):
+        (tmp_path / "app.py").write_text("import pandas\nvals = df.lookup(rows, cols)\n")
+        heuristic = LOOKUP_RULE.model_copy(update={"confidence": "heuristic"})
+
+        previews = preview_rules_repo(tmp_path, [heuristic], verified_only=True)
+
+        assert len(previews) == 1
+        preview = previews[0]
+        assert preview.new_source == preview.old_source and preview.sites == 0
+        assert [(b.rule.match, b.sites, b.lines) for b in preview.blocked] == [
+            (heuristic.match, 1, [2])]
+        assert preview.applied_recipes() == []
+
+    def test_a_verified_rule_beside_it_is_applied_and_only_it_is_a_recipe(self, tmp_path):
+        (tmp_path / "app.py").write_text(
+            "from flask.helpers import safe_join\nvals = df.lookup(rows, cols)\n"
+            "p = safe_join(a, b)\n")
+        heuristic = LOOKUP_RULE.model_copy(update={"confidence": "heuristic"})
+
+        [preview] = preview_mixed_repo(tmp_path, [heuristic, LEGACY_RENAME_RULE], [],
+                                       verified_only=True)
+
+        assert "secure_filename" in preview.new_source and "lookup" in preview.new_source
+        assert [b.rule.match for b in preview.blocked] == [heuristic.match]
+        assert preview.applied_recipes() == [LEGACY_RENAME_RULE]

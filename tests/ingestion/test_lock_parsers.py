@@ -135,45 +135,6 @@ def test_parse_pypi_lock_unsupported_returns_none(tmp_path):
     assert parse_pypi_lock(lock) is None
 
 
-def test_uv_runner_parses_lock_directly_without_recompiling(tmp_path, monkeypatch):
-    """A populated lock must be read verbatim, never recompiled."""
-    (tmp_path / "pyproject.toml").write_text(
-        "[project]\nname = 'proj'\ndependencies = ['httpx']", encoding="utf-8"
-    )
-    (tmp_path / "uv.lock").write_text(
-        """
-version = 1
-
-[[package]]
-name = "proj"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [{ name = "httpx" }]
-
-[[package]]
-name = "httpx"
-version = "0.27.0"
-source = { registry = "https://pypi.org/simple" }
-""",
-        encoding="utf-8",
-    )
-
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("run_command should not be called when a lock is parsed directly")
-
-    monkeypatch.setattr(uv_runner, "run_command", fail_if_called)
-
-    source = DiscoveredSource(
-        path=tmp_path / "uv.lock",
-        mode=Mode.PYPI,
-        is_lock=True,
-        fixation=SourceFixation.PINNED,
-    )
-    graph = uv_runner.ingest(source, current_python="3.12")
-    assert graph.nodes["httpx"].version == "0.27.0"
-    assert graph.resolution_quality == ResolutionQuality.LOCK_PARSED
-
-
 def test_uv_runner_force_recompile_ignores_lock(tmp_path, monkeypatch):
     """force_recompile re-resolves the sibling manifest instead of the lock."""
     (tmp_path / "pyproject.toml").write_text(

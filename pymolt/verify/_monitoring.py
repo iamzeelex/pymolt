@@ -1,0 +1,1916 @@
+"""``sys.monitoring`` (PEP 669) backend, Python 3.12+.
+
+INJECTED RUNTIME — pure stdlib. Imported only on 3.12+, but it ships in the same bundle as the
+3.6 runtime, so it must PARSE on 3.6 (no walrus, no ``match``, no PEP 604 unions, no
+``from __future__ import annotations``).
+
+One tool id, two modes, the same identity / inputs / sampling code path as the setprofile
+backend (``FrameBackend``), so a fact recorded here is identical to one recorded there.
+
+discover (wide)
+    Global ``PY_START`` + ``PY_UNWIND``. ``PY_START`` returns ``DISABLE`` for a code object that
+    is not a dependency (or is a module body), so after warm-up code outside the dependencies
+    costs nothing. For a dependency the caller (near-side) check runs per call, exactly as in
+    setprofile. ``PY_RETURN`` is armed lazily, as a LOCAL event, on a code object the first
+    time a call into it is recorded: returns of dependency code that was never a boundary
+    contact are never delivered.
+
+watch (narrow, long runs)
+    Local ``PY_START`` (+ ``PY_RETURN``) only on the watch-set code objects: the codes recorded
+    during discover plus the impact targets resolved to code objects (functions, every
+    wrapper in a ``__wrapped__`` chain, static/class methods, property accessors, a class's own
+    methods and the constructor that runs). Targets in modules not imported yet resolve on
+    import. ``module.*`` targets use a global ``PY_START`` restricted to the prefix (DISABLE
+    elsewhere).
+
+incremental (3.12+ default for long runs: no discover window)
+    Tool A arms the watch set as the program runs: a global ``CALL`` event whose callback
+    returns ``DISABLE`` at every call site that is not our code (so dependency internals cost
+    one callback per call SITE, ever) and, at a call site in our code, resolves the callable to
+    the Python code that will run (function, bound method, class -> its ``__init__``/``__new__``
+    and a Python metaclass ``__call__``, ``functools.partial``, static/class method, callable
+    instance -> its type's ``__call__``; a C callable's first argument when that is a
+    function, for ``map(dep.f, xs)``). A dependency code is armed once with local
+    ``PY_START``/``PY_RETURN`` and recorded by the same callback as watch mode. A call site
+    that saw the same callee twice is DISABLEd; one that saw two callees (polymorphic) never
+    is. C callables are not recorded (no Python frame), the same as discover.
+    Tool B (a second tool id) owns the calls that never pass a CALL instruction in our code:
+    dependency dunders other than ``__init__``/``__new__``/``__call__`` (``x[k]``, ``for``,
+    ``with``, operators, ``__get__`` descriptors), a metaclass's ``__new__``/``__init__``
+    (class creation), ``property`` accessors, generator-likes
+    (one start per generator, so a generator a dependency created and our code iterates is
+    seen), and ``module.*`` impact prefixes. Its global ``PY_START`` DISABLEs every other code.
+    ``DISABLE`` is per tool, so B never blocks A's lazy local events, and each code object is
+    owned by exactly one tool (one cached classification), so no call is recorded twice.
+    Known recall limits vs discover: a dependency callable invoked by C code with our frame as
+    caller but not passed as the C call's first argument (``sorted(xs, key=dep.f)``, a class
+    in ``map(Dep, xs)``), and a call site that turns polymorphic after it was DISABLEd.
+
+Late contacts (incremental)
+    Tool B fires on every call of a dependency dunder, property or generator, internal ones
+    included, so the controller turns it off once nothing new was armed for a while
+    (``settle``); its contacts are handed over to tool A's local events. A contact that
+    passes no CALL instruction of ours and is first made after that is found through our
+    lines: every code object of ours carries local LINE events (from its module body's first
+    run under B, or from a call of ours that reaches it, nested code objects included), each
+    line DISABLEd at its first run, so a line that ran costs nothing. A line of ours that runs
+    for the first time after the settle turns B on again (``_reopen``) until the controller
+    finds nothing new for ``reopen`` seconds and settles again. Recall limits: a line that ran
+    before and only later reaches a dependency this way (its object changed type), a contact
+    made after the window, and code of ours with no LINE events (imported after the settle
+    through a line that ran before, reached only from dependency code).
+
+Executed lines (discover and incremental)
+    The same LINE events record which lines of ours ran (``executed`` in the sidecar, the
+    host's coverage): discover arms a code object of ours at its first PY_START (DISABLEd at
+    once, as before), incremental arms it as above, module bodies included. Each line costs
+    one callback, at its first run. A code object that gets no LINE events (``_LINE_BIG`` on
+    3.12, the ``_LINED_MAX`` cap, or reached only once it was running) is recorded at function
+    granularity when it starts: its lines are unknown one by one, not "not run". Watch mode sees
+    no code of ours start and records nothing; the discover -> watch switch ends the record.
+
+Receiver-dependent call sites (discover and incremental)
+    Under 3.12 ``d.items()`` is a CALL of the unbound ``dict.items`` with ``d`` as its first
+    argument, and ``m.get(k)`` one of the stdlib ``Mapping.get``: the call is a dependency's
+    only for a receiver whose class is a target class inheriting the callee (FU6), so the
+    callee alone cannot settle the site. Such a site keeps firing while a class of a target
+    module inherits the callee (``_rd_open``: a walk of the callee's class and the classes
+    below it, once per callee); it settles when none does, on our own methods, and on a
+    method no class defines under its code's name (a ``functools.wraps`` wrapper). A closed
+    decision is made again when modules were imported since (checked at a call of ours and
+    when a recorded call completes) and when a call elsewhere shows a target receiver: a
+    builtin method then re-arms the settled sites (``restart_events``), a Python method is
+    armed (its PY_START sees every call). Recall limit: a dependency class made at run time
+    without an import, whose instances reach only a site settled before.
+
+Impact targets (``watch_targets``) are armed in EVERY mode: in discover they are recorded on
+top of the discover target (an impact target outside it would otherwise be invisible until
+the switch).
+
+Cython functions: in every mode the public Cython functions of target modules are wrapped
+(``_wrap.CompiledWrap``, as ``SetProfileBackend`` does), so a Cython call is recorded with its
+inputs and result, the shape a setprofile side records it in, not as a compiled call
+(``arg0``, result unobserved). The wrapper records the call once: its code is in the runtime's
+own module, so its ``PY_START`` and ``CALL`` are DISABLEd, no tool arms it, and an impact
+target that resolves to a wrapper is observed through it, not armed. A Cython callable
+reached without the wrapper (bound before the wrap) is still a compiled call.
+
+``PY_UNWIND`` is global in both modes: CPython does not allow it as a local event, nor can it
+be disabled (returning DISABLE raises into the program and removes the callback). Its
+callback is a dict check when no recorded call is in flight. It carries the exception, so a
+raise is reported with its type (``module.Qualname``, builtins bare: ``TypeError``).
+
+Generators: ``PY_START`` fires once per generator, at its first start (``PY_RESUME`` is not
+subscribed), and the call is emitted there (see ``_backend``). ``PY_YIELD`` is not subscribed:
+a suspension is not an outcome.
+
+The switch (``enter_watch``) never loses or doubles a call: the watch codes get their local
+events while the global ``PY_START`` is still on (a code with both fires once per event), the
+global events are dropped only afterwards, every call in flight is a recorded code (its local
+``PY_RETURN`` stays armed) and ``PY_UNWIND`` never changes. Callbacks run with the GIL; the
+shared state is a few dicts updated atomically, plus a lock taken only the first time a code
+object is recorded.
+
+Object lifetimes: the tracer never keeps the program's objects alive. What a CALL reaches is
+decided once per callable (``_call_kind``), and the call-site and binding-failure state
+remembers a callee; each knows the callable again by ``_identity.held``, a weak reference
+unless its class or module keeps it alive anyway. A builtin method bound to a receiver is
+decided per (receiver class, name), so no entry holds a receiver; a callable that takes no
+weak reference (a method-wrapper) is never known again (its call site does not settle).
+
+Coexistence: another tool (coverage.py, a debugger, cProfile) uses its own tool id; ids are
+tried in the order 4, 3, 2 (PROFILER_ID, cProfile's), 5 and never 0/1 (debugger/coverage).
+``DISABLE`` is per tool. A disabled location stays disabled across ``free_tool_id`` (verified
+3.12-3.14), so re-acquiring an id this process used before calls ``restart_events()`` (it
+re-arms other tools' disabled events once; they disable them again).
+"""
+import functools
+import sys
+import time
+import types
+
+from ._backend import (
+    _C_MUTE_MAX,
+    _C_SITE_MAX,
+    _CODE_CACHE_MAX,
+    _HEAPTYPE,
+    C_RETURN_UNOBSERVED,
+    NO_ARG,
+    OUTCOME_RAISE,
+    OUTCOME_RETURN,
+    UNTYPED_RAISE,
+    FrameBackend,
+    PrefixMatcher,
+    _monotonic,
+    generator_marker,
+    install_warning_capture,
+    is_compiled_callable,
+    never_target,
+    raised_label,
+    remove_warning_capture,
+    same_c_callable,
+)
+from ._identity import _WEAKREF, _wrapped_of, held
+from ._rawthreads import allocate_lock, stack_key
+from ._wrap import _WRAP_MARK, _WRAPPER_CODES, _partition_impact_targets, _WrapFinder
+
+_getframe = sys._getframe
+_modules = sys.modules
+_FUNCTION = types.FunctionType
+_METHOD = types.MethodType
+_CODE = types.CodeType
+_MODULE = types.ModuleType
+_TYPE_DICT = type.__dict__["__dict__"]
+_TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_MODULE = type.__dict__["__module__"]
+_TYPE_SUBCLASSES = type.__dict__["__subclasses__"]
+_MISSING = object()
+# Builtin methods named by a class, called with the receiver as the first argument
+# (``d.items()`` is ``dict.items(d)`` under 3.12), and builtin methods bound to theirs.
+_DESCRIPTORS = (type(str.join), type(object.__init__), type(dict.__dict__["fromkeys"]))
+_BOUND_C = (type(len), type((0).__add__))
+_BUILTIN, _METHOD_WRAPPER = _BOUND_C
+# ``_inherited_call``: no dependency's call with this receiver, but it would be with another
+# one, so the call site must keep firing.
+_KEEP_SITE = object()
+
+TOOL_IDS = (4, 3, 2, 5)
+TOOL_NAME = "pymolt"
+_USED_IDS = set()   # tool ids this process's runtime held before (their DISABLEs persist)
+
+DISCOVER = "discover"
+WATCH = "watch"
+INCREMENTAL = "incremental"
+
+# Reached through a CALL instruction (a class call, a callable instance): tool A arms them.
+_CTOR_NAMES = frozenset(("__init__", "__new__", "__call__"))
+_K_NONE, _K_C, _K_PY = 0, 1, 2     # what a CALL reaches: nothing of ours / compiled / traced Python
+_SITE_STABLE = 2        # same callee this many times at one call site -> DISABLE the site
+_SITES_MAX = 200000
+_BOUND_OBJECTS_MAX = 4096   # bound builtin methods known by object (most are made per call)
+_SETTLE_GRACE = 1.0     # seconds the start de-duplication stays on after tool B is off
+_INHERIT_WALK_MAX = 50000   # classes walked to decide a callee is inherited by none of ours
+REOPEN = 5.0            # post-settle: seconds tool B stays on after a new line (the
+                        # controller times it; the backend only reports it)
+_LINED_MAX = 200000     # code objects of ours given LINE events (past it: not armed, noted)
+# 3.12 delivers a LINE event in time proportional to its code object's size (3.13+ does not):
+# the first run of a code object with LINE events is quadratic in its length there (86 us per
+# line at 32,000 lines). Past this much bytecode a code object of ours gets none on 3.12.
+_LINE_SLOW = sys.version_info < (3, 13)
+_LINE_BIG = 16384       # bytes of bytecode (about 8,000 instructions)
+
+
+def _implicit_name(name):
+    """A dunder run by the interpreter itself (subscript, iteration, ``with``, operators,
+    descriptors), not by a CALL instruction in the caller."""
+    return (len(name) > 4 and name[:2] == "__" and name[-2:] == "__"
+            and name not in _CTOR_NAMES)
+
+
+def _owner_class(code, g):
+    """The class whose namespace defines ``code`` (by ``co_qualname``), or None."""
+    qual = getattr(code, "co_qualname", None)
+    if not qual or "<" in qual or "." not in qual or g is None:
+        return None, None
+    parts = qual.split(".")
+    obj = g.get(parts[0])
+    for part in parts[1:-1]:
+        if not issubclass(type(obj), type):
+            return None, None
+        obj = _TYPE_DICT.__get__(obj, type).get(part)
+    if not issubclass(type(obj), type):
+        return None, None
+    return obj, parts[-1]
+
+
+def _is_meta_ctor(code, g):
+    """``__new__``/``__init__`` of a metaclass: run by class creation (``class X(Base):`` goes
+    through the C ``__build_class__``), not by a CALL to something we can resolve."""
+    if code.co_name not in ("__new__", "__init__"):
+        return False
+    owner, _name = _owner_class(code, g)
+    return owner is not None and issubclass(owner, type)
+
+
+def _is_accessor(code, g):
+    """True if ``code`` is a ``property``'s fget/fset/fdel (run by attribute access)."""
+    obj, name = _owner_class(code, g)
+    if obj is None:
+        return False
+    value = _TYPE_DICT.__get__(obj, type).get(name)
+    if not issubclass(type(value), property):
+        return False
+    for acc in (value.fget, value.fset, value.fdel):
+        for _ in range(8):
+            if acc is None:
+                break
+            if type(acc) is _FUNCTION and acc.__code__ is code:
+                return True
+            acc = _wrapped_of(acc)
+    return False
+
+
+def _mro_value(cls, name):
+    for owner in _TYPE_MRO.__get__(cls, type):
+        value = _TYPE_DICT.__get__(owner, type).get(name, _MISSING)
+        if value is not _MISSING:
+            return value
+    return None
+
+
+def _inherits(cls, name, obj):
+    """True if ``cls`` resolves ``name`` to ``obj``: a builtin method descriptor, or the code
+    of a Python method (also through a static or class method)."""
+    value = _mro_value(cls, name)
+    if value is obj:
+        return True
+    t = type(value)         # never ``isinstance``/``getattr``: a class attribute may be a proxy
+    if issubclass(t, (staticmethod, classmethod)):
+        value = value.__func__
+        t = type(value)
+    return t is _FUNCTION and value.__code__ is obj
+
+
+def _defining_class(recv, name, code):
+    """The class on ``recv``'s MRO (``recv`` itself when it is a class) whose namespace holds
+    ``name`` as ``code``'s function, or None."""
+    t = type(recv)
+    cls = recv if issubclass(t, type) else t
+    for owner in _TYPE_MRO.__get__(cls, type):
+        if _TYPE_DICT.__get__(owner, type).get(name, _MISSING) is not _MISSING:
+            return owner if _inherits(owner, name, code) else None
+    return None
+
+
+def _call_target(obj):
+    """What identifies a call site's callee across calls, cheaply: the function's code, the
+    class or callable type itself, or ``(type, name)`` for a C callable (a bound builtin
+    method is a new object per call). Compared with ``is`` unless it is a tuple."""
+    for _ in range(8):
+        t = type(obj)
+        if t is _FUNCTION:
+            return obj.__code__
+        if t is _METHOD or t is staticmethod or t is classmethod:
+            obj = obj.__func__
+            continue
+        if t is functools.partial:
+            obj = obj.func
+            continue
+        if issubclass(t, type):
+            return obj
+        if type(_mro_value(t, "__call__")) is _FUNCTION:
+            return t
+        return (t, getattr(obj, "__name__", None))
+    return None
+
+
+def _held_target(target):
+    """A ``_call_target`` as a call site keeps it: a class (alone or in a C callable's
+    ``(type, name)``) by ``held``, since a class may be made at run time and dropped again."""
+    t = type(target)
+    if t is tuple:
+        return (held(target[0]), target[1])
+    if issubclass(t, type):
+        return held(target)
+    return target
+
+
+def _same_target(kept, target):
+    """True if ``kept`` (``_held_target``) is the call target ``target``."""
+    if kept is target:
+        return True
+    t = type(kept)
+    if t is _WEAKREF:
+        return kept() is target
+    if t is tuple and type(target) is tuple:
+        k = kept[0]
+        return ((k is target[0] or (type(k) is _WEAKREF and k() is target[0]))
+                and kept[1] == target[1])
+    return False
+
+
+def _frame_of(code):
+    """The frame executing ``code`` that triggered the current callback (``_getframe(1)``
+    unless something wrapped the callback; bounded walk)."""
+    frame = _getframe(2)
+    for _ in range(8):
+        if frame is None or frame.f_code is code:
+            return frame
+        frame = frame.f_back
+    return None
+
+
+# ── impact target -> code objects ────────────────────────────────────────────
+
+def _function_codes(obj, out, seen, depth=0):
+    """Every code object a call through ``obj`` starts in: the function and each function
+    down its ``__wrapped__`` chain (a decorator's wrapper runs first). A pymolt wrapper
+    (``_wrap``: it records its own calls) is skipped: arming its shared code would record
+    the call twice, and every other wrapped callable's calls with it."""
+    for _ in range(16):
+        t = type(obj)
+        if t is _METHOD:
+            obj = obj.__func__
+            continue
+        if t is _FUNCTION and not getattr(obj, _WRAP_MARK, False):
+            code = obj.__code__
+            if id(code) not in seen:
+                seen.add(id(code))
+                out.append(code)
+        elif issubclass(t, (staticmethod, classmethod)):
+            obj = obj.__func__
+            continue
+        elif issubclass(t, property):
+            if depth < 2:
+                for acc in (obj.fget, obj.fset, obj.fdel):
+                    if acc is not None:
+                        _function_codes(acc, out, seen, depth + 1)
+            return
+        elif t is functools.partial:
+            obj = obj.func
+            continue
+        nxt = _wrapped_of(obj)
+        if nxt is None or nxt is obj:
+            return
+        obj = nxt
+
+
+def target_codes(obj):
+    """Code objects to watch for an impact target object (empty: nothing Python-level)."""
+    out = []
+    seen = set()
+    if issubclass(type(obj), type):
+        try:
+            ns = _TYPE_DICT.__get__(obj, type)
+            for value in list(ns.values()):
+                if not issubclass(type(value), type):
+                    _function_codes(value, out, seen)
+            # The constructor that actually runs, possibly inherited from a base.
+            for name in ("__init__", "__new__"):
+                for owner in _TYPE_MRO.__get__(obj, type):
+                    value = _TYPE_DICT.__get__(owner, type).get(name, _MISSING)
+                    if value is not _MISSING:
+                        _function_codes(value, out, seen)
+                        break
+        except Exception:
+            pass
+        return out
+    try:
+        _function_codes(obj, out, seen)
+    except Exception:
+        pass
+    return out
+
+
+def _wrapper_observed(obj):
+    """True if a pymolt wrapper (``_wrap``) records the calls through ``obj``: a wrapped
+    callable, or a class with a wrapped method (a compiled dependency's, ``CompiledWrap``)."""
+    try:
+        if issubclass(type(obj), type):
+            return any(_wrapper_observed(v) for v in list(_TYPE_DICT.__get__(obj, type).values())
+                       if not issubclass(type(v), type))
+        for _ in range(4):
+            t = type(obj)
+            if t is _METHOD or issubclass(t, (staticmethod, classmethod)):
+                obj = obj.__func__
+                continue
+            return t is _FUNCTION and bool(getattr(obj, _WRAP_MARK, False))
+    except Exception:
+        pass
+    return False
+
+
+class _CodeTargets:
+    """Resolve exact impact symbols to code objects, now for loaded modules and on import for
+    the rest (``_wrap._WrapFinder`` calls ``_wrap_module``). Unresolvable targets are recorded
+    in ``skipped`` (honesty marker), never silently dropped."""
+
+    def __init__(self, symbols, on_codes):
+        self._on_codes = on_codes
+        self._by_module = {}        # modname -> [(remainder, full symbol)]
+        self._done = set()
+        self.skipped = []
+        self._skip_seen = set()
+        for sym in (s for s in (symbols or ()) if s):
+            parts = sym.split(".")
+            if len(parts) < 2:
+                self._skip(sym, "no-module")
+                continue
+            for i in range(1, len(parts)):
+                self._by_module.setdefault(".".join(parts[:i]), []).append(
+                    (tuple(parts[i:]), sym))
+
+    @property
+    def modules(self):
+        return set(self._by_module)
+
+    def _skip(self, full, reason):
+        if full not in self._skip_seen:
+            self._skip_seen.add(full)
+            self.skipped.append((full, reason))
+
+    def resolve_loaded(self):
+        for modname in list(self._by_module):
+            module = sys.modules.get(modname)
+            if module is not None:
+                self._wrap_module(modname, module)
+
+    def _wrap_module(self, modname, module):
+        for remainder, full in list(self._by_module.get(modname, ())):
+            if full in self._done:
+                continue
+            obj = module
+            ok = True
+            for part in remainder:
+                try:
+                    obj = getattr(obj, part)
+                except Exception:
+                    ok = False
+                    break
+            if not ok:
+                if len(remainder) == 1:
+                    self._skip(full, "attr-missing")
+                continue                    # a more specific module candidate may resolve
+            self._done.add(full)
+            codes = target_codes(obj)
+            if not codes:
+                if not _wrapper_observed(obj):      # a wrapped Cython callable is observed
+                    self._skip(full, "no-python-code")   # C callable / constant
+                continue
+            self._on_codes(codes, full)
+
+
+def _acquire_tool_id(mon):
+    for tool in TOOL_IDS:
+        try:
+            mon.use_tool_id(tool, TOOL_NAME)
+        except ValueError:
+            continue                        # in use by another tool
+        return tool
+    raise RuntimeError("no free sys.monitoring tool id (tried " + repr(TOOL_IDS) + ")")
+
+
+class MonitoringBackend(FrameBackend):
+    """PEP 669 backend: ``discover`` (global, DISABLE outside dependencies) or ``watch``
+    (local events on the watch set). ``enter_watch`` switches a running discover backend."""
+
+    name = "monitoring"
+
+    def __init__(self, target, sink, exclude=(), source=None, include_internal=False,
+                 mode=DISCOVER, watch_targets=(), reopen=REOPEN):
+        FrameBackend.__init__(self, target, sink, exclude, source, include_internal)
+        self.mode = WATCH if mode == WATCH else DISCOVER
+        self._watch_targets = tuple(watch_targets or ())
+        self._watch_codes = {}      # id(code) -> code
+        self._impact_codes = {}     # id(code) -> code (resolved from impact targets)
+        self._watch_prefix = None   # PrefixMatcher for ``module.*`` impact targets
+        self._local = {}            # id(code) -> (code, local event set we armed)
+        self._local_lock = allocate_lock()
+        self._target_sets = []      # _CodeTargets, one per armed batch of impact targets
+        self._finders = []
+        self._tool = None
+        self._mon = getattr(sys, "monitoring", None)
+        self.switched = False
+        if mode == INCREMENTAL:
+            self.mode = INCREMENTAL
+        # incremental mode
+        self._tool2 = None          # tool B: global PY_START for implicitly-run codes
+        self._sites = {}            # (id(code), offset) -> [code, held callee target, count, poly]
+        self._deps = {}             # id(code) -> (code, is dependency, module) for callees
+        self._ctors = {}            # id(class) -> (held(class), [(code, globals)])
+        self._kinds = {}            # id(code) -> (code, owned by tool B)
+        self._kind_lock = allocate_lock()
+        self._arm_lock = allocate_lock()
+        self._implicit = {}         # tool B's per-code decision entries
+        self.armed = 0              # codes armed by call-site resolution
+        self.last_armed_at = None   # monotonic: last code armed (A) or first recorded (A or B)
+        # What a CALL reaches, decided once (``_call_kind``). No entry keeps the callable alive
+        # (``held``), nor what it holds: a receiver, captured cells, a partial's arguments.
+        # id(callable) -> (held(callable), kind, sym, callee (code, globals) | None, name | None)
+        self._ckinds = {}
+        # (id(receiver class), name) -> (None, kind, sym, None, None, held(class)): the decision
+        # for a bound builtin method, made once per receiver class and name (``_bound_kind``)
+        self._cbound = {}
+        self._cbobj = {}            # id(bound builtin) -> (held, kind, sym, None, None): recent
+        self._csites = {}           # (id(code), offset) -> [code, same-callee count, held callee]
+        self._lastcall = {}         # tid -> (code, offset, callee (code, globals)): last traced
+        self._craise = {}           # tid -> (info, code, offset): raise awaiting its type
+        self._callname = {}         # tid -> (callee code, declared sym): decorator wrappers
+        # Callees whose call is a dependency's for some receivers only (``_inherited_call``):
+        # id(descriptor | code) -> [callee, inherited by a target class, held(owner class), name]
+        self._rd = {}
+        self._rd_closed = {}        # the entries inherited by none, decided again after imports
+        self._rd_token = len(_modules)  # sys.modules size when they were last decided
+        self._keep = {}             # (id(code), offset) -> (code, held callee, held receiver class)
+        self._renames = False
+        self._b_active = True       # tool B owns implicitly-run codes (until settle)
+        self.settled_at = None      # wall time tool B was first paused (or freed)
+        self.settle_reason = None
+        self.handed_over = 0        # tool B codes moved to tool A's local events at settle
+        # Late contacts: LINE events on our code, each line DISABLEd at its first run. After
+        # the settle a line's first run re-opens tool B (``_on_line``) until quiet again.
+        self.reopen = float(reopen or 0.0) if mode == INCREMENTAL else 0.0
+        self._lines_on = self.reopen > 0 and self.near is not None
+        # Executed lines of ours (``_backend.executed_metadata``), in discover and incremental
+        # mode (watch mode sees no code of ours start): the same LINE events, each line
+        # DISABLEd at its first run. Discover arms a code object at its first PY_START,
+        # incremental from its module body's first run under tool B (or a call of ours).
+        self._exec_lines = self.executed and self.mode in (DISCOVER, INCREMENTAL)
+        # id(code) -> [code, set of its lines that ran | None, LINE events armed on it]
+        self._lined = {}
+        self._lined_final = None    # ``_lined`` as ``stop`` left it (the executed record)
+        self.reopened = 0           # times tool B was re-opened after the settle
+        self.reopen_seconds = 0.0   # seconds it was on after the settle
+        self._opened_at = None      # monotonic: when it was last re-opened
+        self._b_reopened = False    # B on again: the codes handed over to A stay A's
+        self.last_fresh_at = None   # monotonic: a line of ours last ran first, post-settle
+        self.compiled_wrap = True   # wrap the Cython functions of dependency modules (see start)
+        self._compiled = None
+
+    # ── lifecycle ──────────────────────────────────────────────────────────────
+    @property
+    def uses_profiling(self):
+        """True while a process-wide event (beyond PY_UNWIND) is armed."""
+        return self.mode in (DISCOVER, INCREMENTAL) or self._watch_prefix is not None
+
+    @property
+    def skipped(self):
+        out = []
+        for targets in self._target_sets:
+            out.extend(targets.skipped)
+        return out
+
+    def start(self):
+        mon = self._mon
+        if mon is None:
+            raise RuntimeError("sys.monitoring is unavailable (Python < 3.12)")
+        tool = _acquire_tool_id(mon)
+        tool2 = None
+        self._lined_final = None
+        self._exec_until = None
+        try:
+            if self.mode == INCREMENTAL:
+                try:
+                    tool2 = _acquire_tool_id(mon)
+                except RuntimeError:
+                    raise RuntimeError("incremental mode needs two free sys.monitoring tool ids")
+            if tool in _USED_IDS or tool2 in _USED_IDS:
+                mon.restart_events()        # our earlier DISABLEs on these ids persist
+            ev = mon.events
+            mon.register_callback(tool, ev.PY_START, self._on_start)
+            mon.register_callback(tool, ev.PY_RETURN, self._on_return)
+            mon.register_callback(tool, ev.PY_UNWIND, self._on_unwind)
+            mon.register_callback(tool, ev.CALL, self._on_call)
+            mon.register_callback(tool, ev.C_RETURN, self._on_c_return)
+            mon.register_callback(tool, ev.C_RAISE, self._on_c_raise)
+            mon.register_callback(tool, ev.RAISE, self._raise_callback())
+            if tool2 is not None:
+                mon.register_callback(tool2, ev.PY_START, self._on_implicit)
+            if self._lines_on or self._exec_lines:
+                mon.register_callback(tool, ev.LINE, self._on_line)
+            self._tool = tool
+            self._tool2 = tool2
+            _USED_IDS.add(tool)
+            if tool2 is not None:
+                _USED_IDS.add(tool2)
+            # Before the impact targets resolve: one that is a Cython callable resolves to
+            # its wrapper (observed), not to a compiled callable with no Python code.
+            self._start_compiled()
+            if self._watch_targets:
+                self._arm_targets(self._watch_targets)
+            self._set_global()
+        except BaseException:
+            self._stop_compiled()
+            self._tool = self._tool2 = None
+            if tool2 is not None:
+                self._release(tool2, local_events=False)
+            self._release(tool)
+            raise
+        install_warning_capture(self)
+
+    def _start_compiled(self):
+        """Wrap the Cython functions of dependency modules, as ``SetProfileBackend`` does, so
+        a Cython call is recorded in the same shape on both sides of a migration: its bound
+        inputs and its result. Natively it is a ``__c_call__`` here (``arg0`` only, result
+        unobserved), and the profile hook below 3.12 does not see it at all. The wrapper
+        records the call once: its own code is never a dependency nor our code, so its
+        ``CALL`` / ``PY_START`` are ``DISABLE``d and its call of the Cython function is not a
+        compiled call from our code. A Cython callable reached without the wrapper (bound
+        before the wrap, a private name, an immutable type) is still a ``__c_call__``."""
+        if not self.compiled_wrap or self._compiled is not None:
+            return
+        compiled = None
+        try:
+            from ._wrap import CompiledWrap
+            compiled = CompiledWrap(self.sink, self.matcher)
+            compiled.near = self.near
+            self._compiled = compiled
+            compiled.start()
+        except Exception:
+            self._stop_compiled()   # never a half-installed wrap: the calls stay compiled calls
+
+    def _stop_compiled(self):
+        compiled, self._compiled = self._compiled, None
+        if compiled is not None:
+            try:
+                compiled.stop()     # restores every wrapped attribute and the loader
+            except Exception:
+                pass
+
+    def stop(self):
+        self._stop_compiled()       # first: the originals are back while the tools still run
+        tool, tool2 = self._tool, self._tool2
+        if tool is None:
+            return
+        self._tool = self._tool2 = None
+        remove_warning_capture(self)
+        if self._opened_at is not None:     # stopped while re-opened: count it
+            self.reopen_seconds += _monotonic() - self._opened_at
+            self._opened_at = None
+        if tool2 is not None:
+            self._release(tool2, local_events=False)
+        self._release(tool)
+        self._lined_final, self._lined = self._lined, {}
+        self._pending.clear()
+        self._cstack.clear()
+        self._lastcall.clear()
+        self._craise.clear()
+        self._callname.clear()
+        self._warned.clear()
+
+    def _release(self, tool, local_events=True):
+        mon = self._mon
+        try:
+            mon.set_events(tool, 0)
+        except Exception:
+            pass
+        local = []
+        if local_events:            # only tool A arms local events
+            with self._local_lock:
+                local = list(self._local.values())
+                self._local = {}
+        for code, _events in local:
+            try:
+                mon.set_local_events(tool, code, 0)
+            except Exception:
+                pass
+        ev = mon.events
+        for event in (ev.PY_START, ev.PY_RETURN, ev.PY_UNWIND, ev.CALL, ev.C_RETURN, ev.C_RAISE,
+                      ev.RAISE, ev.LINE):
+            try:
+                mon.register_callback(tool, event, None)
+            except Exception:
+                pass
+        for finder in self._finders:
+            try:
+                sys.meta_path.remove(finder)
+            except ValueError:
+                pass
+        self._finders = []
+        try:
+            mon.free_tool_id(tool)
+        except Exception:
+            pass
+
+    # ── watch set ──────────────────────────────────────────────────────────────
+    def enter_watch(self, extra_targets=()):
+        """Switch a running discover backend to watch on observed ∪ the impact targets
+        (those given at construction, plus ``extra_targets``).
+
+        Returns False if already watching (idempotent). Safe to call from any thread."""
+        if self._tool is None:
+            return False
+        with self._obs_lock:
+            if self.mode == WATCH:
+                return False
+            self.mode = WATCH       # a code recorded from now on is armed for watch itself
+            codes = list(self.observed.values())
+        # Every observed / impact code joins the watch set BEFORE the decision cache is
+        # dropped, so no concurrent call into one is misjudged as unwatched.
+        for code in codes:
+            self._watch_codes[id(code)] = code
+        if extra_targets:
+            self._arm_targets(extra_targets)
+        self._callee = {}           # watch decisions differ from discover's: rebuilt lazily
+        for code in codes:
+            self._watch_code(code)
+        self._set_global()          # only now: drop the global PY_START (unless prefixes)
+        if self._watch_prefix is None and self._exec_until is None:
+            # Code of ours first run from now on starts unseen: the executed record ends here
+            # (lines of code that started before keep their LINE events).
+            self._exec_until = time.time()
+        self.switched = True
+        return True
+
+    def _set_global(self):
+        ev = self._mon.events
+        # Compiled calls and binding failures (CALL + C_RETURN / C_RAISE + RAISE) are observed
+        # in discover and incremental mode; watch mode keeps its narrow, local-events-only cost.
+        calls = (ev.CALL | ev.C_RETURN | ev.C_RAISE | ev.RAISE
+                 if self.mode in (DISCOVER, INCREMENTAL) else 0)
+        if self.mode == INCREMENTAL:
+            self._mon.set_events(self._tool, ev.PY_UNWIND | calls)
+            self._mon.set_events(self._tool2, ev.PY_START)
+            return
+        start = self.mode == DISCOVER or self._watch_prefix is not None
+        self._mon.set_events(self._tool, (ev.PY_START if start else 0) | ev.PY_UNWIND | calls)
+
+    def _arm_targets(self, targets):
+        symbols, prefixes = _partition_impact_targets(targets)
+        batch = _CodeTargets(symbols, self._watch_resolved)
+        self._target_sets.append(batch)
+        batch.resolve_loaded()
+        modules = batch.modules
+        if modules:
+            finder = _WrapFinder(batch, modules)
+            sys.meta_path.insert(0, finder)
+            self._finders.append(finder)
+        if prefixes:
+            # Only after the exact targets are in the watch set: with a prefix matcher an
+            # unwatched code may be DISABLEd.
+            old = list(self._watch_prefix.prefixes) if self._watch_prefix is not None else []
+            self._watch_prefix = PrefixMatcher(old + list(prefixes), self._exclude)
+
+    def _watch_resolved(self, codes, full):
+        restart = False
+        for code in codes:
+            ent = self._callee.get(id(code))
+            if ent is not None and ent[0] is code and ent[6] is not None:
+                restart = True      # DISABLEd before it was known (outside the target, or
+                                    # called by its module body before the import finished)
+            self._impact_codes[id(code)] = code
+            if self.mode == INCREMENTAL:
+                with self._arm_lock:    # a code of tool B goes to A only while B is off
+                    self._watch_code(code)
+            else:
+                self._watch_code(code)
+        if restart and self._tool is not None:
+            try:
+                self._mon.restart_events()  # a disabled location ignores new local events
+            except Exception:
+                pass
+
+    def _watch_code(self, code):
+        self._watch_codes[id(code)] = code
+        self._callee.pop(id(code), None)
+        ev = self._mon.events
+        if self.mode == INCREMENTAL and self._b_active and self._b_owns(code):
+            return      # tool B's global PY_START records it (any call path)
+        if generator_marker(code) is not None:
+            self._arm_local(code, ev.PY_START)          # recorded at start, nothing pending
+        else:
+            self._arm_local(code, ev.PY_START | ev.PY_RETURN)
+
+    def _arm_local(self, code, events):
+        """Add ``events`` to tool A's local events on ``code``; False if they could not be."""
+        tool = self._tool
+        if tool is None:
+            return False
+        with self._local_lock:
+            cur = self._local.get(id(code))
+            merged = events | (cur[1] if cur is not None else 0)
+            if cur is not None and cur[1] == merged:
+                return True
+            try:
+                self._mon.set_local_events(tool, code, merged)
+            except Exception:
+                return False
+            self._local[id(code)] = (code, merged)
+        return True
+
+    def _on_new_code(self, code, ent):
+        if self.mode == WATCH:
+            self._watch_code(code)
+        else:
+            if self.mode == INCREMENTAL:
+                self.last_armed_at = _monotonic()   # a new contact: not settled yet
+                if not self._b_active and self._b_owns(code):
+                    # Recorded by tool B while it was going off: hand it over itself (under
+                    # the arm lock, so it is never armed on A while B is on again).
+                    with self._arm_lock:
+                        if not self._b_active:
+                            self._watch_code(code)
+                            return
+            if ent[5] is None:      # discover / incremental: arm the return to complete it
+                self._arm_local(code, self._mon.events.PY_RETURN)
+
+    # ── per-code decision ──────────────────────────────────────────────────────
+    def _decide(self, code, frame):
+        callee = self._callee
+        if len(callee) >= _CODE_CACHE_MAX:
+            callee.clear()
+        module = frame.f_globals.get("__name__", "") or ""
+        body = code.co_name == "<module>"
+        prefix = self._watch_prefix
+        watched = id(code) in self._watch_codes or (
+            prefix is not None and not never_target(module)
+            and bool(prefix.matches(module, frame)))
+        disable = None
+        if self.mode == INCREMENTAL:
+            # Only armed codes reach tool A's PY_START; never DISABLE (it would block arming).
+            hit = id(code) in self._watch_codes and not body
+        elif self.mode == WATCH:
+            hit = watched and not body
+            if not hit and prefix is not None:
+                disable = self._mon.DISABLE   # only a global PY_START reaches unwatched code
+        else:
+            hit = not body and (watched or (self._target_module(module, frame)
+                                            and code.co_name != "__del__"))
+            if not hit:
+                disable = self._mon.DISABLE
+        if not hit and self._exec_lines and self.mode != INCREMENTAL and self._code_is_near(frame):
+            self._exec_start(code)      # one of ours starts, its first PY_START (discover)
+        # [code, in_target, module, is_module_body, identity, generator marker, DISABLE|None]
+        ent = [code, hit, module, body, None, generator_marker(code), disable]
+        callee[id(code)] = ent
+        return ent
+
+    # ── callbacks (must never raise into the program) ──────────────────────────
+    def _on_start(self, code, offset):
+        try:
+            ent = self._callee.get(id(code))
+            frame = _getframe(1)
+            if frame.f_code is not code:
+                frame = _frame_of(code)
+                if frame is None:
+                    return None
+            if ent is None:
+                ent = self._decide(code, frame)
+            if not ent[1]:
+                return ent[6]
+            if self.near is not None:          # the near-side check, inlined (hot path)
+                back = frame.f_back
+                if back is None:
+                    return None
+                near = self._near_codes.get(id(back.f_code))
+                if not (near[1] if near is not None else self._code_is_near(back)):
+                    return None
+            if self._inh_codes and id(code) in self._inh_codes:
+                # stdlib code armed for a dependency class's inherited method: only a call on
+                # a receiver of such a class is a contact, named after that class
+                sym = self._inherited_sym(code, frame.f_locals.get(code.co_varnames[0]))
+                if sym is None:
+                    return None
+                self._record(frame, ent, sym)
+                return None
+            if self._renames:
+                cn = self._callname.pop(stack_key(), None)
+                if cn is not None and cn[0] is code:
+                    self._record(frame, ent, cn[1])
+                    return None
+            self._record(frame, ent)
+        except Exception:
+            pass
+        return None
+
+    def _on_return(self, code, offset, retval):
+        try:
+            if self._pending:
+                frame = _getframe(1)
+                if frame.f_code is not code:
+                    frame = _frame_of(code)
+                info = self._pending.pop(id(frame), None)
+                if info is not None and info[0] is code:
+                    self._finish(info, OUTCOME_RETURN, retval,
+                                 self._take_warnings(frame, code) if self._warned else None)
+                    if self._last_start:
+                        self._release_start(frame, info[8])
+                    if self._rd_closed and len(_modules) != self._rd_token:
+                        self._rd_revalidate()   # before our code sees what an import made
+        except Exception:
+            pass
+        return None     # never DISABLE: armed only on codes we record
+
+    def _on_unwind(self, code, offset, exc):
+        try:
+            if self._pending:
+                frame = _getframe(1)
+                if frame.f_code is not code:
+                    frame = _frame_of(code)
+                info = self._pending.pop(id(frame), None)
+                if info is not None and info[0] is code:
+                    self._finish(info, OUTCOME_RAISE, raised_label(exc),
+                                 self._take_warnings(frame, code) if self._warned else None)
+                    if self._last_start:
+                        self._release_start(frame, info[8])
+                    if self._rd_closed and len(_modules) != self._rd_token:
+                        self._rd_revalidate()
+        except Exception:
+            pass
+        return None     # PY_UNWIND cannot be disabled
+
+    def _release_start(self, frame, tid):
+        """A recorded call ended: its frame, kept to drop a start the other tool delivers
+        again (``_record``, the settle), is let go (no duplicate can come any more)."""
+        last = self._last_start
+        if last.get(tid) is frame:
+            last.pop(tid, None)
+
+    # ── incremental: code ownership ────────────────────────────────────────────
+    def _b_owns(self, code, g=None, module=None):
+        """True if tool B (global PY_START) records calls into ``code``: generator-likes,
+        implicitly-run dunders, ``property`` accessors, ``module.*`` impact prefixes.
+        Decided once per code object, under a lock, so both tools always agree."""
+        ent = self._kinds.get(id(code))
+        if ent is not None and ent[0] is code:
+            return ent[1]
+        owned = generator_marker(code) is not None or _implicit_name(code.co_name)
+        prefix = self._watch_prefix
+        if not owned and module is not None and prefix is not None:
+            owned = bool(prefix.matches(module, None))
+        if not owned and g is not None:
+            try:
+                owned = _is_accessor(code, g) or _is_meta_ctor(code, g)
+            except Exception:
+                owned = False
+        with self._kind_lock:
+            ent = self._kinds.get(id(code))
+            if ent is not None and ent[0] is code:
+                return ent[1]
+            if len(self._kinds) >= _CODE_CACHE_MAX:
+                self._kinds.clear()
+            self._kinds[id(code)] = (code, owned)
+        return owned
+
+    # ── incremental: settle (tool B off) ───────────────────────────────────────
+    def settle(self, reason="quiet"):
+        """Turn tool B off once the watch set stopped growing: its global PY_START keeps
+        firing on dependency dunders/properties/generators that only dependencies call. Every
+        code B recorded (and every impact target it owned) is handed to tool A's local events,
+        as in watch mode, before B goes off; from then on A arms any dependency code a CALL in
+        our code reaches, dunders and generators included. Tool A's CALL stays on.
+
+        A contact that passes no CALL instruction of ours (a protocol, dunder, property or
+        generator contact) and is FIRST used after the settle is seen through the lines of
+        our code: B keeps its tool id, and a line of ours that runs for the first time turns
+        it on again (``_on_line``) until the controller finds it quiet and calls this again.
+        With ``reopen`` 0 B is freed for good and such a contact is not seen. Returns True if
+        B went off. Not done with ``module.*`` impact targets (they need B's global
+        PY_START)."""
+        mon = self._mon
+        with self._arm_lock:
+            tool2 = self._tool2
+            if (self.mode != INCREMENTAL or tool2 is None or self._tool is None
+                    or not self._b_active):
+                return False
+            if self._watch_prefix is not None:
+                self.note = "settle-skipped: module.* impact targets need the second tool"
+                return False
+            self._b_reopened = False            # B records whatever starts until it is off
+            self._dedupe_until = float("inf")   # both tools may deliver a start meanwhile
+            self._b_active = False              # A now owns every code (arming and CALLs)
+            with self._obs_lock:
+                codes = list(self.observed.values())
+            codes.extend(self._impact_codes.values())
+            handed = 0
+            for code in codes:
+                if self._b_owns(code):
+                    self._watch_code(code)      # local PY_START (+ PY_RETURN), like watch mode
+                    handed += 1
+            try:
+                mon.set_events(tool2, 0)
+            except Exception:
+                pass
+            if not self._lines_on:
+                self._tool2 = None
+                self._release(tool2, local_events=False)
+            now = _monotonic()
+            self._dedupe_until = now + _SETTLE_GRACE
+            self.handed_over = handed
+            if self._opened_at is not None:
+                self.reopen_seconds += now - self._opened_at
+                self._opened_at = None
+            if self.settled_at is None:
+                self.settled_at = time.time()
+                self.settle_reason = reason
+        return True
+
+    # ── incremental: late contacts (a line of ours that first runs post-settle) ─
+    def _arm_lines(self, code, running=False):
+        """LINE events on ``code`` (ours) and every code object nested in it: a function of
+        ours that has not run yet is covered from its module's (or enclosing function's)
+        first run. Each line is DISABLEd at its first run, so the lines that already ran
+        cost nothing. A module body gets them only for the executed record (it runs once, at
+        import; a late import is seen through the line of ours that runs it, so its own lines
+        never re-open tool B); on 3.12 a very large code object (``_LINE_BIG``) gets none.
+
+        ``running``: ``code`` is running already (a call of ours reached it before any LINE
+        event did), so its earlier lines were not seen: the executed record keeps it at
+        function granularity too."""
+        lined = self._lined
+        line = self._mon.events.LINE
+        if running:
+            ent = lined.get(id(code))
+            if self._exec_lines and (ent is None or ent[0] is not code or not ent[2]):
+                self._exec_started(code)
+        stack = [code]
+        while stack:
+            c = stack.pop()
+            ent = lined.get(id(c))
+            if ent is not None and ent[0] is c:
+                continue
+            if len(lined) >= _LINED_MAX:
+                self.note = "late-lines-capped: code objects past the cap get no LINE events"
+                if self._exec_lines:
+                    self._exec_capped = True    # code of ours past the cap: not recorded
+                return
+            ent = lined[id(c)] = [c, None, False]   # holds the code: its id cannot be reused
+            if c.co_name == "<module>" and not self._exec_lines:
+                pass
+            elif _LINE_SLOW and len(c.co_code) > _LINE_BIG:
+                self.note = "late-lines-skipped: very large code objects get no LINE events (3.12)"
+            else:
+                ent[2] = self._arm_local(c, line)
+            for const in c.co_consts:
+                if type(const) is _CODE:
+                    stack.append(const)
+
+    def _exec_start(self, code):
+        """Discover mode: a code object of ours starts for the first time (its first PY_START):
+        LINE events on it alone (its nested code objects start, and are armed, themselves).
+        A code that cannot have them (``_LINE_BIG`` on 3.12, the ``_LINED_MAX`` cap) is
+        recorded at function granularity instead: it started."""
+        lined = self._lined
+        ent = lined.get(id(code))
+        if ent is not None and ent[0] is code:
+            if not ent[2]:
+                self._exec_started(code)
+            return
+        if len(lined) >= _LINED_MAX:
+            self.note = "late-lines-capped: code objects past the cap get no LINE events"
+            self._exec_started(code)
+            return
+        ent = lined[id(code)] = [code, None, False]
+        if _LINE_SLOW and len(code.co_code) > _LINE_BIG:
+            self.note = "late-lines-skipped: very large code objects get no LINE events (3.12)"
+        else:
+            ent[2] = self._arm_local(code, self._mon.events.LINE)
+        if not ent[2]:
+            self._exec_started(code)
+
+    def _on_line(self, code, line):
+        """A line of ours runs for the first time (LINE of tool A, DISABLEd here at once).
+        After the settle it re-opens tool B: the new path may touch a dependency through a
+        dunder, a property or a generator, which no CALL of ours reaches."""
+        try:
+            ent = self._lined.get(id(code))
+            if ent is None or ent[0] is not code:
+                return self._mon.DISABLE
+            seen = ent[1]
+            if seen is None:
+                seen = ent[1] = set()
+            elif line in seen:
+                return self._mon.DISABLE    # ran before: ``restart_events`` re-armed it
+            seen.add(line)
+            if (self.settled_at is not None and self._lines_on
+                    and code.co_name != "<module>"):
+                self.last_fresh_at = _monotonic()
+                if not self._b_active:
+                    self._reopen()
+        except Exception:
+            pass
+        return self._mon.DISABLE
+
+    # ── executed project code (``_backend.executed_metadata``) ──────────────────
+    executed_granularity = "line"
+
+    def executed_observed(self):
+        return self._exec_lines
+
+    def executed_files(self):
+        out = FrameBackend.executed_files(self)
+        lined = self._lined if self._lined_final is None else self._lined_final
+        for c, seen, _armed in list(lined.values()):
+            if not seen:
+                continue
+            name = c.co_filename
+            if not name or name[0] == "<":
+                continue
+            ent = out.get(name)
+            if ent is None:
+                ent = out[name] = (set(), set())
+            ent[0].update(line for line in seen if line > 0)   # 0: a module's RESUME
+        return out
+
+    def _reopen(self):
+        """Tool B's global PY_START on again (its DISABLEd locations are re-enabled with it:
+        one more callback per code object, then DISABLE). A code handed over to tool A stays
+        A's: B DISABLEs it at its first start (``_on_implicit``). Every hand-over to A runs
+        under the arm lock while B is off, so its local events are in place before B is on:
+        no start is recorded twice or lost."""
+        with self._arm_lock:
+            tool2 = self._tool2
+            if self._b_active or tool2 is None or self._tool is None:
+                return
+            self._opened_at = _monotonic()
+            self._b_reopened = True             # before B's first event
+            self._b_active = True               # B owns implicitly-run codes again
+            try:
+                self._mon.set_events(tool2, self._mon.events.PY_START)
+            except Exception:
+                self._b_active = self._b_reopened = False
+                self._opened_at = None
+                return
+            self.reopened += 1
+
+    # ── incremental: tool A's CALL callback ────────────────────────────────────
+    def _on_call_arm(self, code, offset, callable_, arg0):
+        try:
+            if self.near is not None:
+                nent = self._near_codes.get(id(code))
+                if nent is None:
+                    frame = _getframe(1)
+                    if frame.f_code is not code:
+                        frame = _frame_of(code)
+                        if frame is None:
+                            return None
+                    near = self._code_is_near(frame)
+                else:
+                    near = nent[1]
+                if not near:
+                    return self._mon.DISABLE    # not our code: this site never fires again
+            key = (id(code), offset)
+            site = self._sites.get(key)
+            target = _call_target(callable_)
+            if site is not None and site[0] is code:
+                if not site[3]:
+                    if _same_target(site[1], target):
+                        site[2] += 1
+                        if site[2] >= _SITE_STABLE:
+                            return self._mon.DISABLE    # monomorphic and settled
+                        return None
+                    site[3] = True                      # polymorphic: never disabled
+                self._discover_callable(callable_, arg0)
+                return None
+            if len(self._sites) >= _SITES_MAX:
+                self._sites.clear()
+            if self._lines_on or self._exec_lines:
+                ent = self._lined.get(id(code))
+                if ent is None or ent[0] is not code:
+                    # ours, started before tool B could see it: running already
+                    self._arm_lines(code, running=True)
+            self._discover_callable(callable_, arg0)
+            self._sites[key] = [code, _held_target(target), 1, False]
+        except Exception:
+            pass
+        return None
+
+    # ── compiled calls and binding failures (CALL / C_RETURN / C_RAISE / RAISE) ──
+    def _on_call(self, code, offset, callable_, arg0):
+        """Every call made from our code: the arming of incremental mode, then the compiled-call
+        and binding-failure observation. A site is DISABLEd only when neither needs it again."""
+        keep = self._keep
+        if keep:
+            keep = keep.get((id(code), offset))
+            if keep is not None and keep[0] is code:
+                ref = keep[1]   # held: a descriptor itself, a function by weak reference
+                rt = keep[2]    # held: a C type itself, a Python class by weak reference
+                if ((ref is callable_ or (type(ref) is _WEAKREF and ref() is callable_ is not None))
+                        and (rt is type(arg0) or (type(rt) is _WEAKREF and rt() is type(arg0)))):
+                    return None     # the open site's last answer for this callee, receiver class
+        disable = None
+        if self.mode == INCREMENTAL:
+            disable = self._on_call_arm(code, offset, callable_, arg0)
+        try:
+            seen = self._observe_call(code, offset, callable_, arg0)
+        except Exception:
+            seen = None
+        if seen:
+            return None
+        if self.mode == INCREMENTAL:
+            if disable is not None:
+                self._quiet_site(code, offset)
+            return disable
+        return self._mon.DISABLE if seen is False else None
+
+    def _quiet_site(self, code, offset):
+        key = (id(code), offset)
+        site = self._csites.get(key)
+        if site is None or site[0] is not code:
+            self._csites[key] = [code, _SITE_STABLE, None]
+        else:
+            site[1] = _SITE_STABLE
+
+    def _is_near(self, code):
+        nent = self._near_codes.get(id(code))
+        if nent is not None and nent[0] is code:
+            return nent[1]
+        frame = _frame_of(code)
+        if frame is None:
+            return None
+        return self._code_is_near(frame)
+
+    def _dep_function(self, func):
+        return self._dep_code(func.__code__, func.__globals__)
+
+    def _dep_code(self, code, g):
+        module = g.get("__name__", "") or ""
+        return not never_target(module) and code.co_name != "__del__" and (
+            id(code) in self._impact_codes or self._target_module(module, None))
+
+    def _call_kind(self, callable_):
+        """(held object | None, kind, sym, callee, declared name) of what a CALL reaches.
+        ``callee`` is the Python function's ``(code, globals)``, never the function.
+
+        Cached per object (a function, partial, class, callable instance or compiled
+        callable), which the entry knows again by ``held``, so it keeps neither the object nor
+        what the object holds alive; an object that takes no weak reference is not cached. A
+        builtin method bound to a receiver (``f = d.items``) is a new object on every
+        attribute access and holds the receiver: decided once per (receiver class, name), as
+        ``_c_sym`` decides it (``_bound_kind``), then cached per object like the rest."""
+        obj = callable_
+        t = type(obj)
+        if t is _METHOD:
+            obj = obj.__func__
+            t = type(obj)
+        ent = self._ckinds.get(id(obj))
+        if ent is not None:
+            ref = ent[0]                    # ``is_held``, inline (hot path)
+            if ref is obj or (type(ref) is _WEAKREF and ref() is obj):
+                return ent
+        if t is _BUILTIN or t is _METHOD_WRAPPER:
+            ent = self._cbobj.get(id(obj))
+            if ent is not None:
+                ref = ent[0]
+                if type(ref) is _WEAKREF and ref() is obj:
+                    return ent
+            try:
+                owner = obj.__self__        # ``bound_owner``, inline
+                if owner is None or isinstance(owner, _MODULE):
+                    owner = None
+                elif not isinstance(owner, type):
+                    owner = type(owner)
+            except Exception:
+                owner = None                # decided below by itself, like an unbound one
+            if owner is not None:
+                ent = self._cbound.get((id(owner), obj.__name__))
+                if ent is None or not (ent[5] is owner or (type(ent[5]) is _WEAKREF
+                                                           and ent[5]() is owner)):
+                    ent = self._bound_kind(obj, owner)
+                if t is _METHOD_WRAPPER:    # takes no weak reference: not known again
+                    return ent
+                ent = (_WEAKREF(obj), ent[1], ent[2], None, None)
+                bobj = self._cbobj
+                if len(bobj) >= _BOUND_OBJECTS_MAX:
+                    bobj.clear()            # most are made per call: few are seen again
+                bobj[id(obj)] = ent
+                return ent
+        kind, sym, callee, rename = _K_NONE, None, None, None
+        try:
+            if t is functools.partial:
+                inner = obj.func
+                if type(inner) is _METHOD:
+                    inner = inner.__func__
+                if type(inner) is _FUNCTION and self._dep_function(inner):
+                    kind, callee = _K_PY, (inner.__code__, inner.__globals__)
+            elif t is _FUNCTION:
+                if self._dep_function(obj):
+                    kind, callee = _K_PY, (obj.__code__, obj.__globals__)
+                    rename = self._declared_name(obj)
+            elif is_compiled_callable(obj):
+                sym = self._c_sym(obj)
+                if sym is not None:
+                    kind = _K_C
+            elif issubclass(t, type):
+                pairs = self._ctor_codes(obj)
+                if pairs:
+                    code, g = pairs[-1]         # __init__ (it follows __new__ in the list)
+                    if self._dep_code(code, g):
+                        kind, callee = _K_PY, (code, g)
+                elif not (obj.__flags__ & _HEAPTYPE):
+                    module = getattr(obj, "__module__", None)
+                    if (isinstance(module, str) and module and module != "builtins"
+                            and not never_target(module) and self._in_target(module)):
+                        sym, kind = module + "." + obj.__qualname__, _K_C
+            else:
+                call = _mro_value(t, "__call__")
+                if type(call) is _FUNCTION and self._dep_function(call):
+                    kind, callee = _K_PY, (call.__code__, call.__globals__)
+        except Exception:
+            kind, sym, callee, rename = _K_NONE, None, None, None
+        ref = held(obj)
+        ent = (ref, kind, sym, callee, rename)
+        if ref is not None:
+            self._ckinds_put(obj, ent)
+        return ent
+
+    def _ckinds_put(self, obj, ent):
+        if len(self._ckinds) >= _CODE_CACHE_MAX:
+            self._ckinds.clear()
+        self._ckinds[id(obj)] = ent
+
+    def _bound_kind(self, obj, owner):
+        """``_call_kind`` of a compiled callable bound to a receiver whose class is ``owner``
+        (``bound_owner``), decided once per (owner, name): the entry knows the class by
+        ``held`` (a class made at run time dies with the program's last reference), never the
+        receiver, and knows no object (its first field is None)."""
+        try:
+            sym = self._c_sym(obj)
+        except Exception:
+            sym = None
+        ent = (None, _K_NONE if sym is None else _K_C, sym, None, None, held(owner))
+        if len(self._cbound) >= _CODE_CACHE_MAX:
+            self._cbound.clear()
+        self._cbound[(id(owner), obj.__name__)] = ent
+        return ent
+
+    @staticmethod
+    def _declared_name(func):
+        """``module.qualname`` the callable declares when its code is a closure body
+        (``<locals>``) and the callable says it is something else: a ``functools.wraps``
+        wrapper is its wrapped function, not ``decorator.<locals>.wrapper``."""
+        code_qual = getattr(func.__code__, "co_qualname", None)
+        qual = getattr(func, "__qualname__", None)
+        module = getattr(func, "__module__", None)
+        if (code_qual and "<locals>" in code_qual and isinstance(qual, str)
+                and "<locals>" not in qual and qual != code_qual
+                and isinstance(module, str) and module):
+            return module + "." + qual
+        return None
+
+    def _observe_call(self, code, offset, callable_, arg0):
+        """True: this site must keep firing (a compiled dependency callable, a traced Python
+        one, or a callee only some receivers make a dependency's); False: it never will
+        matter (not our code, or settled on nothing of ours); None: nothing of ours yet."""
+        near = True
+        if self.near is not None:
+            near = self._is_near(code)
+            if near is None:
+                return None
+        elif any(code is c for c in _WRAPPER_CODES):
+            near = False    # no near side: a pymolt wrapper's call of what it wraps is its own
+        if not near:
+            return False
+        ent = self._call_kind(callable_)
+        kind = ent[1]
+        key = (id(code), offset)
+        if kind == _K_C and self._ccount.get(key, 0) >= _C_SITE_MAX:
+            return self._c_over_cap(key, code, ent[2], None)   # the hot path of a capped site
+        if self._rd_closed and len(_modules) != self._rd_token:
+            self._rd_revalidate()
+        csym = None
+        if kind == _K_NONE:
+            csym = self._inherited_call(callable_, arg0)
+            if csym is _KEEP_SITE:
+                # Not a dependency's call with this receiver, but it is with another one: the
+                # site keeps firing whatever callee it saw twice (locust: ``d.items()`` on
+                # plain dicts first, then on ``collections.defaultdict``s). The next call
+                # with the same callee and receiver class gets the same answer at once
+                # (``_on_call``); a bound callable is a new object per call, so it is not kept,
+                # nor a class receiver (``cls``): it is decided by itself, not by its type.
+                t = type(callable_)
+                if (t is _FUNCTION or t in _DESCRIPTORS) and not issubclass(type(arg0), type):
+                    ref = held(callable_)
+                    rt = held(type(arg0))
+                    if ref is not None and rt is not None:
+                        if len(self._keep) >= _SITES_MAX:
+                            self._keep.clear()
+                        self._keep[key] = (code, ref, rt)
+                return True
+        tid = stack_key()
+        if kind != _K_C and csym is None:
+            # Nothing compiled to record. A traced Python callable is only watched for a
+            # binding failure, so a site that reached the same callee twice settles (DISABLE,
+            # like incremental mode's arming): a bind failing on a later call is not seen.
+            if kind == _K_PY:
+                if len(self._lastcall) > 4096:
+                    self._lastcall.clear()  # one slot per greenlet that ever called
+                self._lastcall[tid] = (code, offset, ent[3])
+                if ent[4] is not None:
+                    if len(self._callname) > 4096:
+                        self._callname.clear()
+                    self._callname[tid] = (ent[3][0], ent[4])
+                    self._renames = True
+            if kind == _K_PY and ent[4] is not None:
+                # A callee that declares a name of its own (a decorator wrapper: its code is
+                # shared, or generated and swapped in on first call, as networkx's argmap
+                # does) is named by this event, so its site never settles: once CALL stopped
+                # firing, later calls would take the code's name (locust: 2 calls of 6,572
+                # named ``Process.memory_info``, the rest the wrapper's closure name).
+                return True
+            # The same callee object twice in a row settles the site. It is known again by
+            # the entry's ``held`` reference (one weak reference per live object, so the same
+            # reference is the same object), never by the object: the site keeps no callee
+            # alive. An object that takes no weak reference is never known again.
+            ref = ent[0]
+            site = self._csites.get(key)
+            if site is None or site[0] is not code:
+                if len(self._csites) >= _SITES_MAX:
+                    self._csites.clear()
+                self._csites[key] = [code, 1, ref]
+                return None
+            if ref is not None and site[2] is ref:
+                site[1] += 1
+                return False if site[1] >= _SITE_STABLE else None
+            site[1], site[2] = 1, ref
+            return None
+        site = self._csites.get(key)
+        if site is not None:
+            site[1], site[2] = 0, None       # a compiled callable here: this site never settles
+        frame = _getframe(2)
+        if frame.f_code is not code:
+            frame = _frame_of(code)
+            if frame is None:
+                return True
+        n = self._ccount.get(key, 0)
+        if n >= _C_SITE_MAX:
+            # a hot loop is witnessed, not replayed: counted from here, never recorded
+            return self._c_over_cap(key, code, csym or ent[2], frame)
+        if n == 0 and len(self._ccount) >= _CODE_CACHE_MAX:
+            self._ccount.clear()
+        self._ccount[key] = n + 1
+        info = self._c_start(frame, csym or ent[2],
+                             NO_ARG if arg0 is self._mon.MISSING else arg0)
+        stack = self._cstack.get(tid)
+        if stack is None:
+            stack = self._cstack[tid] = []
+        elif len(stack) >= 256:
+            del stack[:]
+        stack.append((callable_, code, offset, info))
+        return True
+
+    def _c_over_cap(self, key, code, sym, frame):
+        """A compiled call past ``_C_SITE_MAX`` at its site (called from ``_observe_call``):
+        counted, not recorded. True keeps the site firing so the next one is counted too;
+        after ``_C_MUTE_MAX`` muted calls the site stops (False: ``DISABLE``) and its count
+        is a lower bound. A site's first muted call reads the caller frame for its location."""
+        mkey = (key, sym)
+        if frame is None and mkey not in self._cmuted:
+            frame = _getframe(3)    # _c_over_cap <- _observe_call <- _on_call <- caller
+            if frame.f_code is not code:
+                frame = _frame_of(code)
+        if self._c_mute(mkey, sym, frame) < _C_MUTE_MAX:
+            return True
+        self._c_mute_stopped(mkey)
+        return False
+
+    def _on_c_return(self, code, offset, callable_, arg0):
+        try:
+            key = stack_key()
+            stack = self._cstack.get(key)
+            if stack:
+                top = stack[-1]
+                if same_c_callable(top[0], callable_) and top[1] is code and top[2] == offset:
+                    stack.pop()
+                    if not stack:
+                        del self._cstack[key]       # greenlets come and go: no empty leftovers
+                    self._finish(top[3], OUTCOME_RETURN, C_RETURN_UNOBSERVED)
+                    if self._rd_closed and len(_modules) != self._rd_token:
+                        self._rd_revalidate()
+                    return None
+            return None     # C_RETURN / C_RAISE cannot be DISABLEd: they stop with the site's CALL
+        except Exception:
+            return None
+
+    def _on_c_raise(self, code, offset, callable_, arg0):
+        try:
+            tid = stack_key()
+            stale = self._craise.pop(tid, None)
+            if stale is not None:           # its RAISE never came (StopIteration): untyped
+                self._finish(stale[0], OUTCOME_RAISE, UNTYPED_RAISE)
+            stack = self._cstack.get(tid)
+            if stack:
+                top = stack[-1]
+                if same_c_callable(top[0], callable_) and top[1] is code and top[2] == offset:
+                    stack.pop()
+                    if not stack:
+                        del self._cstack[tid]
+                    self._craise[tid] = (top[3], code, offset)   # RAISE types it
+        except Exception:
+            pass
+        return None
+
+    def _raise_callback(self):
+        """The RAISE callback, a closure: it runs on every raise in the process (it cannot be
+        DISABLEd), so the common case, a non-TypeError with nothing awaiting a type, is one
+        call and one test, no attribute lookups."""
+        craise = self._craise
+        slow = self._on_raise
+        te = TypeError
+
+        def on_raise(code, offset, exc):
+            if craise or isinstance(exc, te):
+                slow(code, offset, exc)
+
+        return on_raise
+
+    def _on_raise(self, code, offset, exc):
+        """A raise in our code: it types a compiled call's raise (``C_RAISE`` has no exception),
+        and a TypeError at a call to a traced Python callable that left no frame behind
+        (``tb_next`` is None) is that call failing to bind its arguments. RAISE cannot be
+        DISABLEd and is global, so the common case (not a TypeError, nothing awaiting a type)
+        is two checks."""
+        try:
+            if not self._craise and not isinstance(exc, TypeError):
+                return None
+            if self.near is not None and not self._is_near(code):
+                return None
+            tid = stack_key()
+            pending = self._craise.get(tid)
+            if pending is not None:
+                del self._craise[tid]
+                if pending[1] is code and pending[2] == offset:
+                    self._finish(pending[0], OUTCOME_RAISE, raised_label(exc))
+                    return None
+                self._finish(pending[0], OUTCOME_RAISE, UNTYPED_RAISE)
+            if isinstance(exc, TypeError):
+                last = self._lastcall.get(tid)
+                if last is not None and last[0] is code and last[1] == offset:
+                    del self._lastcall[tid]
+                    tb = exc.__traceback__
+                    if tb is not None and tb.tb_next is None:
+                        frame = _getframe(1)
+                        if frame.f_code is not code:
+                            frame = _frame_of(code)
+                        if frame is not None:
+                            self._record_binding(frame, last[2])
+        except Exception:
+            pass
+        return None
+
+    def _inherited_call(self, callable_, arg0):
+        """FU6: a call from our code to stdlib (or other non-target) code whose receiver is an
+        instance of a target class. A Python method is armed (its start is recorded, named
+        after the receiver's class) and None returned; a builtin method descriptor on a
+        dependency subclass of a builtin returns its symbol, to be recorded like a C call.
+
+        Such a callee is a dependency's for some receivers only, so its call site must not
+        settle on the callee: a ``dict.items`` site reached by plain dicts first, then by
+        ``collections.defaultdict``s, would never see the latter. When a target class inherits
+        the callee (``_rd_open``) and this receiver is not one, ``_KEEP_SITE`` is returned. A
+        builtin method bound to a receiver (``f = d.items``) is decided by ``_c_sym`` per
+        receiver class; only whether it is inherited is decided here."""
+        t = type(callable_)
+        recv = arg0
+        if t is _METHOD:
+            func = callable_.__func__
+            recv = callable_.__self__
+            t = type(func)
+        else:
+            func = callable_
+        missing = self._mon.MISSING
+        if t is _FUNCTION:
+            code = func.__code__
+            if (recv is missing or code.co_argcount < 1
+                    or code.co_varnames[0] not in ("self", "cls")
+                    or id(code) in self._inh_codes):
+                return None     # an armed method: its PY_START sees every receiver, any site
+            if self._dep_function(func):
+                return None
+            if self._inherited_sym(code, recv) is not None:
+                self._arm_inherited(code)
+                return None
+            return _KEEP_SITE if self._rd_open(code, func, recv) else None
+        if t in _BOUND_C:
+            recv = func.__self__
+            if recv is None or type(recv) is _MODULE:
+                return None
+            rtype = type(recv)
+            desc = _mro_value(recv if issubclass(rtype, type) else rtype, func.__name__)
+            if type(desc) not in _DESCRIPTORS:
+                return None
+            return _KEEP_SITE if self._rd_open(desc) else None
+        if t not in _DESCRIPTORS or recv is missing:
+            return None
+        sym = self._inherited_descriptor_sym(func, recv)
+        if sym is None:
+            return _KEEP_SITE if self._rd_open(func) else None
+        if self._rd_closed:
+            self._rd_inherited(func)
+        return sym
+
+    # ── callees only some receivers make a dependency's ───────────────────────
+    def _rd_open(self, obj, func=None, recv=_MISSING):
+        """True if a class of a target module inherits ``obj`` (a builtin method descriptor, or
+        the code of ``func``, a Python method of no dependency, called on ``recv``): a call
+        through it is then a dependency's for some receiver. Decided once per callee. A closed
+        decision is decided again when modules were imported since (``_rd_revalidate``) or a
+        call shows a target receiver (``_rd_inherited``); it is never made for our own code,
+        which no dependency class inherits.
+
+        A Python method is inherited under its code's name (``_inherited_sym``), so its owner
+        is the class defining that name: found from ``co_qualname``, else on the receiver's
+        class. A code no class there defines under its name (a ``functools.wraps`` wrapper
+        installed as another name) can never be recorded as inherited: closed, not revisited."""
+        ent = self._rd.get(id(obj))
+        if ent is not None and ent[0] is obj:
+            return ent[1]
+        owner = name = None
+        found = track = True    # ``object``, or a walk that cannot tell: inherited
+        try:
+            if func is None:
+                owner, name = obj.__objclass__, obj.__name__
+            elif self.near is not None and self._function_is_near(obj, func.__globals__):
+                found = track = False
+            else:
+                name = obj.co_name
+                owner = _owner_class(obj, func.__globals__)[0]
+                if owner is None and recv is not _MISSING:
+                    owner = _defining_class(recv, name, obj)
+                if owner is None:
+                    found = track = False
+            if owner is not None and owner is not object:
+                found = self._inherited_by_target(owner, name, obj)
+        except Exception:
+            found, track = True, False
+        if len(self._rd) >= _CODE_CACHE_MAX:
+            self._rd.clear()
+            self._rd_closed.clear()
+        ent = [obj, found, None if owner is None else held(owner), name]
+        self._rd[id(obj)] = ent
+        if not found and track:
+            self._rd_closed[id(obj)] = ent
+        return found
+
+    def _function_is_near(self, code, g):
+        """Is the function of ``code`` and globals ``g`` our code (decided like a caller's
+        frame)?"""
+        nent = self._near_codes.get(id(code))
+        if nent is not None and nent[0] is code:
+            return nent[1]
+        return self._code_is_near(types.SimpleNamespace(f_code=code, f_globals=g))
+
+    def _inherited_by_target(self, owner, name, obj, classes=None):
+        """True if ``owner`` or a class below it, defined in a target module, resolves
+        ``name`` to ``obj``. ``classes`` caches ``_target_classes`` per owner."""
+        if classes is None:
+            found = self._target_classes(owner)
+        else:
+            found = classes.get(id(owner), _MISSING)
+            if found is _MISSING:
+                found = classes[id(owner)] = self._target_classes(owner)
+        if found is None:
+            return True         # too many classes to tell
+        for cls in found:
+            try:
+                if _inherits(cls, name, obj):
+                    return True
+            except Exception:
+                return True
+        return False
+
+    def _target_classes(self, owner):
+        """The classes of target modules at or below ``owner`` (None past
+        ``_INHERIT_WALK_MAX`` classes walked)."""
+        out = []
+        stack = [owner]
+        seen = set()
+        while stack:
+            cls = stack.pop()
+            try:
+                module = _TYPE_MODULE.__get__(cls, type)
+                if (isinstance(module, str) and module and module != "builtins"
+                        and self._target_module(module, None)):
+                    out.append(cls)
+                subs = _TYPE_SUBCLASSES(cls)
+            except Exception:
+                continue
+            for sub in subs:
+                if id(sub) not in seen:
+                    if len(seen) >= _INHERIT_WALK_MAX:
+                        return None
+                    seen.add(id(sub))
+                    stack.append(sub)
+        return out
+
+    def _rd_inherited(self, desc):
+        """A call just showed a target class inheriting ``desc``: a closed decision on it is
+        stale (the class came later), so its settled call sites fire again."""
+        ent = self._rd_closed.pop(id(desc), None)
+        if ent is not None and ent[0] is desc:
+            ent[1] = True
+            self._restart_events()
+
+    def _rd_revalidate(self):
+        """Modules were imported since the closed decisions were made, and a class one
+        defines may inherit a callee no target class did, at a call site that settled since.
+        Each closed callee is decided again: a builtin method that is inherited now re-arms
+        the settled sites (``restart_events``); a Python method is armed (its PY_START sees
+        every call). Checked at a call of ours and when one completes."""
+        self._rd_token = len(_modules)
+        restart = False
+        classes = {}                # id(owner) -> its target classes, walked once
+        for key, ent in list(self._rd_closed.items()):
+            obj = ent[0]
+            owner = ent[2]
+            if type(owner) is _WEAKREF:
+                owner = owner()
+                if owner is None:
+                    continue        # the class is gone, and every class below it
+            try:
+                if not self._inherited_by_target(owner, ent[3], obj, classes):
+                    continue
+            except Exception:
+                pass                # cannot tell: open, like an undecidable first decision
+            ent[1] = True
+            self._rd_closed.pop(key, None)
+            if type(obj) is _CODE:
+                self._arm_inherited(obj)
+            else:
+                restart = True
+        if restart:
+            self._restart_events()
+
+    def _restart_events(self):
+        if self._tool is not None:
+            try:
+                self._mon.restart_events()      # DISABLEd sites fire again, and re-decide
+            except Exception:
+                pass
+
+    def _arm_inherited(self, code):
+        with self._arm_lock:
+            if id(code) in self._inh_codes:
+                return
+            self._inh_codes[id(code)] = code
+            self._impact_codes[id(code)] = code     # tool B (incremental) records it too
+            ent = self._callee.get(id(code))
+            restart = ent is not None and ent[0] is code and len(ent) > 6 and ent[6] is not None
+            self._watch_code(code)
+            if restart:
+                try:
+                    self._mon.restart_events()      # a DISABLEd location ignores local events
+                except Exception:
+                    pass
+
+    def _record_binding(self, frame, callee):
+        code, g = callee
+        ci = self._identity.code_identity(code, g.get("__name__", ""), g)[0]
+        self._binding_failure(frame, ci.sym, ci.symq)
+
+    def _discover_callable(self, callable_, arg0):
+        pairs = self._resolve(callable_)
+        if pairs is None:
+            # A C callable (``map``, ``filter``, ``functools.reduce`` ...): its first
+            # argument is what it will call.
+            t = type(arg0)
+            if t is _FUNCTION or t is _METHOD or t is functools.partial:
+                pairs = self._resolve(arg0)
+        if pairs:
+            for code, g in pairs:
+                self._arm_callee(code, g)
+
+    def _resolve(self, obj):
+        """[(code, globals)] a call to ``obj`` starts in, or None for a C callable."""
+        for _ in range(8):
+            t = type(obj)
+            if t is _FUNCTION:
+                return [(obj.__code__, obj.__globals__)]
+            if t is _METHOD or t is staticmethod or t is classmethod:
+                obj = obj.__func__
+                continue
+            if t is functools.partial:
+                obj = obj.func
+                continue
+            if issubclass(t, type):
+                return self._ctor_codes(obj)
+            call = _mro_value(t, "__call__")
+            if type(call) is _FUNCTION:
+                return [(call.__code__, call.__globals__)]
+            return None
+        return None
+
+    def _ctor_codes(self, cls):
+        """[(code, globals)] of the metaclass ``__call__``, ``__new__`` and ``__init__`` a call
+        to class ``cls`` starts in. Cached per class, which the entry knows by ``held`` (a
+        class made at run time dies with the program's last reference); it keeps no function
+        either (one of a class made at run time can hold what it closes over)."""
+        ent = self._ctors.get(id(cls))
+        if ent is not None:
+            ref = ent[0]
+            if ref is cls or (type(ref) is _WEAKREF and ref() is cls):
+                return ent[1]
+        pairs = []
+        meta_call = _mro_value(type(cls), "__call__")
+        if type(meta_call) is _FUNCTION:
+            pairs.append((meta_call.__code__, meta_call.__globals__))
+        for name in ("__new__", "__init__"):
+            value = _mro_value(cls, name)
+            if issubclass(type(value), (staticmethod, classmethod)):
+                value = value.__func__
+            if type(value) is _FUNCTION:
+                pairs.append((value.__code__, value.__globals__))
+        ref = held(cls)
+        if ref is not None:
+            if len(self._ctors) >= _CODE_CACHE_MAX:
+                self._ctors.clear()
+            self._ctors[id(cls)] = (ref, pairs)
+        return pairs
+
+    def _arm_callee(self, code, g):
+        if id(code) in self._watch_codes:
+            return
+        ent = self._deps.get(id(code))
+        if ent is None or ent[0] is not code:
+            module = g.get("__name__", "") or ""
+            dep = not never_target(module) and code.co_name != "__del__" and (
+                id(code) in self._impact_codes or self._target_module(module, None))
+            if len(self._deps) >= _CODE_CACHE_MAX:
+                self._deps.clear()
+            ent = (code, dep, module)
+            self._deps[id(code)] = ent
+            if (not dep and (self._lines_on or self._exec_lines)
+                    and self._function_is_near(code, g)):
+                self._arm_lines(code)       # a function of ours our code calls
+        if not ent[1] or (self._b_active and self._b_owns(code, g, ent[2])):
+            return
+        with self._arm_lock:            # cold path: once per newly reached dependency code
+            if id(code) in self._watch_codes:
+                return
+            self._watch_code(code)
+            self.armed += 1
+            self.last_armed_at = _monotonic()
+
+    # ── incremental: tool B's PY_START callback ────────────────────────────────
+    def _on_implicit(self, code, offset):
+        try:
+            ent = self._implicit.get(id(code))
+            frame = _getframe(1)
+            if frame.f_code is not code:
+                frame = _frame_of(code)
+                if frame is None:
+                    return None
+            if ent is None or ent[0] is not code:
+                ent = self._decide_implicit(code, frame)
+            if not ent[1]:
+                return ent[6]
+            if self._b_reopened:
+                loc = self._local.get(id(code))
+                if loc is not None and loc[0] is code and loc[1] & 1:   # PY_START: A's
+                    return self._mon.DISABLE
+            if self.near is not None:
+                back = frame.f_back
+                if back is None:
+                    return None
+                near = self._near_codes.get(id(back.f_code))
+                if not (near[1] if near is not None else self._code_is_near(back)):
+                    return None
+            self._record(frame, ent)
+        except Exception:
+            pass
+        return None
+
+    def _decide_implicit(self, code, frame):
+        g = frame.f_globals
+        module = g.get("__name__", "") or ""
+        body = code.co_name == "<module>"
+        hit = False
+        if (not body and not never_target(module) and code.co_name != "__del__"
+                and self._b_owns(code, g, module)):
+            prefix = self._watch_prefix
+            hit = (id(code) in self._impact_codes
+                   or (prefix is not None and bool(prefix.matches(module, frame)))
+                   or self._target_module(module, frame))
+        if not hit and (self._lines_on or self._exec_lines) and self._code_is_near(frame):
+            self._arm_lines(code)       # our code (a module body: every function in it)
+            if self._exec_lines:
+                ent = self._lined.get(id(code))
+                if ent is not None and ent[0] is code and not ent[2]:
+                    self._exec_started(code)    # it starts now, with no LINE events
+        if len(self._implicit) >= _CODE_CACHE_MAX:
+            self._implicit.clear()
+        ent = [code, hit, module, body, None, generator_marker(code),
+               None if hit else self._mon.DISABLE]
+        self._implicit[id(code)] = ent
+        return ent
+

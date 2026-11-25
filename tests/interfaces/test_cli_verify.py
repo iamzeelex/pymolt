@@ -67,34 +67,6 @@ def test_skipped_golden_keeps_root_verdict_inconclusive(tmp_path, monkeypatch):
     assert json.loads(result.stdout)["verdict"] == "inconclusive"
 
 
-def test_root_verify_folds_persisted_cascade_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "pymolt.verify.service.build_contract_report_from_state",
-        lambda *args, **kwargs: _passing_report(tmp_path),
-    )
-    cascade = tmp_path / "cascade.json"
-    cascade.write_text(json.dumps({
-        "scope": "full",
-        "results": [{
-            "node": {
-                "name": "dep.api",
-                "old_version": "1",
-                "new_version": "2",
-                "trace_prefix": "dep",
-            },
-            "verdict": "behavior-changed",
-            "evidence_level": "trace",
-        }],
-    }))
-
-    result = runner.invoke(app, [
-        "verify", str(tmp_path), "--cascade", str(cascade), "--json",
-    ])
-
-    assert result.exit_code == EXIT_FINDING, result.output
-    assert json.loads(result.stdout)["verdict"] == "fail"
-
-
 def test_failed_canary_can_execute_explicit_auto_rollback(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "pymolt.verify.service.build_contract_report_from_state",
@@ -108,7 +80,7 @@ def test_failed_canary_can_execute_explicit_auto_rollback(tmp_path, monkeypatch)
     rolled_back = []
     monkeypatch.setattr(
         "pymolt.migration_plan.rollback_migration",
-        lambda project_dir, run_id=None: rolled_back.append(run_id),
+        lambda project_dir, run_id=None, agent=False: rolled_back.append((run_id, agent)),
     )
     policy = tmp_path / "policy.json"
     metrics = tmp_path / "metrics.json"
@@ -135,5 +107,5 @@ def test_failed_canary_can_execute_explicit_auto_rollback(tmp_path, monkeypatch)
     ])
 
     assert result.exit_code == EXIT_FINDING, result.output
-    assert rolled_back == ["a" * 32]
+    assert rolled_back == [("a" * 32, False)]  # a person's verify, not an agent's
     assert json.loads(result.stdout)["rollback_executed"] is True

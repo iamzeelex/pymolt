@@ -1,0 +1,1450 @@
+{
+ "pair": "pandas",
+ "versions": {
+  "old": {
+   "pandas": "1.5.3"
+  },
+  "new": {
+   "pandas": "2.2.3"
+  },
+  "python": [
+   "3.11.13",
+   "3.12.11"
+  ]
+ },
+ "symbols": 14,
+ "units": 19,
+ "timing": {
+  "contact_map_s": 0.0,
+  "baseline_run_old_s": 0.213,
+  "engine": {
+   "env_resolve_s": 0.036,
+   "env_build_s": 0,
+   "symbols": 14,
+   "probe_s": 0.867,
+   "probe_old_s": 0.866,
+   "probe_old_cached": false,
+   "probe_new_s": 0.763,
+   "probe_new_cached": false,
+   "diff_s": 0.001,
+   "fetch_s": 0.0,
+   "total_s": 0.905
+  },
+  "engine_wall_s": 0.905,
+  "local_total_excl_env_build_s": 0.91
+ },
+ "score": {
+  "local": {
+   "api": {
+    "tp": 13,
+    "fp": 0,
+    "fn": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "per_category": {
+     "REMOVED": {
+      "tp": [
+       "pandas.core.series.Series.append"
+      ],
+      "fp": [],
+      "fn": []
+     },
+     "SIGNATURE": {
+      "tp": [
+       "pandas.Series",
+       "pandas.concat",
+       "pandas.core.frame.DataFrame.groupby",
+       "pandas.core.frame.DataFrame.mean",
+       "pandas.core.groupby.generic.DataFrameGroupBy",
+       "pandas.core.groupby.groupby.GroupBy",
+       "pandas.core.groupby.groupby.GroupBy.sum",
+       "pandas.core.reshape.concat.concat",
+       "pandas.core.series.Series",
+       "pandas.core.series.Series.__init__",
+       "pandas.core.series.Series.to_dict"
+      ],
+      "fp": [],
+      "fn": []
+     },
+     "BASES": {
+      "tp": [],
+      "fp": [],
+      "fn": []
+     },
+     "DEPRECATED": {
+      "tp": [],
+      "fp": [],
+      "fn": []
+     },
+     "BEHAVIOR": {
+      "tp": [
+       "pandas.core.frame.DataFrame.mean"
+      ],
+      "fp": [],
+      "fn": []
+     }
+    }
+   },
+   "use": {
+    "tp": 2,
+    "fp": 0,
+    "fn": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "per_category": {
+     "REMOVED": {
+      "tp": [
+       "pandas.core.series.Series.append"
+      ],
+      "fp": [],
+      "fn": []
+     },
+     "DEPRECATED": {
+      "tp": [],
+      "fp": [],
+      "fn": []
+     },
+     "BEHAVIOR": {
+      "tp": [
+       "pandas.core.frame.DataFrame.mean"
+      ],
+      "fp": [],
+      "fn": []
+     }
+    }
+   }
+  }
+ },
+ "hints": {
+  "pandas.core.series.Series.append": {
+   "expected": [
+    "pandas.concat",
+    "concat"
+   ],
+   "local": [
+    "pandas.concat",
+    "warning",
+    true
+   ]
+  }
+ },
+ "delta_reports": [
+  {
+   "schema": "pymolt.delta/1",
+   "package": "pandas",
+   "from": "1.5.3",
+   "to": "2.2.3",
+   "old_python": "3.11.13",
+   "new_python": "3.12.11",
+   "quality": "complete",
+   "facts": [
+    {
+     "symbol": "pandas.core.series.Series.append",
+     "aliases": [],
+     "kind": "REMOVED",
+     "param": null,
+     "old": "pandas.core.series.Series.append",
+     "new": null,
+     "deprecated_in_old": true,
+     "successor": "pandas.concat",
+     "evidence": [
+      "existence",
+      "absent in new: AttributeError: type object 'Series' has no attribute 'append'",
+      "docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+      "warning:FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+      "successor:warning"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.groupby",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "squeeze",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.generic.DataFrameGroupBy",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "mutated",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.generic.DataFrameGroupBy",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "squeeze",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.groupby.GroupBy",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "mutated",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.groupby.GroupBy",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "squeeze",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.series.Series.to_dict",
+     "aliases": [],
+     "kind": "SIGNATURE",
+     "param": "into",
+     "old": "POSITIONAL_OR_KEYWORD",
+     "new": "KEYWORD_ONLY",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.groupby",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "axis",
+     "old": "0",
+     "new": "<no_default>",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.groupby",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "group_keys",
+     "old": "<no_default>",
+     "new": "True",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.groupby",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "observed",
+     "old": "False",
+     "new": "<no_default>",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.mean",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "axis",
+     "old": "<no_default>",
+     "new": "0",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.mean",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "numeric_only",
+     "old": "None",
+     "new": "False",
+     "deprecated_in_old": true,
+     "successor": null,
+     "evidence": [
+      "signature",
+      "warning:FutureWarning: The default value of numeric_only in DataFrame.mean is deprecated. In a future version, it will default to False. In addition, specifying 'numeric_only=None' is",
+      "old-prose: .. deprecated:: 1.5.0 Specifying ``numeric_only=None`` is deprecated. The default value will be ``False`` in a future version of pandas."
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.generic.DataFrameGroupBy",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "observed",
+     "old": "False",
+     "new": "<no_default>",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.groupby.GroupBy",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "observed",
+     "old": "False",
+     "new": "<no_default>",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.groupby.GroupBy.sum",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "numeric_only",
+     "old": "<no_default>",
+     "new": "False",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.reshape.concat.concat",
+     "aliases": [
+      "pandas.concat"
+     ],
+     "kind": "DEFAULT",
+     "param": "copy",
+     "old": "True",
+     "new": "None",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.series.Series",
+     "aliases": [
+      "pandas.Series"
+     ],
+     "kind": "DEFAULT",
+     "param": "copy",
+     "old": "False",
+     "new": "None",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.series.Series",
+     "aliases": [
+      "pandas.Series"
+     ],
+     "kind": "DEFAULT",
+     "param": "fastpath",
+     "old": "False",
+     "new": "<no_default>",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.series.Series.__init__",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "copy",
+     "old": "False",
+     "new": "None",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.series.Series.__init__",
+     "aliases": [],
+     "kind": "DEFAULT",
+     "param": "fastpath",
+     "old": "False",
+     "new": "<no_default>",
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.base.IndexOpsMixin",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.base.IndexOpsMixin.__iter__",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame",
+     "aliases": [
+      "pandas.DataFrame"
+     ],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.frame.DataFrame.__init__",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    },
+    {
+     "symbol": "pandas.core.series.Series.__len__",
+     "aliases": [],
+     "kind": "UNCHANGED",
+     "param": null,
+     "old": null,
+     "new": null,
+     "deprecated_in_old": false,
+     "successor": null,
+     "evidence": [
+      "existence",
+      "signature"
+     ]
+    }
+   ],
+   "notes": [
+    "old: baseline capture interpreter (bench/e2e_pandas/.envs/3.11/bin/python)",
+    "new: configured target environment (bench/e2e_pandas/.envs/3.12)"
+   ]
+  }
+ ],
+ "per_unit": {
+  "pandas.DataFrame": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {
+     "pandas.DataFrame": [
+      [
+       "ok",
+       "tuple",
+       "(2, 2)"
+      ],
+      [
+       "ok",
+       "tuple",
+       "(2, 2)"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.DataFrame"
+   ]
+  },
+  "pandas.Series": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param copy default False->None",
+      "param fastpath default False-><no_default>"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.Series": [
+      [
+       "ok",
+       "list",
+       "[1, 2]"
+      ],
+      [
+       "ok",
+       "list",
+       "[1, 2]"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.series.Series copy: False -> None",
+      "DEFAULT pandas.core.series.Series fastpath: False -> <no_default>"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.series.Series",
+      "aliases": [
+       "pandas.Series"
+      ],
+      "kind": "DEFAULT",
+      "param": "copy",
+      "old": "False",
+      "new": "None",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.series.Series",
+      "aliases": [
+       "pandas.Series"
+      ],
+      "kind": "DEFAULT",
+      "param": "fastpath",
+      "old": "False",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.Series"
+   ]
+  },
+  "pandas.concat": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param copy default True->None"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.concat": [
+      [
+       "ok",
+       "list",
+       "[1, 2, 3]"
+      ],
+      [
+       "ok",
+       "list",
+       "[1, 2, 3]"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.reshape.concat.concat copy: True -> None"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.reshape.concat.concat",
+      "aliases": [
+       "pandas.concat"
+      ],
+      "kind": "DEFAULT",
+      "param": "copy",
+      "old": "True",
+      "new": "None",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.concat"
+   ]
+  },
+  "pandas.core.base.IndexOpsMixin": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {}
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.core.base.IndexOpsMixin.__iter__"
+   ]
+  },
+  "pandas.core.base.IndexOpsMixin.__iter__": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {
+     "pandas.core.base.IndexOpsMixin.__iter__": [
+      [
+       "ok",
+       "list",
+       "[1, 2]"
+      ],
+      [
+       "ok",
+       "list",
+       "[1, 2]"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.core.base.IndexOpsMixin.__iter__"
+   ]
+  },
+  "pandas.core.frame.DataFrame": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {}
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.core.frame.DataFrame.__init__",
+    "pandas.core.frame.DataFrame.groupby",
+    "pandas.core.frame.DataFrame.mean"
+   ]
+  },
+  "pandas.core.frame.DataFrame.__init__": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {
+     "pandas.core.frame.DataFrame.__init__": [
+      [
+       "ok",
+       "tuple",
+       "(2, 2)"
+      ],
+      [
+       "ok",
+       "tuple",
+       "(2, 2)"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.core.frame.DataFrame.__init__"
+   ]
+  },
+  "pandas.core.frame.DataFrame.groupby": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param axis default 0-><no_default>",
+      "param group_keys default <no_default>->True",
+      "param squeeze removed",
+      "param observed default False-><no_default>"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.frame.DataFrame.groupby": [
+      [
+       "ok",
+       "str",
+       "'DataFrameGroupBy'"
+      ],
+      [
+       "ok",
+       "str",
+       "'DataFrameGroupBy'"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.frame.DataFrame.groupby axis: 0 -> <no_default>",
+      "DEFAULT pandas.core.frame.DataFrame.groupby group_keys: <no_default> -> True",
+      "DEFAULT pandas.core.frame.DataFrame.groupby observed: False -> <no_default>",
+      "SIGNATURE pandas.core.frame.DataFrame.groupby squeeze: POSITIONAL_OR_KEYWORD -> None"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.frame.DataFrame.groupby",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "squeeze",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.frame.DataFrame.groupby",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "axis",
+      "old": "0",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.frame.DataFrame.groupby",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "group_keys",
+      "old": "<no_default>",
+      "new": "True",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.frame.DataFrame.groupby",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "observed",
+      "old": "False",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.frame.DataFrame.groupby"
+   ]
+  },
+  "pandas.core.frame.DataFrame.mean": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param axis default <no_default>->0",
+      "param numeric_only default None->False"
+     ],
+     "BEHAVIOR": [
+      "pandas.core.frame.DataFrame.mean: ['ok', 'dict', \"{'v': 2.0}\"] -> ['raise', 'TypeError']"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.frame.DataFrame.mean": [
+      [
+       "ok",
+       "dict",
+       "{'v': 2.0}"
+      ],
+      [
+       "raise",
+       "TypeError"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.frame.DataFrame.mean axis: <no_default> -> 0",
+      "DEFAULT pandas.core.frame.DataFrame.mean numeric_only: None -> False"
+     ],
+     "BEHAVIOR": [
+      "warning:FutureWarning: The default value of numeric_only in DataFrame.mean is deprecated. In a future version, it will default to False. In addition, specifying 'numeric_only=None' is"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.frame.DataFrame.mean",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "axis",
+      "old": "<no_default>",
+      "new": "0",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.frame.DataFrame.mean",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "numeric_only",
+      "old": "None",
+      "new": "False",
+      "deprecated_in_old": true,
+      "successor": null,
+      "evidence": [
+       "signature",
+       "warning:FutureWarning: The default value of numeric_only in DataFrame.mean is deprecated. In a future version, it will default to False. In addition, specifying 'numeric_only=None' is",
+       "old-prose: .. deprecated:: 1.5.0 Specifying ``numeric_only=None`` is deprecated. The default value will be ``False`` in a future version of pandas."
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.frame.DataFrame.mean"
+   ]
+  },
+  "pandas.core.groupby.generic.DataFrameGroupBy": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param squeeze removed",
+      "param observed default False-><no_default>",
+      "param mutated removed"
+     ]
+    },
+    "notes": [],
+    "use": {}
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.groupby.generic.DataFrameGroupBy observed: False -> <no_default>",
+      "SIGNATURE pandas.core.groupby.generic.DataFrameGroupBy mutated: POSITIONAL_OR_KEYWORD -> None",
+      "SIGNATURE pandas.core.groupby.generic.DataFrameGroupBy squeeze: POSITIONAL_OR_KEYWORD -> None"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.groupby.generic.DataFrameGroupBy",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "mutated",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.groupby.generic.DataFrameGroupBy",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "squeeze",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.groupby.generic.DataFrameGroupBy",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "observed",
+      "old": "False",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__"
+   ]
+  },
+  "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {
+     "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__": [
+      [
+       "ok",
+       "str",
+       "'SeriesGroupBy'"
+      ],
+      [
+       "ok",
+       "str",
+       "'SeriesGroupBy'"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.core.groupby.generic.DataFrameGroupBy.__getitem__"
+   ]
+  },
+  "pandas.core.groupby.groupby.GroupBy": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param squeeze removed",
+      "param observed default False-><no_default>",
+      "param mutated removed"
+     ]
+    },
+    "notes": [],
+    "use": {}
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.groupby.groupby.GroupBy observed: False -> <no_default>",
+      "SIGNATURE pandas.core.groupby.groupby.GroupBy mutated: POSITIONAL_OR_KEYWORD -> None",
+      "SIGNATURE pandas.core.groupby.groupby.GroupBy squeeze: POSITIONAL_OR_KEYWORD -> None"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.groupby.groupby.GroupBy",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "mutated",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.groupby.groupby.GroupBy",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "squeeze",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": null,
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.groupby.groupby.GroupBy",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "observed",
+      "old": "False",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.groupby.groupby.GroupBy.sum"
+   ]
+  },
+  "pandas.core.groupby.groupby.GroupBy.sum": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param numeric_only default <no_default>->False"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.groupby.groupby.GroupBy.sum": [
+      [
+       "ok",
+       "dict",
+       "{'a': 3}"
+      ],
+      [
+       "ok",
+       "dict",
+       "{'a': 3}"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.groupby.groupby.GroupBy.sum numeric_only: <no_default> -> False"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.groupby.groupby.GroupBy.sum",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "numeric_only",
+      "old": "<no_default>",
+      "new": "False",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.groupby.groupby.GroupBy.sum"
+   ]
+  },
+  "pandas.core.reshape.concat.concat": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param copy default True->None"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.reshape.concat.concat": [
+      [
+       "ok",
+       "list",
+       "[1, 2, 3]"
+      ],
+      [
+       "ok",
+       "list",
+       "[1, 2, 3]"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.reshape.concat.concat copy: True -> None"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.reshape.concat.concat",
+      "aliases": [
+       "pandas.concat"
+      ],
+      "kind": "DEFAULT",
+      "param": "copy",
+      "old": "True",
+      "new": "None",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.reshape.concat.concat"
+   ]
+  },
+  "pandas.core.series.Series": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param copy default False->None",
+      "param fastpath default False-><no_default>"
+     ]
+    },
+    "notes": [],
+    "use": {}
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.series.Series copy: False -> None",
+      "DEFAULT pandas.core.series.Series fastpath: False -> <no_default>"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.series.Series",
+      "aliases": [
+       "pandas.Series"
+      ],
+      "kind": "DEFAULT",
+      "param": "copy",
+      "old": "False",
+      "new": "None",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.series.Series",
+      "aliases": [
+       "pandas.Series"
+      ],
+      "kind": "DEFAULT",
+      "param": "fastpath",
+      "old": "False",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.series.Series.__init__",
+    "pandas.core.series.Series.__len__",
+    "pandas.core.series.Series.append",
+    "pandas.core.series.Series.to_dict"
+   ]
+  },
+  "pandas.core.series.Series.__init__": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param copy default False->None",
+      "param fastpath default False-><no_default>"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.series.Series.__init__": [
+      [
+       "ok",
+       "list",
+       "[1, 2]"
+      ],
+      [
+       "ok",
+       "list",
+       "[1, 2]"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "DEFAULT pandas.core.series.Series.__init__ copy: False -> None",
+      "DEFAULT pandas.core.series.Series.__init__ fastpath: False -> <no_default>"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.series.Series.__init__",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "copy",
+      "old": "False",
+      "new": "None",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     },
+     {
+      "symbol": "pandas.core.series.Series.__init__",
+      "aliases": [],
+      "kind": "DEFAULT",
+      "param": "fastpath",
+      "old": "False",
+      "new": "<no_default>",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.series.Series.__init__"
+   ]
+  },
+  "pandas.core.series.Series.__len__": {
+   "ground_truth": {
+    "categories": {},
+    "notes": [],
+    "use": {
+     "pandas.core.series.Series.__len__": [
+      [
+       "ok",
+       "int",
+       "2"
+      ],
+      [
+       "ok",
+       "int",
+       "2"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {},
+    "hint": null,
+    "hint_source": null,
+    "facts": []
+   },
+   "contacts": [
+    "pandas.core.series.Series.__len__"
+   ]
+  },
+  "pandas.core.series.Series.append": {
+   "ground_truth": {
+    "categories": {
+     "REMOVED": [
+      "absent in new (confirmed by use)"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.series.Series.append": [
+      [
+       "ok",
+       "list",
+       "[1, 2, 3]"
+      ],
+      [
+       "raise",
+       "AttributeError"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "REMOVED": [
+      "REMOVED pandas.core.series.Series.append"
+     ]
+    },
+    "hint": "pandas.concat",
+    "hint_source": "warning",
+    "facts": [
+     {
+      "symbol": "pandas.core.series.Series.append",
+      "aliases": [],
+      "kind": "REMOVED",
+      "param": null,
+      "old": "pandas.core.series.Series.append",
+      "new": null,
+      "deprecated_in_old": true,
+      "successor": "pandas.concat",
+      "evidence": [
+       "existence",
+       "absent in new: AttributeError: type object 'Series' has no attribute 'append'",
+       "docstring: .. deprecated:: 1.4.0 Use :func:`concat` instead. For further details see :ref:`whatsnew_140.deprecations.frame_series_append`",
+       "warning:FutureWarning: The series.append method is deprecated and will be removed from pandas in a future version. Use pandas.concat instead.",
+       "successor:warning"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.series.Series.append"
+   ]
+  },
+  "pandas.core.series.Series.to_dict": {
+   "ground_truth": {
+    "categories": {
+     "SIGNATURE": [
+      "param into kind POSITIONAL_OR_KEYWORD->KEYWORD_ONLY"
+     ]
+    },
+    "notes": [],
+    "use": {
+     "pandas.core.series.Series.to_dict": [
+      [
+       "ok",
+       "dict",
+       "{0: 1, 1: 2}"
+      ],
+      [
+       "ok",
+       "dict",
+       "{0: 1, 1: 2}"
+      ]
+     ]
+    }
+   },
+   "local": {
+    "categories": {
+     "SIGNATURE": [
+      "SIGNATURE pandas.core.series.Series.to_dict into: POSITIONAL_OR_KEYWORD -> KEYWORD_ONLY"
+     ]
+    },
+    "hint": null,
+    "hint_source": null,
+    "facts": [
+     {
+      "symbol": "pandas.core.series.Series.to_dict",
+      "aliases": [],
+      "kind": "SIGNATURE",
+      "param": "into",
+      "old": "POSITIONAL_OR_KEYWORD",
+      "new": "KEYWORD_ONLY",
+      "deprecated_in_old": false,
+      "successor": null,
+      "evidence": [
+       "signature"
+      ]
+     }
+    ]
+   },
+   "contacts": [
+    "pandas.core.series.Series.to_dict"
+   ]
+  }
+ }
+}

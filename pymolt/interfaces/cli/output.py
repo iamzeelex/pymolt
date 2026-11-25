@@ -22,6 +22,7 @@ from typing import NoReturn
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 #: The answer channel. Only a report or a JSON payload is ever written here.
 console = Console()
@@ -60,23 +61,41 @@ def fail(
     hint: str | None = None,
     code: int = EXIT_USAGE,
     json_output: bool = False,
+    extra: dict | None = None,
 ) -> NoReturn:
     """Report a failure on the right stream, in the right shape, and exit.
 
     Under ``--json`` the failure envelope goes to *stdout* — it is the
     machine-readable answer, and keeping stdout parseable in both directions is
-    the whole point. In human mode it goes to stderr.
+    the whole point. In human mode it goes to stderr. ``extra``: more keys for the
+    JSON envelope.
     """
     if json_output:
         payload: dict[str, object] = {"ok": False, "error": message}
         if hint:
             payload["hint"] = hint
+        payload.update(extra or {})
         typer.echo(json.dumps(payload, indent=2))
     else:
         err.print(f"[bold red]Error:[/bold red] {message}")
         if hint:
             err.print(f"[dim]{hint}[/dim]")
     raise typer.Exit(code=code)
+
+
+def fail_state_file(exc, *, json_output: bool = False) -> NoReturn:
+    """A damaged state file, or one a newer pymolt wrote (``pymolt.state_io.StateFileError``):
+    exit 2 with the message and the remedy as the hint; under ``--json``/``--agent`` the
+    envelope also carries ``path``, ``kind``, ``problem``, ``detail`` and ``remedy``."""
+    fail(exc.headline, hint=exc.remedy, code=EXIT_USAGE, json_output=json_output,
+         extra=exc.fields())
+
+
+def wants_machine_output(args: list[str]) -> bool:
+    """Whether a command line asks for ``--json`` or ``--agent`` (before any ``--``: what
+    follows is the captured command's own arguments)."""
+    head = args[:args.index("--")] if "--" in args else args
+    return any(arg in ("--json", "--agent") for arg in head)
 
 
 def require_project_dir(project_dir: str | Path, *, json_output: bool = False) -> Path:
@@ -109,25 +128,27 @@ def next_step(project_dir: str | Path, *, json_output: bool = False) -> None:
     to the reader. The answer is computed in one place (``pymolt.status``) rather
     than hardcoded per command, so the CLI cannot drift from what ``pymolt
     status`` says. Goes to stderr: it is guidance, not part of the answer, and
-    must never land in a piped report.
+    must never land in a piped report. The command names the project dir as the user gave
+    it (``status.shown_dir``), so it runs as printed from where they are.
     """
     if json_output:
         return
     try:
-        from pymolt.status import build_status
+        from pymolt.status import build_status, shown_dir
 
-        status = build_status(project_dir)
+        status = build_status(project_dir, shown=shown_dir(project_dir))
     except Exception:  # guidance must never break the command that produced a result
         return
     if status.next_command:
-        err.print(f"\n[dim]next →[/dim] [white]{status.next_command}[/white]")
+        err.print(f"\n[dim]next →[/dim] [white]{escape(status.next_command)}[/white]")
 
 
 def require_file(path: str | Path, *, what: str = "file", json_output: bool = False) -> Path:
     """Resolve an input file argument, or fail with EXIT_USAGE.
 
-    Used for recordings fed to ``contract diff``: a missing artifact used to fold
-    into an empty diff and report "no behavior change" — a false all-clear.
+    Used for recordings fed to ``verify --baseline/--post-migration``: a missing
+    artifact used to fold into an empty diff and report "no behavior change" — a
+    false all-clear.
     """
     resolved = Path(path)
     if not resolved.is_file():

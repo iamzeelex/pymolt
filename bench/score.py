@@ -8,6 +8,7 @@ visible rather than counted as a win.
 from __future__ import annotations
 
 import collections
+import importlib.util
 import json
 import re
 import statistics
@@ -17,6 +18,30 @@ from pathlib import Path
 BENCH = Path(__file__).resolve().parent
 GT = BENCH / "ground_truth"
 RESULTS = BENCH / "results"
+ARMS = ("bare", "mcp_only", "plugin", "cli_skill")
+
+
+def t4_truth() -> list[dict]:
+    """T4 ground truth, located in the fixture's own source (bench/e2e_pandas/run.py,
+    `change` variant) so a template edit cannot silently shift the expected lines.
+
+    The two pandas 1.5 -> 2.2 risks in toyapp/core.py:
+      Series.append    removed in pandas 2.0 (AttributeError)
+      DataFrame.mean   numeric_only default None -> False: 1.5 drops the string
+                       column (FutureWarning), 2.x raises TypeError, which the app
+                       catches and turns into None — a silent behaviour change.
+    """
+    spec = importlib.util.spec_from_file_location("e2e_run", BENCH / "e2e_pandas" / "run.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    lines = (mod.CORE + mod.AVERAGE).splitlines()
+    sites = []
+    for method, needle, why in (("append", "s1.append(", ("remov", "attributeerror", "concat")),
+                                ("mean", "df.mean(", ("numeric_only", "typeerror", "nuisance",
+                                                      "non-numeric", "string"))):
+        line = next(i for i, text in enumerate(lines, 1) if needle in text)
+        sites.append({"file": "toyapp/core.py", "line": line, "method": method, "why": why})
+    return sites
 
 
 def load_truth() -> dict:
@@ -40,6 +65,7 @@ def load_truth() -> dict:
         ).most_common(5)],
         "per_dep": dict(per_dep),
         "upgrades": changed,
+        "t4_sites": t4_truth(),
     }
 
 
@@ -115,13 +141,65 @@ def score(task: str, ans, T: dict) -> tuple[float, str]:
         return 0.5 * acc + 0.5 * best, \
                f"claimed {n} (truth {T['contact_points']} call sites / {T['distinct_symbols']} symbols); top={got_top}"
 
+    if task == "T4_contract_risk":
+        return score_t4(ans, T["t4_sites"])
+
     return float("nan"), "n/a"
+
+
+def _as_int(x):
+    try:
+        return int(str(x).strip().split(":")[-1].split("-")[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def score_t4(ans, truth: list[dict]) -> tuple[float, str]:
+    """Site-level F1 over the at-risk call sites.
+
+    A claimed entry hits a truth site when its file is toyapp/core.py and its
+    `symbol` names the method, or its line is the site's line, or its line is
+    within +-1 and its reason names the method (the design note cites the mean()
+    line as 23; the generated file has it on 24). Several
+    entries on one site count once; every entry that hits no site is a false
+    positive. Whether the stated reason is right is reported, not scored.
+    """
+    claims = [c for c in (ans.get("at_risk") or []) if isinstance(c, dict)]
+    hit: dict[str, dict] = {}
+    false_pos = []
+    for c in claims:
+        f = str(c.get("file", "")).replace("\\", "/")
+        line = _as_int(c.get("line"))
+        sym = str(c.get("symbol", "")).lower()
+        match = None
+        reason = str(c.get("reason", "")).lower()
+        if f.endswith("core.py") and "test" not in f:
+            # strongest evidence first: the symbol names the method; then the exact
+            # line; then an adjacent line whose reason names the method.
+            match = (next((t for t in truth if t["method"] in sym), None)
+                     or next((t for t in truth if line == t["line"]), None)
+                     or next((t for t in truth if line is not None
+                              and abs(line - t["line"]) <= 1 and t["method"] in reason), None))
+        if match is None:
+            false_pos.append(f"{f}:{c.get('line')} {c.get('symbol')}")
+        else:
+            hit.setdefault(match["method"], c)
+    tp = len(hit)
+    prec = tp / (tp + len(false_pos)) if tp + len(false_pos) else 0.0
+    rec = tp / len(truth)
+    f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
+    reasons = {m: any(w in str(c.get("reason", "")).lower() for w in
+                      next(t["why"] for t in truth if t["method"] == m))
+               for m, c in hit.items()}
+    return f1, (f"{tp}/{len(truth)} sites ({', '.join(sorted(hit)) or 'none'}); "
+                f"reason ok={reasons}; {len(false_pos)} false positive(s) {false_pos}")
 
 
 def main(paths: list[str]) -> int:
     T = load_truth()
     print(f"ground truth: {T['root_count']} roots, {T['contact_points']} contact points, "
-          f"{T['distinct_symbols']} distinct symbols, {len(T['upgrades'])} version changes")
+          f"{T['distinct_symbols']} distinct symbols, {len(T['upgrades'])} version changes; "
+          f"T4 sites {[(t['file'], t['line'], t['method']) for t in T['t4_sites']]}")
     files = [Path(p) for p in paths] or sorted(RESULTS.glob("mcp_*.json"))
     for f in files:
         d = json.loads(f.read_text())
@@ -138,7 +216,7 @@ def main(paths: list[str]) -> int:
             rows[(r["task"], r["arm"])].append(r)
         f.write_text(json.dumps(d, indent=2))
         for task in sorted({k[0] for k in rows}):
-            for arm in ("bare", "mcp_only", "plugin"):
+            for arm in ARMS:
                 rs = rows.get((task, arm))
                 if not rs:
                     continue
