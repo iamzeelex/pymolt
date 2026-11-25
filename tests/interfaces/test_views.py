@@ -502,6 +502,7 @@ _VERIFY_KEYS = {
     "blind_split",
     "unobservable_contacts", "compared", "changes", "change_counts", "calibration",
     "impact_focus", "failing_steps", "unobservable_uses", "dynamic_attribute_reads",
+    "numeric_drift",
 }
 
 

@@ -498,3 +498,96 @@ def test_a_truth_test_compares_truthiness(tmp_path):
 
     assert not one(run(tmp_path, [ok(True)], [ok(1)], src), "dep.R.ok").fails
     assert one(run(tmp_path, [ok(True)], [ok(0)], src), "dep.R.ok").fails
+
+
+# ── 5. numeric drift ──────────────────────────────────────────────────────────────────────
+
+PRED_SRC = "def main(m, X):\n    y = m.predict(X)\n"
+
+
+def pred(values, dtype="float64", x=(1.0, 2.0)):
+    return ev("dep.Model.predict",
+              {"self": {"__opaque__": "dep.Model"}, "X": {"__list__": list(x)}},
+              result={"__structure__": "numpy.ndarray", "dtype": dtype, "shape": [len(values)],
+                      "values": {"__list__": list(values)}}, line=2)
+
+
+def test_floats_within_rounding_are_numeric_drift_and_stamped(tmp_path):
+    a = 5.999999999999991
+    b = 6.000000000000003
+    d = run(tmp_path, [pred([a, 1.0])], [pred([b, 1.0])], PRED_SRC)
+    e = one(d, "dep.Model.predict")
+    assert e.category is FactCategory.DRIFT and e.level.value == "numeric"
+    assert e.absorbed == ["numeric"] and e.compared_equal
+    assert e.numeric["values"] == 1 and 1 <= e.numeric["max_ulps"] <= 1024
+    assert d.numeric_drift["bound_ulps"] == 1024 and d.numeric_drift["values"] == 1
+    assert d.verdict is VerificationVerdict.PASS
+
+
+def test_mutation_floats_apart_by_1e_9_relative_fail(tmp_path):
+    d = run(tmp_path, [pred([6.0])], [pred([6.0 * (1 + 1e-9)])], PRED_SRC)
+    assert one(d, "dep.Model.predict").fails
+
+
+def test_a_4_ulp_difference_stays_drift(tmp_path):
+    import math
+    x = 6.0
+    d = run(tmp_path, [pred([x])], [pred([x + 4 * math.ulp(x)])], PRED_SRC)
+    e = one(d, "dep.Model.predict")
+    assert not e.fails and e.numeric["max_ulps"] == 4
+
+
+def test_mutation_float32_against_float64_with_near_values_fails(tmp_path):
+    d = run(tmp_path, [pred([0.38], "float64")], [pred([0.38000001311302185], "float32")],
+            PRED_SRC)
+    assert one(d, "dep.Model.predict").fails
+
+
+def test_float32_compares_at_its_own_precision(tmp_path):
+    import struct
+
+    def f32(x):
+        return struct.unpack("f", struct.pack("f", x))[0]
+
+    a = f32(0.1)
+    b = struct.unpack("f", struct.pack("I", struct.unpack("I", struct.pack("f", a))[0] + 3))[0]
+    ok = run(tmp_path, [pred([a], "float32")], [pred([b], "float32")], PRED_SRC)
+    assert not one(ok, "dep.Model.predict").fails
+    far = run(tmp_path, [pred([a], "float32")], [pred([a * (1 + 1e-4)], "float32")], PRED_SRC)
+    assert one(far, "dep.Model.predict").fails
+
+
+def test_zero_signs_and_scales(tmp_path):
+    assert not one(run(tmp_path, [pred([0.0])], [pred([-0.0])], PRED_SRC),
+                   "dep.Model.predict").fails
+    # a scalar zero against a tiny non-zero has no scale: exact
+    src = "def main(m):\n    y = m.score()\n"
+    zero = [ev("dep.Model.score", {"self": {"__opaque__": "dep.Model"}}, result=0.0, line=2)]
+    tiny = [ev("dep.Model.score", {"self": {"__opaque__": "dep.Model"}}, result=1e-300, line=2)]
+    assert one(run(tmp_path, zero, tiny, src), "dep.Model.score").fails
+    # inside an array the array's largest magnitude is the scale
+    assert not one(run(tmp_path, [pred([1.0, 0.0])], [pred([1.0, 1e-17])], PRED_SRC),
+                   "dep.Model.predict").fails
+    # across the sign boundary, as any distance
+    assert one(run(tmp_path, [pred([1e-3])], [pred([-1e-3])], PRED_SRC),
+               "dep.Model.predict").fails
+
+
+def test_float_ulps_zero_is_exact_and_strict_reviews(tmp_path):
+    a, b = 5.999999999999991, 6.000000000000003
+    exact = run(tmp_path, [pred([a])], [pred([b])], PRED_SRC, float_ulps=0)
+    assert one(exact, "dep.Model.predict").fails and exact.float_ulps == 0
+    strict = run(tmp_path, [pred([a])], [pred([b])], PRED_SRC, strict=True)
+    e = one(strict, "dep.Model.predict")
+    assert not e.fails and e.review and e.review.startswith("numeric drift")
+    assert strict.verdict is VerificationVerdict.INCONCLUSIVE
+
+
+def test_inputs_within_rounding_are_the_same_input(tmp_path):
+    x_old, x_new = (1.0, 2.0000000000000004), (1.0, 2.0)
+    d = run(tmp_path, [pred([3.0], x=x_old)], [pred([3.0], x=x_new)], PRED_SRC)
+    e = one(d, "dep.Model.predict")
+    assert "matched-modulo-numeric" in e.notes and not e.review and not e.fails
+    changed = run(tmp_path, [pred([3.0], x=x_old)], [pred([3.5], x=x_new)], PRED_SRC)
+    e = one(changed, "dep.Model.predict")
+    assert e.fails and not e.review

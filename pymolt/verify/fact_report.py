@@ -51,6 +51,8 @@ RULES = {
     "order": "facts._judge_order",
     "handle-state": "facts._handles_match (a dependency object, by what the project reads of it)",
     "type-drift": "facts._handle_types_relate / _wrapper_naming / _carry_edit_types",
+    "projected": "facts.compare_outcomes (the consuming statement, source_uses.consumer_at)",
+    "numeric": "facts._floats_close (equal within --float-ulps at the value's precision)",
 }
 
 # review reason (the review text's prefix) -> the one action that settles it
@@ -429,6 +431,7 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
         "accepted_total": len(by_class["accepted"]),
         "explained": table,
         "absorbed": diff.absorbed,
+        "numeric_drift": diff.numeric_drift,
         "quality": quality,
     }
 

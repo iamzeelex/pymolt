@@ -371,7 +371,12 @@ def verify_migration(
     strict: bool = typer.Option(
         False, "--strict",
         help="Review every accepted change instead of counting it equal, and compare a "
-             "dependency object's full state, not only what your code reads of it"),
+             "dependency object's full state, not only what your code reads of it; floats "
+             "equal only within rounding become review items"),
+    float_ulps: int | None = typer.Option(
+        None, "--float-ulps", min=0,
+        help="Floats are equal within this many units in the last place at their own "
+             "precision (default 1024; 0 compares them exactly)"),
     step: str | None = typer.Option(
         None, "--step",
         help="Also print this step's judgement and exit by it (0 verified, 1 failed, 4 needs "
@@ -476,6 +481,7 @@ def verify_migration(
                 comparator_profile=selected.value,
                 custom_comparator=comparator,
                 strict=strict,
+                float_ulps=float_ulps,
             )
 
         contract_report = build_report()

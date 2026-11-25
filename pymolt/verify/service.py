@@ -2760,6 +2760,7 @@ def build_contract_report_from_state(
     comparator_profile: str = "exact",
     custom_comparator=None,
     strict: bool = False,
+    float_ulps: int | None = None,
 ) -> ContractReport:
     """The unified report, sourcing trace/against from the persisted state when
     not explicitly overridden. ``strict``: every ACCEPTED change is a review item.
@@ -2856,8 +2857,8 @@ def build_contract_report_from_state(
             predictions = {"risks": [], "source": "baseline", "plan_id": None,
                            "notes": [f"predicted risks unavailable: {exc}"]}
 
-    diff_context = build_diff_context(project_dir, trace, against, strict=strict) \
-        if trace and against else None
+    diff_context = build_diff_context(project_dir, trace, against, strict=strict,
+                                      float_ulps=float_ulps) if trace and against else None
     report = build_contract_report(
         project_dir,
         trace=trace,
@@ -2913,7 +2914,7 @@ def _compared_recordings(project_dir: str | Path, state: ContractState, trace: s
 
 
 def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path, *,
-                       strict: bool = False):
+                       strict: bool = False, float_ulps: int | None = None):
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
@@ -2932,6 +2933,7 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
     root = Path(os.path.abspath(project_dir))
     ctx = DiffContext()
     ctx.strict = strict
+    ctx.float_ulps = float_ulps
     ctx.old_sources = load_sources(sources_path(against))
     ctx.new_sources = load_sources(sources_path(trace))
     receipt = MigrationReceipt.load(root)
