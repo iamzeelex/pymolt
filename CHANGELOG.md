@@ -424,6 +424,12 @@ All notable changes to pymolt. The format follows
 - Whether code is the project's is decided per namespace, not per module name: a script run as
   `__main__` inside `python -m pytest` (streamlit's AppTest) recorded none of its calls under
   `sys.monitoring`.
+- Code a dependency generates with `exec` is no longer taken for the project's. Such code runs
+  as `<string>` in a namespace with no `__file__`, and is now placed by the module its
+  `__name__` names: SQLAlchemy 2.0's mapped-class `__init__` and decorated methods made every
+  call they made inside SQLAlchemy a contact, and an equivalent 1.3 to 2.0 migration failed on
+  71 APPEARED entries. `python -c`, `<stdin>`, the REPL and notebook cells (`__main__`) stay
+  the user's.
 - A refused capture's hint fits the side: a failing post-migration run may be what the migration
   broke (`--accept-failing` keeps it so verify compares it), a failing replicate may be flaky. A
   run the test runner stopped before any test ran is named so ("N test file(s) could not be
