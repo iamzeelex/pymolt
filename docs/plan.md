@@ -50,8 +50,8 @@ irrelevant changes.
   the evidence names several objects, or offers a choice ("`st.cache_data` or
   `st.cache_resource`"), no successor is picked: the fact lists them as `succession.candidates`,
   ordered by evidence, and the agent or person chooses. Every fact that names a successor says
-  how (`succession`: its `trust`, the `sources`, `caveats` such as "the default has changed",
-  and the names it `rejected` and why). A parameter paired with another only by its position is a
+  how (`succession`: its `trust`, the `sources`, `caveats` such as "the default has changed"
+  or "is not equivalent to", and the names it `rejected` and why). A parameter paired with another only by its position is a
   candidate, never a successor. Prose and text only name a successor; they never rewrite code.
 - **Proven successors.** A successor is *proven* only by the library's own code, and only a
   proven one is rewritten:
