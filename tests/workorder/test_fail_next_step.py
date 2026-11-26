@@ -62,7 +62,9 @@ def test_a_fail_at_a_planned_steps_site_names_it_and_a_persons_options(tmp_path)
     assert "`pymolt verify . --accept ID`" in status.next_reason
 
 
-def test_a_fail_at_a_rolled_back_steps_site_says_how_to_bring_it_back(tmp_path):
+def test_a_fail_at_a_rolled_back_persons_step_says_to_record_it_again(tmp_path):
+    # beh-1 is a person's step: `apply --step beh-1` refuses it, so the change is made again
+    # under a record.
     plan = _plan(tmp_path)
     record_step(tmp_path, plan, "beh-1")
     edit(tmp_path, *SAME)
@@ -76,9 +78,23 @@ def test_a_fail_at_a_rolled_back_steps_site_says_how_to_bring_it_back(tmp_path):
 
     assert code == 1
     assert "Failing at the sites of plan step(s) beh-1 (rolled_back)." in text
-    assert f"Rolled back: `pymolt apply {tmp_path} --step beh-1` brings it back." in text
+    assert f"Rolled back: `pymolt apply {tmp_path} --step beh-1 --record` brings it back." in text
     status = build_status(tmp_path, shown=str(tmp_path))
     assert status.next_command is None                 # never `pymolt rollback .`
-    assert (f"(`pymolt apply {tmp_path} --step beh-1` brings the rolled-back step back)"
+    assert (f"(`pymolt apply {tmp_path} --step beh-1 --record` brings the rolled-back step back)"
             in status.next_reason)
     assert f"`pymolt verify {tmp_path} --accept ID`" in status.next_reason
+
+
+def test_a_rolled_back_pymolt_step_is_brought_back_by_apply_alone():
+    from pymolt.interfaces.views import fail_lines
+    from pymolt.status import bring_back_command
+
+    assert bring_back_command(".", "mech-1", "pymolt") == "pymolt apply . --step mech-1"
+    assert bring_back_command(".", "beh-1", "agent") == "pymolt apply . --step beh-1 --record"
+    assert bring_back_command(".", "x-1", None) == "pymolt apply . --step x-1"
+
+    class Unified:
+        failing_steps = [{"id": "mech-1", "executor": "pymolt", "status": "rolled_back"}]
+
+    assert "Rolled back: `pymolt apply . --step mech-1` brings it back." in fail_lines(Unified())

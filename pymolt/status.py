@@ -99,6 +99,15 @@ def command(shown: str, verb: str, *args: str) -> str:
     return " ".join(("pymolt", verb, shown, *args))
 
 
+def bring_back_command(shown: str, step_id: str, executor: str | None) -> str:
+    """The command that brings a rolled-back step back. pymolt applies its own step again; a
+    person's or an agent's change is made again under a record, since `apply --step ID` refuses
+    a step pymolt does not write."""
+    if executor is not None and executor != "pymolt":
+        return command(shown, "apply", "--step", step_id, "--record")
+    return command(shown, "apply", "--step", step_id)
+
+
 def capture_command(shown: str, when: str, *args: str) -> str:
     """``pymolt capture WHEN [--project-dir DIR] ARGS``: capture takes its project dir as an
     option, left out for the current directory."""
@@ -1135,15 +1144,15 @@ def _decide_next(
         steps = list(getattr(verification, "failing_steps", None) or ())
         current = {s.id: s.status for s in projection.steps} if projection is not None else {}
         named = ", ".join(f"{s['id']} ({current.get(s['id'], s['status'])})" for s in steps)
-        back = [s["id"] for s in steps if current.get(s["id"], s["status"]) == "rolled_back"]
+        back = [s for s in steps if current.get(s["id"], s["status"]) == "rolled_back"]
         status.next_command = None
         status.next_reason = (
             "The verdict is FAIL" + (f" at the sites of plan step(s) {named}" if named else "")
             + (". No apply run made this migration, so there is nothing to roll back"
                if by_hand else "")
             + ". A person decides: fix the code"
-            + (f" (`{command(shown, 'apply', '--step', back[0])}` brings the rolled-back step back)"
-               if back else "")
+            + (f" (`{bring_back_command(shown, back[0]['id'], back[0].get('executor'))}` "
+               "brings the rolled-back step back)" if back else "")
             + ", then capture post-migration again and verify; or accept an intended change "
               f"with `{command(shown, 'verify', '--accept', 'ID')}` on a terminal.")
         return
