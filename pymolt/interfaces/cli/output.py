@@ -50,9 +50,9 @@ EXIT_INCONCLUSIVE = 4
 
 def warn(message: str, *, hint: str | None = None) -> None:
     """A diagnostic the user should see but which is not the answer."""
-    err.print(f"[bold yellow]⚠️ Warning:[/bold yellow] {message}")
+    err.print(f"[bold yellow]⚠️ Warning:[/bold yellow] {escape(message)}")
     if hint:
-        err.print(f"[dim]{hint}[/dim]")
+        err.print(f"[dim]{escape(hint)}[/dim]")
 
 
 def fail(
@@ -77,9 +77,9 @@ def fail(
         payload.update(extra or {})
         typer.echo(json.dumps(payload, indent=2))
     else:
-        err.print(f"[bold red]Error:[/bold red] {message}")
+        err.print(f"[bold red]Error:[/bold red] {escape(message)}")
         if hint:
-            err.print(f"[dim]{hint}[/dim]")
+            err.print(f"[dim]{escape(hint)}[/dim]")
     raise typer.Exit(code=code)
 
 
