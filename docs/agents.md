@@ -88,7 +88,7 @@ adapter over the same view layer: each tool returns exactly what `pymolt <comman
 for the same project.
 
 ```bash
-uv tool install --python 3.12 "./pymolt[mcp]"
+uv tool install --python 3.12 "pymolt[mcp]"
 ```
 
 ```json

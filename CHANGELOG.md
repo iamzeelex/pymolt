@@ -5,24 +5,7 @@ All notable changes to pymolt. The format follows
 [PEP 440](https://peps.python.org/pep-0440/) as described in
 [docs/RELEASING.md](docs/RELEASING.md).
 
-## [0.2.0rc2] - 2026-11-26
-
-### Fixed
-
-- After a FAIL at the sites of a rolled-back person's or agent's step, `verify` and `status` say
-  to make the change again with `pymolt apply . --step ID --record`. They said
-  `pymolt apply . --step ID`, which refuses a step pymolt does not write.
-- Text in square brackets is no longer dropped from the printed output: `scan` showed
-  `requests[socks]==2.31.0` as `requests==2.31.0`, and `pymolt mcp` without the MCP extra said to
-  install `pymolt` instead of `pymolt[mcp]`. The same fix covers the other commands' tables, paths,
-  commands and messages, and the Codex entry in `pymolt mcp --help`.
-- `verify --accept` marks an outcome it shortens in its prompt with `…`: it cut the old and new
-  outcomes at 120 characters without saying so, so the old value of a long result seemed missing.
-- The install commands in the README, the plugin's README and the MCP docs ask for Python 3.12
-  (`uv tool install --python 3.12`, `pipx install --python python3.12`). Without it uv and pipx
-  take the first Python on `PATH`, which may be 3.13, where pymolt is not tested.
-
-## [0.2.0rc1] - 2026-11-25
+## [0.2.0] - 2026-11-26
 
 ### Breaking
 
@@ -657,11 +640,22 @@ All notable changes to pymolt. The format follows
   worktree, a CI workspace) keeps them: apply refused "the baseline capture was replaced", and
   verify lost the plan's predictions. An absolute path an earlier 0.2 build stored is read through
   this checkout's `.pymolt/`.
+- After a FAIL at the sites of a rolled-back person's or agent's step, `verify` and `status` say
+  to make the change again with `pymolt apply . --step ID --record`. They said
+  `pymolt apply . --step ID`, which refuses a step pymolt does not write.
+- Text in square brackets is no longer dropped from the printed output: `scan` showed
+  `requests[socks]==2.31.0` as `requests==2.31.0`, and `pymolt mcp` without the MCP extra said to
+  install `pymolt` instead of `pymolt[mcp]`. The same fix covers the other commands' tables, paths,
+  commands and messages, and the Codex entry in `pymolt mcp --help`.
+- `verify --accept` marks an outcome it shortens in its prompt with `…`: it cut the old and new
+  outcomes at 120 characters without saying so, so the old value of a long result seemed missing.
+- The install commands in the README, the plugin's README and the MCP docs ask for Python 3.12
+  (`uv tool install --python 3.12`, `pipx install --python python3.12`). Without it uv and pipx
+  take the first Python on `PATH`, which may be 3.13, where pymolt is not tested.
 
 ## [0.1.0] - 2026-09-26
 
 First public release on PyPI.
 
-[0.2.0rc2]: https://github.com/iamzeelex/pymolt/compare/v0.2.0rc1...v0.2.0rc2
-[0.2.0rc1]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...v0.2.0rc1
+[0.2.0]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/iamzeelex/pymolt/releases/tag/v0.1.0
