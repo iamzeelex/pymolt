@@ -640,6 +640,9 @@ All notable changes to pymolt. The format follows
   worktree, a CI workspace) keeps them: apply refused "the baseline capture was replaced", and
   verify lost the plan's predictions. An absolute path an earlier 0.2 build stored is read through
   this checkout's `.pymolt/`.
+- After a FAIL at the sites of a rolled-back person's or agent's step, `verify` and `status` say
+  to make the change again with `pymolt apply . --step ID --record`. They said
+  `pymolt apply . --step ID`, which refuses a step pymolt does not write.
 
 ## [0.1.0] - 2026-09-26
 
