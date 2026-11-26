@@ -60,6 +60,16 @@ def _outcomes(outcomes) -> list:
     return [o.model_dump(mode="json") for o in outcomes or ()]
 
 
+_SAMPLE = 120
+
+
+def _sample(outcomes) -> str:
+    """An outcome as the accept prompt shows it: its JSON, cut to ``_SAMPLE`` characters with an
+    ellipsis that says it was cut. A person attests to what the prompt shows."""
+    text = json.dumps(_outcomes(outcomes), default=str)
+    return text if len(text) <= _SAMPLE else text[:_SAMPLE] + "…"
+
+
 def fingerprint(entries) -> str:
     """sha256 of the canonical JSON of the entries' new outcomes (masked values)."""
     rows = sorted(json.dumps(_outcomes(e.new), sort_keys=True, default=str) for e in entries)
@@ -309,8 +319,7 @@ def accept_finding(project_dir: str | Path, fdiff, finding: str, *, attester,
     fp = fingerprint(group)
     site = rep.old_site or rep.new_site
     where = f"{site.file}:{site.line}" if site else "?"
-    sample = json.dumps(_outcomes(rep.old), default=str)[:120], json.dumps(
-        _outcomes(rep.new), default=str)[:120]
+    sample = _sample(rep.old), _sample(rep.new)
     text = (f"Accept finding {finding}: {rep.symbol} at {where}, {sample[0]} -> {sample[1]} "
             f"({len(group)} entr{'y' if len(group) == 1 else 'ies'}), as "
             + (f"step {step}'s intended change" if not adhoc else

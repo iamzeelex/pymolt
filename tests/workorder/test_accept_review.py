@@ -284,3 +284,13 @@ def test_cli_accept_is_refused_under_agent_and_off_a_terminal(tmp_path):
     assert "not a terminal" in plain.output
     assert not [e for e in _events(tmp_path) if e["event"] == "accept"] if (
         tmp_path / ".pymolt" / "apply_ledger.json").exists() else True
+
+
+def test_the_accept_prompt_marks_an_outcome_it_cuts():
+    from pymolt.verify.accepts import _SAMPLE, _sample
+
+    short = [Outcome(kind="raise", value="TypeError")]
+    assert _sample(short) == '[{"kind": "raise", "value": "TypeError", "count": 1}]'
+    long = [Outcome(kind="return", value={"values": list(range(100))})]
+    text = _sample(long)
+    assert len(text) == _SAMPLE + 1 and text.endswith("…")

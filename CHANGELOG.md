@@ -395,6 +395,8 @@ All notable changes to pymolt. The format follows
   directory when it lies inside it), and capture commands add `--project-dir`: `pymolt scan
   tests/artifacts/flasgger` suggested `pymolt setup .`, and `status` printed `apply --step ID
   --record` with no dir. The MCP `status` and `apply` tools follow the same rule.
+- `verify --accept` marks an outcome it shortens in its prompt with `…`: it cut the old and new
+  outcomes at 120 characters without saying so, so the old value of a long result seemed missing.
 - pymolt's own parsing of the project's files no longer prints `SyntaxWarning: invalid escape
   sequence` on stderr; the compile check still reports each one as a finding.
 
