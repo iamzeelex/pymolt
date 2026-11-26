@@ -1,6 +1,6 @@
 {
   "name": "pymolt",
-  "version": "0.2.0.dev0",
+  "version": "0.3.0.dev0",
   "description": "Prove a Python migration didn't change behaviour: records what your code actually calls into its dependencies before and after, and reports what changed. Drives the pymolt CLI (status, scan, setup, assess, capture, plan, apply, rollback, verify) with `--agent`: works the plan step by step and leaves a person's decisions to a person. No MCP server needed.",
   "author": {
     "name": "zeelex",
