@@ -189,6 +189,13 @@ def status_view(report, shown: str = ".") -> dict:
         names = [p.phase for p in report.phases if p.state == state]
         if names:
             lines.append(f"{label}: {', '.join(names)}.")
+    captures = dict(getattr(report, "captures", None) or {})
+    plan = getattr(report, "plan", None)
+    if plan is not None:
+        lines.append(f"Plan {plan['name'] or plan['plan_id'][:8]}; baseline "
+                     f"{captures.get('baseline') or 'not captured'}.")
+    for note in report.notes:           # the 0.2 layout, the branch drift: advisories
+        lines.append(f"Note: {note}.")
     warnings: list[str] = []
     for problem in report.problems:     # a damaged or newer state file: fix it first
         warnings.append(problem["error"])
@@ -205,6 +212,9 @@ def status_view(report, shown: str = ".") -> dict:
         "next_command": report.next_command,
         "next_reason": report.next_reason,
         "notes": list(report.notes),
+        "plan": plan,
+        "captures": captures,
+        "drift": getattr(report, "drift", None),
     }
     if report.inconclusive_kind is not None:
         data["inconclusive_kind"] = report.inconclusive_kind
@@ -745,6 +755,7 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
         "accepted": accepted,
         "validity": validity,
         "validity_reason": slot.validity_reason,
+        "capture_id": slot.capture_id,
         "events": slot.events,
         "processes": slot.processes,
         "returncode": slot.returncode,
@@ -875,7 +886,8 @@ def apply_view(result, plan, project_dir=None, shown: str = ".") -> dict:
     remaining = {status: lists.cap(f"remaining.{status}", ids)
                  for status, ids in result.remaining.items()}
     data = {
-        "outcome": result.outcome, "plan_id": result.plan_id, "run_id": result.run_id,
+        "outcome": result.outcome, "plan_id": result.plan_id,
+        "plan_name": getattr(plan, "name", None), "run_id": result.run_id,
         "applied": [{"step": sid, "title": titles.get(sid), "rebased": sid in result.rebased,
                      "wrote": sid not in result.unwritten} for sid in result.applied],
         "rebased": list(result.rebased), "noop": list(result.noop),
@@ -899,10 +911,64 @@ def rollback_view(result) -> dict:
     summary = (f"rolled back {', '.join(result.steps) or 'no step'} of run {result.run_id[:8]}"
                f"; {len(result.files_restored)} file(s) restored")
     data = {"run_id": result.run_id, "plan_id": result.plan.plan_id,
+            "plan_name": getattr(result.plan, "name", None),
             "rolled_back_at": result.rolled_back_at, "steps": list(result.steps),
             "kept": list(result.kept), "files_restored": list(result.files_restored),
             "post_migration_capture": result.post, "post_migration_trace": result.post_trace}
     return ok(summary, _Lists().finish(data, list(result.notes)))
+
+
+def plan_identity(plan, saved=None) -> dict:
+    """The plan's identity and what ``plan`` did with it (``plan_store.PlanSaveResult``;
+    None: a plan stored as it is): the keys ``plan --json`` and the plan view share.
+    ``saved``: a new plan was stored and made current; ``unchanged_from``: the current plan an
+    unchanged re-plan kept (then ``plan`` is that plan)."""
+    baseline = getattr(plan, "baseline", None)
+    source = getattr(plan, "source", None)
+    lineage = getattr(plan, "lineage", None)
+    return {
+        "plan_name": getattr(plan, "name", None),
+        "label": getattr(plan, "label", None),
+        "created_at": plan.created_at,
+        "pymolt_version": getattr(plan, "pymolt_version", None),
+        # ``source`` in the plan file; ``plan_source`` here, where ``source`` is the target
+        # manifest the plan was made for.
+        "plan_source": source.model_dump(mode="json") if source is not None else None,
+        "baseline_capture_id": baseline.capture_id if baseline is not None else None,
+        "baseline_warning": getattr(saved, "baseline_warning", None)
+        if saved is not None else getattr(plan, "baseline_warning", None),
+        "lineage": lineage.model_dump(mode="json") if lineage is not None else None,
+        "content_digest": getattr(plan, "content_digest", None),
+        "saved": saved.saved if saved is not None else True,
+        "unchanged_from": getattr(saved, "unchanged_from", None),
+        "moved_legacy": getattr(saved, "moved_legacy", None),
+        # What plan retention did: the plans it removed, or why it removed none.
+        "pruned": pruned_data(getattr(saved, "pruned", None)),
+    }
+
+
+def pruned_data(pruned) -> dict:
+    """``plan_store.PruneResult`` -> ``{removed, skipped}`` (None: nothing was pruned)."""
+    if pruned is None:
+        return {"removed": [], "skipped": None}
+    return pruned.as_dict()
+
+
+def pruned_line(pruned) -> str | None:
+    """What plan retention did, in words; None when it did nothing."""
+    data = pruned_data(pruned)
+    if data["skipped"]:
+        return f"Old plans: {data['skipped']}."
+    if data["removed"]:
+        return (f"Removed {len(data['removed'])} old plan(s) retention no longer keeps "
+                "(the current plan, its parent, plans runs reference, plans git tracks and the "
+                "20 newest are kept).")
+    return None
+
+
+#: What an unchanged re-plan says (``plan``'s panel, its view and PLAN.md's writer).
+UNCHANGED = ("Unchanged: same steps, baseline, setup and target manifest as the current plan. "
+             "Nothing saved; its approvals still hold.")
 
 
 #: A plan made with no baseline capture bound: what apply and verify then do (plan, both views).
@@ -913,14 +979,17 @@ NO_BASELINE_WARNING = ("No baseline capture is bound to this plan: apply refuses
 
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
               plan_md: str | Path | None = None, project_dir: str | Path | None = None,
-              plan_file: str | Path | None = None, shown: str = ".") -> dict:
+              saved=None, plan_file: str | Path | None = None, shown: str = ".") -> dict:
     """A saved ``MigrationPlan`` -> view. The full report is the plan file itself.
     ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines;
-    ``plan_file``: ``plan --output`` (status then does not read the plan); ``shown``: the
-    project dir as the next command names it. ``next`` is status's (``status.plan_next``)."""
+    ``saved``: what ``plan`` did (``plan_store.PlanSaveResult``: stored, unchanged, or only
+    written to ``-o``'s file); ``plan_file``: the file a new plan was only written to
+    (``plan --output``: status then does not read it); ``shown``: the project dir as the next
+    command names it. ``next`` is status's (``status.plan_next``)."""
     from pymolt.codemods.models import CodemodPattern
+    from pymolt.status import command as cli_command
     from pymolt.status import plan_next
-    from pymolt.workorder.render import brief_data
+    from pymolt.workorder.render import brief_data, identity_line
 
     full_path = str(plan_path)
     lists = _Lists()
@@ -956,9 +1025,11 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
         plan.baseline_trace_path is not None or delta_total > 0
         or any(getattr(r, "scope", "dependency") == "dependency" for r in risks_report.risks))
 
+    identity = plan_identity(plan, saved)
     data: dict[str, Any] = {
         "plan_id": plan.plan_id,
         "plan_path": full_path,
+        **identity,
         "source": source_desc,
         "dependencies": lists.cap("dependencies", [
             f"{d.name} {d.from_version}>{d.to_version}" for d in plan.dependencies]),
@@ -1000,13 +1071,30 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
                 "brief": brief_data(plan, step, project_dir, shown)
                 if step is not None and step.executor != "pymolt" else None}
     warnings: list[str] = []
+    if identity["baseline_warning"]:
+        warnings.append(identity["baseline_warning"])
     if plan.baseline_trace_path is None:
         warnings.append(NO_BASELINE_WARNING)
+    name = identity["plan_name"] or plan.plan_id[:8]
+    exported = bool(getattr(saved, "exported", False))
+    if identity["unchanged_from"]:
+        done = f"Plan {name}. {UNCHANGED}" + (f" Written to {full_path}." if exported else "")
+    elif identity["saved"]:
+        done = f"Plan {name} saved: it is the current plan."
+    else:
+        done = (f"Plan {name} written to {full_path} only: not saved in .pymolt/plans/ "
+                f"(`{cli_command(shown, 'apply', '--plan', 'PATH')}` saves and applies it).")
     lines = [
-        f"Plan {plan.plan_id[:8]} saved: {len(plan.changes)} file(s) to change, {sites} "
-        f"site(s), {len(plan.dependencies)} dependency move(s), from {source_desc}.",
+        done,
+        identity_line(plan) + ".",
+        f"{len(plan.changes)} file(s) to change, {sites} site(s), "
+        f"{len(plan.dependencies)} dependency move(s), from {source_desc}.",
         "Files: " + _note(lists, "files_to_change", len(files), full_path),
     ]
+    if identity["moved_legacy"]:
+        lines.append(f"The 0.2 plan file was moved into .pymolt/plans/{identity['moved_legacy']}.")
+    if pruned := pruned_line(getattr(saved, "pruned", None)):
+        lines.append(pruned)
     if advisories:
         lines.append(f"{len(advisories)} site(s) need manual review (data.advisories).")
     if manual:
@@ -1290,6 +1378,17 @@ def inconclusive_line(unified) -> str | None:
         if more:
             line += f" It also needs evidence ({more} reason(s))."
     return line
+
+
+def compared_captures_line(compared) -> str | None:
+    """``baseline <id> → post-migration <id>``: the captures a report compared, by id (a side
+    that is no capture, or whose id is unknown, is left out). None when neither side is."""
+    if compared is None:
+        return None
+    sides = [f"{name} {ident}" for name, ident in (
+        (compared.before_capture, compared.before_capture_id),
+        (compared.after_capture, compared.after_capture_id)) if name and ident]
+    return " → ".join(sides) or None
 
 
 def unobservable_line(rep) -> str | None:

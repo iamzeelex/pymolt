@@ -52,6 +52,11 @@ _CAPTURE_MODE = {
 }
 
 
+def _named(slot) -> str:
+    """``<capture id>: `` before a capture's event count (empty when it has none)."""
+    return f"{escape(slot.capture_id)}: " if slot.capture_id else ""
+
+
 def _emit_capture(slot, when: str, project_dir: str, *, agent: bool, invalid_code: int) -> None:
     """--json prints the capture's slot, --agent the view; exits as the human path does."""
     from pymolt.interfaces import views
@@ -208,7 +213,8 @@ def capture_cmd(
             _emit_capture(slot, when, project_dir, agent=agent, invalid_code=EXIT_INCONCLUSIVE)
             return
         if slot.validity is CaptureValidity.VALID:
-            err.print(f"[green]collected[/green] {slot.events} events -> {slot.trace_path}")
+            err.print(f"[green]collected[/green] {_named(slot)}{slot.events} events -> "
+                      f"{slot.trace_path}")
             next_step(project_dir)
             return
         err.print(
@@ -298,7 +304,7 @@ def capture_cmd(
             else EXIT_INCONCLUSIVE
         )
         raise typer.Exit(code=code)
-    err.print(f"[green]captured[/green] {slot.events} events -> {slot.trace_path}")
+    err.print(f"[green]captured[/green] {_named(slot)}{slot.events} events -> {slot.trace_path}")
     if slot.red:
         failed = slot.red.get("failed")
         err.print(
@@ -360,8 +366,9 @@ def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bo
                   f"diagnostic artifact: {slot.trace_path}\n"
                   + escape(views.capture_refusal_hint(slot, None, "baseline-replicate")))
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
-    err.print(f"[green]captured[/green] baseline replicate: {slot.events} events -> "
-              f"{slot.trace_path}")
+    err.print(f"[green]captured[/green] baseline replicate"
+              f"{' ' + escape(slot.capture_id) if slot.capture_id else ''}: "
+              f"{slot.events} events -> {slot.trace_path}")
     if slot.archived_previous:
         err.print(f"[dim]previous replicate kept at {slot.archived_previous}[/dim]")
     next_step(project_dir)

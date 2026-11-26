@@ -78,7 +78,9 @@ def test_status_surfaces_environment_problems():
         next_reason="The baseline no longer describes the project.",
     )
     view = views.status_view(report)
-    data = _assert_envelope(view, {"phases", "checks", "next_command", "next_reason", "notes"})
+    data = _assert_envelope(view, {"phases", "checks", "next_command", "next_reason", "notes",
+                                   "plan", "captures", "drift"})
+    assert (data["plan"], data["captures"], data["drift"]) == (None, {}, None)
     assert view["full_report_path"] is None, "status fits whole: nothing to point at"
     assert data["warnings"] == ["base environment: container abc is not running (start it)"]
     assert "ERROR base environment" in view["summary"]
@@ -294,7 +296,8 @@ def test_assess_full_report_is_the_json_payload(tmp_path):
 # ── capture ──────────────────────────────────────────────────────────────────
 
 _CAPTURE_KEYS = {
-    "when", "accepted", "validity", "validity_reason", "events", "processes", "returncode",
+    "when", "accepted", "validity", "validity_reason", "capture_id", "events", "processes",
+    "returncode",
     "trace_path", "command_log", "filled_slots", "env_note", "duration_seconds",
     "dropped_events", "archived_previous", "impact_targets",
     "deployment_id", "request_id", "correlation_id", "metadata_path", "red",
@@ -460,6 +463,10 @@ _PLAN_KEYS = {
     "risks_attention_total", "risks_fixed", "risks_fixed_total",
     "python", "compile_findings", "compile_findings_total",
     "steps", "steps_total", "steps_by_executor", "plan_md", "next",
+    # the plan's identity, and what `plan` did with it
+    "plan_name", "label", "created_at", "pymolt_version", "plan_source", "baseline_capture_id",
+    "baseline_warning", "lineage", "content_digest", "saved", "unchanged_from", "moved_legacy",
+    "pruned",
 }
 
 
@@ -480,10 +487,10 @@ def test_plan_shows_manual_review_and_an_unbound_baseline():
         advisories=[PlannedAdvisory(path="core.py", line=24, column=0, severity="manual",
                                     reason="DataFrame.mean default changed")],
     )
-    view = views.plan_view(plan, {"pandas": []}, "requirements-target.txt",
-                           plan_path="/p/.pymolt/migration_plan.json")
+    stored = "/p/.pymolt/plans/20261120T0631Z-f74941c5/plan.json"
+    view = views.plan_view(plan, {"pandas": []}, "requirements-target.txt", plan_path=stored)
     data = _assert_envelope(view, _PLAN_KEYS)
-    assert view["full_report_path"] == "/p/.pymolt/migration_plan.json"
+    assert view["full_report_path"] == stored
     assert data["files_to_change"] == ["core.py"]
     assert "pd.concat" in data["diffs"][0]["diff"]
     assert data["advisories"] == ["core.py:24 [not applied] DataFrame.mean default changed"]
@@ -663,5 +670,5 @@ def test_plan_keeps_the_plain_risk_line_when_every_delta_is_conclusive():
     plan = _plan_with_risks(["complete"], changes=False)
     summary = views.plan_view(plan, {"pandas": [1]}, "t.txt", plan_path="/p/plan.json")["summary"]
     assert "Predicted risks: 0 need attention, 0 fixed by the plan (" in summary
-    assert "unknown" not in summary
+    assert "API changes unknown" not in summary and "inconclusive" not in summary
     assert "The plan changes no file." in summary

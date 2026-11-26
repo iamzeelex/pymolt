@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "selected_manifest": "requirements.txt",
+  "selected_tool": "uv",
+  "base_python": "3.11",
+  "base_python_source": "declared",
+  "container_id": null,
+  "runner": null,
+  "system_python": null,
+  "target_python": "3.12",
+  "target_env_created": true,
+  "target_env_path": "<ENVS>/3.12",
+  "target_overrides": {}
+}

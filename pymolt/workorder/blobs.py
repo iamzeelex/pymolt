@@ -6,7 +6,9 @@ atomically, and never changed; reading one checks its hash, and a blob that does
 treated as missing. Design: ``docs/design/apply-work-order.md`` 2.1.
 
 The store holds copies of project source, so it writes ``.pymolt/.gitignore`` with ``blobs/``,
-``cache/`` and ``migrations/*/steps/``. The project's own ``.gitignore`` is never touched.
+``cache/`` and ``migrations/*/steps/``, and ``plans/current.json`` (which plan is current is this
+checkout's local state; the plans themselves can be committed). The project's own ``.gitignore``
+is never touched.
 
 **Retention.** A blob stays while one of these names it:
 
@@ -23,6 +25,7 @@ removes nothing when the ledger or the receipt is damaged (``StateFileError``).
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -36,7 +39,7 @@ from pymolt.state_io import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
-GITIGNORE_LINES = ("blobs/", "cache/", "migrations/*/steps/")
+GITIGNORE_LINES = ("blobs/", "cache/", "migrations/*/steps/", "plans/current.json")
 _GITIGNORE_HEAD = "# pymolt: local stores that hold copies of the project's source\n"
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 #: How many runs that left the chain keep their blobs.
@@ -232,25 +235,45 @@ def collect_blobs(project_dir: str | Path, *, ledger: Any = _UNSET,
     return removed
 
 
-def collect_after_plan(project_dir: str | Path) -> list[str]:
-    """``plan``'s collection: under the migration lock when it is free (another migration
-    operation running leaves it for later). Never raises."""
-    from pymolt.migration_plan import MigrationConflictError, _migration_lock
+@dataclasses.dataclass
+class Collected:
+    """What ``collect_after_plan`` removed: blob hashes, and with ``plans`` what plan retention
+    did (``plan_store.PruneResult``; None when it was not asked for)."""
 
+    blobs: list[str] = dataclasses.field(default_factory=list)
+    plans: Any = None
+
+
+def collect_after_plan(project_dir: str | Path, *, plans: bool = False) -> Collected:
+    """``plan``'s housekeeping, under the migration lock when it is free: the blob store
+    (``collect_blobs``), then with ``plans`` the plan store's retention
+    (``plan_store.prune_plans``). Another migration operation holding the lock leaves both for
+    later (retention says so when it had plans to remove). Never raises."""
+    from pymolt.migration_plan import MigrationConflictError, _migration_lock
+    from pymolt.plan_store import PruneResult, needs_pruning, prune_plans
+
+    out = Collected(plans=PruneResult() if plans else None)
     try:
-        if not blobs_dir(project_dir).is_dir():
-            return []
-        with _migration_lock(project_dir, "plan: collect blobs"):
-            return collect_blobs(project_dir)
+        has_blobs = blobs_dir(project_dir).is_dir()
+        prune = plans and needs_pruning(project_dir)
+        if not (has_blobs or prune):
+            return out
+        with _migration_lock(project_dir, "plan: collect blobs and old plans"):
+            if has_blobs:
+                out.blobs = collect_blobs(project_dir)
+            if prune:
+                out.plans = prune_plans(project_dir)
     except MigrationConflictError:
-        return []
+        if plans and needs_pruning(project_dir):
+            out.plans = PruneResult(skipped="no plan was removed: another migration operation "
+                                            "held the migration lock")
     except Exception:  # noqa: BLE001 - housekeeping never fails the command
-        logger.warning("could not collect the blob store", exc_info=True)
-        return []
+        logger.warning("could not collect the blob store or the old plans", exc_info=True)
+    return out
 
 
 __all__ = [
-    "CLOSED_RUNS_KEPT", "GITIGNORE_LINES", "blob_path", "blobs_dir", "collect_after_plan",
+    "CLOSED_RUNS_KEPT", "GITIGNORE_LINES", "Collected", "blob_path", "blobs_dir", "collect_after_plan",
     "collect_blobs", "ensure_gitignore", "get_text", "has_blob", "kept_runs", "put_text",
     "put_texts", "referenced", "sha256", "snapshot_hashes", "stored",
 ]

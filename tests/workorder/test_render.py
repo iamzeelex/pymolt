@@ -10,6 +10,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from pymolt.migration_plan import MigrationPlan
 from pymolt.verify.facts import CallWarning
 from pymolt.verify.predict import PredictionReport, RiskTier
 from pymolt.workorder.manual import T0, link_and_manual_steps
@@ -64,11 +65,35 @@ def _plan(tmp_path, *, warning="numeric_only will default to False"):
         "python": {"from": "3.11", "to": "3.12"}})
 
 
+PARENT = "3c9e0d12" + "0" * 24
+COMMIT = "1a2b3c4d" + "e" * 32
+
+
+def _identified(plan, **changes):
+    """``plan`` as pymolt 0.3 stores it: named, made by a known pymolt at a known commit, bound
+    to a baseline capture and derived from a parent."""
+    from pymolt.migration_plan import CaptureRef, PlanLineage, PlanSource
+
+    data = {"created_at": "2026-11-20T06:31:09+00:00", "name": None,
+            "pymolt_version": "0.3.0.dev0",
+            "source": PlanSource(git_commit=COMMIT, git_dirty=True, git_prefix="",
+                                 quality="git"),
+            "baseline": CaptureRef(capture_id="20261120T060620Z-b3e1a2c0",
+                                   captured_at="2026-11-20T06:06:20+00:00",
+                                   trace_sha256="b3e1a2c0" + "9" * 56),
+            "lineage": PlanLineage(root=PARENT, parent=PARENT, generation=1), **changes}
+    out = plan.model_copy(update=data)
+    if out.name is None:
+        from pymolt.migration_plan import name_of
+
+        out.name = name_of(out)
+    return out
+
+
 def test_plan_md_matches_the_golden_file(tmp_path, monkeypatch):
-    monkeypatch.setattr("pymolt.__version__", "0.2.0.dev0")
+    monkeypatch.setattr("pymolt.__version__", "9.9.9")      # the plan's version is shown
     _root, plan = _plan(tmp_path)
-    plan = plan.model_copy(update={"created_at": "2026-11-20T06:31:09+00:00",
-                                   "baseline_trace_sha256": "b3e1a2c0" + "f" * 56})
+    plan = _identified(plan, baseline_trace_sha256="b3e1a2c0" + "f" * 56)
     text = plan_markdown(plan, "pymolt apply .")
     if os.environ.get("PYMOLT_REGEN_GOLDEN"):
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
@@ -77,25 +102,58 @@ def test_plan_md_matches_the_golden_file(tmp_path, monkeypatch):
         "PLAN.md changed: review it, then regenerate with PYMOLT_REGEN_GOLDEN=1")
 
 
-def test_header_names_the_capture_and_survives_missing_data(tmp_path, monkeypatch):
-    from pymolt.workorder.render import capture_name
+def test_the_identity_line_and_its_variants(tmp_path):
+    from pymolt.migration_plan import PlanLineage, PlanSource
+    from pymolt.workorder.render import capture_name, identity_line
+
+    _root, plan = _plan(tmp_path)
+    plan = _identified(plan, plan_id="f74941c5" + "1" * 24)
+    assert identity_line(plan) == (
+        "plan f74941c5 · 2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · "
+        "commit 1a2b3c4 (dirty) · derived from 3c9e0d12")
+    assert identity_line(plan, version=True).endswith(" · pymolt 0.3.0.dev0")
+    labelled = _identified(plan, label="numpy2", name=None)
+    assert identity_line(labelled).startswith("plan f74941c5 (numpy2) · ")
+    fresh = plan.model_copy(update={"lineage": PlanLineage(root=plan.plan_id)})
+    assert identity_line(fresh).endswith("commit 1a2b3c4 (dirty) · fresh")
+    for quality in ("not-a-repo", "no-git", "no-commit", "error"):
+        unknown = plan.model_copy(update={"source": PlanSource(quality=quality)})
+        assert f" · commit unknown ({quality}) · " in identity_line(unknown)
+    clean_tree = plan.model_copy(update={"source": plan.source.model_copy(
+        update={"git_dirty": False})})
+    assert " · commit 1a2b3c4 · " in identity_line(clean_tree)
+    none = plan.model_copy(update={"baseline": None, "baseline_captured_at": None})
+    assert " · no baseline · " in identity_line(none)
+    # A plan pymolt 0.2 made: its commit and lineage are unknown.
+    old = plan.model_copy(update={"source": None, "pymolt_version": None, "adapted_from": 2,
+                                  "lineage": PlanLineage(root=plan.plan_id)})
+    assert identity_line(old).endswith(" · made by pymolt before 0.3")
+    assert identity_line(old, version=True).endswith(" · made by pymolt before 0.3")
+    # A plan whose created_at is not a time: its name says so, and the line too.
+    undated = _identified(plan, created_at="sometime", name=None)
+    assert undated.name.startswith("00000000T0000Z-")
+    assert identity_line(undated).startswith("plan f74941c5 · time unknown · ")
+    assert capture_name("2026-11-20T06:06:20Z", "abcdef0123") == "20261120T060620Z-abcdef01"
+    assert capture_name("garbage", "abc") is None
+
+
+def test_plan_md_header_is_the_plans_name_and_identity(tmp_path, monkeypatch):
     monkeypatch.setattr("pymolt.__version__", "9.9.9")
     _root, plan = _plan(tmp_path)
-    base = plan.model_copy(update={"created_at": "2026-11-20T06:31:09+00:00",
+    plan = _identified(plan)
+    lines = plan_markdown(plan).splitlines()
+    assert lines[0] == f"# Migration plan {plan.name}"
+    assert lines[1].startswith(f"plan {plan.plan_id[:8]} · 2026-11-20 06:31 UTC · baseline ")
+    assert lines[1].endswith(" · pymolt 0.3.0.dev0")             # the plan's, not 9.9.9
+    # Without a baseline slot copy, the flat binding still names the capture.
+    flat = plan.model_copy(update={"baseline": None,
                                    "baseline_captured_at": "2026-11-20T06:06:20+00:00",
                                    "baseline_trace_sha256": "b3e1a2c0" + "9" * 56})
-    line = plan_markdown(base).splitlines()[1]
-    assert line == ("Made 2026-11-20 06:31 UTC by pymolt 9.9.9 · baseline captured "
-                    "2026-11-20 06:06 UTC (20261120T060620Z-b3e1a2c0)")
-    assert capture_name("2026-11-20T06:06:20Z", "abcdef0123") == "20261120T060620Z-abcdef01"
-    no_sha = plan_markdown(base.model_copy(update={"baseline_trace_sha256": None}))
-    assert no_sha.splitlines()[1].endswith("baseline captured 2026-11-20 06:06 UTC")
-    none = plan_markdown(base.model_copy(update={"baseline_captured_at": None}))
-    assert none.splitlines()[1].endswith("· no baseline capture")
-    for bad in ("", "not a date"):
-        text = plan_markdown(base.model_copy(update={"created_at": bad}))
-        assert text.splitlines()[1].startswith(f"Made {bad + ' ' if bad else ''}by pymolt 9.9.9")
-    assert capture_name("garbage", "abc") is None
+    assert " · baseline 20261120T060620Z-b3e1a2c0 · " in plan_markdown(flat).splitlines()[1]
+    no_sha = flat.model_copy(update={"baseline_trace_sha256": None})
+    assert " · baseline 20261120T060620Z · " in plan_markdown(no_sha).splitlines()[1]
+    memory = plan.model_copy(update={"name": None})              # never stored: its id
+    assert plan_markdown(memory).splitlines()[0] == f"# Migration plan {plan.plan_id[:8]}"
 
 
 def test_the_header_says_once_which_api_changes_are_unknown_and_what_settles_it(tmp_path):
@@ -132,12 +190,16 @@ def test_plan_md_collapses_low_steps_the_baseline_never_ran(tmp_path):
     assert f"## {low[0].id} ·" not in text                    # no section of its own
 
 
-def test_write_plan_md_defaults_to_dot_pymolt(tmp_path):
+def test_write_plan_md_defaults_to_the_plans_folder(tmp_path):
     root, plan = _plan(tmp_path)
+    # A plan only exported (`plan -o`) is not stored: PLAN.md goes where 0.2 put it.
     assert write_plan_md(plan, root) == root / ".pymolt" / "PLAN.md"
+    stored = plan.save(root)
+    assert write_plan_md(plan, root) == stored.parent / "PLAN.md"
+    assert stored.parent.name == plan.name
     assert write_plan_md(plan, root, "docs/PLAN.md") == root / "docs" / "PLAN.md"
     assert (root / "docs" / "PLAN.md").read_text(encoding="utf-8").startswith(
-        "# Migration plan 3f2a9c1e")
+        f"# Migration plan {plan.name}")
 
 
 # ── untrusted text ──────────────────────────────────────────────────────────────────────────
@@ -230,8 +292,10 @@ def test_plan_writes_plan_md_and_lists_the_steps(tmp_path, monkeypatch):
     out = runner.invoke(app, ["plan", str(tmp_path), "--json"])
     assert out.exit_code == 0, out.output
     payload = json.loads(out.stdout)
-    assert payload["plan_md"] == str(tmp_path / ".pymolt" / "PLAN.md")
-    assert (tmp_path / ".pymolt" / "PLAN.md").is_file()
+    folder = tmp_path.resolve() / ".pymolt" / "plans" / MigrationPlan.load(tmp_path).name
+    assert payload["plan_path"] == str(folder / "plan.json")
+    assert payload["plan_md"] == str(folder / "PLAN.md")
+    assert (folder / "PLAN.md").is_file() and not (tmp_path / ".pymolt" / "PLAN.md").exists()
     assert [(s["id"], s["type"], s["executor"]) for s in payload["steps"]] == [
         ("env-1", "manifest-pin", "pymolt"), ("env-2", "target-env", "person"),
         ("mech-1", "codemod", "pymolt")]
@@ -251,7 +315,7 @@ def test_plan_writes_plan_md_and_lists_the_steps(tmp_path, monkeypatch):
 
     assert data["next"]["command"] == f"pymolt apply {shown_dir(tmp_path)}"
     assert (data["next"]["step"], data["next"]["brief"]) == (None, None)
-    assert "Next: `pymolt apply .`" in (tmp_path / ".pymolt" / "PLAN.md").read_text()
+    assert "Next: `pymolt apply .`" in (folder / "PLAN.md").read_text()
     monkeypatch.chdir(tmp_path)
     human = runner.invoke(app, ["plan", "."])
     assert "Next: pymolt apply .\n" in human.stdout

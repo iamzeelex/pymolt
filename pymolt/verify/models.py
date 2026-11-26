@@ -7,6 +7,7 @@ carries its own trust level (``evidence_level``) and where it is unsure (``hones
 downstream consumer never has to ask "how good is this verdict?".
 """
 import logging
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -156,11 +157,38 @@ class CaptureMode(StrEnum):
     LIVE_ATTACH = "live_attach"    # you run your own process; pymolt only watches + finalizes
 
 
+def capture_stamp(captured_at: str | None) -> str | None:
+    """``captured_at`` (ISO 8601) in UTC as ``YYYYMMDDTHHMMSSZ``; None when missing or not a
+    time. A time without a zone is read as UTC."""
+    if not captured_at:
+        return None
+    try:
+        when = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is not None:
+        when = when.astimezone(UTC)
+    return when.strftime("%Y%m%dT%H%M%SZ")
+
+
+def capture_id(captured_at: str | None, sha256: str | None) -> str | None:
+    """A capture's id: ``<captured_at as YYYYMMDDTHHMMSSZ>-<trace sha256[:8]>``, e.g.
+    ``20261120T060620Z-b3e1a2c0``. It names the recording's content and time, not a path, so
+    it stays the same when the recording is archived. None when either part is missing."""
+    stamp = capture_stamp(captured_at)
+    return f"{stamp}-{str(sha256)[:8]}" if stamp and sha256 else None
+
+
 class ContractSlot(BaseModel):
     """One captured dynamic trace, named by when it was taken relative to migration."""
 
     trace_path: str
     captured_at: str  # ISO 8601 timestamp
+    # The recording's sha256 when it was captured, and its id (``capture_id``). Stamped by
+    # pymolt 0.3 on every slot it makes; an older slot has neither, and readers compute them
+    # (``service.slot_capture_id``). No schema bump: pymolt 0.2 ignores the two keys.
+    trace_sha256: str | None = None
+    capture_id: str | None = None
     mode: CaptureMode
     command: list[str] = Field(default_factory=list)
     target: str = "all"

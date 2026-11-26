@@ -24,10 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pymolt
 from pymolt.workorder.models import LIST_CAP, TEXT_CAP, PlanStep
 
-DEFAULT_PLAN_MD = Path(".pymolt") / "PLAN.md"
 _DIFF_CAP = 200          # diff lines per step in PLAN.md; the plan file has every hunk
 
 _UNSAFE = re.compile("[\x00-\x08\x0b-\x1f\x80-\x9f  ‪-‮⁦-⁩]")
@@ -152,26 +150,64 @@ def _utc_minutes(value: str | None) -> str | None:
 
 
 def capture_name(captured_at: str | None, sha256: str | None) -> str | None:
-    """``<YYYYMMDDTHHMMSSZ>-<8 hex of the trace sha256>``; the sha part is left out if missing."""
+    """The capture id (``verify.models.capture_id``); without a sha, its time stamp alone."""
+    from pymolt.verify.models import capture_id, capture_stamp
+
+    return capture_id(captured_at, sha256) or capture_stamp(captured_at)
+
+
+def _baseline_part(plan) -> str:
+    """``baseline <capture id>`` (without a recording's sha, its capture time), or
+    ``no baseline``."""
+    baseline = getattr(plan, "baseline", None)
+    captured_at = baseline.captured_at if baseline is not None else plan.baseline_captured_at
     if not captured_at:
-        return None
-    try:
-        when = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if when.tzinfo is not None:
-        when = when.astimezone(timezone.utc)
-    stamp = when.strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-{str(sha256)[:8]}" if sha256 else stamp
+        return "no baseline"
+    name = (baseline.capture_id if baseline is not None else None) or capture_name(
+        captured_at, plan.baseline_trace_sha256)
+    return f"baseline {name or clean(captured_at, 40)}"
 
 
-def _baseline_text(plan) -> str:
-    if not plan.baseline_captured_at:
-        return "no baseline capture"
-    when = _utc_minutes(plan.baseline_captured_at) or str(plan.baseline_captured_at)
-    name = capture_name(plan.baseline_captured_at, plan.baseline_trace_sha256)
-    text = f"baseline captured {when}"
-    return f"{text} ({name})" if name and plan.baseline_trace_sha256 else text
+def _commit_part(plan) -> str | None:
+    """``commit 1a2b3c4 (dirty)``, ``commit unknown (<quality>)``, or for a plan an earlier
+    pymolt made (read through an adapter), ``made by pymolt before 0.3``."""
+    source = getattr(plan, "source", None)
+    if source is None:
+        if getattr(plan, "adapted_from", None) is not None:
+            return "made by pymolt before 0.3"
+        return "commit unknown"
+    if source.git_commit:
+        return f"commit {source.git_commit[:7]}" + (" (dirty)" if source.git_dirty else "")
+    return f"commit unknown ({source.quality})"
+
+
+def identity_line(plan, *, version: bool = False) -> str:
+    """Who the plan is, on one line (the plan panel and PLAN.md's header)::
+
+        plan f74941c5 · 2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 ·
+        commit 1a2b3c4 (dirty) · derived from 3c9e0d12
+
+    With a label, ``plan f74941c5 (numpy2)``. The variants: ``time unknown`` (a plan whose
+    ``created_at`` is not a time), ``no baseline``, ``commit unknown (<quality>)``, ``made by
+    pymolt before 0.3`` (a schema-1 or -2 plan: its commit and lineage are unknown) and
+    ``fresh`` (no parent). ``version``: also ``pymolt <the version that made it>``."""
+    from pymolt.migration_plan import name_time_known
+
+    head = f"plan {plan.plan_id[:8]}" + (f" ({plan.label})" if getattr(plan, "label", None)
+                                          else "")
+    name = getattr(plan, "name", None)
+    when = _utc_minutes(plan.created_at) if name is None or name_time_known(name) else None
+    parts = [head, when or "time unknown", _baseline_part(plan)]
+    commit = _commit_part(plan)
+    parts.append(commit)
+    if commit != "made by pymolt before 0.3":
+        lineage = getattr(plan, "lineage", None)
+        parts.append(f"derived from {lineage.parent[:8]}" if lineage is not None
+                     and lineage.parent else "fresh")
+    made_by = getattr(plan, "pymolt_version", None)
+    if version and made_by:
+        parts.append(f"pymolt {made_by}")
+    return _plain(" · ".join(parts), 500)
 
 
 _COMMAND = re.compile(r"`([^`]+)`")
@@ -203,13 +239,10 @@ def _header(plan, next_command: str | None = None) -> list[str]:
     moves = [f"{d.name} {d.from_version} → {d.to_version}" for d in plan.dependencies]
     if plan.python:
         moves.append(f"Python {plan.python.get('from')} → {plan.python.get('to')}")
-    made = _utc_minutes(plan.created_at) or plan.created_at
-    made_by = f"pymolt {pymolt.__version__}"
-    made_by = f"Made {made} by {made_by}" if made else f"Made by {made_by}"
     who = {k: sum(1 for s in plan.steps if s.executor == k) for k in _WHO}
     parts = ", ".join(f"{n} {_WHO[k]}" for k, n in who.items() if n)
-    lines = [f"# Migration plan {plan.plan_id[:8]}",
-             _plain(f"{made_by} · {_baseline_text(plan)}", 500)]
+    title = getattr(plan, "name", None) or plan.plan_id[:8]
+    lines = [f"# Migration plan {title}", identity_line(plan, version=True)]
     if moves:
         lines.append(_plain(" · ".join(moves), 500))
     unknown = _unknown_api_changes(plan)
@@ -325,24 +358,55 @@ def _do(s: PlanStep) -> list[str]:
     return out
 
 
-def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None, *,
-                  plan_file: str | Path | None = None) -> Path:
-    """Write PLAN.md (default ``.pymolt/PLAN.md``) and return its path. Its next command is
-    status's (``status.plan_next``) once the plan is saved (at ``plan_file``, default the
-    saved plan), naming the project dir ``.``: PLAN.md is read from the project."""
+def plan_md_path(plan, project_dir: str | Path) -> Path:
+    """Where PLAN.md goes by default: beside the stored plan
+    (``.pymolt/plans/<name>/PLAN.md``); for a plan only exported (``plan -o``), which is not
+    stored, ``.pymolt/PLAN.md`` as in 0.2."""
+    from pymolt.plan_store import LEGACY_PLAN_MD, PLAN_MD_FILE, stored_plan_file
+
     root = Path(project_dir).resolve()
-    out = Path(path).expanduser() if path else DEFAULT_PLAN_MD
+    if plan.name:
+        stored = stored_plan_file(root, plan.name)
+        if stored.is_file():
+            return stored.parent / PLAN_MD_FILE
+    return root / LEGACY_PLAN_MD
+
+
+def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None, *,
+                  plan_file: str | Path | None = None, status_next: bool = True) -> Path:
+    """Write PLAN.md (default ``plan_md_path``) and return its path. Its next command is
+    status's (``status.plan_next``) once the plan is saved (``plan_file``: the file a new plan
+    was only written to, ``plan -o``), naming the project dir ``.``: PLAN.md is read from the
+    project. ``status_next`` False: a plan status does not project (the 0.2 plan file moved
+    into the store), whose PLAN.md then points at ``pymolt status .``."""
+    root = Path(project_dir).resolve()
+    out = Path(path).expanduser() if path else plan_md_path(plan, root)
     if not out.is_absolute():
         out = root / out
     from pymolt.state_io import atomic_write_text
     from pymolt.status import plan_next
 
-    try:
-        command = plan_next(root, plan_file)[0]
-    except Exception:  # noqa: BLE001 - PLAN.md stands without it: it then points at status
-        command = None
+    command = None
+    if status_next:
+        try:
+            command = plan_next(root, plan_file)[0]
+        except Exception:  # noqa: BLE001 - PLAN.md stands without it: it then points at status
+            command = None
     atomic_write_text(out, plan_markdown(plan, command))
     return out
+
+
+def write_saved_plan_md(saved, project_dir: str | Path, path: str | Path | None = None, *,
+                        plan_file: str | Path | None = None) -> Path:
+    """PLAN.md after ``plan`` saved (``plan_store.PlanSaveResult``): written for a new plan;
+    for an unchanged re-plan, only when the current plan's PLAN.md is missing, or to ``path``
+    (``--plan-md``) when given. ``plan_file``: the file a new plan was only written to
+    (``plan -o``), which its next command applies. Returns where it is."""
+    if saved.unchanged_from and not path:
+        out = plan_md_path(saved.plan, project_dir)
+        if out.is_file():
+            return out
+    return write_plan_md(saved.plan, project_dir, path, plan_file=plan_file)
 
 
 # ── briefs ────────────────────────────────────────────────────────────────────────────────

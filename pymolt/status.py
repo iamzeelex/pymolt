@@ -13,6 +13,10 @@ orientation without a state machine. It decides nothing and writes nothing.
 A state file that is damaged, or was written by a newer pymolt (``pymolt.state_io``), does
 not make status fail: it is read as missing, and reported as a problem of the phase it
 belongs to, with no next command and its remedy as the reason.
+
+It also names the current plan (``plan``: its identity) and the captures (``captures``: their
+ids), notes a plan still in the 0.2 layout, and says when the current plan was made at another
+commit than ``HEAD`` (``drift``): advisories, never a phase state or a next command.
 """
 
 from __future__ import annotations
@@ -22,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+from pymolt.machine_paths import PathScrubber
 
 #: Phase states. `stale` is deliberately distinct from `todo`: work that was
 #: done but no longer describes this project is worse than work not done,
@@ -74,6 +80,17 @@ class FunnelStatus(BaseModel):
     # Every damaged or newer state file found (``StateFileError.as_dict()`` plus ``phase``),
     # in funnel order; while there is one, there is no next command.
     problems: list[dict] = Field(default_factory=list)
+    # The current plan's identity (None: no current plan): ``name``, ``plan_id``, ``label``,
+    # ``created_at``, ``schema`` (the schema it was written in), ``pymolt_version``,
+    # ``git_commit``, ``git_dirty``, ``lineage`` and ``identity`` (its line in words).
+    plan: dict | None = None
+    # The captures' ids (``verify.models.capture_id``), None for a slot with no capture:
+    # ``baseline``, ``post_migration``, ``baseline_replicate``.
+    captures: dict = Field(default_factory=dict)
+    # The current plan was made (or confirmed by an unchanged re-plan) at another commit than
+    # HEAD: ``{plan_commit, head}``. An advisory only, never a phase state or a next command;
+    # None when either commit is unknown.
+    drift: dict | None = None
 
     def phase(self, name: str) -> PhaseState | None:
         return next((p for p in self.phases if p.phase == name), None)
@@ -118,15 +135,26 @@ def capture_command(shown: str, when: str, *args: str) -> str:
 def plan_next(project_dir: str | Path, plan_file: str | Path | None = None,
               shown: str = ".") -> tuple[str | None, str, str | None]:
     """``(command, reason, step)`` after ``plan`` saved a plan: status's next (QA H4: plan,
-    PLAN.md and status name one next command). A plan saved elsewhere (``plan --output``) is
-    one status does not read: its next is ``apply --plan`` of that file."""
+    PLAN.md and status name one next command). A plan written only to a file (``plan
+    --output``) is not the current plan, which status reads: its next is ``apply --plan`` of
+    that file."""
     from pymolt.migration_plan import plan_path
 
     if plan_file is not None and plan_path(project_dir, plan_file) != plan_path(project_dir):
-        return (command(shown, "apply", "--plan", shlex.quote(str(plan_file))),
-                "status follows the default plan file; `apply --plan` applies this one.", None)
+        return (command(shown, "apply", "--plan", shlex.quote(_plan_file_ref(plan_file))),
+                "status follows the current plan; `apply --plan` saves and applies this one.",
+                None)
     status = build_status(project_dir, shown=shown)
     return status.next_command, status.next_reason, status.next_step
+
+
+def _plan_file_ref(plan_file: str | Path) -> str:
+    """``plan_file`` as ``apply --plan`` reads it as a path (``plan_store.resolve_plan_ref``):
+    a bare name that is not ``*.json`` would be read as a plan name or id, so it gets ``./``."""
+    text = str(plan_file)
+    if "/" in text or "\\" in text or text.endswith(".json"):
+        return text
+    return f"./{text}"
 
 
 #: Stands for the target Python in a printed command when setup names no target environment.
@@ -277,12 +305,16 @@ def _age(iso_timestamp: str | None) -> str:
 
 
 def _capture_phase(
-    name: str, slot, current_fingerprint: str | None, *, world: str = ""
+    name: str, slot, current_fingerprint: str | None, *, world: str = "",
+    capture_id: str | None = None, project_path: Path | None = None,
 ) -> PhaseState:
     """Project one capture slot, including whether its evidence still applies.
 
     ``current_fingerprint`` is the environment the capture must describe;
-    ``world`` names it in the stale detail when it is not the project as it is now.
+    ``world`` names it in the stale detail when it is not the project as it is now;
+    ``capture_id`` (``verify.service.slot_capture_id``) begins the detail. The command names
+    no folder of the machine (``machine_paths``): its paths are relative to ``project_path``
+    or under ``~``.
     """
     label = "baseline" if name == "baseline" else "post-migration"
     if slot is None:
@@ -291,11 +323,12 @@ def _capture_phase(
             detail="not captured",
         )
 
-    bits = [f"{slot.events} events"]
+    bits = [capture_id] if capture_id else []
+    bits.append(f"{slot.events} events")
     if age := _age(slot.captured_at):
         bits.append(age)
     if slot.command:
-        bits.append(" ".join(slot.command))
+        bits.append(" ".join(PathScrubber(project_path)(list(slot.command))))
     red = getattr(slot, "red", None)
     if red:
         failed = red.get("failed")
@@ -337,7 +370,7 @@ def _capture_phase(
 
 def _baseline_phase(
     slot, current_fingerprint: str | None, receipt, project_path: Path,
-    current_setup: str | None = None,
+    current_setup: str | None = None, capture_id: str | None = None,
 ) -> PhaseState:
     """Project the baseline against the world it must describe.
 
@@ -347,18 +380,21 @@ def _baseline_phase(
     then would record the migrated world, not the starting point.
     """
     if receipt is None or receipt.status != "applied":
-        phase = _capture_phase("baseline", slot, current_fingerprint)
+        phase = _capture_phase("baseline", slot, current_fingerprint, capture_id=capture_id,
+                               project_path=project_path)
         return _content_only_move(phase, slot, current_setup)
     run = receipt.run_id[:8]
     start = receipt.starting_fingerprint(project_path)
     if start is not None:
         world = f"the one migration run {run} started from"
-        phase = _capture_phase("baseline", slot, start, world=world)
+        phase = _capture_phase("baseline", slot, start, world=world, capture_id=capture_id,
+                               project_path=project_path)
         # Pins bumped in the same manifest before the apply are part of the migration.
         return _content_only_move(
             phase, slot, getattr(receipt, "environment_setup_fingerprint", None),
             than=f" than {world}")
-    phase = _capture_phase("baseline", slot, None)
+    phase = _capture_phase("baseline", slot, None, capture_id=capture_id,
+                           project_path=project_path)
     if (
         phase.state == DONE
         and current_fingerprint is not None
@@ -519,9 +555,11 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
         applied_plan = receipt.plan_id or receipt.run_id
         saved = MigrationPlan.load(project_path)
         if saved is None or saved.plan_id == applied_plan:
+            named = f"plan {_plan_label(saved)} " if saved is not None else ""
             return PhaseState(
                 phase="plan", state=DONE,
-                detail=f"applied by migration run {receipt.run_id[:8]} (its steps: see steps)",
+                detail=f"{named}applied by migration run {receipt.run_id[:8]} (its steps: "
+                       "see steps)",
             )
         # A re-plan after an apply: the saved plan is a new one, projected as such.
         earlier = (f" · an earlier run ({receipt.run_id[:8]}) applied a previous plan "
@@ -534,9 +572,11 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
         )
     plan = MigrationPlan.load(project_path)
     if plan is None:
+        from pymolt.plan_store import no_current_plan
+
         return PhaseState(
             phase="plan", state=TODO,
-            detail="no plan saved",
+            detail=no_current_plan(project_path) or "no plan saved",
         )
     # Run-level only: a planned file that moved is a step's business (re-based, present or
     # stale: the steps phase).
@@ -544,7 +584,7 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     if not inspection.valid:
         return PhaseState(
             phase="plan", state=STALE,
-            detail=f"plan {plan.plan_id[:8]} is stale: {inspection.reasons[0]}{earlier}",
+            detail=f"plan {_plan_label(plan)} is stale: {inspection.reasons[0]}{earlier}",
         )
     # A rolled-back plan whose files are back at their planned originals applies again as is.
     again = (receipt is not None and receipt.status == "rolled_back"
@@ -552,13 +592,18 @@ def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
     return PhaseState(
         phase="plan", state=DONE,
         detail=(
-            f"plan {plan.plan_id[:8]} · {len(plan.changes)} file(s) · "
+            f"plan {_plan_label(plan)} · {len(plan.changes)} file(s) · "
             f"{sum(change.sites for change in plan.changes)} rewrite(s)"
             + (f" · rolled back in run {receipt.run_id[:8]}; apply runs it again"
                if again else "")
             + earlier
         ),
     )
+
+
+def _plan_label(plan) -> str:
+    """How status names a plan: its name (``YYYYMMDDTHHMMZ-<id8>[-<label>]``), else its id."""
+    return plan.name or plan.plan_id[:8]
 
 
 def _precedes_start(post_slot, baseline_slot, receipt) -> bool:
@@ -652,11 +697,12 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False,
 
 
 #: Which phase a state file belongs to, by name (the files of ``.pymolt/migrations/<run>/``
-#: are the migration's).
+#: are the migration's, those of ``.pymolt/plans/<name>/`` the plan's).
 _STATE_FILE_PHASES = {
     "env_config.json": "setup",
     "contract_state.json": "baseline",
     "migration_plan.json": "plan",
+    "current.json": "plan",
     "migration_state.json": "migration",
     "apply_ledger.json": "migration",
     "verification.json": "report",
@@ -666,6 +712,8 @@ _STATE_FILE_PHASES = {
 def _problem_phase(path: Path) -> str:
     if path.parent.parent.name == "migrations":
         return "migration"
+    if path.parent.parent.name == "plans" or path.parent.name == "plans":
+        return "plan"
     return _STATE_FILE_PHASES.get(path.name, "migration")
 
 
@@ -684,6 +732,7 @@ def _state_file_problems(root: Path) -> list:
         _load_run_state,
     )
     from pymolt.migration_state import MigrationReceipt
+    from pymolt.plan_store import check_current
     from pymolt.state_io import StateFileError, read_state_json
     from pymolt.verify.models import ContractState
     from pymolt.verify.unified import (
@@ -705,6 +754,9 @@ def _state_file_problems(root: Path) -> list:
 
     check(lambda: EnvConfig.load(state / "env_config.json"))
     check(lambda: ContractState.load(state / "contract_state.json"))
+    # The current-plan pointer and the plan it names (not every saved plan), and the 0.2
+    # layout's plan file while it is there.
+    check(lambda: check_current(root))
     check(lambda: read_state_json(state / "migration_plan.json", kind=PLAN_KIND,
                                   newest=PLAN_SCHEMA_VERSION, remedy=PLAN_REMEDY))
     check(lambda: MigrationReceipt.load(root))
@@ -760,6 +812,7 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False,
         environment_fingerprint,
         environment_setup_fingerprint,
         load_contract_state,
+        slot_capture_id,
         sources_changed,
         usable_replicate,
     )
@@ -821,8 +874,14 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False,
     baseline_slot = contract.baseline
     post_slot = contract.post_migration
     receipt = MigrationReceipt.load(project_path)
+    status.captures = {
+        "baseline": slot_capture_id(project_path, baseline_slot),
+        "post_migration": slot_capture_id(project_path, post_slot),
+        "baseline_replicate": slot_capture_id(project_path, contract.baseline_replicate),
+    }
     baseline = _baseline_phase(
         baseline_slot, fingerprint, receipt, project_path, current_setup=setup_fingerprint,
+        capture_id=status.captures["baseline"],
     )
     assess_phase = status.phase("assess")
     assert assess_phase is not None
@@ -842,7 +901,8 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False,
     if by_hand and plan.state == TODO:
         plan = plan.model_copy(update={"detail": plan.detail + " (optional: the migration was "
                                                                "made by hand)"})
-    post = _capture_phase("post_migration", post_slot, fingerprint)
+    post = _capture_phase("post_migration", post_slot, fingerprint,
+                          capture_id=status.captures["post_migration"], project_path=project_path)
     if post_slot is not None and hand and _precedes_start(post_slot, baseline_slot, receipt):
         post = PhaseState(
             phase="post-migration", state=STALE,
@@ -874,6 +934,7 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False,
                 detail=f"{post.detail} — {listed} changed since it was captured",
             )
     status.phases.extend([baseline, plan, *([steps] if steps else []), migration, post])
+    _plan_identity(status, project_path, shown)
 
     if baseline.state == TODO and post.state == TODO:
         report = PhaseState(
@@ -946,6 +1007,63 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False,
         and sources_changed(project_path, baseline_slot.sources_path) == [],
     )
     return status
+
+
+def legacy_note(shown: str = ".", *, beside: bool = False) -> str:
+    """The note on a plan in the 0.2 layout (``beside``: there beside the current plan);
+    ``shown``: the project dir as its command names it (``shown_dir``)."""
+    what = ("a plan in the 0.2 layout (.pymolt/migration_plan.json) is there beside the current "
+            "plan" if beside else "this plan is in the 0.2 layout (.pymolt/migration_plan.json)")
+    return f"{what}; the next `{command(shown, 'plan')}` moves it into .pymolt/plans/"
+
+
+LEGACY_NOTE = legacy_note()
+LEGACY_BESIDE_NOTE = legacy_note(beside=True)
+
+
+def _plan_identity(status: FunnelStatus, project_path: Path, shown: str = ".") -> None:
+    """The current plan's identity (``status.plan``), the note when a plan is in the 0.2
+    layout, and the branch-drift advisory (``status.drift``): the commit the current plan was
+    made at (the pointer's ``checked_commit`` when an unchanged re-plan confirmed it since, else
+    the plan's ``source``) is known and is not ``HEAD``'s. Never a phase state or a next
+    command; silent when either commit is unknown. Reads one git commit, only for a plan made
+    in a repository. ``shown``: the project dir as the notes' commands name it."""
+    from pymolt.migration_plan import MigrationPlan
+    from pymolt.plan_store import legacy_plan_file, load_pointer
+    from pymolt.workorder.render import identity_line
+
+    plan = MigrationPlan.load(project_path)
+    pointer = load_pointer(project_path)
+    if legacy_plan_file(project_path).exists():
+        status.notes.append(legacy_note(shown, beside=pointer is not None))
+    if plan is None:
+        return
+    source = plan.source
+    status.plan = {
+        "name": plan.name, "plan_id": plan.plan_id, "label": plan.label,
+        "created_at": plan.created_at, "schema": plan.adapted_from or plan.schema_version,
+        "pymolt_version": plan.pymolt_version,
+        "git_commit": source.git_commit if source is not None else None,
+        "git_dirty": source.git_dirty if source is not None else None,
+        "lineage": plan.lineage.model_dump(mode="json") if plan.lineage is not None else None,
+        "identity": identity_line(plan),
+    }
+    checked = pointer.checked_commit if pointer is not None \
+        and pointer.plan_id == plan.plan_id else None
+    made = checked or (source.git_commit if source is not None else None)
+    if not made:
+        return
+    from pymolt.adapters.git import head_commit
+
+    head = head_commit(project_path)
+    if head is None or head == made:
+        return
+    dirty = " with uncommitted changes" if checked is None and source is not None \
+        and source.git_dirty else ""
+    status.drift = {"plan_commit": made, "head": head}
+    status.notes.append(f"the current plan was made at commit {made[:7]}{dirty}; HEAD is "
+                        f"{head[:7]}: re-plan (`{command(shown, 'plan')}`) if the code it "
+                        "plans for changed")
 
 
 def _projection(project_path: Path, receipt, post_slot):

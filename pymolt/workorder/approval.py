@@ -31,8 +31,11 @@ APPROVAL_FILE = "approval.json"
 
 
 def plan_digest(plan: MigrationPlan) -> str:
-    """sha256 of the plan's canonical JSON: any change to its content changes it."""
-    data = json.dumps(plan.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    """sha256 of the plan's canonical JSON, as stored (``MigrationPlan.stored_form``): any change
+    to the file changes it. A schema-2 plan pymolt 0.2 wrote hashes as 0.2 hashed it (0.2 wrote
+    ``model_dump``), so upgrading voids no approval; a schema-1 plan 0.2 approved does not (0.2
+    hashed its adapted form), which voids that approval, the safe way."""
+    data = json.dumps(plan.stored_form(), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
@@ -69,7 +72,8 @@ def approve(project_dir: str | Path, plan: MigrationPlan, *, attester) -> dict:
         text = (f"Approve plan {plan.plan_id[:8]} for agents: they may apply its "
                 f"{len(pymolt_steps)} pymolt step(s) ({', '.join(pymolt_steps[:8]) or 'none'}"
                 f"{' ...' if len(pymolt_steps) > 8 else ''}) and roll back one step at a time. "
-                "A re-plan or any change to the plan voids it.")
+                "A new plan (a re-plan that changes anything) or any change to the "
+                "plan voids it.")
         record, why = attester.ask(text, {
             "kind": "approval", "project": project_id(root), "plan_id": plan.plan_id,
             "run_id": run_id, "plan_sha256": digest, "scope": list(SCOPE)}) if attester \

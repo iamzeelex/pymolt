@@ -6,7 +6,8 @@ before it produced, under the migration lock, all or nothing:
 1. **Load.** The plan's run is the run that applies it: one per plan (``plan_id``), opened by its
    first invocation, which closes any other open run (its steps in effect stay in effect). A
    closed run applies nothing more (re-plan). Once a run exists its frozen copy
-   (``migrations/<run>/plan.json``) must be the same plan.
+   (``migrations/<run>/plan.json``) must be the same plan. An invocation that writes makes its
+   plan the current plan first (``plan_store.adopt``).
 2. **Run preconditions.** An interrupted invocation is recovered first (``state.json`` names its
    files with their texts before and after, by hash). The plan must not be run-level stale: the
    setup fingerprint and the target manifest are as at plan time (H3). The baseline must be the
@@ -595,8 +596,10 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
     from pymolt.apply_ledger import LedgerSnapshot, append_ledger
     from pymolt.codemods.apply import write_previews
     from pymolt.codemods.models import FilePreview
+    from pymolt.plan_store import adopt
     from pymolt.workorder.blobs import put_texts
 
+    adopt(root, plan)                 # a mutating apply makes its plan the current plan
     now = _now()
     run_dir = _run_dir(root, run_id)
     records = [(s, _event(root, plan, run_id, s, decisions), decisions)
@@ -614,7 +617,7 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
     run_dir.mkdir(parents=True, exist_ok=True)
     frozen = run_dir / "plan.json"
     if not frozen.is_file():
-        plan.save(root, frozen)
+        plan.freeze(frozen)
     base_state = state or MigrationRunState(
         run_id=run_id, status="prepared", prepared_at=now,
         plan_id=None if run_id == plan.plan_id else plan.plan_id)
@@ -934,6 +937,9 @@ def _skip(root: Path, plan: MigrationPlan, step_id: str, reason: str) -> ApplyRe
     inspection = inspect_migration_plan(root, plan, check_files=False)
     if not inspection.valid:
         raise StepRefusal("stale migration plan: " + "; ".join(inspection.reasons))
+    from pymolt.plan_store import adopt
+
+    adopt(root, plan)
     now = _now()
     before = LedgerSnapshot.take(root)
     try:
@@ -952,7 +958,7 @@ def _skip(root: Path, plan: MigrationPlan, step_id: str, reason: str) -> ApplyRe
         run_dir = _run_dir(root, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         if not (run_dir / "plan.json").is_file():
-            plan.save(root, run_dir / "plan.json")
+            plan.freeze(run_dir / "plan.json")
         base_state = state or MigrationRunState(
             run_id=run_id, status="prepared", prepared_at=now,
             plan_id=None if run_id == plan.plan_id else plan.plan_id)

@@ -4,7 +4,8 @@
 A toy app (requests + pandas, with an unpinned requirements.txt) is captured under Python
 3.11 + pandas 1.5.3 (baseline), planned offline against ``pandas==2.2.3`` (the plan must
 take pandas 1.5.3 from the baseline capture, propose ``Series.append`` -> ``pd.concat`` and
-predict the scenario's break), applied with ``pymolt apply``, and captured under Python 3.12
+predict the scenario's break; planned again in a new process, it must be unchanged: the
+same plan id, nothing saved), applied with ``pymolt apply``, and captured under Python 3.12
 + pandas 2.2.3 (post-migration). Each scenario has a fixed expected verdict, so this script
 is a pass/fail acceptance test for the plan -> apply -> verify pipeline, not just a demo:
 
@@ -147,10 +148,20 @@ def capture(root: Path, when: str, spec: dict) -> int:
                   log=f"capture_{when}.log")
 
 
+def current_plan_file(root: Path) -> Path:
+    """The current plan's file: the one ``.pymolt/plans/current.json`` names, else the 0.2
+    layout's single file."""
+    try:
+        name = json.loads((root / ".pymolt" / "plans" / "current.json").read_text())["name"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return root / ".pymolt" / "migration_plan.json"
+    return root / ".pymolt" / "plans" / str(name) / "plan.json"
+
+
 def check_plan(root: Path, change: bool) -> tuple[bool, str]:
     """The offline plan's from-side, rewrite and predictions (acceptance criterion 1)."""
     try:
-        plan = json.loads((root / ".pymolt" / "migration_plan.json").read_text())
+        plan = json.loads(current_plan_file(root).read_text())
     except (OSError, ValueError):
         return False, "no plan"
     deps = {d.get("name"): d.get("from_version") for d in plan.get("dependencies", [])}
@@ -166,6 +177,30 @@ def check_plan(root: Path, change: bool) -> tuple[bool, str]:
     return ok, f"plan from pandas {deps.get('pandas')}, rewrites {rewrites}"
 
 
+def check_replan(root: Path) -> tuple[bool, str]:
+    """A second `pymolt plan` in a new process finds the plan unchanged: `saved: false` and the
+    same plan id. A content field that varies between processes would make it save a new plan
+    (and void the first plan's approvals)."""
+    try:
+        first = json.loads(current_plan_file(root).read_text())["plan_id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, "no plan to re-plan"
+    done = subprocess.run([str(PYMOLT), "plan", ".", "--target-manifest",
+                           "requirements-target.txt", "--json"], cwd=root, capture_output=True,
+                          text=True, stdin=subprocess.DEVNULL)
+    (root / "replan.json").write_text(done.stdout)
+    (root / "replan.log").write_text(done.stderr)
+    try:
+        payload = json.loads(done.stdout)
+    except ValueError:
+        return False, f"re-plan exit {done.returncode}, no JSON"
+    if done.returncode == 0 and payload.get("saved") is False \
+            and payload.get("plan_id") == first:
+        return True, "re-plan unchanged"
+    return False, (f"re-plan exit {done.returncode}: saved {payload.get('saved')}, plan "
+                   f"{str(payload.get('plan_id'))[:8]} (first {first[:8]})")
+
+
 def run_scenario(name: str, base: Path) -> dict:
     change, upgrade, expected = SCENARIOS[name]
     root = base / name
@@ -179,6 +214,7 @@ def run_scenario(name: str, base: Path) -> dict:
     rc_plan = pymolt(root, "plan", ".", "--target-manifest", "requirements-target.txt",
                      log="plan.log")
     plan_ok, plan_detail = check_plan(root, change)
+    replan_ok, replan_detail = check_replan(root)
     rc_apply = pymolt(root, "apply", ".", log="apply.log")
     if upgrade:
         (root / "requirements.txt").write_text("pandas==2.2.3\nrequests\n")
@@ -194,9 +230,9 @@ def run_scenario(name: str, base: Path) -> dict:
     counts = {k: v for k, v in (facts.get("counts") or {}).items() if v}
     changed = [e for e in facts.get("entries", []) if e.get("category") == "changed"]
     verdict = rep.get("verdict")
-    ok = rc_base == 0 and rc_plan == 0 and plan_ok and rc_apply == 0 and rc_post == 0 \
-        and verdict == expected
-    detail = plan_detail
+    ok = rc_base == 0 and rc_plan == 0 and plan_ok and replan_ok and rc_apply == 0 \
+        and rc_post == 0 and verdict == expected
+    detail = f"{plan_detail}; {replan_detail}"
     calibration = rep.get("calibration") or {}
     # The rewrite the plan made kept the behaviour: a prevented risk, never a miss.
     append = [r for r in calibration.get("risks", [])
@@ -222,7 +258,7 @@ def run_scenario(name: str, base: Path) -> dict:
             "granularity": rep.get("coverage_granularity"),
             "reasons": rep.get("verdict_reasons"),
             "detail": detail, "captures_rc": [rc_base, rc_post],
-            "plan_rc": rc_plan, "apply_rc": rc_apply,
+            "plan_rc": rc_plan, "apply_rc": rc_apply, "replan_ok": replan_ok,
             "calibration": {k: calibration.get(k) for k in
                             ("source", "predicted", "hit", "prevented", "miss",
                              "not_exercised")}}

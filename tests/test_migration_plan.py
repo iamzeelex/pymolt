@@ -20,6 +20,7 @@ from pymolt.migration_plan import (
     rollback_migration,
 )
 from pymolt.migration_state import MigrationReceipt
+from pymolt.plan_store import load_pointer
 from pymolt.verify import service
 from pymolt.verify.models import CaptureMode
 
@@ -88,7 +89,9 @@ def test_plan_round_trip_is_relative_and_inspectable(tmp_path):
     saved = plan.save(tmp_path)
     loaded = MigrationPlan.load(tmp_path)
 
-    assert saved == tmp_path / ".pymolt" / "migration_plan.json"
+    assert saved == tmp_path.resolve() / ".pymolt" / "plans" / plan.name / "plan.json"
+    assert load_pointer(tmp_path).name == plan.name and plan.lineage.root == plan.plan_id
+    assert not (tmp_path / ".pymolt" / "migration_plan.json").exists()
     assert loaded == plan
     assert plan.changes[0].path == "app0.py"
     assert plan.target_manifest_path == "requirements-target.txt"

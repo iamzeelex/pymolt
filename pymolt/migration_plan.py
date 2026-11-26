@@ -10,17 +10,28 @@ temporary transaction files have been removed.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from pymolt.apply_ledger import claim_for
 from pymolt.codemods.models import ApiImpact, FilePreview, recipe_key
+from pymolt.machine_paths import PathScrubber, scrub_prose
 from pymolt.state_io import (
     MIGRATION_LOCK,
     FileLock,
@@ -38,9 +49,26 @@ from pymolt.workorder.models import PLAN_SCHEMA_ID, PLAN_SCHEMA_VERSION, V1_STEP
 
 logger = logging.getLogger(__name__)
 
-# PLAN_SCHEMA_VERSION 2: the plan is a work order of steps (``pymolt.workorder``); a schema-1
-# file is read as one synthetic step (``pymolt.workorder.v1``).
+# PLAN_SCHEMA_VERSION 3: the plan is a work order of steps (``pymolt.workorder``, schema 2) with
+# an identity (its name, source, baseline and lineage). A schema-2 file is read as a schema-3
+# plan whose identity is filled from what it holds (``fill_identity``); a schema-1 file as one
+# synthetic step (``pymolt.workorder.v1``).
+# Plans are stored in ``.pymolt/plans/<name>/plan.json`` (``pymolt.plan_store``); this is the
+# 0.2 layout's single plan file, read while there is no current-plan pointer.
 DEFAULT_PLAN_PATH = Path(".pymolt/migration_plan.json")
+
+#: A plan's label (``plan --label``): lowercase letters, digits, ``.``, ``_`` and ``-``, 1 to 32
+#: characters, beginning and ending with a letter or a digit. Nothing else is rewritten into one.
+LABEL_PATTERN = r"[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?"
+LABEL_RE = re.compile(rf"^{LABEL_PATTERN}$")
+LABEL_RULE = ("a label is 1 to 32 lowercase letters, digits, '.', '_' or '-', beginning and "
+              "ending with a letter or a digit")
+#: A plan's name: ``YYYYMMDDTHHMMZ-<id8>[-<label>]``, its creation time in UTC to the minute, the
+#: first 8 hex of its id and its label. It sorts by time and is safe as a folder name.
+NAME_RE = re.compile(rf"^(\d{{8}}T\d{{4}}Z)-([0-9a-f]{{8}})(?:-({LABEL_PATTERN}))?$")
+#: The time part of the name of a plan whose ``created_at`` is not a time: unknown, said so,
+#: and the same in every copy of the plan (a file's mtime would differ between them).
+UNKNOWN_TIME = "00000000T0000Z"
 
 
 class MigrationPlanError(RuntimeError):
@@ -117,20 +145,30 @@ RUN_STATE_REMEDY = keep_remedy("this run's rollback information")
 
 
 def _plan_file_kind(project_dir: str | Path, source: Path) -> tuple[str, str]:
-    """What a plan file is to a person (the saved plan, a run's frozen copy, or a plan file
-    given on the command line) and the remedy when it is damaged."""
+    """What a plan file is to a person (a saved plan, a run's frozen copy, or a plan file
+    given on the command line) and the remedy when it is damaged. By its path alone: a damaged
+    pointer never stops a frozen copy from loading."""
+    from pymolt.plan_store import is_stored_plan_file
+
     if source.parent.parent.name == "migrations" and source.parent.parent.parent.name == \
             ".pymolt":
         return FROZEN_PLAN_KIND, FROZEN_PLAN_REMEDY
-    if source.resolve() == plan_path(project_dir).resolve():
+    root = Path(project_dir).resolve()
+    resolved = source.resolve()
+    if is_stored_plan_file(root, resolved) or resolved == (root / DEFAULT_PLAN_PATH).resolve():
         return PLAN_KIND, PLAN_REMEDY
     return PLAN_KIND, "Pass a readable plan file, or run `pymolt plan .` to plan again."
 
 
 def plan_path(project_dir: str | Path, path: str | Path | None = None) -> Path:
+    """``path`` (relative to the project), or the current plan's file: the one the current-plan
+    pointer names (``.pymolt/plans/<name>/plan.json``), else the 0.2 layout's single file. A
+    pointer whose plan is not in the store raises ``StateFileError``."""
     root = Path(project_dir).resolve()
     if path is None:
-        return root / DEFAULT_PLAN_PATH
+        from pymolt.plan_store import current_pointer
+
+        return current_pointer(root)[1]
     candidate = Path(path).expanduser()
     return candidate if candidate.is_absolute() else root / candidate
 
@@ -225,6 +263,125 @@ class PlanInspection(BaseModel):
         return not self.reasons
 
 
+def plan_name(created_at: str, plan_id: str, label: str | None = None) -> str:
+    """A plan's name (``NAME_RE``): ``created_at`` in UTC to the minute, ``plan_id[:8]`` and the
+    label. Raises ``ValueError`` when ``created_at`` is not a time (a time without a zone is
+    read as UTC) or the label breaks ``LABEL_RULE``."""
+    when = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    if when.tzinfo is not None:
+        when = when.astimezone(UTC)
+    if label is not None and not LABEL_RE.match(label):
+        raise ValueError(f"invalid label {label!r}: {LABEL_RULE}")
+    return f"{when:%Y%m%dT%H%MZ}-{_validate_run_id(plan_id)[:8]}" + (f"-{label}" if label else "")
+
+
+def name_of(plan: MigrationPlan) -> str:
+    """The name ``plan`` gets from what it holds: ``plan_name``, or with a ``created_at`` that is
+    not a time, ``UNKNOWN_TIME`` in its place (``00000000T0000Z-<id8>[-<label>]``). It reads
+    nothing else, so a plan and each copy of it get the same name."""
+    try:
+        return plan_name(plan.created_at, plan.plan_id, plan.label)
+    except ValueError:
+        return f"{UNKNOWN_TIME}-{plan.plan_id[:8]}" + (f"-{plan.label}" if plan.label else "")
+
+
+def name_time_known(name: str | None) -> bool:
+    """Whether a plan name carries its plan's creation time (not ``UNKNOWN_TIME``)."""
+    return bool(name) and not str(name).startswith(UNKNOWN_TIME)
+
+
+def _plan_id_field(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return _validate_run_id(value)
+    except MigrationPlanError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+SourceQuality = Literal["git", "no-commit", "not-a-repo", "no-git", "error"]
+
+
+class PlanSource(BaseModel):
+    """The code a plan was made from, as the project's local git repository says it
+    (``adapters.git.git_facts``): ``HEAD``'s commit, whether a tracked file under the project
+    differed from it (``.pymolt/`` aside), and the project's folder in the repository (POSIX,
+    ``""`` at its top). Each is None when unknown; ``quality`` says why, ``note`` in words."""
+
+    git_commit: str | None = None
+    git_dirty: bool | None = None
+    git_prefix: str | None = None
+    quality: SourceQuality
+    note: str | None = None
+
+
+class CaptureRef(BaseModel):
+    """The baseline capture a plan was made from, copied from its slot at plan time:
+    ``trace_sha256`` is the recording's sha256 as the plan hashed it and ``capture_id`` the id
+    made from it (``verify.models.capture_id``). The slot's fingerprints are kept beside the
+    plan's own ``environment_*fingerprint`` (taken at plan time), so a mismatch shows."""
+
+    capture_id: str | None = None
+    captured_at: str
+    trace_sha256: str | None = None
+    env_fingerprint: str | None = None
+    env_setup_fingerprint: str | None = None
+    command: list[str] = Field(default_factory=list)
+
+
+class PlanLineage(BaseModel):
+    """Where a plan comes from, by plan ids: the first plan of its lineage (``root``; its own id
+    for a fresh plan), the plan it was derived from (``parent``) and how many derivations lie
+    between them (``generation``). Recorded only: nothing is inherited through it yet."""
+
+    root: str
+    parent: str | None = None
+    generation: int = Field(default=0, ge=0)
+
+    @field_validator("root", "parent")
+    @classmethod
+    def _ids_are_plan_ids(cls, value: str | None) -> str | None:
+        return _plan_id_field(value)
+
+
+#: The fields ``content_digest_of`` leaves out: what names, times and places a plan, and the
+#: inputs ``plan`` compares on their own (the baseline, the environment, the target manifest).
+#: A field missing here is part of the content: forgetting an identity field only makes an
+#: unchanged re-plan save again, while forgetting a content field would hide a change.
+DIGEST_EXCLUDED_FIELDS = frozenset({
+    # identity and time
+    "schema_version", "plan_id", "created_at", "name", "label", "adapted_from", "content_digest",
+    # provenance
+    "pymolt_version", "source", "lineage",
+    # input bindings
+    "baseline", "baseline_trace_path", "baseline_captured_at", "baseline_trace_sha256",
+    "environment_fingerprint", "environment_setup_fingerprint", "target_manifest_sha256",
+})
+
+
+def content_digest_of(plan: MigrationPlan) -> str:
+    """sha256 of what the plan says to do: its canonical JSON (``model_dump(mode="json")``,
+    sorted keys, no spaces) without ``DIGEST_EXCLUDED_FIELDS`` and without the provenance text
+    that varies with cache state: ``risks.notes``, each ``risks.deltas[*].notes``,
+    ``python.notes`` and ``python.sides`` (e.g. "old side read statically from ...")."""
+    # A JSON round trip first: a plan made in memory and the same plan read back hash alike.
+    data = json.loads(json.dumps(plan.model_dump(mode="json")))
+    for field in DIGEST_EXCLUDED_FIELDS:
+        data.pop(field, None)
+    risks = data.get("risks")
+    if isinstance(risks, dict):
+        risks.pop("notes", None)
+        for delta in risks.get("deltas") or ():
+            if isinstance(delta, dict):
+                delta.pop("notes", None)
+    python = data.get("python")
+    if isinstance(python, dict):
+        python.pop("notes", None)
+        python.pop("sides", None)
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class MigrationPlan(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": PLAN_SCHEMA_ID})
@@ -265,17 +422,55 @@ class MigrationPlan(BaseModel):
     # The work order (``pymolt.workorder.models``): ordered by phase, then by application order.
     # ``changes`` stays the v1 view: every file's text after all of its pymolt code steps.
     steps: list[PlanStep] = Field(default_factory=list)
-    # The schema this plan was read from when an adapter made its steps (1: a schema-1 plan,
-    # read as one synthetic step ``v1``); None for a plan written as it is.
+    # The schema this plan was read from when an adapter made it (1: a schema-1 plan, read as
+    # one synthetic step ``v1``; 2: a schema-2 plan, its identity filled by ``fill_identity``);
+    # None for a plan written as it is.
     adapted_from: int | None = None
+    # Schema 3: the plan's identity. Optional, so an adapted schema-2 plan fits; pymolt 0.3
+    # writes them for every plan it makes.
+    # ``YYYYMMDDTHHMMZ-<id8>[-<label>]`` (``NAME_RE``): the plan's folder under .pymolt/plans/.
+    name: str | None = None
+    label: str | None = None
+    # The pymolt that made the plan; None: unknown (a plan made before it was recorded).
+    pymolt_version: str | None = None
+    source: PlanSource | None = None
+    baseline: CaptureRef | None = None
+    lineage: PlanLineage | None = None
+    # ``content_digest_of`` at save time (64 hex).
+    content_digest: str | None = None
+
+    # The JSON object the plan was read from (``load``); None for a plan made in memory. Its
+    # stored form: what ``plan_digest`` hashes and ``freeze`` writes, so an adapted plan's
+    # frozen copy and approval stay those of the file as it was written.
+    _stored: dict[str, Any] | None = PrivateAttr(default=None)
+    # Why the baseline binding needs a person's eye (the recording changed since its capture);
+    # set by ``create_migration_plan``, never saved.
+    _baseline_warning: str | None = PrivateAttr(default=None)
+
+    def __eq__(self, other: object) -> bool:
+        """Plans are equal by their fields: where a plan was read from is not part of it."""
+        if not isinstance(other, MigrationPlan):
+            return NotImplemented
+        return type(self) is type(other) and self.__dict__ == other.__dict__
 
     @property
     def setup_fingerprint(self) -> str | None:
         """The setup fingerprint at plan time (``environment_setup_fingerprint``): H3's input."""
         return self.environment_setup_fingerprint
 
+    @property
+    def baseline_warning(self) -> str | None:
+        """Set on a plan just made when its baseline's recording no longer has the sha256 its
+        capture stamped: the plan binds the recording as it is now."""
+        return self._baseline_warning
+
     def step(self, step_id: str) -> PlanStep | None:
         return next((s for s in self.steps if s.id == step_id), None)
+
+    def stored_form(self) -> dict[str, Any]:
+        """The plan's JSON object as stored: as it was read, or ``model_dump`` for a plan made in
+        memory."""
+        return self._stored if self._stored is not None else self.model_dump(mode="json")
 
     @field_validator("plan_id")
     @classmethod
@@ -285,45 +480,134 @@ class MigrationPlan(BaseModel):
         except MigrationPlanError as exc:
             raise ValueError(str(exc)) from exc
 
+    @field_validator("label")
+    @classmethod
+    def _label_is_safe(cls, value: str | None) -> str | None:
+        if value is not None and not LABEL_RE.match(value):
+            raise ValueError(f"invalid label {value!r}: {LABEL_RULE}")
+        return value
+
+    @field_validator("content_digest")
+    @classmethod
+    def _digest_is_hex(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("content_digest is not a sha256 (64 lowercase hex)")
+        return value
+
+    @model_validator(mode="after")
+    def _name_is_the_plans(self) -> MigrationPlan:
+        """A name is a folder name: it must be ``NAME_RE``, with this plan's id and label."""
+        if self.name is None:
+            return self
+        match = NAME_RE.match(self.name)
+        if match is None:
+            raise ValueError(f"invalid plan name {self.name!r}: not YYYYMMDDTHHMMZ-<id8>"
+                             "[-<label>]")
+        if match.group(2) != self.plan_id[:8] or match.group(3) != self.label:
+            raise ValueError(f"plan name {self.name!r} does not carry the plan's id "
+                             f"{self.plan_id[:8]} and label {self.label!r}")
+        return self
+
     @classmethod
     def load(
         cls, project_dir: str | Path, path: str | Path | None = None
     ) -> MigrationPlan | None:
-        """The plan at ``path`` (default: the saved plan; a schema-1 plan is read as one
-        synthetic step); None when there is none. A damaged plan, or one written by a newer
-        pymolt, raises ``StateFileError``."""
-        source = plan_path(project_dir, path)
+        """The plan at ``path`` (default: the current plan, ``plan_path``; a schema-2 plan is
+        read with its identity filled, a schema-1 plan as one synthetic step); None when there
+        is none. A damaged plan, one written by a newer pymolt, or a current plan whose id is
+        not the pointer's raises ``StateFileError``."""
+        pointer = None
+        if path is None:
+            from pymolt.plan_store import current_pointer
+
+            pointer, source = current_pointer(project_dir)
+        else:
+            source = plan_path(project_dir, path)
         kind, remedy = _plan_file_kind(project_dir, source)
 
         def adapt(data: dict) -> MigrationPlan:
-            if schema_version(data) == 1:
+            version = schema_version(data)
+            if version == 1:
                 from pymolt.workorder.v1 import read_v1
 
-                return read_v1(cls, data)
-            return cls.model_validate(data)
+                plan = read_v1(cls, data)
+            elif version == 2:
+                plan = fill_identity(cls.model_validate({
+                    **data, "schema_version": PLAN_SCHEMA_VERSION,
+                    # A frozen copy 0.2 made of a schema-1 plan keeps 1.
+                    "adapted_from": data.get("adapted_from") or 2}))
+            else:
+                plan = cls.model_validate(data)
+            plan._stored = data
+            return plan
 
-        return load_state(source, cls, kind=kind, newest=PLAN_SCHEMA_VERSION, remedy=remedy,
+        plan = load_state(source, cls, kind=kind, newest=PLAN_SCHEMA_VERSION, remedy=remedy,
                           adapt=adapt)
+        if pointer is not None and plan is not None:
+            from pymolt.plan_store import check_plan_id
+
+            check_plan_id(project_dir, pointer, plan.plan_id)
+        return plan
+
+    def freeze(self, path: str | Path) -> Path:
+        """Write the plan's stored form (``stored_form``) to ``path``: a run's frozen copy is
+        the plan file as it was read, so its digest, and the approvals bound to it, hold."""
+        return atomic_write_json(path, self.stored_form())
 
     def save(
         self, project_dir: str | Path, path: str | Path | None = None
     ) -> Path:
-        target = plan_path(project_dir, path)
-        if target.resolve() != plan_path(project_dir).resolve():
+        """Store the plan and make it the current plan (``pymolt.plan_store``): its name is
+        stamped when it has none, ``.pymolt/plans/<name>/plan.json`` is written in a folder
+        created for it (a folder another plan took draws a new id: the plan is not bound to
+        anything yet), and the pointer names it. Refused while the pointer or the current plan
+        is damaged or newer (``StateFileError``). With ``path``: written there only, as an
+        export (``model_dump``; nothing is stored, the current plan stays)."""
+        from pymolt.plan_store import in_store, store, write_pointer
+
+        if path is not None:
+            target = plan_path(project_dir, path)
+            if in_store(project_dir, target):
+                raise MigrationPlanError(
+                    f"refusing to write a plan into the plan store by path: {target}")
             return atomic_write_json(target, self.model_dump(mode="json"))
         with state_lock(project_dir, operation="plan"):
-            MigrationPlan.load(project_dir)     # never replaces a damaged or newer saved plan
-            return atomic_write_json(target, self.model_dump(mode="json"))
+            MigrationPlan.load(project_dir)     # never replaces a damaged or newer current plan
+            stored = store(project_dir, self)
+            write_pointer(project_dir, self, set_by="plan")
+            return stored
 
-    def save_planned(self, project_dir: str | Path, path: str | Path | None = None) -> Path:
-        """Save the plan ``pymolt plan`` made, then drop the blobs retention no longer keeps
-        (``plan`` and ``apply`` collect the store; it waits when another operation holds the
-        migration lock)."""
-        from pymolt.workorder.blobs import collect_after_plan
+    def save_planned(self, project_dir: str | Path, *, label: str | None = None,
+                     fresh: bool = False, output: str | Path | None = None):
+        """Save the plan ``pymolt plan`` made (``plan_store.save_planned``): unchanged from the
+        current plan, nothing is stored and the current plan stays; otherwise it is stamped
+        with its lineage (derived from the current plan, or ``fresh``) and ``label``, and
+        stored and made current (with ``output``, ``-o``, only written there). The 0.2 plan
+        file is moved into the store first, and the blob store is collected after. Returns a
+        ``plan_store.PlanSaveResult``."""
+        from pymolt.plan_store import save_planned
 
-        saved = self.save(project_dir, path)
-        collect_after_plan(project_dir)
-        return saved
+        return save_planned(project_dir, self, label=label, fresh=fresh, output=output)
+
+
+def fill_identity(plan: MigrationPlan) -> MigrationPlan:
+    """Fill the schema-3 identity of a plan read from an older schema, from what it holds:
+    ``name`` from ``created_at`` and ``plan_id`` (``name_of``: with a ``created_at`` that is not a
+    time, its time part is ``UNKNOWN_TIME``), a fresh ``lineage`` and ``baseline`` from
+    ``baseline_captured_at`` and ``baseline_trace_sha256``. ``pymolt_version``, ``source`` and
+    ``content_digest`` stay None: unknown. It reads nothing else and is deterministic, so a
+    plan and its frozen copy fill alike (apply's frozen check compares them)."""
+    from pymolt.verify.models import capture_id
+
+    if plan.name is None:
+        plan.name = name_of(plan)
+    if plan.lineage is None:
+        plan.lineage = PlanLineage(root=plan.plan_id)
+    if plan.baseline is None and plan.baseline_captured_at:
+        plan.baseline = CaptureRef(
+            capture_id=capture_id(plan.baseline_captured_at, plan.baseline_trace_sha256),
+            captured_at=plan.baseline_captured_at, trace_sha256=plan.baseline_trace_sha256)
+    return plan
 
 
 class InvocationFile(BaseModel):
@@ -396,6 +680,7 @@ def create_migration_plan(
     items with the blocked matches of the previews. ``recorder``: the preview walk's recipe
     chains (``workorder.builder.StepRecorder``), from which the automated steps are made; a
     file with no recorded chain keeps its whole change in one step."""
+    from pymolt.verify.models import capture_id
     from pymolt.verify.service import (
         environment_fingerprint,
         environment_setup_fingerprint,
@@ -407,16 +692,32 @@ def create_migration_plan(
     baseline = contract.baseline
     baseline_hash = None
     baseline_path = None
+    baseline_ref = None
+    baseline_warning = None
     if baseline is not None:
         baseline_path = Path(baseline.trace_path)
         if not baseline_path.is_absolute():
             baseline_path = root / baseline_path
         try:
+            # The plan binds the recording as it is now (apply checks this hash), whatever
+            # its capture stamped.
             baseline_hash = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
         except OSError as exc:
             raise MigrationPlanError(
                 f"cannot bind the plan to baseline trace: {baseline_path}"
             ) from exc
+        baseline_ref = CaptureRef(
+            capture_id=capture_id(baseline.captured_at, baseline_hash),
+            captured_at=baseline.captured_at, trace_sha256=baseline_hash,
+            env_fingerprint=baseline.env_fingerprint,
+            env_setup_fingerprint=baseline.env_setup_fingerprint,
+            command=list(baseline.command))
+        if baseline.trace_sha256 and baseline.trace_sha256 != baseline_hash:
+            baseline_warning = (
+                f"the baseline recording changed since its capture "
+                f"({baseline.capture_id or baseline.trace_sha256[:8]}): the plan is bound to "
+                f"it as it is now ({baseline_ref.capture_id}); capture the baseline again if "
+                "the change was not yours")
     target_relative = None
     target_hash = None
     if target_manifest_path:
@@ -495,7 +796,7 @@ def create_migration_plan(
     finish_steps(steps, risks, root=root, t0=t0, baseline_trace=baseline_path,
                  baseline_command=list(baseline.command) if baseline is not None else None)
 
-    return MigrationPlan(
+    plan = MigrationPlan(
         target_python=target_python,
         source_manifest=source_manifest,
         target_manifest_path=target_relative,
@@ -507,6 +808,7 @@ def create_migration_plan(
         baseline_trace_path=_project_relative(root, baseline.trace_path) if baseline else None,
         baseline_captured_at=baseline.captured_at if baseline else None,
         baseline_trace_sha256=baseline_hash,
+        baseline=baseline_ref,
         dependencies=[
             PlannedDependency(
                 name=item.name,
@@ -530,6 +832,11 @@ def create_migration_plan(
         compile_findings=compile_findings,
         steps=steps,
     )
+    # A plan can be committed: what pymolt writes about the machine (probed interpreters, the
+    # target environment, the baseline's command) names no folder of it (``machine_paths``).
+    scrub_prose(plan, PathScrubber(project_dir))
+    plan._baseline_warning = baseline_warning
+    return plan
 
 
 def _env_steps(root: Path, source_manifest: str, target_manifest: str | None,

@@ -34,7 +34,7 @@ def test_the_store_writes_its_own_gitignore_and_never_the_projects(tmp_path):
     (tmp_path / ".pymolt" / ".gitignore").write_text("mine/")
     blobs.put_text(tmp_path, "x = 1\n")
     lines = (tmp_path / ".pymolt" / ".gitignore").read_text().splitlines()
-    assert lines == ["mine/", "blobs/", "cache/", "migrations/*/steps/"]
+    assert lines == ["mine/", "blobs/", "cache/", "migrations/*/steps/", "plans/current.json"]
     assert (tmp_path / ".gitignore").read_text() == "build/\n"
     blobs.ensure_gitignore(tmp_path)                          # idempotent
     assert (tmp_path / ".pymolt" / ".gitignore").read_text().count("blobs/") == 1
@@ -120,9 +120,9 @@ def test_nothing_is_collected_while_the_receipt_or_ledger_cannot_be_read(tmp_pat
 def test_plan_collects_when_the_lock_is_free_and_leaves_it_otherwise(tmp_path):
     stray = blobs.put_text(tmp_path, "nobody = 1\n")
     with _migration_lock(tmp_path, "apply"):
-        assert blobs.collect_after_plan(tmp_path) == []
+        assert blobs.collect_after_plan(tmp_path).blobs == []
     assert blobs.has_blob(tmp_path, stray)
-    assert blobs.collect_after_plan(tmp_path) == [stray]
+    assert blobs.collect_after_plan(tmp_path).blobs == [stray]
 
 
 def test_apply_collects_what_no_run_keeps(tmp_path):

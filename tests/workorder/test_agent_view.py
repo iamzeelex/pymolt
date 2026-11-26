@@ -13,8 +13,10 @@ from typer.testing import CliRunner
 
 from pymolt.attest import Attester
 from pymolt.interfaces.cli.commands import app
-from pymolt.migration_plan import MigrationConflictError
+from pymolt.migration_plan import MigrationConflictError, MigrationPlan
 from pymolt.migration_state import MigrationReceipt
+from pymolt.plan_store import stored_plan_file
+from pymolt.state_io import atomic_write_json
 from pymolt.workorder.apply import StepRefusal, apply_steps
 from pymolt.workorder.approval import approval_path, approve, check_approval
 from pymolt.workorder.rollback import rollback_steps
@@ -79,7 +81,10 @@ def test_any_change_to_the_plan_voids_the_approval(tmp_path):
     plan = _approved(tmp_path)
     changed = plan.model_copy(update={"steps": [
         s.model_copy(update={"title": s.title + "!"}) for s in plan.steps]})
-    changed.save(tmp_path)
+    # A stored plan is never rewritten (saved, the copy would be a new plan): the change is a
+    # hand edit of its file.
+    atomic_write_json(stored_plan_file(tmp_path, plan.name), changed.model_dump(mode="json"))
+    changed = MigrationPlan.load(tmp_path)
     assert check_approval(tmp_path, changed, plan.plan_id, "pymolt-steps") == (
         "the plan changed since it was approved")
     with pytest.raises(StepRefusal, match="the plan changed since it was approved"):

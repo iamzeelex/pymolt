@@ -451,7 +451,7 @@ def test_the_runtime_warning_reaches_the_baseline_facts(captured):
 
 def test_plan_stores_risks_and_verify_calibrates_them(captured):
     from pymolt.codemods.models import DependencyMigration
-    from pymolt.migration_plan import MigrationPlan, create_migration_plan
+    from pymolt.migration_plan import MigrationPlan, create_migration_plan, plan_path
     from pymolt.verify import service
 
     root, _baseline_slot = captured
@@ -462,8 +462,9 @@ def test_plan_stores_risks_and_verify_calibrates_them(captured):
         root, [], [DependencyMigration("wdepx", "1", "2")], target_python="3.12",
         source_manifest="requirements.txt", target_manifest_path=None, files_scanned=0,
         delta_reports=[delta])
-    plan.save(root)
-    stored = json.loads((root / ".pymolt" / "migration_plan.json").read_text())["risks"]
+    saved = plan.save(root)
+    assert saved == plan_path(root)
+    stored = json.loads(saved.read_text())["risks"]
     assert stored["schema"] == RISKS_SCHEMA
     (risk,) = stored["risks"]
     assert (risk["symbol"], risk["tier"], risk["site"]["func"]) == ("wdepx.mean", "high", "run")

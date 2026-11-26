@@ -1,0 +1,4 @@
+# pymolt: local stores that hold copies of the project's source
+blobs/
+cache/
+migrations/*/steps/

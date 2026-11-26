@@ -312,8 +312,17 @@ def _read(path: Path) -> str:
         return ""
 
 
+def current_plan_file(root: Path) -> Path:
+    """The current plan's file: the one ``.pymolt/plans/current.json`` names, else the 0.2
+    layout's single file."""
+    name = jload(root / ".pymolt" / "plans" / "current.json").get("name")
+    if not isinstance(name, str) or not name:
+        return root / ".pymolt" / "migration_plan.json"
+    return root / ".pymolt" / "plans" / name / "plan.json"
+
+
 def _plan_steps(root: Path) -> list[dict]:
-    return jload(root / ".pymolt" / "migration_plan.json").get("steps") or []
+    return jload(current_plan_file(root)).get("steps") or []
 
 
 def match_step(steps: list[dict], edit: dict) -> str | None:
@@ -464,7 +473,7 @@ def run_scenario(toy: dict, scn: str, out: Path, pymolt: Path, timeout: int,
     (root / "requirements-target.txt").write_text("\n".join(toy["target_manifest"]) + "\n")
     step("plan", [pm, "plan", ".", "--target-manifest", "requirements-target.txt", "--agent"],
          stdout="plan_agent.json")
-    plan_file = root / ".pymolt" / "migration_plan.json"
+    plan_file = current_plan_file(root)
     if online:  # keep the offline plan to report both; the online one is the one applied
         if plan_file.exists():
             shutil.copy(plan_file, root / "migration_plan_offline.json")
@@ -531,7 +540,7 @@ def read_scenario(root: Path) -> dict:
     return {
         "root": root,
         "result": jload(root / "result.json"),
-        "plan": jload(root / ".pymolt" / "migration_plan.json"),
+        "plan": jload(current_plan_file(root)),
         "plan_offline": jload(root / "migration_plan_offline.json"),
         "verify": verify,
         "contract": verify.get("contract") or {},

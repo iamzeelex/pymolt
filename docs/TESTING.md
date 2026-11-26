@@ -279,15 +279,20 @@ pymolt capture baseline --mode tests --project-dir . -- \
 Expect: `run.py setup` prints `3.11: python/pandas 3.11.x 1.5.3` and `3.12: … 2.2.3`; the
 capture says **captured 15 events**, `dropped=0`, and `next → pymolt plan .`.
 
-**Plan, and the agent gate.**
+**Plan, plan again, and the agent gate.**
 
 ```bash
 pymolt plan .
+pymolt plan . --json | python -c 'import json, sys; d = json.load(sys.stdin); print(d["saved"], d["unchanged_from"])'
+ls .pymolt/plans
 pymolt status .
 pymolt apply . --agent
 ```
 Expect:
-- `plan`: the verified codemod `$S.append($OTHER, ignore_index=$IGN) → pd.concat(…)`, a
+- `plan`: the panel opens with the plan's identity line, `plan <id8> · <date> <time> UTC ·
+  baseline <capture id> · commit unknown (not-a-repo) · fresh` (`/tmp` is not a repository),
+  then `Plan <name> saved to …/.pymolt/plans/<name>/plan.json`, and ends with
+  `Next: pymolt apply .`. The plan shows the verified codemod `$S.append($OTHER, ignore_index=$IGN) → pd.concat(…)`, a
   **certain** risk at `toyapp/core.py:13` (fixed by the plan), a **high** one at
   `toyapp/core.py:24` (`DataFrame.mean`), and a Steps table of **7 steps: 2 by pymolt, 5 for a
   person**, with an empty depends-on column:
@@ -300,9 +305,13 @@ Expect:
   | `beh-1` | person | preserve | `DataFrame.mean`: default `numeric_only` None → False (effort large) |
   | `beh-2`…`beh-4` | person | preserve | `Series` `copy`, `DataFrame.groupby` `axis`, `GroupBy.sum` `numeric_only` (effort medium: a call-time default) |
 
-  It writes `.pymolt/PLAN.md` and no source.
+  It writes `plan.json` and `PLAN.md` in `.pymolt/plans/<name>/`, whose name is
+  `<YYYYMMDDTHHMM>Z-<id8>`, and no source. `PLAN.md` is titled `# Migration plan <name>`.
+- the second plan: `False <name>`: nothing changed, so nothing was saved and the plan above
+  stays current with its id. `ls` shows `<name>` and `current.json`.
 - `status`: `7 step(s): 1 present, 2 planned, 4 planned (person)` (`env-2` is present: setup
-  names an existing target env), next `pymolt apply .`.
+  names an existing target env), `current plan: plan <id8> · …`, the baseline line beginning
+  with its capture id, next `pymolt apply .`.
 - `apply --agent`: exit **2**, `"ok": false`, no person approved this plan for agents; the hint
   names `pymolt apply . --approve-agent`.
 
@@ -312,7 +321,7 @@ Off a terminal it is refused the same way (`stdin is not a terminal`).
 
 <!-- docs-check:off -->
 ```text
-Approve plan <id> for agents: they may apply its 2 pymolt step(s) (env-1, mech-1) and roll back one step at a time. A re-plan or any change to the plan voids it.
+Approve plan <id> for agents: they may apply its 2 pymolt step(s) (env-1, mech-1) and roll back one step at a time. A new plan (a re-plan that changes anything) or any change to the plan voids it.
 To attest this as a person, type <6 hex chars>:
 ```
 <!-- docs-check:on -->
@@ -440,6 +449,48 @@ Clean up:
 ```bash
 cd - && rm -rf /tmp/pymolt-rc && unset XDG_STATE_HOME XDG_CONFIG_HOME
 ```
+
+## H — a project from pymolt 0.2 (about 5 minutes)
+
+`tests/fixtures/v02_project/` is a `.pymolt/` that pymolt 0.2 wrote on the `change` toy of
+`bench/e2e_pandas`: setup, the baseline, `plan` (the single `.pymolt/migration_plan.json`) and
+`apply --step env-1`, which leaves a run open. Put it on disk (its environment paths point at
+`bench/e2e_pandas/.envs`, built in G) and run 0.3 on it.
+
+```bash
+T=/tmp/pymolt-v02; rm -rf $T
+export XDG_STATE_HOME=$T-state XDG_CONFIG_HOME=$T-config
+python -c 'import sys, pathlib; sys.path.insert(0, "."); from tests.fixtures.v02_loader import materialize
+materialize(pathlib.Path(sys.argv[1]))' $T
+cd $T
+pymolt status .
+ls .pymolt
+pymolt apply .
+pymolt plan .
+ls .pymolt .pymolt/plans
+pymolt status .
+```
+Expect:
+- the first `status`: `current plan: plan <id8> · <date> 00:55 UTC · baseline <capture id> ·
+  made by pymolt before 0.3`, and the note `this plan is in the 0.2 layout
+  (.pymolt/migration_plan.json); the next `pymolt plan .` moves it into .pymolt/plans/`. The
+  plan phase reads `plan <name> applied by migration run <id8>`; next `pymolt apply .`. There is
+  no `.pymolt/plans/`: status writes nothing there;
+- `apply .` continues the 0.2 run: `mech-1` applied, `compile_target ok`, `smoke_import ok`;
+  still no `.pymolt/plans/`;
+- `plan .`: the 0.2 plan file is moved first (`The 0.2 plan file was moved into
+  .pymolt/plans/<name>`). The project changed since 0.2 planned (`env-1` and `mech-1` are
+  applied), so the new plan is saved, `derived from <id8 of the 0.2 plan>` (generation 1 in
+  `--json`), with no file left to change. A plan with the same steps as the 0.2 plan would say
+  `Unchanged` and keep the 0.2 plan current, with its approval;
+- `ls`: no `migration_plan.json` and no `PLAN.md` left in `.pymolt/`; `.pymolt/plans/` holds
+  the 0.2 plan's folder (its `plan.json` the same JSON as the 0.2 file, so its run and approval
+  hold, and its `PLAN.md`), the new plan's and `current.json`;
+- the last `status`: no 0.2 note; the plan phase names the new plan and says an earlier run
+  applied a previous plan.
+
+pymolt 0.2 run on the project afterwards finds no plan. Clean up with
+`cd - && rm -rf /tmp/pymolt-v02* && unset XDG_STATE_HOME XDG_CONFIG_HOME`.
 
 ---
 

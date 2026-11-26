@@ -256,6 +256,13 @@ class _Context:
                            **fields)
 
 
+def _adopt(ctx: _Context) -> None:
+    """Before a record's first write: its plan becomes the current plan (``plan_store.adopt``)."""
+    from pymolt.plan_store import adopt
+
+    adopt(ctx.root, ctx.plan)
+
+
 def _refuse_stale_plan(ctx: _Context) -> None:
     inspection = inspect_migration_plan(ctx.root, ctx.plan, check_files=False)
     if not inspection.valid:
@@ -335,6 +342,7 @@ def _begin(ctx: _Context, *, by: str, actor: str | None) -> ApplyResult:
     _refuse_stale_plan(ctx)
     _recordable(ctx)
     root = ctx.root
+    _adopt(ctx)
     files: dict[str, Any] = {}
     new_bytes = 0
     hash_only = 0
@@ -396,7 +404,7 @@ def _save_state(ctx: _Context, now: str, status: str | None) -> None:
     run_dir = _run_dir(ctx.root, ctx.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     if not (run_dir / "plan.json").is_file():
-        ctx.plan.save(ctx.root, run_dir / "plan.json")
+        ctx.plan.freeze(run_dir / "plan.json")
     base = ctx.state or MigrationRunState(
         run_id=ctx.run_id, status="prepared", prepared_at=now,
         plan_id=None if ctx.run_id == ctx.plan.plan_id else ctx.plan.plan_id)
@@ -439,6 +447,7 @@ def _abort(ctx: _Context) -> ApplyResult:
         from pymolt.migration_state import StepReceipt
 
         previous = StepReceipt.model_validate(found[1]["previous"])
+    _adopt(ctx)
     now = _now()
     before = LedgerSnapshot.take(ctx.root)
     try:
@@ -771,6 +780,7 @@ def _done(ctx: _Context, *, by: str | None, actor: str | None, claim: str | None
                for c in changes],
         claim=chosen, expect=attrs.expect, pairs=[list(p) for p in pairs], recorded_from=how,
         snapshot=snap_path, unrecorded=unrecorded[:50])
+    _adopt(ctx)
     put_texts(root, [t for c in changes for t in (c.before, c.after)])
     ledger_before = LedgerSnapshot.take(root)
     try:

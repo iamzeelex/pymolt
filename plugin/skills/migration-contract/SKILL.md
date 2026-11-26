@@ -60,7 +60,7 @@ the steps it depends on. `status` names the next step and command;
 how verify judges it.
 
 - **pymolt steps.** A person approves the plan for agents once, on a terminal:
-  `pymolt apply . --approve-agent`. A re-plan or any change to the plan voids it. Then run
+  `pymolt apply . --approve-agent`. A new plan or any change to the plan voids it. Then run
   `pymolt apply . --agent` (or with `--step ID` or `--through ID`). `--dry-run` shows the diff
   and needs no approval. Without the approval apply refuses: ask the person, never work around it.
 - **agent steps** are your own edits. Record each, or verify judges it as a hand edit:

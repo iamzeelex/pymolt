@@ -176,7 +176,7 @@ lists them as `do.manual.candidates`. A keyword rename's step names its paramete
 
 ## The plan as steps
 
-The saved plan (`"schema_version": 2`) lists the migration as ordered steps, `steps` in `--json`.
+The saved plan (`"schema_version": 3`) lists the migration as ordered steps, `steps` in `--json`.
 A step pymolt applies is one recipe across every file it changes: a rule, a pattern, or a group
 of import moves applied together. Its `edits` hold, per file, the hunks between the text before
 and after that recipe, the statements it replaces, inserts or deletes, and anchors that name
@@ -261,19 +261,77 @@ when that cannot be done safely the step is refused and nothing is written
 
 A file whose recipes the plan could not tell apart keeps its whole change in one step, with the
 reason in the step's `why.evidence`. Such a step applies only to its own two texts: it has no
-recipe to run again. A plan saved by an earlier pymolt (`"schema_version": 1`)
-is read as one step, `v1`. The schema is `pymolt/schemas/migration_plan-2.schema.json`.
+recipe to run again. A plan saved by pymolt 0.2 (`"schema_version": 2`) is read as it is,
+with its identity filled from what it holds; one saved by an earlier pymolt
+(`"schema_version": 1`) is read as one step, `v1`. The schema is
+`pymolt/schemas/migration_plan-3.schema.json`; `migration_plan-2.schema.json` stays for
+schema-2 files.
+
+## Saved plans
+
+Every plan `plan` saves gets a folder of its own, `.pymolt/plans/<name>/`, with its
+`plan.json`, written once and never changed, and its `PLAN.md`:
+
+```text
+.pymolt/plans/20261120T0631Z-f74941c5/plan.json
+.pymolt/plans/20261120T0631Z-f74941c5/PLAN.md
+.pymolt/plans/current.json      which plan is current (local state, gitignored)
+```
+
+- **Name.** `YYYYMMDDTHHMMZ-<id8>[-<label>]`: the plan's UTC time to the minute, the first 8 hex
+  of its id and its label (`plan --label numpy2`). Names sort by time; the id keeps plans made in
+  the same minute (a CI matrix) apart. A plan whose time is not readable (an old file) is named
+  `00000000T0000Z-<id8>`, and shown as "time unknown".
+- **Identity.** A plan also records the pymolt version that made it, the git commit it was made
+  at (`source`: the commit, whether a tracked file under the project differed from it, the
+  project's folder in the repository; never a branch, an author, a remote or an absolute path),
+  the baseline capture it was made from (`baseline.capture_id`), its lineage and a digest of its
+  content. The plan's identity line reads: `plan f74941c5 · 2026-11-20 06:31 UTC · baseline
+  20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 (dirty) · derived from 3c9e0d12`. A plan made by
+  pymolt 0.2 reads "made by pymolt before 0.3".
+- **The current plan.** `plan` makes the plan it saves current; so does an `apply` that writes
+  (a step, `--skip`, `--record`) of another plan. `apply`, `verify` and `status` use the current
+  plan; `apply --plan` takes `current`, a name, an id prefix or a path. The pointer is this
+  checkout's own state, so a fresh clone of a repository that commits its plan folders has no
+  current plan: `status` names the newest saved plan and how to choose one.
+- **No machine folders.** A plan can be committed, so the text pymolt writes about the machine
+  (probed interpreters, the target environment, the baseline's command and each step's check
+  command) writes a path inside the project relative to it and a path under the home folder as
+  `~/...`; a shell expands `~` when you run such a command. The project's own text (sources,
+  anchors, manifest lines) is kept as written.
+- **Unchanged.** A plan whose content (its steps, changes, risks and the rest, without its id,
+  time, name and provenance) and inputs (the baseline capture, the baseline recording's path,
+  the setup and the target manifest) equal the current plan's is not saved: the current plan
+  stays, its approvals hold, and the pointer records the commit it was confirmed at.
+  `--fresh` and a new `--label` always save.
+- **Lineage.** A saved plan derives from the current plan: `lineage.parent` is that plan's id,
+  `lineage.root` the first plan of the lineage, and `generation` counts the derivations.
+  `--fresh`, or no current plan, starts a new lineage. It is recorded only: nothing is carried
+  over from the parent yet.
+- **Retention.** After saving, `plan` removes the plans it no longer keeps. Kept: the current
+  plan and its parent, every plan an apply run references, every plan folder git tracks, and the
+  20 newest. When a state file it reads is damaged, or git cannot say what it tracks, it removes
+  nothing and says why (`pruned.skipped`). Anything in `.pymolt/plans/` that is not named like a
+  plan is never touched.
+- **A 0.2 project.** `status`, `apply` and `verify` read `.pymolt/migration_plan.json` where it
+  is, so its open run and approval hold. The first `plan` moves it into `.pymolt/plans/`, as it
+  is, with its `.pymolt/PLAN.md`, then plans: unchanged, the moved plan stays current; changed,
+  the new plan derives from it.
+- **`plan -o PATH`** writes the plan only to `PATH`, as 0.2 did; `apply --plan PATH` saves it
+  into `.pymolt/plans/` before its first write.
 
 ### PLAN.md
 
-`plan` also writes the plan for a person, `.pymolt/PLAN.md` (`--plan-md PATH` writes it
-elsewhere). It starts with a header: when the plan was made (UTC) and by which pymolt
-version, the baseline capture it was made from (its time and its name, `<time>-<8 hex of the
-trace's sha256>`), the moves, the packages whose API changes could not be computed (once, with
-the first reason and what settles it, such as starting the container and planning again: their
-steps are missing), and the step counts with the next command (the one `pymolt status` names, for
-the project as `.`). Then a table of the steps: what each does, who does it, its
-claim, its sites (run / not run in the baseline), its effort and what it depends on. Then one
+`plan` also writes the plan for a person, `PLAN.md` in the plan's folder (`--plan-md PATH`
+writes it elsewhere; a plan written only to `-o`'s file gets `.pymolt/PLAN.md`). Its title is the
+plan's name. Its header is the plan's identity line, with the pymolt version that made the plan;
+the baseline capture is named by its capture id (`<time>-<8 hex of the trace's sha256>`). Then
+the moves, the packages whose API changes could not be computed (once, with the first reason and
+what settles it, such as starting the container and planning again: their steps are missing),
+and the step counts with the next command (the one `pymolt status` names, for the project as
+`.`; for a plan written only to `-o`'s file, `pymolt apply . --plan FILE`). Then a table of the
+steps: what each does, who does it, its claim, its sites (run / not run in the baseline), its
+effort and what it depends on. Then one
 section per step: where (with the line numbers at plan time), why, what to do (the diff, for a
 pymolt step), how verify judges it, and its effort. Low-tier steps the baseline never ran are
 collapsed into one table at the end.

@@ -1,4 +1,4 @@
-"""A schema-1 plan read as a schema-2 work order with one synthetic step, ``v1`` (design 1.8).
+"""A schema-1 plan read as a work order with one synthetic step, ``v1`` (design 1.8).
 
 A schema-1 plan froze whole files and never recorded where one recipe ends and the next
 begins, so it cannot be split into steps without a re-plan. Its one step is a pymolt
@@ -28,11 +28,12 @@ _CLAIMS = ("same-object", "same-signature", "verified-rule", "python-fixer")
 
 
 def read_v1(model: type, data: dict[str, Any]):
-    """``data`` (a schema-1 plan's JSON) as a ``model`` (``MigrationPlan``) of schema 2."""
-    from pymolt.migration_plan import PLAN_SCHEMA_VERSION
+    """``data`` (a schema-1 plan's JSON) as a ``model`` (``MigrationPlan``) of the current
+    schema, its identity filled as a schema-2 plan's (``migration_plan.fill_identity``)."""
+    from pymolt.migration_plan import PLAN_SCHEMA_VERSION, fill_identity
 
-    plan = model.model_validate({**data, "schema_version": PLAN_SCHEMA_VERSION,
-                                 "adapted_from": 1, "steps": []})
+    plan = fill_identity(model.model_validate({**data, "schema_version": PLAN_SCHEMA_VERSION,
+                                               "adapted_from": 1, "steps": []}))
     if plan.changes:
         plan.steps = [v1_step(plan)]
         if plan.risks is not None:

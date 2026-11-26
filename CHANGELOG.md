@@ -7,6 +7,83 @@ All notable changes to pymolt. The format follows
 
 ## [Unreleased]
 
+### Added
+
+#### Capture and tracer
+
+- Each capture has an id, its UTC time and the first 8 hex of its recording's sha256, such as
+  `20261120T060620Z-b3e1a2c0`. `capture` prints it (`captured <id>: 15 events -> …`) and the
+  slot keeps it with the sha256 (`capture_id`, `trace_sha256`); a capture made by an earlier
+  pymolt gets its id computed when it is read. `verify` names the two captures it compared
+  (`baseline <id> → post-migration <id>`; `compared.before_capture_id` and `after_capture_id`
+  in `--json` and `verification.json`).
+
+#### Plan and apply
+
+- Plan files are schema 3 (`pymolt.plan/3`, `pymolt/schemas/migration_plan-3.schema.json`): a
+  plan also records its name, label, the pymolt version and git commit it was made with, the
+  baseline capture it was made from (`baseline.capture_id`), its lineage and a digest of its
+  content. A schema-2 plan made by pymolt 0.2 is read as it is, so its runs, frozen copies and
+  agent approvals hold; pymolt 0.2 refuses a schema-3 plan as newer.
+- `plan` warns when the baseline's recording changed since it was captured: the plan binds the
+  recording as it is now.
+- Plans are kept, one folder each: `plan` saves `.pymolt/plans/<name>/plan.json`, written once
+  and never changed, with its `PLAN.md` beside it, and makes it the current plan. A plan's name
+  is its UTC time to the minute and the first 8 hex of its id, such as
+  `20261120T0631Z-f74941c5`. `.pymolt/plans/current.json` names the current plan; it is local
+  state, listed in `.pymolt/.gitignore`, while the plan folders can be committed. A damaged
+  pointer, or one that names a plan the store does not hold, refuses `plan`, `apply` and
+  `verify`, and `status` reports it. A checkout with saved plans and no pointer makes none of
+  them current: `status` and `apply` name the newest and how to choose one.
+- A plan names no folder of the machine it was made on, so its folder can be committed: in what
+  pymolt writes about the machine (the interpreters the delta engine probed, the target
+  environment setup names, the baseline's command and each step's check command) a path inside
+  the project is relative to it and a path under the home folder is `~/...`. The project's own
+  text (sources, anchors, manifest lines) is kept as written. `status` shows the baseline's
+  command the same way.
+- `apply --plan` takes `current` (the default), a plan name, a plan id prefix (4 to 32 hex) or a
+  path. A reference that matches no plan, or several, exits 2. An `apply` that writes (a step,
+  `--skip`, `--record`) makes its plan the current plan; a plan file written with `plan -o` is
+  saved into `.pymolt/plans/` first. `--dry-run`, `--brief` and `--approve-agent` leave the
+  current plan as it is.
+- A project from pymolt 0.2 keeps working: `status`, `apply` and `verify` read its
+  `.pymolt/migration_plan.json` where it is, and its open run and agent approval hold. The first
+  `plan` moves that file, as it is, into `.pymolt/plans/` (and its `.pymolt/PLAN.md` into the
+  plan's folder). pymolt 0.2 does not read the moved plan.
+- A `plan` with the same steps, baseline capture, setup and target manifest as the current plan
+  saves nothing: it says "Unchanged: same steps, baseline, setup and target manifest as the
+  current plan. Nothing saved; its approvals still hold." and keeps the current plan, its id and
+  its agent approval. A plan that changed is saved and derived from the current plan: its
+  `lineage` records the parent's id, the lineage's first plan and the generation (recorded only:
+  nothing is inherited yet). `plan --fresh` starts a new lineage; `plan --label TEXT` adds a label
+  to the plan's name (`20261120T0631Z-f74941c5-numpy2`). Both always save a plan; a label outside
+  the rule (lowercase letters, digits, `.`, `_`, `-`) exits 2. The MCP `plan` tool takes `label`
+  and `fresh`. The two plans' baseline recordings are compared by the file they name, so a plan
+  an earlier 0.2 build saved with the recording's absolute path re-plans unchanged.
+- The plan panel, `PLAN.md`'s header and `status` show a plan's identity line: `plan f74941c5 ·
+  2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 (dirty) · derived
+  from 3c9e0d12` ("made by pymolt before 0.3" for a 0.2 plan). `PLAN.md` is titled by the plan's
+  name. `plan --json` and `--agent` add `plan_name`, `label`, `created_at`, `pymolt_version`,
+  `plan_source`, `baseline_capture_id`, `baseline_warning`, `lineage`, `content_digest`, `saved`,
+  `unchanged_from`, `moved_legacy` and `pruned`; the apply and rollback views add `plan_name`.
+- `plan` removes old plans: it keeps the current plan, its parent, every plan an apply run
+  references, every plan folder git tracks (one `git ls-files`) and the 20 newest. It removes
+  nothing when a state file it reads is damaged or git cannot say what it tracks, and `pruned`
+  says why.
+- `status` names the current plan and begins each capture's line with its capture id
+  (`plan`, `captures` in `--json` and `--agent`). It notes when the current plan was made at
+  another commit than `HEAD` (`drift`), and when a plan is still in the 0.2 layout; neither
+  changes a phase or the next command.
+
+### Changed
+
+#### Plan and apply
+
+- `apply --approve-agent` says what voids an approval: a new plan (a re-plan that changes
+  anything) or any change to the plan. A re-plan that changes nothing keeps it.
+
+## [0.2.0rc1] - 2026-11-25
+
 ### Breaking
 
 - The CLI has 12 commands instead of 31. A removed command prints its replacement and exits
@@ -648,5 +725,6 @@ All notable changes to pymolt. The format follows
 
 First public release on PyPI.
 
-[Unreleased]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/iamzeelex/pymolt/compare/v0.2.0rc1...HEAD
+[0.2.0rc1]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...v0.2.0rc1
 [0.1.0]: https://github.com/iamzeelex/pymolt/releases/tag/v0.1.0
