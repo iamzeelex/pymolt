@@ -9,11 +9,11 @@ your code actually calls at runtime, before and after, and tell you what changed
 
 ## Prerequisite
 
-Install the CLI so the `pymolt` command is on your PATH. 0.2.0rc1 is a release candidate, so
+Install the CLI so the `pymolt` command is on your PATH. 0.2.0rc2 is a release candidate, so
 ask for pre-releases:
 
 ```bash
-uv tool install --python 3.12 --prerelease allow pymolt==0.2.0rc1   # or: pipx install --python python3.12 --pip-args=--pre pymolt==0.2.0rc1
+uv tool install --python 3.12 --prerelease allow pymolt==0.2.0rc2   # or: pipx install --python python3.12 --pip-args=--pre pymolt==0.2.0rc2
 ```
 
 ## Install the plugin
