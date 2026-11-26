@@ -136,9 +136,16 @@ with `git cherry-pick -x` (PR), and released as `0.2.0rc2` through steps 2–3. 
 fixes enter the release branch after rc1.
 
 **5. Final.** When an RC has passed with nothing left to fix, a PR into
-`release/0.2` sets `uvx hatch version 0.2.0` and renames the changelog section to
-`## [0.2.0] - <date>` (`chore: release 0.2.0`); after the merge, tag `v0.2.0` and push
-the tag. The final differs from the last RC only in the version and the changelog.
+`release/0.2` (`chore: release 0.2.0`):
+
+- sets `uvx hatch version 0.2.0`, and the same version in `plugin/.claude-plugin/plugin.json`;
+- folds the RC changelog sections into one `## [0.2.0] - <date>`, compared with the
+  previous release;
+- points the install lines in the README, `plugin/README.md` and `docs/agents.md` at the
+  release, with no pin and no pre-release flag (`uv tool install --python 3.12 pymolt`).
+
+After the merge, tag `v0.2.0` and push the tag. The final's code is the last RC's: only
+those versions, the changelog and the install lines differ.
 
 **6. Bring the changelog back** to `main` (cherry-pick the changelog commit, PR).
 
