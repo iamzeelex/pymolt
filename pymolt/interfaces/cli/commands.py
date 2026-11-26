@@ -160,7 +160,10 @@ def _ask_until_valid(prompt: str, default: str, accept, complaint: str) -> str:
         resolved = accept(answer)
         if resolved is not None:
             return resolved
-        err.print(f"[bold red]{complaint}[/bold red] [dim](got {answer!r})[/dim]")
+        err.print(
+            f"[bold red]{escape(complaint)}[/bold red] [dim](got "
+            f"{escape(repr(answer))})[/dim]"
+        )
 
 
 def _ask_from_list(prompt: str, names: list[str], default: str) -> str:
@@ -286,7 +289,7 @@ def status(
         typer.echo(json_lib.dumps(report.model_dump(mode="json"), indent=2))
         return
 
-    console.print(f"[bold]pymolt[/bold] [dim]{report.project_dir}[/dim]\n")
+    console.print(f"[bold]pymolt[/bold] [dim]{escape(str(report.project_dir))}[/dim]\n")
     for phase in report.phases:
         # A damaged or newer state file: the one thing on the screen to fix first.
         glyph, colour = ("✗", "red") if phase.problem else _STATE_MARK.get(
@@ -297,14 +300,14 @@ def status(
 
     for check in report.checks:
         glyph, colour = _CHECK_MARK.get(check.state, ("!", "yellow"))
-        detail = check.detail + (f" — {check.hint}" if check.hint else "")
+        detail = escape(check.detail + (f" — {check.hint}" if check.hint else ""))
         console.print(
             f"  [{colour}]{glyph}[/{colour}] [bold]{check.name:<15}[/bold] "
             f"[{'dim' if check.state == 'ok' else colour}]{detail}[/]"
         )
 
     for note in report.notes:
-        console.print(f"  [dim]note: {note}[/dim]")
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
 
     console.print()
     if report.next_command:
@@ -772,7 +775,7 @@ def plan(
 
     console.print(Panel(
         f"Plan [bold cyan]{migration_plan.plan_id[:8]}[/bold cyan] saved to\n"
-        f"[green]{saved_path}[/green]\n\n"
+        f"[green]{escape(str(saved_path))}[/green]\n\n"
         f"Dependencies: [bold]{payload['dependencies']}[/bold]   "
         f"files: [bold]{payload['files_to_change']}[/bold]   "
         f"rewrite sites: [bold]{payload['rewrite_sites']}[/bold]   "
@@ -837,7 +840,7 @@ def _render_steps(plan, plan_md_path) -> None:
                           ", ".join(step.depends_on) or "")
         console.print(table)
         console.print(f"{steps_summary(plan)}.")
-    console.print(f"[dim]The plan for a person: {plan_md_path}[/dim]")
+    console.print(f"[dim]The plan for a person: {escape(str(plan_md_path))}[/dim]")
 
 
 def _render_python(plan) -> None:
@@ -854,17 +857,18 @@ def _render_python(plan) -> None:
             table.add_column(column)
         for risk in risks:
             style = _TIER_STYLE.get(risk.tier.value, "")
-            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
-                          risk.symbol, risk.reason + (
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]",
+                          escape(risk.site.label()), escape(risk.symbol),
+                          escape(risk.reason + (
                               " (fixed by the plan)" if risk.fixed_by_plan
                               else f" (manual: {_manual_hint(risk)})" if risk.fix == "advisory"
                               and _manual_hint(risk) else " (manual)" if risk.fix == "advisory"
-                              else ""))
+                              else "")))
         console.print(table)
     console.print(f"\n[bold]{line}[/bold]")
     for listed in (plan.risks.guarded if plan.risks else []):
-        console.print(f"[dim]  listed, not rated: {listed.site.label()} {listed.symbol} "
-                      f"({listed.kind})[/dim]")
+        console.print(f"[dim]  listed, not rated: {escape(listed.site.label())} "
+                      f"{escape(listed.symbol)} ({escape(str(listed.kind))})[/dim]")
     if plan.compile_findings:
         console.print(f"[dim]  compile check: {len(plan.compile_findings)} finding(s) on "
                       f"Python {plan.python.get('to')} (see the saved plan)[/dim]")
@@ -913,8 +917,8 @@ def _render_risks(risks, *, baseline: bool = True) -> None:
         for risk in group:
             style = _TIER_STYLE.get(risk.tier.value, "")
             why = risk.reason + ("" if risk.basis == "trace" else " (static only)")
-            table.add_row(f"[{style}]{risk.tier.value}[/{style}]", risk.site.label(),
-                          risk.symbol, why)
+            table.add_row(f"[{style}]{risk.tier.value}[/{style}]",
+                          escape(risk.site.label()), escape(risk.symbol), escape(why))
         console.print(table)
     if not risks.risks:
         from pymolt.interfaces.views import inconclusive_deltas, unknown_api_phrase
@@ -937,7 +941,7 @@ def _render_risks(risks, *, baseline: bool = True) -> None:
                           f"need attention, {len(risks.fixed)} fixed by the plan; "
                           f"{unknown_api_phrase(unknown, total)} (inconclusive).")
     for note in risks.notes:
-        console.print(f"[dim]  note: {note}[/dim]")
+        console.print(f"[dim]  note: {escape(note)}[/dim]")
 
 
 def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=()) -> None:
@@ -948,7 +952,7 @@ def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=())
     for pkg, items in by_pkg.items():
         if not items:
             continue
-        table = Table(title=f"Codemods — {pkg}")
+        table = Table(title=f"Codemods — {escape(pkg)}")
         table.add_column("kind")
         table.add_column("change")
         table.add_column("conf")
@@ -959,7 +963,7 @@ def _render_recipes(by_pkg, previews, files_scanned: int, risks=None, manual=())
                 change = f"{item.old_qualname} → {item.new_qualname}"
             else:
                 change = f"{item.match} → {item.rewrite[0]}"
-            table.add_row(item.kind or "template", change, item.confidence)
+            table.add_row(item.kind or "template", escape(change), item.confidence)
         console.print(table)
 
     advised = [p for p in previews if p.advisories]
@@ -1494,7 +1498,10 @@ def scan(
         return
 
     if not report.surfaces.project_roots:
-        err.print(f"[bold yellow]No Python project roots found under {project_path}.[/bold yellow]")
+        err.print(
+            f"[bold yellow]No Python project roots found under "
+            f"{escape(str(project_path))}.[/bold yellow]"
+        )
         return
 
     _render_surface_map(report.surfaces)
@@ -1503,7 +1510,7 @@ def scan(
     for root_path, inv in report.inventory_by_root.items():
         if not inv.edges and not inv.indexes:
             continue
-        console.print(f"\n[bold]Dependency edges — [cyan]{root_path}[/cyan][/bold]")
+        console.print(f"\n[bold]Dependency edges — [cyan]{escape(str(root_path))}[/cyan][/bold]")
         _render_inventory(inv)
 
     if report.contact_map is not None:
@@ -1523,9 +1530,9 @@ def _render_python_exposure(exposure: dict, cmap) -> None:
 
     summary = views.exposure_summary(exposure)
     if summary:
-        console.print(f"\n[bold]Python exposure[/bold] — {summary}")
+        console.print(f"\n[bold]Python exposure[/bold] — {escape(summary)}")
         for row in exposure["unguarded_sites"][:_CONTACT_ROWS]:
-            console.print(f"  [dim]{row}[/dim]")
+            console.print(f"  [dim]{escape(str(row))}[/dim]")
         extra = len(exposure["unguarded_sites"]) - _CONTACT_ROWS
         if extra > 0:
             console.print(f"  [dim]… {extra} more (pymolt scan --json)[/dim]")
@@ -1547,18 +1554,19 @@ def _render_contact_map(cmap) -> None:
     for dep, targets in cmap.by_dep.items():
         rows = [c for c in cmap.contacts if c.dep == dep]
         table = Table(
-            title=f"{dep} — {len(targets)} symbol(s)", title_justify="left", show_header=True,
+            title=f"{escape(dep)} — {len(targets)} symbol(s)", title_justify="left",
+            show_header=True,
         )
         table.add_column("Dependency symbol", style="cyan", overflow="fold")
         table.add_column("Called from (your code)", overflow="fold")
         table.add_column("File", style="dim", overflow="fold")
         for c in rows[:_CONTACT_ROWS]:
-            table.add_row(c.target, c.caller, c.file or "—")
+            table.add_row(escape(c.target), escape(c.caller), escape(c.file or "—"))
         if len(rows) > _CONTACT_ROWS:
             table.caption = f"… {len(rows) - _CONTACT_ROWS} more (pymolt scan --json)"
         console.print(table)
     for note in cmap.notes:
-        console.print(f"[dim]Note: {note}[/dim]")
+        console.print(f"[dim]Note: {escape(note)}[/dim]")
 
 
 def _eol_hint(status: str, eol_date: str | None) -> str:
@@ -1702,20 +1710,25 @@ def setup(
 
     # ── Display findings (CLI owns its rendering; the data is the shared model) ──
     console.print("[bold]pymolt setup[/bold]")
-    console.print(f"Scanning directory: {options.project_dir}\n")
+    console.print(f"Scanning directory: {escape(str(options.project_dir))}\n")
 
     console.print("[bold cyan]Discovered Dependency Manifests:[/bold cyan]")
     for i, m in enumerate(options.manifests, 1):
         default_marker = " [green][default][/green]" if m.is_default else ""
-        console.print(f"  {i}. {m.name} ({m.mode}, fixation: {m.fixation}){default_marker}")
+        console.print(
+            f"  {i}. {escape(str(m.name))} ({m.mode}, fixation: "
+            f"{m.fixation}){default_marker}"
+        )
     console.print()
 
     console.print("[bold cyan]Discovered Local Environments & System Tools:[/bold cyan]")
     console.print(
-        f"  Local folders: {', '.join(options.local_envs) if options.local_envs else 'None detected'}"
+        "  Local folders: "
+        + (escape(", ".join(options.local_envs)) if options.local_envs else "None detected")
     )
     tool_status = [
-        f"{tool}: " + (f"[green]found[/green] ({path})" if path else "[red]not found[/red]")
+        f"{tool}: "
+        + (f"[green]found[/green] ({escape(str(path))})" if path else "[red]not found[/red]")
         for tool, path in options.system_tools.items()
     ]
     console.print(f"  System tools : {', '.join(tool_status)}")
@@ -1726,7 +1739,10 @@ def setup(
             "[bold cyan]Discovered Running Docker Containers (bind-mounting project):[/bold cyan]"
         )
         for c in options.containers:
-            console.print(f"  Container {c.id} ({c.name}) - Python {c.python}")
+            console.print(
+                f"  Container {escape(str(c.id))} ({escape(str(c.name))}) "
+                f"- Python {c.python}"
+            )
         console.print()
     else:
         console.print("[bold cyan]Running Docker Containers:[/bold cyan]")
@@ -1754,7 +1770,8 @@ def setup(
             console.print("\n[bold yellow]Available resolution tools/environments:[/bold yellow]")
             for i, t in enumerate(options.tools, 1):
                 default_marker = " [green][default][/green]" if t.is_default else ""
-                console.print(f"  {i}. {t.name} ({t.detail}){default_marker}")
+                console.print(f"  {i}. {escape(str(t.name))} "
+                              f"({escape(str(t.detail))}){default_marker}")
             selected_tool = _ask_from_list(
                 "Select resolution tool", tool_names,
                 str(tool_names.index(options.default_tool) + 1),
@@ -1766,7 +1783,8 @@ def setup(
                 console.print("\n[bold yellow]Select a running Docker container:[/bold yellow]")
                 for idx, c in enumerate(options.containers, 1):
                     default_c = " [green][default][/green]" if idx == 1 else ""
-                    console.print(f"  {idx}. Container {c.id} ({c.name}){default_c}")
+                    console.print(f"  {idx}. Container {escape(str(c.id))} "
+                                  f"({escape(str(c.name))}){default_c}")
                 c_choice = str(typer.prompt("Select container number", default="1")).strip()
                 if c_choice.isdigit() and 1 <= int(c_choice) <= len(options.containers):
                     container_id = options.containers[int(c_choice) - 1].id
@@ -1796,7 +1814,7 @@ def setup(
             if scanned_envs:
                 console.print("\n[bold yellow]Select your target environment folder:[/bold yellow]")
                 for idx, folder in enumerate(scanned_envs, 1):
-                    console.print(f"  {idx}. {folder}")
+                    console.print(f"  {idx}. {escape(str(folder))}")
                 console.print(f"  {len(scanned_envs) + 1}. Other path...")
                 env_choice = str(typer.prompt("Select target environment option", default="1")).strip()
                 if env_choice.isdigit() and 1 <= int(env_choice) <= len(scanned_envs):
@@ -1855,22 +1873,22 @@ def setup(
     apply_setup(project_path, choices, notes=side_effects)
 
     config_file = project_path / ".pymolt" / "env_config.json"
-    console.print(f"\n[bold green]✓ Configuration saved to {config_file}[/bold green]")
+    console.print(f"\n[bold green]✓ Configuration saved to {escape(str(config_file))}[/bold green]")
     for note in side_effects:
-        console.print(f"[yellow]{note}[/yellow]")
+        console.print(f"[yellow]{escape(note)}[/yellow]")
     console.print(Panel(
-        f"Selected Manifest  : {selected_manifest}\n"
-        f"Resolution Tool    : {selected_tool}\n"
-        f"Base Python        : {base_python}\n"
-        f"Container ID       : {container_id or 'None'}\n"
+        f"Selected Manifest  : {escape(str(selected_manifest))}\n"
+        f"Resolution Tool    : {escape(str(selected_tool))}\n"
+        f"Base Python        : {escape(str(base_python))}\n"
+        f"Container ID       : {escape(str(container_id or 'None'))}\n"
         f"Target Python      : {target_python}\n"
-        f"Target Env Created : {target_env_created}\n"
-        f"Target Env Path    : {target_env_path or 'None'}",
+        f"Target Env Created : {escape(str(target_env_created))}\n"
+        f"Target Env Path    : {escape(str(target_env_path or 'None'))}",
         title="Saved Configuration",
         expand=False
     ))
     if defaulted:
-        console.print(f"[dim]Detected defaults used for: {', '.join(defaulted)}. "
+        console.print(f"[dim]Detected defaults used for: {escape(', '.join(defaulted))}. "
                       "Pass them as options to choose.[/dim]")
     next_step(project_path)
 
@@ -1991,20 +2009,20 @@ def _render_assess_header(
 ):
     """Render the assess summary panel (source/legacy/target/compilation environment)."""
     console.print(Panel(
-        f"Directory:          [yellow]{project_dir}[/yellow]\n"
-        f"Source manifest:    [magenta]{chosen_source.path.name}[/magenta] "
+        f"Directory:          [yellow]{escape(str(project_dir))}[/yellow]\n"
+        f"Source manifest:    [magenta]{escape(chosen_source.path.name)}[/magenta] "
         f"[dim](as declared: {chosen_source.fixation.value})[/dim]\n"
         "\n"
         "[bold cyan]Base (the project as it is today)[/bold cyan]\n"
-        f"  Python:           [green]{python_display}[/green]\n"
-        f"  Interpreter:      [dim]{legacy_interpreter_display}[/dim]\n"
+        f"  Python:           [green]{escape(str(python_display))}[/green]\n"
+        f"  Interpreter:      [dim]{escape(str(legacy_interpreter_display))}[/dim]\n"
         "\n"
         "[bold cyan]Target (what it is being migrated to)[/bold cyan]\n"
         f"  Python:           [green]{target_python_to_use}[/green]\n"
-        f"  Env folder:       [blue]{target_env_display}[/blue]\n"
-        f"  Interpreter:      [dim]{target_interpreter_display}[/dim]\n"
+        f"  Env folder:       [blue]{escape(str(target_env_display))}[/blue]\n"
+        f"  Interpreter:      [dim]{escape(str(target_interpreter_display))}[/dim]\n"
         "\n"
-        f"Resolved in:        [blue]{comp_env}[/blue]",
+        f"Resolved in:        [blue]{escape(str(comp_env))}[/blue]",
         title="pymolt assess",
         expand=False,
     ))
@@ -2060,8 +2078,8 @@ def _render_comparison_table(rows, verbose):
             continue
 
         role_str = "[bold yellow]direct[/bold yellow]" if row["direct"] else "[dim]transitive[/dim]"
-        b_ver = row["baseline_version"] or "-"
-        t_raw = row["target_version"]
+        b_ver = escape(row["baseline_version"] or "-")
+        t_raw = escape(row["target_version"]) if row["target_version"] else row["target_version"]
         status = row["status"]
 
         if status == "conflict":
@@ -2080,10 +2098,10 @@ def _render_comparison_table(rows, verbose):
             move = f"{b_ver} → {t_raw or 'unpinned'}"
 
         label, style = _STATUS_MARK.get(status, ("✔ resolved", "green"))
-        cells = [row["name"], row["declared_constraint"] or "-", move, role_str,
+        cells = [escape(row["name"]), escape(row["declared_constraint"] or "-"), move, role_str,
                  f"[{style}]{label}[/{style}]"]
         if exotic_origin:
-            cells.append(_PROVENANCE_LABELS.get(row["origin"], row["origin"] or "-"))
+            cells.append(escape(_PROVENANCE_LABELS.get(row["origin"], row["origin"] or "-")))
         table.add_row(*cells)
 
     return table, [row["name"] for row in rows]
@@ -2094,7 +2112,8 @@ def _render_risk(risk_report):
     from pymolt.core.enums import RiskTier
 
     if risk_report.not_rated:
-        console.print(f"[yellow]Migration risk not rated: {risk_report.not_rated}.[/yellow]")
+        console.print("[yellow]Migration risk not rated: "
+                      f"{escape(str(risk_report.not_rated))}.[/yellow]")
         return
     high = risk_report.by_tier(RiskTier.HIGH)
     medium = risk_report.by_tier(RiskTier.MEDIUM)
@@ -2130,7 +2149,8 @@ def _render_risk(risk_report):
     table.add_column("Why")
     tier_markup = {RiskTier.HIGH: "[bold red]HIGH[/bold red]", RiskTier.MEDIUM: "[yellow]MEDIUM[/yellow]"}
     for p in sorted(flagged, key=lambda x: (x.tier != RiskTier.HIGH, x.name)):
-        table.add_row(p.name, p.target_version or "-", tier_markup[p.tier], "; ".join(p.reasons))
+        table.add_row(escape(p.name), escape(p.target_version or "-"), tier_markup[p.tier],
+                      escape("; ".join(p.reasons)))
     console.print(table)
 
 
@@ -2142,7 +2162,7 @@ def _render_manual_zone(report, target_resolved: bool = True):
             f"[bold red]Manual Zone Alert ({len(report.manual_zone)} unresolved packages):[/bold red]\n"
             "The following packages require manual mapping configuration in "
             "[bold].pymolt/config.toml[/bold]:\n"
-            f"[yellow]{', '.join(report.manual_zone)}[/yellow]\n\n"
+            f"[yellow]{escape(', '.join(report.manual_zone))}[/yellow]\n\n"
             "This occurs when packages exist on Conda but have no direct metadata link "
             "to a PyPI twin package.",
             title="Manual Action Required",
@@ -2177,9 +2197,10 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             t_node = target_graph.nodes.get(pkg_name) if target_graph else None
             t_ver = t_node.version if t_node else "-"
             override = config.get("target_overrides", {}).get(pkg_name, "")
-            override_str = f" [cyan](override: {override})[/cyan]" if override else ""
+            override_str = f" [cyan](override: {escape(str(override))})[/cyan]" if override else ""
             console.print(
-                f"  {idx}. {pkg_name} (base: {b_ver}, target: {t_ver}){override_str}"
+                f"  {idx}. {escape(pkg_name)} (base: {escape(str(b_ver))}, "
+                f"target: {escape(str(t_ver))}){override_str}"
             )
 
         choice_str = typer.prompt(
@@ -2192,10 +2213,14 @@ def _run_override_menu(config, config_file, baseline_graph, target_graph, all_pa
             pkg_to_override = all_packages[int(choice_str) - 1]
             current_override = config.get("target_overrides", {}).get(pkg_to_override, "")
 
-            console.print(f"[dim]Fetching version suggestions for {pkg_to_override} from PyPI...[/dim]")
+            console.print(
+                f"[dim]Fetching version suggestions for {escape(pkg_to_override)} "
+                f"from PyPI...[/dim]"
+            )
             suggestions = fetch_pypi_versions(pkg_to_override)
             if suggestions:
-                console.print(f"[bold cyan]Suggestions: {', '.join(suggestions)}[/bold cyan]")
+                console.print("[bold cyan]Suggestions: "
+                              f"{escape(', '.join(suggestions))}[/bold cyan]")
             else:
                 console.print("[dim]No suggestions found on PyPI.[/dim]")
 
@@ -2544,12 +2569,12 @@ def assess(
         if verdict is not None:
             title, body, style = verdict
             console.print(Panel(
-                f"[bold {style}]{title}[/bold {style}]\n{body}",
+                f"[bold {style}]{escape(title)}[/bold {style}]\n{escape(body)}",
                 title="Compatibility Report", border_style=style,
             ))
             culprits = failure_evidence(target_error)[1]
             if culprits:
-                console.print(f"[bold]Culprit(s):[/bold] {', '.join(culprits)}")
+                console.print(f"[bold]Culprit(s):[/bold] {escape(', '.join(culprits))}")
             if target_error:
                 detail = failure_evidence(target_error)[0]
                 if detail:
@@ -2618,16 +2643,17 @@ def assess(
                 # not the result of a comparison, and must not read as one.
                 if getattr(report, "resolution_quality", None) == "unresolved":
                     console.print(
-                        f"[yellow]✓ Target manifest written: {written.name}  "
+                        f"[yellow]✓ Target manifest written: {escape(written.name)}  "
                         "— target-only snapshot; no base was resolved, so "
                         "this is not a comparison.[/yellow]"
                     )
                 else:
                     console.print(
-                        f"[bold green]✓ Target manifest written: {written.name}[/bold green]"
+                        "[bold green]✓ Target manifest written: "
+                        f"{escape(written.name)}[/bold green]"
                     )
         except OSError as e:
-            err.print(f"[bold red]Failed to write target manifest:[/bold red] {e}")
+            err.print(f"[bold red]Failed to write target manifest:[/bold red] {escape(str(e))}")
 
     target_manifest = next((
         name for name in ("requirements-target.txt", "environment-target.yml")
@@ -2668,11 +2694,11 @@ def _render_target_hint(hint, shown: str = ".") -> None:
     )
     if hint.suggested_dockerfile:
         console.print("[bold]Dockerfile.pymolt-target:[/bold]")
-        console.print(hint.suggested_dockerfile)
+        console.print(hint.suggested_dockerfile, markup=False)
     for cmd in hint.suggested_uv_commands:
-        console.print(f"  [white]{cmd}[/white]")
+        console.print(f"  [white]{escape(cmd)}[/white]")
     for note in hint.notes:
-        console.print(f"  [dim]note: {note}[/dim]")
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
     console.print(
         f"  [dim]Once it exists: {escape(command(shown, 'setup', '--target-env', 'PATH'))} "
         "(or --container on the post-migration capture).[/dim]"
@@ -2686,23 +2712,23 @@ def _render_baseline_hint(hint) -> None:
     brief an LLM agent can execute to stand up the interpreter and hand control back.
     """
     console.print(Panel(
-        f"[yellow]{hint.reason}[/yellow]\n\n"
+        f"[yellow]{escape(hint.reason)}[/yellow]\n\n"
         "pymolt will not fabricate the legacy graph (resolving your unpinned constraints to "
         "their latest releases would be a fiction). Build the base environment, then re-run.\n\n"
         "[bold]1) Save this as Dockerfile.pymolt-legacy:[/bold]\n"
-        f"[dim]{hint.suggested_dockerfile}[/dim]"
+        f"[dim]{escape(hint.suggested_dockerfile)}[/dim]"
         "[bold]2) Build, run, and re-point assess:[/bold]\n"
-        + "\n".join(f"  [white]{c}[/white]" for c in hint.suggested_commands),
+        + "\n".join(f"  [white]{escape(c)}[/white]" for c in hint.suggested_commands),
         title=f"Base environment needed — Python {hint.base_python}",
         border_style="yellow", expand=False,
     ))
     console.print(Panel(
-        hint.agent_brief,
+        escape(hint.agent_brief),
         title="Delegating to an LLM agent? Hand it this brief",
         border_style="cyan", expand=False,
     ))
     for note in hint.notes:
-        console.print(f"  [dim]note: {note}[/dim]")
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
     console.print()
 
 
@@ -2735,7 +2761,8 @@ def _render_inventory(inv) -> None:
         table.add_column("Group", style="magenta")
         table.add_column("From", style="dim")
         for e in sorted(direct, key=lambda x: (x.name or x.raw or "").lower()):
-            table.add_row(e.name or "—", e.raw or "—", e.group, e.source_file or "—")
+            table.add_row(escape(e.name or "—"), escape(e.raw or "—"), escape(e.group),
+                          escape(e.source_file or "—"))
         console.print(table)
 
     non_pypi = inv.non_pypi_edges()
@@ -2753,8 +2780,10 @@ def _render_inventory(inv) -> None:
         }
         for e in sorted(non_pypi, key=lambda x: (x.kind.value, x.name or "")):
             # A name read off the URL is a guess about someone else's repo layout.
-            label = f"{e.name}[dim]?[/dim]" if (e.name and e.name_inferred) else (e.name or "-")
-            table.add_row(label, kind_markup.get(e.kind.value, e.kind.value), e.group, e.raw)
+            label = (f"{escape(e.name)}[dim]?[/dim]" if (e.name and e.name_inferred)
+                     else escape(e.name or "-"))
+            table.add_row(label, kind_markup.get(e.kind.value, e.kind.value), escape(e.group),
+                          escape(e.raw))
         console.print(table)
         if any(e.name_inferred for e in non_pypi):
             console.print("[dim]? = name inferred from the URL, not declared[/dim]")
@@ -2770,35 +2799,38 @@ def _render_inventory(inv) -> None:
                 blocked[key] = blocked.get(key, 0) + 1
         for (label, blocker), count in blocked.items():
             times = f" [dim]({count} lines)[/dim]" if count > 1 else ""
-            console.print(f"  [bold red]⚠ {escape(label)}:[/bold red] {blocker}{times}")
+            console.print(f"  [bold red]⚠ {escape(label)}:[/bold red] {escape(blocker)}{times}")
     else:
         console.print("[bold green]✔ All declared dependencies are ordinary PyPI edges.[/bold green]")
 
     if inv.indexes:
         console.print(Panel(
-            "\n".join(f"[{i.kind}] {i.value}   [dim]({i.source_file})[/dim]" for i in inv.indexes),
+            "\n".join(f"\\[{escape(str(i.kind))}] {escape(str(i.value))}   "
+                       f"[dim]({escape(str(i.source_file))})[/dim]" for i in inv.indexes),
             title="Custom indexes / find-links (access & supply-chain trust)",
             border_style="yellow",
         ))
 
     extra_groups = sorted(g for g in groups if g != "main")
     if extra_groups:
-        console.print(f"[dim]Optional/dev groups: {', '.join(extra_groups)} "
+        console.print(f"[dim]Optional/dev groups: {escape(', '.join(extra_groups))} "
                       "(migrated/tested separately from main).[/dim]")
     for note in inv.notes:
-        console.print(f"[dim]Note: {note}[/dim]")
+        console.print(f"[dim]Note: {escape(note)}[/dim]")
 
 
 def _render_surface_map(smap) -> None:
     """Render the discovery surface map (per project root: version evidence, Dockerfiles, tox/nox)."""
     console.print(Panel(
-        f"Repo: [yellow]{smap.root_dir}[/yellow]\nProject roots: [bold]{len(smap.project_roots)}[/bold]",
+        f"Repo: [yellow]{escape(str(smap.root_dir))}[/yellow]\n"
+        f"Project roots: [bold]{len(smap.project_roots)}[/bold]",
         title="Discovery — Surface Map",
         expand=False,
     ))
     for r in smap.project_roots:
         divergent = r.is_divergent
-        console.print(f"\n[bold cyan]{r.path}[/bold cyan]   manifests: {', '.join(r.manifests) or '—'}")
+        console.print(f"\n[bold cyan]{escape(str(r.path))}[/bold cyan]   "
+                      f"manifests: {escape(', '.join(r.manifests)) or '—'}")
 
         if r.version_evidence:
             table = Table(title="Python version evidence" + (" — ⚠ DIVERGENT" if divergent else ""))
@@ -2808,29 +2840,31 @@ def _render_surface_map(smap) -> None:
             table.add_column("Note")
             for ev in r.version_evidence:
                 conf = ev.confidence.value if hasattr(ev.confidence, "value") else str(ev.confidence)
-                table.add_row(ev.source, ev.version or "—", conf, ev.note or "")
+                table.add_row(escape(ev.source), escape(ev.version or "—"), conf,
+                              escape(ev.note or ""))
             console.print(table)
             if divergent:
                 console.print(f"[bold yellow]⚠ Runtime divergence across sources: "
-                              f"{', '.join(r.runtime_versions())}[/bold yellow]")
+                              f"{escape(', '.join(r.runtime_versions()))}[/bold yellow]")
             for rv, constraint in r.floor_violations():
                 console.print(f"[bold red]⚠ Runtime {rv} is below the declared floor "
-                              f"{constraint}[/bold red]")
+                              f"{escape(str(constraint))}[/bold red]")
 
         for d in r.dockerfiles:
-            tools = ", ".join(d.install_tools) or "—"
+            tools = escape(", ".join(d.install_tools)) or "—"
             conf = d.runtime_confidence.value if hasattr(d.runtime_confidence, "value") else str(d.runtime_confidence)
-            console.print(f"  [magenta]{d.path}[/magenta]: {len(d.stages)} stage(s), runtime Python "
-                          f"[bold]{d.runtime_python or '?'}[/bold] ({conf}), os {d.os_hint or '?'}, install: {tools}")
+            console.print(f"  [magenta]{escape(str(d.path))}[/magenta]: {len(d.stages)} stage(s), "
+                          f"runtime Python [bold]{escape(str(d.runtime_python or '?'))}[/bold] "
+                          f"({conf}), os {escape(str(d.os_hint or '?'))}, install: {tools}")
             for note in d.notes:
-                console.print(f"    [dim]• {note}[/dim]")
+                console.print(f"    [dim]• {escape(note)}[/dim]")
 
         for tn in r.tox_nox:
-            console.print(f"  [blue]{tn.path}[/blue] ({tn.kind}): "
-                          f"versions {', '.join(tn.declared_versions) or '—'}")
+            console.print(f"  [blue]{escape(str(tn.path))}[/blue] ({tn.kind}): "
+                          f"versions {escape(', '.join(tn.declared_versions)) or '—'}")
 
     for note in smap.notes:
-        console.print(f"[dim]Note: {note}[/dim]")
+        console.print(f"[dim]Note: {escape(note)}[/dim]")
 
 def _unified_patches(previews, project_path: Path) -> list[str]:
     """Build portable patches whose paths are relative to the project root."""
@@ -2867,7 +2901,7 @@ def _render_or_write_patches(
         if not output.is_absolute():
             output = project_path / output
         atomic_write_text(output, "\n".join(patches))
-        err.print(f"[dim]patch written → {output}[/dim]")
+        err.print(f"[dim]patch written → {escape(str(output))}[/dim]")
 
 
 @app.command(rich_help_panel="Tools")
@@ -2889,7 +2923,7 @@ def mcp(
     An agent client starts it; you register it once, with what you allow:
 
       Claude Code:  claude mcp add pymolt -- pymolt mcp --allow-run
-      Codex:        add an [mcp_servers.pymolt] entry to ~/.codex/config.toml
+      Codex:        add an \\[mcp_servers.pymolt] entry to ~/.codex/config.toml
 
     Without --allow-run the agent runs no program. apply and rollback change source only
     on a plan you approved for agents (`pymolt apply . --approve-agent`).
@@ -2902,7 +2936,7 @@ def mcp(
     except ModuleNotFoundError:
         err.print(
             "[bold red]MCP support is not installed.[/bold red] Reinstall with the extra: "
-            "uv tool install 'pymolt[mcp]'  (or: pipx install 'pymolt[mcp]')"
+            "uv tool install 'pymolt\\[mcp]'  (or: pipx install 'pymolt\\[mcp]')"
         )
         raise typer.Exit(code=1) from None
 
@@ -2916,7 +2950,7 @@ def mcp(
         err.print("[bold]Register it once, then your client starts it automatically:[/bold]")
         err.print("  Claude Code   [cyan]claude mcp add pymolt -- pymolt mcp[/cyan]")
         err.print(
-            "  Codex         add [cyan][mcp_servers.pymolt][/cyan] to ~/.codex/config.toml "
+            "  Codex         add [cyan]\\[mcp_servers.pymolt][/cyan] to ~/.codex/config.toml "
             '([cyan]command = "pymolt", args = ["mcp"][/cyan])'
         )
         err.print('  Other         command [cyan]pymolt[/cyan], args [cyan]["mcp"][/cyan]')
@@ -2984,14 +3018,14 @@ def succession(
     covered = knowledge_coverage()
     if not json_output:
         if frameworks:
-            console.print(f"[bold]Frameworks detected:[/bold] {', '.join(frameworks)}")
+            console.print(f"[bold]Frameworks detected:[/bold] {escape(', '.join(frameworks))}")
         else:
             console.print(f"[bold]No framework among the {len(declared)} declared "
                           "dependencies[/bold] (all were checked).")
 
     with err.status("Looking up framework succession…", spinner="dots") as status:
         edges, result = run_succession(
-            project_dir, progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
+            project_dir, progress=lambda m: status.update(f"[cyan]{escape(m)}[/cyan]"),
         )
 
     from pymolt.strategic.succession.transplant import build_transplant_plan
@@ -3026,7 +3060,8 @@ def succession(
         source = "pymolt's succession knowledge"
         if named:
             console.print(
-                f"[yellow]{named}: not in {source}, which covers {', '.join(covered)}.[/yellow]\n"
+                f"[yellow]{escape(named)}: not in {source}, which covers "
+                f"{escape(', '.join(covered))}.[/yellow]\n"
                 "[dim]That is a gap in what pymolt knows, not a finding that no successor "
                 "exists.[/dim]"
             )
@@ -3034,7 +3069,7 @@ def succession(
             console.print(
                 f"[yellow]Checked all {len(declared)} declared dependencies: none is a "
                 f"framework {source} has a succession path for (it covers "
-                f"{', '.join(covered)}).[/yellow]"
+                f"{escape(', '.join(covered))}).[/yellow]"
             )
         return
 
@@ -3042,7 +3077,7 @@ def succession(
         if e.is_in_place:
             console.print(Panel(
                 f"[bold]{e.from_framework} → {e.to_framework}[/bold]  [green]in-place[/green]\n"
-                f"{e.summary}\n"
+                f"{escape(e.summary)}\n"
                 f"[dim]{len(e.patterns)} import shim(s), {len(e.rules)} rule(s)[/dim]",
                 title="Succession — living corpse", border_style="green", expand=False,
             ))
@@ -3054,10 +3089,10 @@ def succession(
             f"\n[bold]In-place shims — would change {result.files_changed} file(s):[/bold]"
         )
         for change in result.changes:
-            console.print(f"  [green]{change.path}[/green]  ({change.sites} site(s))")
+            console.print(f"  [green]{escape(str(change.path))}[/green]  ({change.sites} site(s))")
         if saved_plan:
-            console.print(f"\nPlan saved to [green]{saved_plan}[/green].")
-            console.print(f"[bold]Next:[/bold] pymolt apply {project_dir}")
+            console.print(f"\nPlan saved to [green]{escape(str(saved_plan))}[/green].")
+            console.print(f"[bold]Next:[/bold] pymolt apply {escape(str(project_dir))}")
         elif save_plan:
             console.print("\n[yellow]No in-place shim changes a file: nothing to plan.[/yellow]")
         else:
@@ -3168,7 +3203,7 @@ def forks(
         return
 
     console.print(Panel(
-        f"[bold]Fork-network triage[/bold] — [cyan]{report.base_repo}[/cyan]  "
+        f"[bold]Fork-network triage[/bold] — [cyan]{escape(str(report.base_repo))}[/cyan]  "
         f"auth: [white]{report.auth_mode}[/white]",
         expand=False, border_style="blue",
     ))
@@ -3188,7 +3223,7 @@ def forks(
             style = _PORTED_STYLE.get(c.ported_signal.value, "dim")
             table.add_row(
                 str(i),
-                c.name_with_owner,
+                escape(c.name_with_owner),
                 c.pushed_at.date().isoformat(),
                 str(c.stars),
                 str(c.ahead_by) if c.ahead_by is not None else "—",
@@ -3198,7 +3233,7 @@ def forks(
         console.print(table)
 
     for note in report.notes:
-        console.print(f"[dim]note: {note}[/dim]")
+        console.print(f"[dim]note: {escape(note)}[/dim]")
 
 
 

@@ -391,12 +391,18 @@ All notable changes to pymolt. The format follows
 
 ### Fixed
 
+- Text in square brackets is no longer dropped from the printed output: `scan` showed `requests[socks]==2.31.0` as `requests==2.31.0`, and `pymolt mcp` without the MCP extra said to install `pymolt` instead of `pymolt[mcp]`. The same fix covers the other commands' tables, paths, commands and messages, and the Codex entry in `pymolt mcp --help`.
 - Every printed next command names the project dir as you gave it (relative to the current
   directory when it lies inside it), and capture commands add `--project-dir`: `pymolt scan
   tests/artifacts/flasgger` suggested `pymolt setup .`, and `status` printed `apply --step ID
   --record` with no dir. The MCP `status` and `apply` tools follow the same rule.
+- `verify --accept` marks an outcome it shortens in its prompt with `…`: it cut the old and new
+  outcomes at 120 characters without saying so, so the old value of a long result seemed missing.
 - pymolt's own parsing of the project's files no longer prints `SyntaxWarning: invalid escape
   sequence` on stderr; the compile check still reports each one as a finding.
+- The install commands in the README, the plugin's README and the MCP docs ask for Python 3.12
+  (`uv tool install --python 3.12`, `pipx install --python python3.12`). Without it uv and pipx
+  take the first Python on `PATH`, which may be 3.13, where pymolt is not tested.
 
 #### Capture and tracer
 
@@ -640,6 +646,9 @@ All notable changes to pymolt. The format follows
   worktree, a CI workspace) keeps them: apply refused "the baseline capture was replaced", and
   verify lost the plan's predictions. An absolute path an earlier 0.2 build stored is read through
   this checkout's `.pymolt/`.
+- After a FAIL at the sites of a rolled-back person's or agent's step, `verify` and `status` say
+  to make the change again with `pymolt apply . --step ID --record`. They said
+  `pymolt apply . --step ID`, which refuses a step pymolt does not write.
 
 ## [0.1.0] - 2026-09-26
 
