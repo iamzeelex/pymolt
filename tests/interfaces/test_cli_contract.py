@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -373,3 +374,38 @@ def test_parsing_project_source_prints_no_syntax_warning(tmp_path):
     shown = [w.filename for w in caught if issubclass(w.category, SyntaxWarning)]
     # The parse in pymolt's process is quiet; a compile that names a file keeps its warning.
     assert shown == ["app.py"]
+
+
+# ── bracketed data survives rich markup ───────────────────────────────────────
+
+
+def _plain(output: str) -> str:
+    return _ANSI.sub("", output)
+
+
+def test_scan_shows_extras_in_the_edges_table(tmp_path):
+    (tmp_path / "requirements.txt").write_text(
+        "requests[socks]==2.31.0\nuvicorn[standard]>=0.20\n", encoding="utf-8")
+    out = _plain(runner.invoke(app, ["scan", str(tmp_path)]).output)
+    assert "requests[socks]==2.31.0" in out
+    assert "uvicorn[standard]>=0.20" in out
+
+
+def test_mcp_without_the_extra_names_the_extra(monkeypatch):
+    # None in sys.modules makes `from pymolt.interfaces.mcp_server import run` raise
+    # ModuleNotFoundError, as it does when the extra is not installed.
+    monkeypatch.setitem(sys.modules, "pymolt.interfaces.mcp_server", None)
+    result = runner.invoke(app, ["mcp"])
+    assert result.exit_code == 1
+    out = " ".join(_plain(result.output).split())
+    assert "pymolt[mcp]" in out
+
+
+def test_mcp_help_keeps_the_codex_table_name():
+    help_text = _plain(runner.invoke(app, ["mcp", "--help"]).output)
+    assert "[mcp_servers.pymolt]" in help_text
+
+
+def test_error_messages_keep_bracketed_text():
+    out = " ".join(_plain(runner.invoke(app, ["scan", "no[such]dir"]).output).split())
+    assert "no[such]dir" in out

@@ -208,13 +208,16 @@ def capture_cmd(
             _emit_capture(slot, when, project_dir, agent=agent, invalid_code=EXIT_INCONCLUSIVE)
             return
         if slot.validity is CaptureValidity.VALID:
-            err.print(f"[green]collected[/green] {slot.events} events -> {slot.trace_path}")
+            err.print(
+                f"[green]collected[/green] {slot.events} events -> "
+                f"{escape(str(slot.trace_path))}"
+            )
             next_step(project_dir)
             return
         err.print(
             f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
-            f"{slot.validity_reason or slot.validity.value}\n"
-            f"diagnostic artifact: {slot.trace_path}"
+            f"{escape(slot.validity_reason or slot.validity.value)}\n"
+            f"diagnostic artifact: {escape(str(slot.trace_path))}"
         )
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
 
@@ -253,7 +256,7 @@ def capture_cmd(
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
             f"  [white]{escape(collect_cmd)}[/white]\n\n"
-            f"  [white]{instr.command_hint}[/white]",
+            f"  [white]{escape(instr.command_hint)}[/white]",
             title="capture (attach)", expand=False, border_style="cyan",
         ))
         return
@@ -261,7 +264,7 @@ def capture_cmd(
     if not command:
         fail("provide a command after --, e.g. -- pytest tests/", json_output=machine)
     err.print(f"[dim]capturing[/dim] when=[cyan]{when}[/cyan] mode=[cyan]{mode}[/cyan] "
-              f"cmd=[white]{' '.join(command)}[/white]")
+              f"cmd=[white]{escape(' '.join(command))}[/white]")
     slot = service.capture_named_trace(
         project_dir, when_key, capture_mode, command=command, target=target, backend=backend,
         container=container, workdir=workdir, exclude=exclude, source=source,
@@ -286,8 +289,8 @@ def capture_cmd(
 
         err.print(
             f"[bold yellow]capture not accepted as {when} evidence[/bold yellow]: "
-            f"{slot.validity_reason or slot.validity.value}\n"
-            f"diagnostic artifact: {slot.trace_path}\n"
+            f"{escape(slot.validity_reason or slot.validity.value)}\n"
+            f"diagnostic artifact: {escape(str(slot.trace_path))}\n"
             + escape(views.capture_refusal_hint(
                 slot, service.static_contact_count(project_dir) if slot.events == 0 else None,
                 when))
@@ -298,7 +301,7 @@ def capture_cmd(
             else EXIT_INCONCLUSIVE
         )
         raise typer.Exit(code=code)
-    err.print(f"[green]captured[/green] {slot.events} events -> {slot.trace_path}")
+    err.print(f"[green]captured[/green] {slot.events} events -> {escape(str(slot.trace_path))}")
     if slot.red:
         failed = slot.red.get("failed")
         err.print(
@@ -310,7 +313,7 @@ def capture_cmd(
         err.print(
             f"[dim]duration={slot.duration_seconds:.3f}s  "
             f"dropped={slot.dropped_events if slot.dropped_events is not None else 'unknown'}  "
-            f"backend={slot.backend or backend}[/dim]"
+            f"backend={escape(str(slot.backend or backend))}[/dim]"
         )
     for failure in getattr(slot, "activation_failures", []) or []:
         err.print(
@@ -320,7 +323,8 @@ def capture_cmd(
             "so this capture cannot support a PASS"
         )
     if slot.archived_previous:
-        err.print(f"[dim]previous {when} recording kept at {slot.archived_previous}[/dim]")
+        err.print(f"[dim]previous {when} recording kept at "
+                  f"{escape(str(slot.archived_previous))}[/dim]")
     if runs > 1:
         _capture_replicate(project_dir, None, force=True, accept_failing=accept_failing,
                            machine=False, agent=False)
@@ -356,14 +360,14 @@ def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bo
         from pymolt.interfaces import views
 
         err.print(f"[bold yellow]replicate not accepted[/bold yellow]: "
-                  f"{slot.validity_reason or slot.validity.value}\n"
-                  f"diagnostic artifact: {slot.trace_path}\n"
+                  f"{escape(slot.validity_reason or slot.validity.value)}\n"
+                  f"diagnostic artifact: {escape(str(slot.trace_path))}\n"
                   + escape(views.capture_refusal_hint(slot, None, "baseline-replicate")))
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
     err.print(f"[green]captured[/green] baseline replicate: {slot.events} events -> "
-              f"{slot.trace_path}")
+              f"{escape(str(slot.trace_path))}")
     if slot.archived_previous:
-        err.print(f"[dim]previous replicate kept at {slot.archived_previous}[/dim]")
+        err.print(f"[dim]previous replicate kept at {escape(str(slot.archived_previous))}[/dim]")
     next_step(project_dir)
 
 
@@ -518,8 +522,8 @@ def _render_calibration(cal) -> None:
         t.add_column("Call site (your code)", overflow="fold", ratio=2)
         t.add_column("Observed", overflow="fold", ratio=2)
         for risk in cal.risks:
-            observed = ", ".join(f"{o.category} {o.symbol.rsplit('.', 1)[-1]}"
-                                 for o in risk.observed) or (risk.note or "—")
+            observed = escape(", ".join(f"{o.category} {o.symbol.rsplit('.', 1)[-1]}"
+                                        for o in risk.observed) or (risk.note or "—"))
             if risk.fixed_by_plan:
                 observed += " [dim](fixed by the plan)[/dim]"
             t.add_row(risk.tier.value, _CALIBRATION_LABEL.get(risk.result.value,
@@ -661,7 +665,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             head += f"\n{escape(whole['edited_summary'])}"
     head = f"VERDICT: [bold {border}]{rep.verdict.value.upper()}[/bold {border}]\n" + head
     if rep.verdict_reasons:
-        head += "\n" + "\n".join(f"• {reason}" for reason in rep.verdict_reasons)
+        head += "\n" + "\n".join(f"• {escape(reason)}" for reason in rep.verdict_reasons)
     console.print(Panel(head, title="Contract Report", border_style=border, expand=False))
     _render_fact_summary(rep.all_fact_diff or rep.fact_diff, verbose=verbose)
     if rep.unpredicted_changes:
@@ -689,7 +693,7 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         _pv = {"stable": "[green]stable[/green]", "changed": "[bold red]CHANGED[/bold red]",
                "error": "[dim]error[/dim]", "opaque-inputs": "[dim]opaque inputs[/dim]"}
         for s in probed:
-            t.add_row(s.target, _pv.get(s.probe_status, s.probe_status or "—"))
+            t.add_row(escape(s.target), _pv.get(s.probe_status, s.probe_status or "—"))
         console.print(t)
 
     blind = [s for s in visible_symbols if s.status == "blind"]
@@ -714,7 +718,8 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             coarse = coarse_ran(mine) if s.blind_reason == "ran-not-recorded" else set()
             if coarse:
                 why += f" (by its {' or '.join(sorted(coarse))})"
-            t.add_row(s.target, why, ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
+            t.add_row(escape(s.target), why, escape(", ".join(s.callers)) or "—",
+                      escape(", ".join(s.files)) or "—")
             settled[_blind_caption(s, mine, coarse)] = None
         # What settles each kind of row, in the words of the verdict's causes (``blind_kind``):
         # a probe replays recorded calls, so it never settles a BLIND symbol.
@@ -728,9 +733,9 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         t.add_column("Dependency symbol", style="cyan", overflow="fold", ratio=2)
         t.add_column("Observed at", style="dim", overflow="fold", ratio=1)
         for s in dyn:
-            t.add_row(s.target, ", ".join(s.observed_at[:3]) or "—")
+            t.add_row(escape(s.target), escape(", ".join(s.observed_at[:3])) or "—")
         t.caption = "static under-approximation (dynamic dispatch / monkeypatch / getattr)"
         console.print(t)
 
     for note in rep.notes:
-        console.print(f"[dim]Note: {note}[/dim]")
+        console.print(f"[dim]Note: {escape(note)}[/dim]")

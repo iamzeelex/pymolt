@@ -391,6 +391,7 @@ All notable changes to pymolt. The format follows
 
 ### Fixed
 
+- Text in square brackets is no longer dropped from the printed output: `scan` showed `requests[socks]==2.31.0` as `requests==2.31.0`, and `pymolt mcp` without the MCP extra said to install `pymolt` instead of `pymolt[mcp]`. The same fix covers the other commands' tables, paths, commands and messages, and the Codex entry in `pymolt mcp --help`.
 - Every printed next command names the project dir as you gave it (relative to the current
   directory when it lies inside it), and capture commands add `--project-dir`: `pymolt scan
   tests/artifacts/flasgger` suggested `pymolt setup .`, and `status` printed `apply --step ID
