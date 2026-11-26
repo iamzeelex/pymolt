@@ -1351,15 +1351,16 @@ def fail_lines(unified, shown: str = ".") -> list[str]:
     (``unified.failing_steps``), then the two ways on: fix the code and capture again, or accept
     an intended change, a person's attested act on a terminal. ``shown``: the project dir as
     the commands name it (``status.shown_dir``)."""
-    from pymolt.status import command
+    from pymolt.status import bring_back_command, command
 
     steps = list(getattr(unified, "failing_steps", None) or ())
     lines = []
     if steps:
         lines.append(f"Failing at the sites of plan step(s) {failing_steps_text(steps)}.")
-        back = [s["id"] for s in steps if s["status"] == "rolled_back"]
+        back = [s for s in steps if s["status"] == "rolled_back"]
         if back:
-            lines.append(f"Rolled back: `{command(shown, 'apply', '--step', back[0])}` brings "
+            again = bring_back_command(shown, back[0]["id"], back[0].get("executor"))
+            lines.append(f"Rolled back: `{again}` brings "
                          + ("it" if len(back) == 1 else "each") + " back.")
     lines.append("A person decides: fix the code, then capture post-migration again and verify; "
                  "or accept an intended change with "
