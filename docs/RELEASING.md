@@ -106,7 +106,7 @@ Move the changelog's *Unreleased* entries under `## [0.2.0rc1] - <date>`, commit
 `chore: release 0.2.0rc1`, merge the PR.
 
 If the README's Install section still says the PyPI release is outdated, point it at PyPI in the
-same commit (`uv tool install pymolt`, or `pip install --pre pymolt` for an RC), and the same
+same commit (`uv tool install --python 3.12 pymolt`, with `--prerelease allow` for an RC), and the same
 in `plugin/README.md`.
 
 In parallel, open `main` for the next minor: a PR to `main` with
@@ -127,7 +127,7 @@ when they pass publishes to PyPI and creates a GitHub pre-release.
 **4. Test the RC as users get it**, from PyPI, not from the checkout:
 
 ```bash
-uv tool install --prerelease allow pymolt==0.2.0rc1
+uv tool install --python 3.12 --prerelease allow pymolt==0.2.0rc1
 ```
 
 Run the scenarios in `docs/TESTING.md` and the legacy evaluation in `bench/`. A

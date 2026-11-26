@@ -18,7 +18,7 @@ the offline-first core), so install PyMolt with the `mcp` extra. It pins `mcp>=1
 uses the 1.x FastMCP API:
 
 ```bash
-uv tool install 'pymolt[mcp]'          # or: pipx install 'pymolt[mcp]'
+uv tool install --python 3.12 'pymolt[mcp]'   # or: pipx install --python python3.12 'pymolt[mcp]'
 ```
 
 If you run `pymolt mcp` without the extra, it exits with a clear message telling

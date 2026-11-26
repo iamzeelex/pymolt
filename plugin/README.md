@@ -13,7 +13,7 @@ Install the CLI so the `pymolt` command is on your PATH. 0.2.0rc1 is a release c
 ask for pre-releases:
 
 ```bash
-uv tool install --prerelease allow pymolt==0.2.0rc1   # or: pipx install --pip-args=--pre pymolt==0.2.0rc1
+uv tool install --python 3.12 --prerelease allow pymolt==0.2.0rc1   # or: pipx install --python python3.12 --pip-args=--pre pymolt==0.2.0rc1
 ```
 
 ## Install the plugin
@@ -60,7 +60,7 @@ commands as MCP tools (nine tools). Each tool returns exactly what `pymolt <comm
 prints. The server is an optional extra:
 
 ```bash
-uv tool install './pymolt[mcp]'   # or: pipx install './pymolt[mcp]'
+uv tool install --python 3.12 './pymolt[mcp]'   # or: pipx install --python python3.12 './pymolt[mcp]'
 ```
 
 Register it as a stdio server whose command is `pymolt mcp`:
