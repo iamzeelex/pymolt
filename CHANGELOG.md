@@ -398,6 +398,9 @@ All notable changes to pymolt. The format follows
   --record` with no dir. The MCP `status` and `apply` tools follow the same rule.
 - pymolt's own parsing of the project's files no longer prints `SyntaxWarning: invalid escape
   sequence` on stderr; the compile check still reports each one as a finding.
+- The install commands in the README, the plugin's README and the MCP docs ask for Python 3.12
+  (`uv tool install --python 3.12`, `pipx install --python python3.12`). Without it uv and pipx
+  take the first Python on `PATH`, which may be 3.13, where pymolt is not tested.
 
 #### Capture and tracer
 

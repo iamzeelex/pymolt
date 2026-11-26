@@ -14,7 +14,7 @@ this plugin, so install from source until the next release:
 
 ```bash
 git clone https://github.com/iamzeelex/pymolt.git
-uv tool install ./pymolt   # or: pipx install ./pymolt
+uv tool install --python 3.12 ./pymolt   # or: pipx install --python python3.12 ./pymolt
 ```
 
 ## Install the plugin
@@ -61,7 +61,7 @@ commands as MCP tools (nine tools). Each tool returns exactly what `pymolt <comm
 prints. The server is an optional extra:
 
 ```bash
-uv tool install './pymolt[mcp]'   # or: pipx install './pymolt[mcp]'
+uv tool install --python 3.12 './pymolt[mcp]'   # or: pipx install --python python3.12 './pymolt[mcp]'
 ```
 
 Register it as a stdio server whose command is `pymolt mcp`:
