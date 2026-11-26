@@ -170,8 +170,9 @@ def _note(lists: _Lists, name: str, shown: int, full_report_path: str | None) ->
 # ── status ───────────────────────────────────────────────────────────────────
 
 
-def status_view(report) -> dict:
-    """``FunnelStatus`` -> view. Everything fits, so there is no full report."""
+def status_view(report, shown: str = ".") -> dict:
+    """``FunnelStatus`` -> view. Everything fits, so there is no full report. ``shown``: the
+    project dir as the next brief's commands name it (``status.shown_dir``)."""
     lists = _Lists()
     phases = [
         {"phase": p.phase, "state": p.state, "detail": p.detail, "blocker": p.blocker,
@@ -223,12 +224,12 @@ def status_view(report) -> dict:
         data["steps"] = lists.cap("steps", list(report.steps))
         data["steps_total"] = len(report.steps)
         data["next_step"] = report.next_step
-        data["next_brief"] = _next_brief(report)
+        data["next_brief"] = _next_brief(report, shown)
     return ok("\n".join(lines), lists.finish(data, warnings),
               hint=report.next_reason or None)
 
 
-def _next_brief(report) -> dict | None:
+def _next_brief(report, shown: str = ".") -> dict | None:
     """The brief of the step the next command is about (untrusted text under ``data``)."""
     if not report.next_step:
         return None
@@ -237,7 +238,7 @@ def _next_brief(report) -> dict | None:
 
     plan = MigrationPlan.load(report.project_dir)
     step = plan.step(report.next_step) if plan is not None else None
-    return brief_data(plan, step, report.project_dir) if step is not None else None
+    return brief_data(plan, step, report.project_dir, shown) if step is not None else None
 
 
 # ── scan ─────────────────────────────────────────────────────────────────────
@@ -265,6 +266,8 @@ def exposure_summary(exposure: dict) -> str | None:
 
 def scan_view(report, project_dir: str | Path) -> dict:
     """``ScanReport`` -> view. The full report is the ``scan --json`` payload."""
+    from pymolt.ingestion.detect import pick_default_name
+
     full_path = write_full_report(project_dir, "scan", report.model_dump(mode="json"))
     lists = _Lists()
     surfaces = report.surfaces
@@ -276,7 +279,8 @@ def scan_view(report, project_dir: str | Path) -> dict:
             divergences.append(f"{root.path}: {', '.join(root.runtime_versions()) or '?'}")
         roots.append({
             "path": root.path,
-            "chosen_manifest": root.manifests[0] if root.manifests else None,
+            # The manifest setup would assume here, by the one shared rule.
+            "chosen_manifest": pick_default_name(Path(project_dir) / root.path, root.manifests),
             "manifests": list(root.manifests),
             "python_version_evidence": [
                 {"source": e.source, "version": e.version, "kind": e.kind}
@@ -469,7 +473,8 @@ def setup_view(options, project_dir: str | Path, *, config=None,
 
 # ── assess ───────────────────────────────────────────────────────────────────
 
-_ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3, "added": 4}
+_ROW_PRIORITY = {"conflict": 0, "unresolved": 1, "removed": 2, "upgrade": 3,
+                 "base-unknown": 3, "added": 4, "excluded": 5}
 _VERDICT_LEVEL = {"red": "blocked", "yellow": "unproven", "green": "resolves"}
 
 
@@ -486,6 +491,8 @@ def assess_payload(result, *, baseline_hint=None, target_hint=None) -> dict:
         "target_error": result.target_error,
         "target_error_detail": result.target_error_detail,
         "target_culprits": list(result.target_culprits),
+        "target_hint": result.target_hint,
+        "target_basis": result.target_basis,
         "baseline_unresolved": result.baseline_unresolved,
         "baseline_tier": result.baseline_tier,
         "target_manifest_path": result.target_manifest_path,
@@ -523,7 +530,7 @@ def assess_hints(project_dir: str | Path, result) -> dict:
 def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False,
                 baseline_hint=None, target_hint=None) -> dict:
     """``AssessResult`` -> view. The verdict wording is the service's own."""
-    from pymolt.assess.service import BaselineTier, compatibility_verdict
+    from pymolt.assess.service import BaselineTier, compatibility_verdict, unpinned_example
 
     full_path = write_full_report(project_dir, "assess", assess_payload(
         result, baseline_hint=baseline_hint, target_hint=target_hint))
@@ -540,6 +547,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
             tiers[tier] = tiers.get(tier, 0) + 1
         risk_data = {"assessed": result.risk.assessed, "skipped": result.risk.skipped,
                      "errors": result.risk.errors, "by_tier": tiers}
+        if result.risk.not_rated:
+            risk_data["not_rated"] = result.risk.not_rated
+            warnings.append(f"risk not rated: {result.risk.not_rated}.")
         if result.risk.errors:
             warnings.append(f"risk: {result.risk.errors} package(s) unreachable; "
                             "their risk is unknown, not low.")
@@ -560,7 +570,8 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 
     verdict = None
     found = compatibility_verdict(result.target_python, result.target_error,
-                                  BaselineTier(result.baseline_tier))
+                                  BaselineTier(result.baseline_tier),
+                                  unpinned_example(result.rows))
     if found is not None:
         title, body, style = found
         verdict = {"title": re.sub(r"^\W+", "", title), "detail": body,
@@ -578,6 +589,7 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         "target_error": result.target_error,
         "target_error_detail": result.target_error_detail,
         "target_culprits": list(result.target_culprits),
+        "target_basis": result.target_basis,
         "changes_format": "name base>target status" + (" risk=tier" if risk_by_pkg else ""),
         "changes": changes,
         "changes_total": len(moved),
@@ -607,6 +619,8 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         f"added: {counts.get('added', 0)}, removed: {counts.get('removed', 0)}, "
         f"conflicts: {counts.get('conflict', 0)}, "
         + (f"unresolved: {counts['unresolved']}, " if counts.get("unresolved") else "")
+        + (f"base version unknown: {counts['base-unknown']}, "
+           if counts.get("base-unknown") else "")
         + f"manual-zone: {len(manual_zone)}."
     )
     lines.append(f"{len(moved)} package(s) differ, {counts.get('unchanged', 0)} unchanged. "
@@ -620,7 +634,9 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
     lines.append("A resolve is not evidence the code still works: capture and verify decide.")
 
-    if result.target_error:
+    if result.target_error and result.target_hint:
+        hint = f"The target does not resolve: {result.target_error}. {result.target_hint}"
+    elif result.target_error:
         culprits = ", ".join(result.target_culprits) or "none named by the resolver"
         hint = (f"The target does not resolve: {result.target_error}. Culprit(s): {culprits}. "
                 "Fix or loosen them, then assess again.")
@@ -635,22 +651,61 @@ def assess_view(result, project_dir: str | Path, *, risk_requested: bool = False
 # ── capture ──────────────────────────────────────────────────────────────────
 
 
-def capture_refusal_hint(slot, static_contacts: int | None) -> str:
-    """The hint for a capture that was not accepted, by what went wrong. A failed run names
-    the failing tests the command log shows, and the log itself."""
-    from pymolt.verify.service import failed_tests, parse_failed_count
+#: What to do about failing tests, by the capture refused (``capture_refusal_hint``).
+_FAILING_TESTS_FIX = {
+    "baseline": "Fix or deselect them, or keep a red baseline with --accept-failing.",
+    "baseline-replicate": (
+        "They did not fail in the baseline, which ran the same code, so they may be flaky: fix "
+        "or deselect them, or keep a red replicate with --accept-failing."),
+    "post-migration": (
+        "Tests that fail after the migration may be what it broke: fix the code and capture "
+        "post-migration again, or keep this run with --accept-failing (stamped red) so verify "
+        "compares it; calls from failing tests are compared as usual."),
+}
+
+
+def capture_refusal_hint(slot, static_contacts: int | None, when: str = "baseline") -> str:
+    """The hint for a capture that was not accepted, by what went wrong and which capture it
+    was (``when``: baseline, baseline-replicate or post-migration). A failed run names the
+    failing tests the command log shows, and the log itself; a run stopped before any test
+    could fail (collection errors, a command line the runner rejected, no test selected)
+    says so by name (``service.command_failure``)."""
+    from pymolt.verify.service import command_failure, failed_tests, parse_failed_count
 
     rc = slot.returncode
     log = f" (see {slot.command_log})" if slot.command_log else ""
+
+    def named(names: list[str], total: int) -> str:
+        if not names:
+            return ""
+        more = f" and {total - len(names)} more" if total > len(names) else ""
+        return f": {', '.join(names)}{more}"
+
+    stopped = command_failure(slot.command_log, rc)
+    if stopped is not None and stopped.kind == "collection":
+        names, total = failed_tests(slot.command_log)
+        fix = ("After a migration this is often module-level code the target breaks (an "
+               "import of a removed module, a changed call): fix the error each one reports, or "
+               "deselect those files (pytest --ignore PATH), then capture post-migration again."
+               if when == "post-migration" else
+               "Fix the error each one reports, or deselect those files (pytest --ignore "
+               "PATH), then capture again.")
+        return (f"{stopped.count or total or 'Some'} test file(s) could not be collected "
+                f"(exit {rc}){named(names, total)}{log}: the test run stopped before any test "
+                f"ran. {fix}")
+    if stopped is not None and stopped.kind == "usage":
+        said = f": {stopped.detail}" if stopped.detail else ""
+        return (f"The command line was rejected (usage error, exit {rc}){said}{log}. Fix the "
+                "command and capture again; the slot is unchanged.")
+    if stopped is not None and stopped.kind == "no-tests":
+        return (f"The command selected no test (exit {rc}){log}. Fix the test selection and "
+                "capture again; the slot is unchanged.")
     if rc not in (None, 0) and slot.events > 0:
         failed, _ = parse_failed_count(slot.command_log)
         names, total = failed_tests(slot.command_log)
-        which = ""
-        if names:
-            more = f" and {total - len(names)} more" if total > len(names) else ""
-            which = f": {', '.join(names)}{more}"
-        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc}){which}"
-                f"{log}. Fix or deselect them, or keep a red baseline with --accept-failing.")
+        return (f"{failed if failed is not None else 'Some'} test(s) failed (exit {rc})"
+                f"{named(names, total)}{log}. "
+                + _FAILING_TESTS_FIX.get(when, _FAILING_TESTS_FIX["baseline"]))
     if rc not in (None, 0):
         return (f"The command failed (exit {rc}) and recorded no dependency call"
                 f"{log}. Fix the command and capture again; the slot is unchanged.")
@@ -730,7 +785,8 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
                          f"({failed if failed is not None else 'some'} test(s) failed); kept "
                          "because --accept-failing was given. The calls from failing tests are "
                          "compared as usual.")
-        hint = ("Next: change the code (or apply a plan), then capture post-migration."
+        hint = ("Next: plan the migration (`pymolt plan .`) and apply it, or change the code "
+                "yourself; then capture post-migration."
                 if "post_migration" not in filled else
                 "Next: verify (compares baseline and post-migration).")
     else:
@@ -740,7 +796,7 @@ def capture_view(slot, *, when: str, state, static_contacts: int | None = None,
             from pymolt.verify.service import static_contact_count
 
             static_contacts = static_contact_count(project_dir)
-        hint = capture_refusal_hint(slot, static_contacts)
+        hint = capture_refusal_hint(slot, static_contacts, when)
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
     view = ok("\n".join(lines), lists.finish(data, warnings),
@@ -791,26 +847,27 @@ def steps_summary(plan) -> str:
     return f"{len(plan.steps)} step(s)" + (f": {parts}" if parts else "")
 
 
-def _next_for(project_dir, plan) -> dict | None:
+def _next_for(project_dir, plan, shown: str = ".") -> dict | None:
     """``{command, step, brief}``: what `status` names next, with the step's brief when an agent
-    or a person does it (its text from dependencies and the project is under ``data``)."""
+    or a person does it (its text from dependencies and the project is under ``data``).
+    ``shown``: the project dir as the command names it (``status.shown_dir``)."""
     if project_dir is None:
         return None
     from pymolt.status import build_status
     from pymolt.workorder.render import brief_data
 
     try:
-        status = build_status(project_dir)
+        status = build_status(project_dir, shown=shown)
     except Exception:  # noqa: BLE001 - the view stands without the next command
         return None
     step = plan.step(status.next_step) if status.next_step else None
-    brief = brief_data(plan, step, project_dir) if step is not None \
+    brief = brief_data(plan, step, project_dir, shown) if step is not None \
         and step.executor != "pymolt" else None
     return {"command": status.next_command, "step": status.next_step,
             "reason": status.next_reason, "brief": brief}
 
 
-def apply_view(result, plan, project_dir=None) -> dict:
+def apply_view(result, plan, project_dir=None, shown: str = ".") -> dict:
     """An ``apply`` invocation (``workorder.apply.ApplyResult``) -> view (design 3.6):
     ``applied`` (``rebased``: re-based onto another text), ``noop``, ``present``, ``refused``
     (none: a refused invocation is a failure), ``checks`` per step, ``remaining`` by status,
@@ -836,7 +893,7 @@ def apply_view(result, plan, project_dir=None) -> dict:
         "rebased": list(result.rebased), "noop": list(result.noop),
         "present": list(result.present), "skipped": list(result.skipped),
         "blocked": dict(result.blocked), "checks": dict(result.checks),
-        "refused": {}, "next": _next_for(project_dir, plan),
+        "refused": {}, "next": _next_for(project_dir, plan, shown),
         "recorded": list(result.recorded), "in_progress": list(result.in_progress),
         "unrecorded": lists.cap("unrecorded", list(result.unrecorded)),
         "attestation": result.attestation, "check_failed": result.check_failed,
@@ -914,15 +971,25 @@ UNCHANGED = ("Unchanged: same steps, baseline, setup and target manifest as the 
              "Nothing saved; its approvals still hold.")
 
 
+#: A plan made with no baseline capture bound: what apply and verify then do (plan, both views).
+NO_BASELINE_WARNING = ("No baseline capture is bound to this plan: apply refuses it without "
+                       "--allow-no-baseline and verify could only be INCONCLUSIVE. Capture "
+                       "the baseline, then plan again.")
+
+
 def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
               plan_md: str | Path | None = None, project_dir: str | Path | None = None,
-              saved=None) -> dict:
+              saved=None, plan_file: str | Path | None = None, shown: str = ".") -> dict:
     """A saved ``MigrationPlan`` -> view. The full report is the plan file itself.
     ``plan_md``: where PLAN.md was written; ``project_dir``: to resolve the next brief's lines;
     ``saved``: what ``plan`` did (``plan_store.PlanSaveResult``: stored, unchanged, or only
-    written to ``-o``'s file)."""
+    written to ``-o``'s file); ``plan_file``: the file a new plan was only written to
+    (``plan --output``: status then does not read it); ``shown``: the project dir as the next
+    command names it. ``next`` is status's (``status.plan_next``)."""
     from pymolt.codemods.models import CodemodPattern
-    from pymolt.workorder.render import brief_data, identity_line, next_agent_step, next_command
+    from pymolt.status import command as cli_command
+    from pymolt.status import plan_next
+    from pymolt.workorder.render import brief_data, identity_line
 
     full_path = str(plan_path)
     lists = _Lists()
@@ -991,19 +1058,23 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
                               for who in ("pymolt", "agent", "person")},
         "plan_md": str(plan_md) if plan_md else None,
     }
-    agent_step = next_agent_step(plan)
-    data["next"] = {
-        "command": next_command(plan),
-        "step": agent_step.id if agent_step else None,
-        "brief": brief_data(plan, agent_step, project_dir) if agent_step else None,
-    }
+    data["next"] = None
+    if project_dir is not None:
+        try:
+            command, reason, step_id = plan_next(project_dir, plan_file, shown)
+        except Exception:  # noqa: BLE001 - the view stands without the next command
+            command = None
+        if command is not None or step_id is not None:
+            step = plan.step(step_id) if step_id else None
+            data["next"] = {
+                "command": command, "step": step_id, "reason": reason,
+                "brief": brief_data(plan, step, project_dir, shown)
+                if step is not None and step.executor != "pymolt" else None}
     warnings: list[str] = []
     if identity["baseline_warning"]:
         warnings.append(identity["baseline_warning"])
     if plan.baseline_trace_path is None:
-        warnings.append("No baseline capture is bound to this plan: apply refuses it without "
-                        "--allow-no-baseline and verify could only be INCONCLUSIVE. Capture "
-                        "the baseline, then plan again.")
+        warnings.append(NO_BASELINE_WARNING)
     name = identity["plan_name"] or plan.plan_id[:8]
     exported = bool(getattr(saved, "exported", False))
     if identity["unchanged_from"]:
@@ -1012,7 +1083,7 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
         done = f"Plan {name} saved: it is the current plan."
     else:
         done = (f"Plan {name} written to {full_path} only: not saved in .pymolt/plans/ "
-                "(`pymolt apply . --plan PATH` saves and applies it).")
+                f"(`{cli_command(shown, 'apply', '--plan', 'PATH')}` saves and applies it).")
     lines = [
         done,
         identity_line(plan) + ".",
@@ -1060,14 +1131,19 @@ def plan_view(plan, by_pkg: dict, source_desc: str, *, plan_path: str | Path,
         lines.append(f"{lists.truncated['diffs']} diff(s) omitted; the plan file has every change.")
     if plan.steps:
         lines.append(f"{steps_summary(plan)} (data.steps"
-                     + (f"; PLAN.md: {plan_md}" if plan_md else "") + ")."
-                     + (f" The first for an agent is {agent_step.id}; its brief is "
-                        "data.next.brief." if agent_step else ""))
+                     + (f"; PLAN.md: {plan_md}" if plan_md else "") + ").")
+    if data["next"] is not None and data["next"]["command"]:
+        lines.append(f"Next: {data['next']['command']}"
+                     + (" (its step's brief: data.next.brief)." if data["next"]["brief"]
+                        else "."))
     if warnings:
         lines.append(f"{len(warnings)} warning(s), see data.warnings.")
+    hint = ("Review the diffs; a person then runs `pymolt apply` in the project (it refuses "
+            "the plan if a planned file changed since).")
+    if plan.baseline_trace_path is None and data["next"] is not None:
+        hint = data["next"]["reason"] or hint
     return ok("\n".join(lines), lists.finish(data, warnings), full_report_path=full_path,
-              hint="Review the diffs; a person then runs `pymolt apply` in the project "
-                   "(it refuses the plan if a planned file changed since).")
+              hint=hint)
 
 
 def _risk_label(risk) -> str:
@@ -1207,8 +1283,11 @@ def coverage_lines(rep) -> list[str]:
     counts = rep.granularity_counts or {}
     if len(counts) > 1:
         granularity += " (" + ", ".join(f"{n} by {g}" for g, n in counts.items()) + ")"
-    lines = [f"Coverage: {_pct(rep.coverage)} ({reached} of {observable} contacts ran; "
-             f"granularity {granularity})   Recall: {_pct(rep.recall)} "
+    # Ran only by its function or file: coverage an upper bound, recall a lower bound.
+    bounded = getattr(rep, "coverage_bounded", False)
+    lines = [f"Coverage: {'at most ' if bounded else ''}{_pct(rep.coverage)} ({reached} of "
+             f"{observable} contacts ran; granularity {granularity})   Recall: "
+             f"{'at least ' if bounded else ''}{_pct(rep.recall)} "
              f"({rep.contacts_recorded} of {reached} recorded)"]
     if rep.blind:
         lines.append(f"BLIND symbols: not run {rep.blind_not_run}, ran but not recorded "
@@ -1312,6 +1391,82 @@ def compared_captures_line(compared) -> str | None:
     return " → ".join(sides) or None
 
 
+def unobservable_line(rep) -> str | None:
+    """One line naming the dependency uses no capture can observe (``unobservable_uses``): they
+    do not keep the verdict from PASS (``inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS``), so the
+    verdict says it did not see them. None when there are none."""
+    uses = list(getattr(rep, "unobservable_uses", None) or ())
+    if not uses:
+        return None
+    shown = ", ".join(uses[:5]) + (f", … ({len(uses) - 5} more)" if len(uses) > 5 else "")
+    return (f"{len(uses)} dependency use(s) cannot be observed by a capture, so this verdict "
+            f"does not cover them; a person may glance at: {shown}")
+
+
+def _whole_fact_diff(rep) -> dict:
+    fd = getattr(rep, "all_fact_diff", None) or getattr(rep, "fact_diff", None)
+    return fd if isinstance(fd, dict) else {}
+
+
+def dynamic_reads_line(rep) -> str | None:
+    """One line naming the places the project reads attributes by a computed name
+    (``getattr(x, var)``, ``vars(x)``, ``x.__dict__``, ``asdict(x)``), when a dependency
+    object's unread state differed: verify compares what the project reads of such an object by
+    name, so what those places read is not compared. Listed, not blocking (like
+    ``unobservable_uses``); ``verify --strict`` compares the full state. None when there are
+    none."""
+    reads = list(_whole_fact_diff(rep).get("dynamic_reads") or ())
+    if not reads:
+        return None
+    shown = ", ".join(reads[:5]) + (f", … ({len(reads) - 5} more)" if len(reads) > 5 else "")
+    return (f"{len(reads)} place(s) read a dependency object's attributes by a computed name, "
+            "so the state they may read is not compared (`verify --strict` compares it all); "
+            f"a person may glance at: {shown}")
+
+
+def numeric_line(rep) -> str | None:
+    """``k values equal within floating-point rounding (<=N ulps)``: the numeric layer is
+    always stamped. None when no float needed it."""
+    drift = _whole_fact_diff(rep).get("numeric_drift")
+    if not drift:
+        return None
+    return (f"{drift['values']} value(s) equal within floating-point rounding "
+            f"(≤{drift['bound_ulps']} ulps; at most {drift['max_ulps']:g} ulps, relative "
+            f"{drift['max_relative']:.1e}); `verify --float-ulps 0` compares them exactly")
+
+
+def semantics_lines(rep) -> list[str]:
+    """The verdict's lines about how dependency objects and values were compared."""
+    return [line for line in (numeric_line(rep), dynamic_reads_line(rep)) if line]
+
+
+def failing_steps_text(steps) -> str:
+    """``beh-1 (rolled_back), mech-1 (applied)``: the plan steps whose sites failed."""
+    return ", ".join(f"{s['id']} ({s['status']})" for s in steps)
+
+
+def fail_lines(unified, shown: str = ".") -> list[str]:
+    """What a FAIL leaves to a person: the plan steps whose sites failed, when known
+    (``unified.failing_steps``), then the two ways on: fix the code and capture again, or accept
+    an intended change, a person's attested act on a terminal. ``shown``: the project dir as
+    the commands name it (``status.shown_dir``)."""
+    from pymolt.status import command
+
+    steps = list(getattr(unified, "failing_steps", None) or ())
+    lines = []
+    if steps:
+        lines.append(f"Failing at the sites of plan step(s) {failing_steps_text(steps)}.")
+        back = [s["id"] for s in steps if s["status"] == "rolled_back"]
+        if back:
+            lines.append(f"Rolled back: `{command(shown, 'apply', '--step', back[0])}` brings "
+                         + ("it" if len(back) == 1 else "each") + " back.")
+    lines.append("A person decides: fix the code, then capture post-migration again and verify; "
+                 "or accept an intended change with "
+                 f"`{command(shown, 'verify', '--accept', 'ID')}` on a terminal (each finding "
+                 "prints its id).")
+    return lines
+
+
 def saved_verdict_note(compared, saved_path) -> str | None:
     """What saving a verdict meant, when it is not the usual verdict on the two captures.
 
@@ -1351,6 +1506,8 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "compared_recordings": (rep.compared.model_dump(mode="json")
                                 if getattr(rep, "compared", None) is not None else None),
         "baseline_stale": rep.baseline_stale,
+        # The current-side capture recorded code that has changed since: {capture: files}.
+        "stale_sources": dict(getattr(rep, "stale_sources", None) or {}),
         "static_targets": rep.static_targets,
         "confirmed": rep.confirmed,
         "blind": rep.blind,
@@ -1360,6 +1517,9 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "coverage_pct": None if rep.coverage is None else round(rep.coverage * 100),
         "recall_pct": None if rep.recall is None else round(rep.recall * 100),
         "granularity": rep.coverage_granularity,
+        # True: a contact counts as ran only by its function or file, so coverage_pct is an
+        # upper bound and recall_pct a lower bound.
+        "coverage_bounded": getattr(rep, "coverage_bounded", False),
         "blind_split": {"not_run": rep.blind_not_run,
                         "ran_not_recorded": rep.blind_ran_not_recorded,
                         "unobservable": rep.blind_unobservable},
@@ -1368,16 +1528,36 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         "changes": {},
         "change_counts": {},
         "calibration": _calibration_data(lists, getattr(rep, "calibration", None)),
+        # FAIL: the plan steps whose sites failed, in effect or not (id, executor, status,
+        # findings).
+        "failing_steps": list(getattr(unified, "failing_steps", None) or ()),
+        # BLIND symbols no capture can observe: they do not keep the verdict from PASS, and the
+        # verdict does not cover them (``unobservable_line``).
+        "unobservable_uses": list(getattr(rep, "unobservable_uses", None) or ()),
+        # Places the project reads a dependency object's attributes by a computed name: listed,
+        # not compared (``dynamic_reads_line``).
+        "dynamic_attribute_reads": list(_whole_fact_diff(rep).get("dynamic_reads") or ()),
+        # Floats equal only within floating-point rounding (``numeric_line``), or None.
+        "numeric_drift": _whole_fact_diff(rep).get("numeric_drift"),
     }
     lines = [f"VERDICT: {verdict.upper()}"
              + (f" ({'; '.join(unified.reasons)})" if unified.reasons else "")]
     settles = inconclusive_line(unified)
     if settles:
         lines.append(settles)
+    if unseen := unobservable_line(rep):
+        lines.append(unseen)
+    lines.extend(semantics_lines(rep))
     if rep.baseline_stale:
         lines.append("STALE EVIDENCE: a capture was taken against another manifest or "
                      "environment than the one it must describe. Capture again before "
                      "trusting this verdict.")
+    moved = (getattr(rep, "stale_sources", None) or {}).get("post-migration")
+    if moved:
+        lines.append(f"STALE EVIDENCE: the post-migration capture recorded code that has "
+                     f"changed since ({', '.join(moved[:3])}"
+                     + (f" and {len(moved) - 3} more" if len(moved) > 3 else "")
+                     + "). Capture post-migration again before trusting this verdict.")
     lines.append(f"Static {rep.static_targets}, confirmed {rep.confirmed}, BLIND {rep.blind}, "
                  f"dynamic-only {rep.dynamic_only}.")
     lines.extend(coverage_lines(rep))
@@ -1447,10 +1627,15 @@ def verify_view(unified, project_dir: str | Path, *, saved_path: str | Path | No
         lines.append(note)
 
     if not data["compared"]:
-        hint = ("Only one side is recorded, so nothing was compared: change the code, then "
-                "capture post-migration.")
+        hint = ("Only one side is recorded, so nothing was compared: plan the migration "
+                "(`pymolt plan .`) and apply it, or change the code yourself; then capture "
+                "post-migration.")
     elif verdict == "fail":
-        hint = "Behaviour changed: fix the listed calls, capture post-migration again, verify."
+        steps = list(getattr(unified, "failing_steps", None) or ())
+        at = f" at the sites of plan step(s) {failing_steps_text(steps)}" if steps else ""
+        hint = (f"Behaviour changed{at}: fix the listed calls, capture post-migration again, "
+                "verify. Only a person accepts an intended change (`pymolt verify . --accept "
+                "ID` on a terminal; refused under --agent).")
     elif verdict == "inconclusive":
         hint = settles or ("Read the reasons: usually a fresh capture or more coverage (BLIND) "
                            "is needed.")

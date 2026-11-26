@@ -25,6 +25,7 @@ from pathlib import Path
 
 from pymolt.assess import AssessResult
 from pymolt.assess.service import (
+    UNKNOWN_VERSION,
     _is_missing_container_error,
     build_comparison_rows,
     resolve_chosen_source,
@@ -46,8 +47,9 @@ from pymolt.codemods.models import (
 )
 from pymolt.codemods.rules import CodemodRule, RuleAdvisory
 from pymolt.core.graph import DependencyGraph
+from pymolt.core.versions import same_version
 from pymolt.ingestion.config import EnvConfig
-from pymolt.ingestion.detect import DiscoveredSource, detect_sources
+from pymolt.ingestion.detect import DiscoveredSource, detect_sources, find_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 
 log = logging.getLogger(__name__)
@@ -55,15 +57,18 @@ log = logging.getLogger(__name__)
 
 def migrations_from_rows(rows: list[dict]) -> list[DependencyMigration]:
     """
-    Convert assess comparison rows into dependency migrations — only the
-    packages that actually changed version (status == 'upgrade', both versions
-    concrete). 'added'/'removed'/'unchanged' rows yield no codemods.
+    Convert assess comparison rows into dependency migrations: the packages that
+    changed version (status == 'upgrade', both versions concrete), and the ones whose
+    base version is unknown ('base-unknown'), with ``from_version`` "unknown" — the plan
+    states those as moves it could not compute (see :func:`known_migrations`), never as
+    a move from a guessed release. 'added'/'removed'/'unchanged' rows yield no codemods.
     """
     migrations: list[DependencyMigration] = []
     for row in rows:
-        if row.get("status") != "upgrade":
+        status = row.get("status")
+        if status not in ("upgrade", "base-unknown"):
             continue
-        old = row.get("baseline_version")
+        old = UNKNOWN_VERSION if status == "base-unknown" else row.get("baseline_version")
         new = row.get("target_version")
         name = row.get("name")
         if not (name and old and new) or old in ("unpinned", None) or new in ("unpinned", None):
@@ -72,7 +77,18 @@ def migrations_from_rows(rows: list[dict]) -> list[DependencyMigration]:
     return migrations
 
 
-_WITNESSABLE = ("upgrade", "unchanged", "added")
+def known_migrations(
+    migrations: list[DependencyMigration],
+) -> tuple[list[DependencyMigration], list[DependencyMigration]]:
+    """``(known, unknown)``: the moves with a base version, and those without one.
+
+    Only the known ones go to the delta engine: for an unknown base it would have to pick
+    an old release (the manifest's floor, a 2013 sdist), which is a guess."""
+    known = [m for m in migrations if m.from_version != UNKNOWN_VERSION]
+    return known, [m for m in migrations if m.from_version == UNKNOWN_VERSION]
+
+
+_WITNESSABLE = ("upgrade", "unchanged", "added", "base-unknown")
 
 
 def witness_rows(
@@ -97,17 +113,19 @@ def witness_rows(
         ran = witnessed.get(canonicalize_name(name)) if isinstance(name, str) else None
         target = row.get("target_version")
         if (ran is None or row.get("status") not in _WITNESSABLE
-                or target in (None, "unpinned") or ran == row.get("baseline_version")):
+                or target in (None, "unpinned") or same_version(ran, row.get("baseline_version"))):
             out.append(row)
             continue
         resolved = row.get("baseline_version")
-        status = "upgrade" if ran != target else "unchanged"
+        status = "unchanged" if same_version(ran, target) else "upgrade"
         out.append({**row, "baseline_version": ran, "status": status})
-        if "upgrade" not in (status, row.get("status")):
+        if "upgrade" not in (status, row.get("status")) and row.get("status") != "base-unknown":
             continue                        # the correction changes no migration
         notes.append(f"{name}: the baseline capture ran {ran}"
                      + (f" (the baseline manifest resolves to {resolved} today)"
-                        if resolved not in (None, "unpinned") else ""))
+                        if resolved not in (None, "unpinned", UNKNOWN_VERSION)
+                        else " (the base version was unknown)"
+                        if resolved == UNKNOWN_VERSION else ""))
     return out, notes
 
 
@@ -119,21 +137,35 @@ def _config_value(config: dict | EnvConfig | None, key: str, default=None):
     return getattr(config, key, default)
 
 
-def _match_source(
-    sources: list[DiscoveredSource], source_ref: str | Path
-) -> DiscoveredSource | None:
+def _locate_source(
+    project_dir: str | Path, source_ref: str | Path
+) -> tuple[Path, DiscoveredSource] | None:
+    """The ingestion root and the manifest ``source_ref`` names, or None.
+
+    A relative ``source_ref`` is relative to the project, the way setup records it
+    (``etc/requirements.txt``), never to the process's working directory: resolved
+    against the cwd it named another project's file, or none, and a match on the bare
+    file name then picked a different manifest that happened to share it. The lookup is
+    assess's (:func:`find_source`), so plan and assess read the same file. When
+    ``project_dir`` is not a directory it names the manifest itself (the target
+    manifest), and its folder is the root.
+    """
+    project_path = Path(project_dir).expanduser()
     ref = Path(source_ref).expanduser()
-    ref_name = ref.name
-    for src in sources:
-        try:
-            if src.path.resolve() == ref.resolve():
-                return src
-        except OSError:
-            pass
-    for src in sources:
-        if src.path.name == ref_name:
-            return src
-    return None
+    if not project_path.is_dir():
+        project_path, ref = project_path.parent, Path(project_path.name)
+    candidate = ref if ref.is_absolute() else project_path / ref
+    if candidate.is_dir():
+        # No manifest named: the project's default one.
+        if candidate.resolve() != project_path.resolve():
+            return None
+        sources = detect_sources(project_path)
+        return (project_path, resolve_chosen_source(sources, None)) if sources else None
+    # Pymolt's own generated target manifest is found only when it is the one named.
+    include_gen = ref.name.endswith(("-target.txt", "-target.yml"))
+    sources = detect_sources(project_path, include_generated=include_gen)
+    chosen = find_source(sources, ref.as_posix(), project_path)
+    return (project_path, chosen) if chosen is not None else None
 
 
 def _resolve_graph_for_source(
@@ -152,31 +184,9 @@ def _resolve_graph_for_source(
     ``assess.service._resolve_baseline_graph``) instead of raising, and returns a
     warning as the third tuple element (``None`` when no degrade happened).
     """
-    source_path = Path(source_ref).expanduser()
-    candidate_roots = []
-    if source_path.exists():
-        candidate_roots.append(source_path.parent)
-    candidate_roots.append(Path(project_dir))
-
-    tried: list[Path] = []
-    for root in candidate_roots:
-        root = Path(root)
-        if root in tried:
-            continue
-        tried.append(root)
-        # If source_path is specifically a generated target manifest (e.g. requirements-target.txt),
-        # include generated files; otherwise only scan real project source manifests.
-        include_gen = source_path.is_file() and (
-            source_path.name.endswith("-target.txt") or source_path.name.endswith("-target.yml")
-        )
-        sources = detect_sources(root, include_generated=include_gen)
-        chosen = _match_source(sources, source_path)
-        if chosen is None and source_path.is_dir() and root.resolve() == source_path.resolve():
-            # For project root, pick genuine non-generated project source
-            non_gen_sources = detect_sources(root, include_generated=False)
-            chosen = resolve_chosen_source(non_gen_sources, None) if non_gen_sources else None
-        if chosen is None:
-            continue
+    located = _locate_source(project_dir, source_ref)
+    if located is not None:
+        root, chosen = located
         try:
             graph, _report = orchestrate_ingestion(
                 str(root),
@@ -217,7 +227,7 @@ def _resolve_graph_for_source(
             log.warning(warning)
             return graph, root, warning
 
-    raise ValueError(f"Could not resolve dependency source {source_path} in {project_dir}")
+    raise ValueError(f"Could not resolve dependency source {source_ref} in {project_dir}")
 
 
 def _resolver_failure(side: str, manifest: str | Path, exc: subprocess.CalledProcessError):
@@ -397,11 +407,17 @@ def _split_bundles(
     rules_flat: list[CodemodRule] = []
     patterns_flat: list[CodemodPattern] = []
     downgraded: list[str] = []
+    from pymolt.codemods.successors import KINDS as SUCCESSOR_KINDS
+
     for name, bundle in bundles.items():
         downgraded.extend(bundle.downgraded)
         if bundle.rules:
-            by_pkg[name] = bundle.rules
+            # A successor pattern has no rule form (its anchors and template would be lost):
+            # it stays a pattern beside its package's rules.
+            successors = [p for p in bundle.patterns if p.kind in SUCCESSOR_KINDS]
+            by_pkg[name] = [*bundle.rules, *successors]
             rules_flat.extend(bundle.rules)
+            patterns_flat.extend(successors)
         else:
             by_pkg[name] = bundle.patterns
             patterns_flat.extend(bundle.patterns)
@@ -589,16 +605,25 @@ def build_migration_plan(
     previews: list[FilePreview] = []
     downgraded: list[str] = []
     provider = codemod_provider(root, online=online)
-    if migrations:
+    known, unknown = known_migrations(migrations)
+    if known:
         by_pkg, previews = preview_codemods(
-            root, migrations, client=provider, progress=progress,
+            root, known, client=provider, progress=progress,
             on_impacts=impacts.update, on_file=lambda item: scanned.add(item.path),
             auto_apply_only=True, on_downgraded=downgraded.extend, on_step=recorder.record,
         )
         recorder.note_packages(by_pkg)
     # The provider's delta reports feed the plan's risk prediction as-is, so the facts are
-    # computed once.
-    delta_reports = getattr(provider, "reports", None) or None
+    # computed once. A move from an unknown base is never computed: its delta is
+    # inconclusive, with what settles it.
+    from pymolt.delta.provider import inconclusive_impact, unknown_base_report
+
+    reports = list(getattr(provider, "reports", None) or ())
+    for move in unknown:
+        report = unknown_base_report(move.name, move.to_version)
+        reports.append(report)
+        impacts[move.name] = [inconclusive_impact(report)]
+    delta_reports = reports or None
     python_move = None
     if config.base_python and config.target_python:
         from pymolt.pyversion.plan import same_python_minor

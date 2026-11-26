@@ -304,6 +304,31 @@ def _call_target(obj):
     return None
 
 
+def _held_target(target):
+    """A ``_call_target`` as a call site keeps it: a class (alone or in a C callable's
+    ``(type, name)``) by ``held``, since a class may be made at run time and dropped again."""
+    t = type(target)
+    if t is tuple:
+        return (held(target[0]), target[1])
+    if issubclass(t, type):
+        return held(target)
+    return target
+
+
+def _same_target(kept, target):
+    """True if ``kept`` (``_held_target``) is the call target ``target``."""
+    if kept is target:
+        return True
+    t = type(kept)
+    if t is _WEAKREF:
+        return kept() is target
+    if t is tuple and type(target) is tuple:
+        k = kept[0]
+        return ((k is target[0] or (type(k) is _WEAKREF and k() is target[0]))
+                and kept[1] == target[1])
+    return False
+
+
 def _frame_of(code):
     """The frame executing ``code`` that triggered the current callback (``_getframe(1)``
     unless something wrapped the callback; bounded walk)."""
@@ -490,9 +515,9 @@ class MonitoringBackend(FrameBackend):
             self.mode = INCREMENTAL
         # incremental mode
         self._tool2 = None          # tool B: global PY_START for implicitly-run codes
-        self._sites = {}            # (id(code), offset) -> [code, callee target, count, poly]
+        self._sites = {}            # (id(code), offset) -> [code, held callee target, count, poly]
         self._deps = {}             # id(code) -> (code, is dependency, module) for callees
-        self._ctors = {}            # id(class) -> (class, [(code, function)])
+        self._ctors = {}            # id(class) -> (held(class), [(code, globals)])
         self._kinds = {}            # id(code) -> (code, owned by tool B)
         self._kind_lock = allocate_lock()
         self._arm_lock = allocate_lock()
@@ -503,8 +528,8 @@ class MonitoringBackend(FrameBackend):
         # (``held``), nor what it holds: a receiver, captured cells, a partial's arguments.
         # id(callable) -> (held(callable), kind, sym, callee (code, globals) | None, name | None)
         self._ckinds = {}
-        # (id(receiver class), name) -> (None, kind, sym, None, None, class): the decision for
-        # a bound builtin method, made once per receiver class and name (``_bound_kind``)
+        # (id(receiver class), name) -> (None, kind, sym, None, None, held(class)): the decision
+        # for a bound builtin method, made once per receiver class and name (``_bound_kind``)
         self._cbound = {}
         self._cbobj = {}            # id(bound builtin) -> (held, kind, sym, None, None): recent
         self._csites = {}           # (id(code), offset) -> [code, same-callee count, held callee]
@@ -512,11 +537,11 @@ class MonitoringBackend(FrameBackend):
         self._craise = {}           # tid -> (info, code, offset): raise awaiting its type
         self._callname = {}         # tid -> (callee code, declared sym): decorator wrappers
         # Callees whose call is a dependency's for some receivers only (``_inherited_call``):
-        # id(descriptor | code) -> [callee, inherited by a target class, owner class, name]
+        # id(descriptor | code) -> [callee, inherited by a target class, held(owner class), name]
         self._rd = {}
         self._rd_closed = {}        # the entries inherited by none, decided again after imports
         self._rd_token = len(_modules)  # sys.modules size when they were last decided
-        self._keep = {}             # (id(code), offset) -> (code, callee, receiver class): open
+        self._keep = {}             # (id(code), offset) -> (code, held callee, held receiver class)
         self._renames = False
         self._b_active = True       # tool B owns implicitly-run codes (until settle)
         self.settled_at = None      # wall time tool B was first paused (or freed)
@@ -1149,8 +1174,7 @@ class MonitoringBackend(FrameBackend):
             target = _call_target(callable_)
             if site is not None and site[0] is code:
                 if not site[3]:
-                    same = site[1] is target or (type(target) is tuple and site[1] == target)
-                    if same:
+                    if _same_target(site[1], target):
                         site[2] += 1
                         if site[2] >= _SITE_STABLE:
                             return self._mon.DISABLE    # monomorphic and settled
@@ -1166,7 +1190,7 @@ class MonitoringBackend(FrameBackend):
                     # ours, started before tool B could see it: running already
                     self._arm_lines(code, running=True)
             self._discover_callable(callable_, arg0)
-            self._sites[key] = [code, target, 1, False]
+            self._sites[key] = [code, _held_target(target), 1, False]
         except Exception:
             pass
         return None
@@ -1178,10 +1202,11 @@ class MonitoringBackend(FrameBackend):
         keep = self._keep
         if keep:
             keep = keep.get((id(code), offset))
-            if keep is not None and keep[2] is type(arg0) and keep[0] is code:
+            if keep is not None and keep[0] is code:
                 ref = keep[1]   # held: a descriptor itself, a function by weak reference
-                if ref is callable_ or (type(ref) is _WEAKREF
-                                        and ref() is callable_ is not None):
+                rt = keep[2]    # held: a C type itself, a Python class by weak reference
+                if ((ref is callable_ or (type(ref) is _WEAKREF and ref() is callable_ is not None))
+                        and (rt is type(arg0) or (type(rt) is _WEAKREF and rt() is type(arg0)))):
                     return None     # the open site's last answer for this callee, receiver class
         disable = None
         if self.mode == INCREMENTAL:
@@ -1216,9 +1241,12 @@ class MonitoringBackend(FrameBackend):
         return self._code_is_near(frame)
 
     def _dep_function(self, func):
-        module = func.__globals__.get("__name__", "") or ""
-        return not never_target(module) and func.__code__.co_name != "__del__" and (
-            id(func.__code__) in self._impact_codes or self._target_module(module, None))
+        return self._dep_code(func.__code__, func.__globals__)
+
+    def _dep_code(self, code, g):
+        module = g.get("__name__", "") or ""
+        return not never_target(module) and code.co_name != "__del__" and (
+            id(code) in self._impact_codes or self._target_module(module, None))
 
     def _call_kind(self, callable_):
         """(held object | None, kind, sym, callee, declared name) of what a CALL reaches.
@@ -1256,7 +1284,8 @@ class MonitoringBackend(FrameBackend):
                 owner = None                # decided below by itself, like an unbound one
             if owner is not None:
                 ent = self._cbound.get((id(owner), obj.__name__))
-                if ent is None or ent[5] is not owner:
+                if ent is None or not (ent[5] is owner or (type(ent[5]) is _WEAKREF
+                                                           and ent[5]() is owner)):
                     ent = self._bound_kind(obj, owner)
                 if t is _METHOD_WRAPPER:    # takes no weak reference: not known again
                     return ent
@@ -1285,9 +1314,9 @@ class MonitoringBackend(FrameBackend):
             elif issubclass(t, type):
                 pairs = self._ctor_codes(obj)
                 if pairs:
-                    func = pairs[-1][1]         # __init__ (it follows __new__ in the list)
-                    if self._dep_function(func):
-                        kind, callee = _K_PY, (func.__code__, func.__globals__)
+                    code, g = pairs[-1]         # __init__ (it follows __new__ in the list)
+                    if self._dep_code(code, g):
+                        kind, callee = _K_PY, (code, g)
                 elif not (obj.__flags__ & _HEAPTYPE):
                     module = getattr(obj, "__module__", None)
                     if (isinstance(module, str) and module and module != "builtins"
@@ -1312,13 +1341,14 @@ class MonitoringBackend(FrameBackend):
 
     def _bound_kind(self, obj, owner):
         """``_call_kind`` of a compiled callable bound to a receiver whose class is ``owner``
-        (``bound_owner``), decided once per (owner, name): the entry holds the class, never
-        the receiver, and knows no object (its first field is None)."""
+        (``bound_owner``), decided once per (owner, name): the entry knows the class by
+        ``held`` (a class made at run time dies with the program's last reference), never the
+        receiver, and knows no object (its first field is None)."""
         try:
             sym = self._c_sym(obj)
         except Exception:
             sym = None
-        ent = (None, _K_NONE if sym is None else _K_C, sym, None, None, owner)
+        ent = (None, _K_NONE if sym is None else _K_C, sym, None, None, held(owner))
         if len(self._cbound) >= _CODE_CACHE_MAX:
             self._cbound.clear()
         self._cbound[(id(owner), obj.__name__)] = ent
@@ -1371,10 +1401,11 @@ class MonitoringBackend(FrameBackend):
                 t = type(callable_)
                 if (t is _FUNCTION or t in _DESCRIPTORS) and not issubclass(type(arg0), type):
                     ref = held(callable_)
-                    if ref is not None:
+                    rt = held(type(arg0))
+                    if ref is not None and rt is not None:
                         if len(self._keep) >= _SITES_MAX:
                             self._keep.clear()
-                        self._keep[key] = (code, ref, type(arg0))
+                        self._keep[key] = (code, ref, rt)
                 return True
         tid = stack_key()
         if kind != _K_C and csym is None:
@@ -1609,7 +1640,7 @@ class MonitoringBackend(FrameBackend):
         try:
             if func is None:
                 owner, name = obj.__objclass__, obj.__name__
-            elif self.near is not None and self._function_is_near(obj, func):
+            elif self.near is not None and self._function_is_near(obj, func.__globals__):
                 found = track = False
             else:
                 name = obj.co_name
@@ -1625,18 +1656,19 @@ class MonitoringBackend(FrameBackend):
         if len(self._rd) >= _CODE_CACHE_MAX:
             self._rd.clear()
             self._rd_closed.clear()
-        ent = [obj, found, owner, name]
+        ent = [obj, found, None if owner is None else held(owner), name]
         self._rd[id(obj)] = ent
         if not found and track:
             self._rd_closed[id(obj)] = ent
         return found
 
-    def _function_is_near(self, code, func):
-        """Is ``func`` our code (decided like a caller's frame, from its code and globals)?"""
+    def _function_is_near(self, code, g):
+        """Is the function of ``code`` and globals ``g`` our code (decided like a caller's
+        frame)?"""
         nent = self._near_codes.get(id(code))
         if nent is not None and nent[0] is code:
             return nent[1]
-        return self._code_is_near(types.SimpleNamespace(f_code=code, f_globals=func.__globals__))
+        return self._code_is_near(types.SimpleNamespace(f_code=code, f_globals=g))
 
     def _inherited_by_target(self, owner, name, obj, classes=None):
         """True if ``owner`` or a class below it, defined in a target module, resolves
@@ -1700,8 +1732,13 @@ class MonitoringBackend(FrameBackend):
         classes = {}                # id(owner) -> its target classes, walked once
         for key, ent in list(self._rd_closed.items()):
             obj = ent[0]
+            owner = ent[2]
+            if type(owner) is _WEAKREF:
+                owner = owner()
+                if owner is None:
+                    continue        # the class is gone, and every class below it
             try:
-                if not self._inherited_by_target(ent[2], ent[3], obj, classes):
+                if not self._inherited_by_target(owner, ent[3], obj, classes):
                     continue
             except Exception:
                 pass                # cannot tell: open, like an undecidable first decision
@@ -1750,15 +1787,15 @@ class MonitoringBackend(FrameBackend):
             if t is _FUNCTION or t is _METHOD or t is functools.partial:
                 pairs = self._resolve(arg0)
         if pairs:
-            for code, func in pairs:
-                self._arm_callee(code, func)
+            for code, g in pairs:
+                self._arm_callee(code, g)
 
     def _resolve(self, obj):
-        """[(code, function)] a call to ``obj`` starts in, or None for a C callable."""
+        """[(code, globals)] a call to ``obj`` starts in, or None for a C callable."""
         for _ in range(8):
             t = type(obj)
             if t is _FUNCTION:
-                return [(obj.__code__, obj)]
+                return [(obj.__code__, obj.__globals__)]
             if t is _METHOD or t is staticmethod or t is classmethod:
                 obj = obj.__func__
                 continue
@@ -1769,35 +1806,43 @@ class MonitoringBackend(FrameBackend):
                 return self._ctor_codes(obj)
             call = _mro_value(t, "__call__")
             if type(call) is _FUNCTION:
-                return [(call.__code__, call)]
+                return [(call.__code__, call.__globals__)]
             return None
         return None
 
     def _ctor_codes(self, cls):
+        """[(code, globals)] of the metaclass ``__call__``, ``__new__`` and ``__init__`` a call
+        to class ``cls`` starts in. Cached per class, which the entry knows by ``held`` (a
+        class made at run time dies with the program's last reference); it keeps no function
+        either (one of a class made at run time can hold what it closes over)."""
         ent = self._ctors.get(id(cls))
-        if ent is not None and ent[0] is cls:
-            return ent[1]
+        if ent is not None:
+            ref = ent[0]
+            if ref is cls or (type(ref) is _WEAKREF and ref() is cls):
+                return ent[1]
         pairs = []
         meta_call = _mro_value(type(cls), "__call__")
         if type(meta_call) is _FUNCTION:
-            pairs.append((meta_call.__code__, meta_call))
+            pairs.append((meta_call.__code__, meta_call.__globals__))
         for name in ("__new__", "__init__"):
             value = _mro_value(cls, name)
             if issubclass(type(value), (staticmethod, classmethod)):
                 value = value.__func__
             if type(value) is _FUNCTION:
-                pairs.append((value.__code__, value))
-        if len(self._ctors) >= _CODE_CACHE_MAX:
-            self._ctors.clear()
-        self._ctors[id(cls)] = (cls, pairs)     # holds the class: its id cannot recycle
+                pairs.append((value.__code__, value.__globals__))
+        ref = held(cls)
+        if ref is not None:
+            if len(self._ctors) >= _CODE_CACHE_MAX:
+                self._ctors.clear()
+            self._ctors[id(cls)] = (ref, pairs)
         return pairs
 
-    def _arm_callee(self, code, func):
+    def _arm_callee(self, code, g):
         if id(code) in self._watch_codes:
             return
         ent = self._deps.get(id(code))
         if ent is None or ent[0] is not code:
-            module = func.__globals__.get("__name__", "") or ""
+            module = g.get("__name__", "") or ""
             dep = not never_target(module) and code.co_name != "__del__" and (
                 id(code) in self._impact_codes or self._target_module(module, None))
             if len(self._deps) >= _CODE_CACHE_MAX:
@@ -1805,9 +1850,9 @@ class MonitoringBackend(FrameBackend):
             ent = (code, dep, module)
             self._deps[id(code)] = ent
             if (not dep and (self._lines_on or self._exec_lines)
-                    and self._function_is_near(code, func)):
+                    and self._function_is_near(code, g)):
                 self._arm_lines(code)       # a function of ours our code calls
-        if not ent[1] or (self._b_active and self._b_owns(code, func.__globals__, ent[2])):
+        if not ent[1] or (self._b_active and self._b_owns(code, g, ent[2])):
             return
         with self._arm_lock:            # cold path: once per newly reached dependency code
             if id(code) in self._watch_codes:

@@ -1,0 +1,476 @@
+"""What the project's own source does with the dependency objects it holds (HOST side).
+
+verify compares a dependency object returned to the project by what the project can observe of
+it (``facts``' handle projection). This module reads that from a capture's source snapshot
+(``{project-relative path: text}``, the ``.sources.json`` a capture keeps), with the stdlib
+``ast`` only, so it works on every capture that kept its source:
+
+- ``read``: attribute names the project reads by name, in a non-call position (``x.name``, and
+  ``getattr``/``hasattr`` with a literal name). A method name in a call (``x.close()``) is not
+  read: the call itself is a recorded fact of its own. ``keys``: for an attribute the project
+  only indexes with literal string keys (``app.config["SEED"]``, ``x.headers.get("ETag")``,
+  ``"k" in x.meta``) or writes into (``x.config.update(...)``), the keys it reads; every other
+  use of the attribute (passed on, iterated, indexed by a computed key) reads it whole
+  (``whole``). An attribute of a module (``st.query_params`` after ``import streamlit as st``)
+  is read off the module, not off an object the project holds: not counted.
+- ``probed``: names whose *presence* the project tests (``hasattr(x, "n")``,
+  ``getattr(x, "n", default)``).
+- ``introspected``: class names the project checks an object against (``isinstance``,
+  ``issubclass``, ``except``, ``match``, ``type(x) is C`` / ``x.__class__ == C``,
+  ``singledispatch`` registrations); ``type_names_read``: the project reads a type's name
+  (``type(x).__name__``, ``x.__class__.__qualname__``), so any class may be observed.
+- ``calls``: how each call's result is consumed (``consumer``): ``discarded`` (an expression
+  statement), ``awaited`` (``await f()`` on its own line), ``unpacked`` (``a, b = f()``),
+  ``iterated`` (``for x in f()``), ``int``/``float``/``bool``/``len`` (the sole argument of an
+  unshadowed builtin), ``truth`` (an ``if``/``while``/``assert`` test, ``not f()``), or
+  ``value`` (anything else: the full result).
+- ``dynamic``: the places the project reads attributes by a computed name (``getattr(x, var)``,
+  ``vars(x)``, ``x.__dict__``, ``asdict(x)``, ``dir(x)``): what they read cannot be projected, so
+  the verdict lists them.
+
+Over-approximation is the safe direction: a name read anywhere in the project counts as read on
+every object, so the projection compares more, never less.
+"""
+
+from __future__ import annotations
+
+import ast
+import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+_DYNAMIC_CALLS = {"vars": 1, "dir": 1, "asdict": 1, "astuple": 1}
+_KEY_READS = ("get", "pop", "setdefault", "__getitem__", "__contains__")
+_WRITES = ("update", "clear", "__setitem__", "__delitem__")
+
+
+@dataclass
+class SourceUses:
+    read: set[str] = field(default_factory=set)
+    whole: set[str] = field(default_factory=set)
+    keys: dict[str, set[str]] = field(default_factory=dict)
+    probed: set[str] = field(default_factory=set)
+    introspected: set[str] = field(default_factory=set)
+    # the top-level packages of the classes it checks, resolved through the file's imports
+    # (``isinstance(r, JR)`` after ``from dep.models import JSONResponse as JR`` -> ``dep``):
+    # with no class hierarchy recorded, any class of such a package may be a base of another
+    introspected_packages: set[str] = field(default_factory=set)
+    type_names_read: bool = False
+    dynamic: list[tuple[str, int, str]] = field(default_factory=list)
+    # file -> [(first line, last line, callee leaf, consumer)] of every call
+    calls: dict[str, list[tuple[int, int, str, str]]] = field(default_factory=dict)
+    # file -> [(first line, last line, callee leaf, names)]: the attribute names the project
+    # reads (or probes) off a call's result: ``f().x``, or ``r = f()`` then ``r.x`` /
+    # ``hasattr(r, "x")`` in the same scope
+    result_reads: dict[str, list[tuple[int, int, str, frozenset[str]]]] = field(
+        default_factory=dict)
+    # names the project defines (functions and classes, any depth): a callable of one of these
+    # names is the project's own, never a wrapper a library made
+    defined: set[str] = field(default_factory=set)
+    files: int = 0          # files parsed
+    unparsed: int = 0       # files that did not parse (their uses are unknown)
+    unparsed_files: list[str] = field(default_factory=list)
+
+
+def _leaf(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _class_refs(node: ast.AST | None) -> list[ast.AST]:
+    """The class references an ``isinstance`` second argument / ``except`` clause holds."""
+    if isinstance(node, ast.Tuple | ast.List | ast.Set):
+        return [r for e in node.elts for r in _class_refs(e)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):   # ``A | B``
+        return _class_refs(node.left) + _class_refs(node.right)
+    return [node] if isinstance(node, ast.Name | ast.Attribute) else []
+
+
+def import_bindings(tree: ast.AST) -> dict[str, str]:
+    """Names the file's absolute imports bind -> the dotted path they stand for
+    (``import a.b as c`` -> ``c: a.b``; ``from x.y import Z as W`` -> ``W: x.y.Z``)."""
+    out: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.asname:
+                    out[a.asname] = a.name
+                else:
+                    out[a.name.split(".")[0]] = a.name.split(".")[0]
+        elif isinstance(n, ast.ImportFrom) and not n.level and n.module:
+            for a in n.names:
+                out[a.asname or a.name] = f"{n.module}.{a.name}"
+    return out
+
+
+def _dotted_name(node: ast.AST, bindings: Mapping[str, str]) -> str | None:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name) or node.id not in bindings:
+        return None
+    return ".".join([bindings[node.id], *reversed(parts)])
+
+
+def _class_leaves(node: ast.AST | None) -> set[str]:
+    """The class names an ``isinstance`` second argument / ``except`` clause names."""
+    if isinstance(node, ast.Tuple | ast.List | ast.Set):
+        out: set[str] = set()
+        for e in node.elts:
+            out |= _class_leaves(e)
+        return out
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):   # ``A | B``
+        return _class_leaves(node.left) | _class_leaves(node.right)
+    leaf = _leaf(node)
+    return {leaf} if leaf else set()
+
+
+def _is_type_of(node: ast.AST) -> bool:
+    """``type(x)`` (one argument) or ``x.__class__``."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id == "type" and len(node.args) == 1:
+        return True
+    return isinstance(node, ast.Attribute) and node.attr == "__class__"
+
+
+_CONVERSIONS = ("int", "float", "bool", "len")
+
+
+def _bound_names(tree: ast.AST) -> set[str]:
+    """Every name the file binds anywhere (a conversion builtin rebound there is shadowed)."""
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store | ast.Del):
+            out.add(n.id)
+        elif isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            out.add(n.name)
+        elif isinstance(n, ast.alias):
+            out.add((n.asname or n.name).split(".")[0])
+        elif isinstance(n, ast.arg):
+            out.add(n.arg)
+    return out
+
+
+def _consumer(call: ast.Call, parents: dict[int, ast.AST], shadowed: set[str]) -> str:
+    node: ast.AST = call
+    parent = parents.get(id(node))
+    awaited = False
+    while isinstance(parent, ast.Await):
+        awaited = True
+        node, parent = parent, parents.get(id(parent))
+    if isinstance(parent, ast.Expr):
+        return "awaited" if awaited else "discarded"
+    if awaited:
+        return "value"            # an awaited result: its coroutine marker is all there is
+    if (isinstance(parent, ast.Assign) and parent.value is node and len(parent.targets) == 1
+            and isinstance(parent.targets[0], ast.Tuple | ast.List)
+            and not any(isinstance(e, ast.Starred) for e in parent.targets[0].elts)):
+        return "unpacked"
+    if isinstance(parent, ast.For | ast.AsyncFor | ast.comprehension) and parent.iter is node:
+        return "iterated"
+    if (isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name)
+            and parent.func.id in _CONVERSIONS and parent.func.id not in shadowed
+            and len(parent.args) == 1 and parent.args[0] is node and not parent.keywords):
+        return parent.func.id
+    if isinstance(parent, ast.If | ast.While | ast.IfExp | ast.Assert) and parent.test is node:
+        return "truth"
+    if isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not):
+        return "truth"
+    if isinstance(parent, ast.comprehension) and node in parent.ifs:
+        return "truth"
+    return "value"
+
+
+def _literal_name(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value:
+        return node.value
+    return None
+
+
+class _Visitor(ast.NodeVisitor):
+    def __init__(self, uses: SourceUses, file: str, lines: list[str],
+                 parents: dict[int, ast.AST], modules: set[str],
+                 bindings: Mapping[str, str] | None = None) -> None:
+        self.bindings = bindings or {}
+        self.uses = uses
+        self.file = file
+        self.lines = lines
+        self.parents = parents
+        self.modules = modules          # names an ``import`` statement binds to a module
+        self.called: set[int] = set()   # ids of Attribute nodes that are a call's func
+
+    def _attribute_use(self, node: ast.Attribute) -> tuple[str, str | None]:
+        """How a read attribute's value is used: ``("key", k)`` (indexed by a literal string
+        key), ``("write", None)`` (written into) or ``("whole", None)`` (anything else)."""
+        parent = self.parents.get(id(node))
+        if isinstance(parent, ast.Subscript) and parent.value is node:
+            if not isinstance(parent.ctx, ast.Load):
+                return ("write", None)
+            key = _literal_name(parent.slice)
+            return ("key", key) if key is not None else ("whole", None)
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            call = self.parents.get(id(parent))
+            if isinstance(call, ast.Call) and call.func is parent:
+                if parent.attr in _WRITES:
+                    return ("write", None)
+                if parent.attr in _KEY_READS and call.args:
+                    key = _literal_name(call.args[0])
+                    if key is not None:
+                        return ("key", key)
+            return ("whole", None)
+        if isinstance(parent, ast.Compare) and node in parent.comparators:
+            i = parent.comparators.index(node)
+            left = parent.left if i == 0 else parent.comparators[i - 1]
+            if isinstance(parent.ops[i], ast.In | ast.NotIn):
+                key = _literal_name(left)
+                if key is not None:
+                    return ("key", key)
+        return ("whole", None)
+
+    def _introspect(self, node: ast.AST | None, *, packages: bool = True) -> None:
+        """Record the classes a check names: their names, and through the file's imports
+        their full names' leaves and (``packages``) top-level packages."""
+        self.uses.introspected |= _class_leaves(node)
+        for ref in _class_refs(node):
+            full = _dotted_name(ref, self.bindings)
+            if full:
+                self.uses.introspected.add(full.rsplit(".", 1)[-1])
+                if packages:
+                    self.uses.introspected_packages.add(full.split(".")[0])
+
+    def _dynamic(self, node: ast.AST, what: str) -> None:
+        line = getattr(node, "lineno", 0)
+        self.uses.dynamic.append((self.file, line, what))
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute):
+            self.called.add(id(node.func))
+        name = _leaf(node.func)
+        if name in ("getattr", "hasattr") and len(node.args) >= 2:
+            lit = _literal_name(node.args[1])
+            if lit is None:
+                if name == "getattr":
+                    self._dynamic(node, "getattr(x, <computed name>)")
+            else:
+                self.uses.read.add(lit)
+                self.uses.whole.add(lit)
+                if name == "hasattr" or len(node.args) >= 3:
+                    self.uses.probed.add(lit)
+        elif name in ("isinstance", "issubclass") and len(node.args) >= 2:
+            self._introspect(node.args[1])
+        elif name == "attrgetter":
+            for a in node.args:
+                lit = _literal_name(a)
+                if lit:
+                    self.uses.read.update(lit.split("."))
+                    self.uses.whole.update(lit.split("."))
+        elif name in _DYNAMIC_CALLS and len(node.args) == _DYNAMIC_CALLS[name]:
+            self._dynamic(node, f"{name}(x)")
+        elif name == "register" and node.args:              # singledispatch ``f.register(C)``
+            self._introspect(node.args[0])
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        module_attr = isinstance(node.value, ast.Name) and node.value.id in self.modules
+        if isinstance(node.ctx, ast.Load) and id(node) not in self.called and not module_attr:
+            if node.attr == "__dict__":
+                self._dynamic(node, "x.__dict__")
+            use, key = self._attribute_use(node)
+            if use == "key" and key is not None:
+                self.uses.read.add(node.attr)
+                self.uses.keys.setdefault(node.attr, set()).add(key)
+            elif use == "whole":
+                self.uses.read.add(node.attr)
+                self.uses.whole.add(node.attr)
+            # written into only (``env.globals["f"] = f``, ``app.config.update(...)``): not read
+            if node.attr in ("__name__", "__qualname__", "__module__") and _is_type_of(node.value):
+                self.uses.type_names_read = True
+        self.generic_visit(node)
+
+    def visit_Compare(self, node: ast.Compare) -> None:
+        sides = [node.left, *node.comparators]
+        if any(_is_type_of(s) for s in sides):
+            for s in sides:
+                if not _is_type_of(s):
+                    self._introspect(s)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        # an ``except`` clause tests a raised exception's class only (raises compare
+        # strictly): it never checks a returned object, so it marks no package
+        self._introspect(node.type, packages=False)
+        self.generic_visit(node)
+
+    def visit_MatchClass(self, node: ast.MatchClass) -> None:
+        self._introspect(node.cls)
+        self.generic_visit(node)
+
+    def _register_annotation(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for d in node.decorator_list:
+            if isinstance(d, ast.Attribute) and d.attr == "register":
+                args = [*node.args.posonlyargs, *node.args.args]
+                if args and args[0].annotation is not None:
+                    self._introspect(args[0].annotation)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._register_annotation(node)
+        self.uses.defined.add(node.name)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.uses.defined.add(node.name)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._register_annotation(node)
+        self.uses.defined.add(node.name)
+        self.generic_visit(node)
+
+
+def _scope_of(node: ast.AST, parents: Mapping[int, ast.AST]) -> ast.AST | None:
+    p = parents.get(id(node))
+    while p is not None and not isinstance(p, ast.FunctionDef | ast.AsyncFunctionDef
+                                           | ast.Lambda | ast.Module):
+        p = parents.get(id(p))
+    return p
+
+
+def _result_reads(call: ast.Call, parents: Mapping[int, ast.AST]) -> frozenset[str]:
+    """The attribute names read or probed off this call's result (``f().x``; ``r = f()``
+    then ``r.x`` or ``hasattr(r, "x")`` anywhere in the same function or module)."""
+    out: set[str] = set()
+    parent = parents.get(id(call))
+    if isinstance(parent, ast.Attribute) and parent.value is call:
+        grand = parents.get(id(parent))
+        if not (isinstance(grand, ast.Call) and grand.func is parent):
+            out.add(parent.attr)
+    target = None
+    if isinstance(parent, ast.Assign) and parent.value is call and len(parent.targets) == 1 \
+            and isinstance(parent.targets[0], ast.Name):
+        target = parent.targets[0].id
+    elif isinstance(parent, ast.AnnAssign) and parent.value is call \
+            and isinstance(parent.target, ast.Name):
+        target = parent.target.id
+    elif isinstance(parent, ast.NamedExpr) and parent.value is call:
+        target = parent.target.id
+    if target is None:
+        return frozenset(out)
+    scope = _scope_of(call, parents)
+    for n in ast.walk(scope) if scope is not None else ():
+        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == target and isinstance(n.ctx, ast.Load)):
+            grand = parents.get(id(n))
+            if not (isinstance(grand, ast.Call) and grand.func is n):
+                out.add(n.attr)
+        elif (isinstance(n, ast.Call) and _leaf(n.func) in ("hasattr", "getattr")
+              and len(n.args) >= 2 and isinstance(n.args[0], ast.Name)
+              and n.args[0].id == target):
+            lit = _literal_name(n.args[1])
+            if lit:
+                out.add(lit)
+    return frozenset(out)
+
+
+def result_reads_at(uses: SourceUses | None, file: str, line: int | None,
+                    leaf: str) -> frozenset[str]:
+    """The names read off the result of the project's call to ``leaf`` at ``file:line``."""
+    if uses is None or line is None:
+        return frozenset()
+    out: set[str] = set()
+    for first, last, name, names in uses.result_reads.get(file, ()):
+        if name == leaf and first <= line <= last:
+            out |= names
+    return frozenset(out)
+
+
+def consumer_at(uses: SourceUses | None, file: str, line: int | None, leaf: str) -> str | None:
+    """How the project consumes the result of its call to ``leaf`` at ``file:line``: the
+    consumer of the calls to that name spanning the line, when they agree; None when no such
+    call is in the source (or the snapshot is missing)."""
+    if uses is None or line is None:
+        return None
+    found = {c for first, last, name, c in uses.calls.get(file, ()) if name == leaf
+             and first <= line <= last}
+    if not found:
+        return None
+    return found.pop() if len(found) == 1 else "value"
+
+
+def parse(text: str) -> ast.AST | None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            return None
+
+
+def source_uses(sources: Mapping[str, str] | None) -> SourceUses | None:
+    """The uses of one capture's source snapshot; None without a snapshot."""
+    if not sources:
+        return None
+    uses = SourceUses()
+    for file in sorted(sources):
+        if not file.endswith(".py"):
+            continue
+        text = sources[file]
+        tree = parse(text)
+        if tree is None or not _analyse(uses, file, text, tree):
+            uses.unparsed += 1
+            uses.unparsed_files.append(file)
+            continue
+        uses.files += 1
+    uses.dynamic.sort()
+    return uses
+
+
+def _analyse(uses: SourceUses, file: str, text: str, tree: ast.AST) -> bool:
+    """Record one parsed file's uses; False when the file is too deep to walk (a long
+    generated expression: the visitor recurses), so its uses stay unknown."""
+    try:
+        _analyse_tree(uses, file, text, tree)
+    except (RecursionError, MemoryError):
+        return False
+    return True
+
+
+def _analyse_tree(uses: SourceUses, file: str, text: str, tree: ast.AST) -> None:
+    parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    modules = {(a.asname or a.name).split(".")[0] for n in ast.walk(tree)
+               if isinstance(n, ast.Import) for a in n.names}
+    shadowed = _bound_names(tree) & set(_CONVERSIONS)
+    calls = uses.calls.setdefault(file, [])
+    reads = uses.result_reads.setdefault(file, [])
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            leaf = _leaf(n.func)
+            if leaf:
+                calls.append((n.lineno, n.end_lineno or n.lineno, leaf,
+                              _consumer(n, parents, shadowed)))
+                names = _result_reads(n, parents)
+                if names:
+                    reads.append((n.lineno, n.end_lineno or n.lineno, leaf, names))
+    v = _Visitor(uses, file, text.splitlines(), parents, modules, import_bindings(tree))
+    # ``called`` must be known before an Attribute is visited: a Call is visited before
+    # its func (generic_visit walks fields in order), so one pass suffices.
+    v.visit(tree)
+
+
+def project_modules(*sources: Mapping[str, str] | None) -> frozenset[str]:
+    """Every name a project file may be imported under as a top-level module: each directory
+    component of its path and its stem (``src/mypkg/models.py`` -> ``src``, ``mypkg`` and
+    ``models``: a src layout imports ``mypkg``; ``tests/test_x.py`` -> ``tests``, ``test_x``:
+    pytest may import a test module by its bare name), plus ``__main__``. Over-inclusion is the
+    safe direction: a type of any of these modules is the project's, compared as a value."""
+    out = {"__main__"}
+    for src in sources:
+        for rel in src or ():
+            rel = rel.replace("\\", "/")
+            if not rel.endswith(".py"):
+                continue
+            out.update(x for x in rel[:-3].split("/") if x and x != "__init__")
+    return frozenset(out)

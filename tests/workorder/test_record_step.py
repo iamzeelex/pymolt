@@ -119,6 +119,11 @@ def test_a_second_record_is_refused_and_one_record_is_open_per_run(tmp_path):
     with pytest.raises(StepRefusal, match="being recorded: rollback"):
         rollback_steps(tmp_path)
     assert (tmp_path / ".pymolt" / "migration_state.json").read_bytes() == before
+    # The refusal's commands name the project dir as the caller gave it.
+    with pytest.raises(StepRefusal) as refused:
+        rollback_steps(tmp_path, shown="proj")
+    assert "`pymolt apply proj --step sig-1 --record --done`" in refused.value.hint
+    assert "`pymolt apply proj --step sig-1 --record --abort`" in refused.value.hint
     # A dry run writes nothing, so it still runs.
     assert apply_steps(tmp_path, plan, dry_run=True, allow_no_baseline=True).outcome == "dry_run"
 

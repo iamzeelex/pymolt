@@ -84,6 +84,103 @@ def _note_wrapper_code(code):
     _WRAPPER_CODES.append(code)
 
 
+# ── what a wrapper can stand in for ──────────────────────────────────────────
+# A wrapper is a plain function: it keeps a function's call, its binding as a method (or the
+# static / class method it is rebound as), its names, doc, ``__dict__`` attributes, its
+# ``inspect.signature`` (through ``__wrapped__``) and pickling by name. A callable whose
+# protocol is more than that keeps its own object: the program would see the difference
+# (scipy's ``gaussian_kde`` indexes a fused Cython function, ``gaussian_kernel_estimate[spec]``,
+# and raised ``TypeError: 'function' object is not subscriptable`` under capture).
+_FUNCTION_LIKE = (types.FunctionType, types.MethodType, types.BuiltinFunctionType)
+_CO_GENERATOR = 0x20
+_CO_COROUTINE = 0x80
+_CO_ITERABLE_COROUTINE = 0x100
+_CO_ASYNC_GENERATOR = 0x200
+_TYPE_DICT = type.__dict__["__dict__"]
+_TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_NAME = type.__dict__["__name__"]
+
+
+def _caller_code():
+    """The code object of the wrapper's caller, or None when C called the wrapper with no
+    Python frame above it (an ``atexit`` callback, a thread's target, a Cython function
+    calling back at shutdown): ``sys._getframe(2)`` raises there, and a wrapper must never
+    raise into the program (pyarrow's ``_unregister_py_extension_types`` at exit printed
+    ``ValueError: call stack is not deep enough``). Such a call is never ours."""
+    try:
+        return _getframe(2).f_code
+    except ValueError:
+        return None
+
+
+def unkept_protocol(inner, raw, holder, attr):
+    """Why a plain function wrapper around ``inner`` (stored as ``raw`` under ``attr`` on
+    ``holder``) would change what the program sees, or None when it would not:
+
+    - ``callable-object``: not a function, method, builtin or Cython function. Its class's
+      attributes and methods are not a function's (an ``lru_cache`` wrapper's
+      ``cache_clear``, a partial's ``func``, a callable instance's other methods);
+    - ``fused`` / ``subscriptable``: its type supports ``obj[key]`` (a fused Cython function's
+      specialisations, and its ``__signatures__``);
+    - ``coroutine`` / ``async-generator`` / ``generator``: a wrapper is none of these
+      (``inspect.iscoroutinefunction``, ``asyncio.iscoroutinefunction``,
+      ``inspect.isgeneratorfunction``: frameworks call such a function differently);
+    - ``binding``: in a class namespace it does not bind an instance as a function does (a
+      builtin, a Cython function marked static, a static or class method inherited from a
+      base), so a wrapper there would.
+
+    Reads type namespaces and C-level attributes only: never runs user code."""
+    t = type(inner)
+    cython = _is_cython(inner)
+    if not cython and t not in _FUNCTION_LIKE:
+        return "callable-object"
+    for cls in _TYPE_MRO.__get__(t, type):
+        if "__getitem__" in _TYPE_DICT.__get__(cls, type):
+            return "fused" if _TYPE_NAME.__get__(t, type) == "fused_cython_function" \
+                else "subscriptable"
+    flags = getattr(getattr(inner, "__code__", None), "co_flags", 0)
+    if type(flags) is int:
+        if flags & (_CO_COROUTINE | _CO_ITERABLE_COROUTINE):
+            return "coroutine"
+        if flags & _CO_ASYNC_GENERATOR:
+            return "async-generator"
+        if flags & _CO_GENERATOR:
+            return "generator"
+    if not isinstance(holder, type):
+        return None
+    if raw is None:                     # inherited: the base's descriptor is what binds
+        raw = _class_value(holder, attr)
+        if isinstance(raw, (staticmethod, classmethod)):
+            return "binding"
+    if raw is None or isinstance(raw, (staticmethod, classmethod)):
+        return None                     # rebound as the same kind of method
+    if type(raw) is types.FunctionType:
+        return None
+    if _is_cython(raw) and _binds_instance(raw, holder):
+        return None
+    return "binding"
+
+
+def _class_value(cls, name):
+    """The raw class-namespace value ``name`` resolves to on ``cls`` (None if absent)."""
+    for owner in _TYPE_MRO.__get__(cls, type):
+        value = _TYPE_DICT.__get__(owner, type).get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _binds_instance(func, cls):
+    """True if a Cython function in ``cls``'s namespace binds an instance like a function
+    (one marked static returns itself; its ``__get__`` is C code)."""
+    probe = object()
+    try:
+        bound = type(func).__get__(func, probe, cls)
+    except Exception:
+        return False
+    return type(bound) is types.MethodType and bound.__self__ is probe
+
+
 _CALL_OPS = frozenset(n for n in (
     "CALL_FUNCTION", "CALL_FUNCTION_KW", "CALL_FUNCTION_EX", "CALL_METHOD", "CALL_METHOD_KW",
     "PRECALL", "CALL", "CALL_KW", "CALL_FUNCTION_EX") if n in dis.opmap)
@@ -307,7 +404,9 @@ class WrapBackend(object):
             self._done.add(full)
 
     def _wrap_attr(self, holder, attr, real_obj, qualname):
-        """Wrap a module-level function OR a class method (instance / static / class)."""
+        """Wrap a module-level function OR a class method (instance / static / class), unless
+        the wrapper would not keep its protocol (``unkept_protocol``: left as it is, and
+        listed in ``skipped`` with the reason)."""
         raw = getattr(holder, "__dict__", {}).get(attr)
         if isinstance(raw, staticmethod):
             inner, rebind = raw.__func__, staticmethod
@@ -315,6 +414,13 @@ class WrapBackend(object):
             inner, rebind = raw.__func__, classmethod
         else:
             inner, rebind = real_obj, None
+        try:
+            kept = unkept_protocol(inner, raw, holder, attr)
+        except Exception:
+            kept = "uninspectable"
+        if kept is not None:
+            self._mark_skip(qualname, kept)
+            return
         backend = self
         # Canonical identity, once per wrapped symbol: the unwrapped callable's own name,
         # plus its receiver parameter (self/cls) for the per-call ``own``.
@@ -330,8 +436,8 @@ class WrapBackend(object):
         @functools.wraps(inner)
         def wrapper(*a, **kw):
             if not_near:
-                code = _getframe(1).f_code
-                if not_near.get(id(code)) is code:
+                code = _caller_code()
+                if code is None or not_near.get(id(code)) is code:
                     return inner(*a, **kw)      # never a boundary contact: nothing to record
             t0 = _now()
             try:
@@ -410,8 +516,8 @@ class WrapBackend(object):
         @functools.wraps(real_init)
         def init_wrapper(self_obj, *a, **kw):
             if not_near:
-                code = _getframe(1).f_code
-                if not_near.get(id(code)) is code:
+                code = _caller_code()
+                if code is None or not_near.get(id(code)) is code:
                     real_init(self_obj, *a, **kw)   # never a boundary contact
                     return
             bound_args = (self_obj,) + a            # include self so it binds to the real signature

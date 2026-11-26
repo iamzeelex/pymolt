@@ -1,0 +1,366 @@
+{
+ "name": "flask",
+ "ecosystem": "WSGI micro-framework",
+ "old": {
+  "python": "3.10",
+  "requirements": [
+   "Flask==2.0.3",
+   "Werkzeug==2.0.3",
+   "Jinja2==3.0.3",
+   "itsdangerous==2.0.1",
+   "click==8.0.4",
+   "MarkupSafe==2.1.5",
+   "pytest"
+  ]
+ },
+ "new": {
+  "python": "3.12",
+  "requirements": [
+   "Flask==3.1.3",
+   "Werkzeug==3.1.9",
+   "pytest"
+  ]
+ },
+ "manifest": [
+  "Flask",
+  "Werkzeug"
+ ],
+ "target_manifest": [
+  "Flask==3.1.3",
+  "Werkzeug==3.1.9"
+ ],
+ "files": {
+  "app/__init__.py": "from flask import Flask\n\nfrom app import views\nfrom app.jsonenc import ShopJSONEncoder\n\n\ndef create_app(**overrides):\n    app = Flask(__name__)\n    app.config.update(SECRET_KEY=\"toy\", API_TOKEN=\"s3cret\", JSON_SORT_KEYS=False,\n                      FILES_DIR=\"/srv/shop/files\", SEED={\"mug\": \"7.50\", \"pen\": \"1.20\"})\n    app.config.update(overrides)\n    app.json_encoder = ShopJSONEncoder\n    app.register_blueprint(views.bp)\n\n    @app.before_first_request\n    def warm_up():\n        views.STATS[\"warm\"] += 1\n\n    return app\n",
+  "app/jsonenc.py": "from decimal import Decimal\n\nfrom flask.json import JSONEncoder\n\n\nclass ShopJSONEncoder(JSONEncoder):\n    \"\"\"Prices are Decimals and tags are sets in the store; the API sends strings and lists.\"\"\"\n\n    def default(self, o):\n        if isinstance(o, Decimal):\n            return str(o)\n        if isinstance(o, (set, frozenset)):\n            return sorted(o)\n        return super().default(o)\n",
+  "app/views.py": "import io\nfrom decimal import Decimal\n\nfrom flask import (Blueprint, Markup, _app_ctx_stack, abort, current_app, escape, jsonify,\n                   redirect, request, safe_join, send_file)\nfrom werkzeug.security import safe_str_cmp\nfrom werkzeug.urls import url_parse\n\nbp = Blueprint(\"shop\", __name__)\nSTATS = {\"warm\": 0}\n\n\ndef get_store():\n    top = _app_ctx_stack.top\n    if not hasattr(top, \"shop_store\"):\n        seed = current_app.config[\"SEED\"]\n        top.shop_store = {name: {\"name\": name, \"price\": Decimal(p), \"tags\": {\"stock\"}}\n                          for name, p in seed.items()}\n    return top.shop_store\n\n\n@bp.route(\"/items\")\ndef list_items():\n    items = sorted(get_store().values(), key=lambda i: i[\"name\"])\n    return jsonify({\"items\": items, \"count\": len(items)})\n\n\n@bp.route(\"/items/<name>\")\ndef item_page(name):\n    item = get_store().get(name)\n    if item is None:\n        return Markup(\"<p>No item named <em>%s</em></p>\") % name, 404\n    return \"<h1>%s</h1><p>%s EUR</p>\" % (escape(item[\"name\"]), item[\"price\"])\n\n\n@bp.route(\"/invoice/<name>\")\ndef invoice(name):\n    item = get_store().get(name) or abort(404)\n    body = io.BytesIO((\"%s;%s\\n\" % (item[\"name\"], item[\"price\"])).encode())\n    return send_file(body, mimetype=\"text/csv\", as_attachment=True,\n                     attachment_filename=\"invoice-%s.csv\" % name, cache_timeout=60)\n\n\n@bp.route(\"/files/<path:sub>\")\ndef file_path(sub):\n    path = safe_join(current_app.config[\"FILES_DIR\"], sub)\n    return jsonify({\"path\": path})\n\n\n@bp.route(\"/admin\")\ndef admin():\n    token = request.headers.get(\"X-Token\", \"\")\n    if not safe_str_cmp(token, current_app.config[\"API_TOKEN\"]):\n        abort(403)\n    return jsonify({\"admin\": True, \"warm\": STATS[\"warm\"]})\n\n\n@bp.route(\"/login\", methods=[\"POST\"])\ndef login():\n    target = request.args.get(\"next\", \"/items\")\n    if url_parse(target).netloc:\n        target = \"/items\"\n    return redirect(target)\n",
+  "tests/test_shop.py": "import pytest\n\nfrom app import create_app\n\n\n@pytest.fixture()\ndef client():\n    return create_app().test_client()\n\n\ndef test_items_json_keeps_key_order(client):\n    r = client.get(\"/items\")\n    assert r.status_code == 200\n    assert r.get_json() == {\"items\": [\n        {\"name\": \"mug\", \"price\": \"7.50\", \"tags\": [\"stock\"]},\n        {\"name\": \"pen\", \"price\": \"1.20\", \"tags\": [\"stock\"]}], \"count\": 2}\n    assert r.get_data(as_text=True).startswith('{\"items\":[{\"name\":\"mug\"')\n\n\ndef test_item_page_escapes(client):\n    assert client.get(\"/items/mug\").get_data(as_text=True) == \"<h1>mug</h1><p>7.50 EUR</p>\"\n    r = client.get(\"/items/<script>\")\n    assert r.status_code == 404\n    assert \"&lt;script&gt;\" in r.get_data(as_text=True)\n\n\ndef test_invoice_download(client):\n    r = client.get(\"/invoice/pen\")\n    assert r.status_code == 200\n    assert r.headers[\"Content-Disposition\"] == \"attachment; filename=invoice-pen.csv\"\n    assert r.headers[\"Cache-Control\"] == \"public, max-age=60\"\n    assert r.data == b\"pen;1.20\\n\"\n    assert client.get(\"/invoice/nope\").status_code == 404\n\n\ndef test_safe_join(client):\n    assert client.get(\"/files/a/b.txt\").get_json() == {\"path\": \"/srv/shop/files/a/b.txt\"}\n    assert client.get(\"/files/../../etc/passwd\").status_code == 404\n\n\ndef test_admin_token(client):\n    assert client.get(\"/admin\").status_code == 403\n    r = client.get(\"/admin\", headers={\"X-Token\": \"s3cret\"})\n    assert r.get_json() == {\"admin\": True, \"warm\": r.get_json()[\"warm\"]}\n    assert r.get_json()[\"warm\"] >= 1\n\n\ndef test_login_redirect_is_local(client):\n    assert client.post(\"/login?next=/items/pen\").headers[\"Location\"].endswith(\"/items/pen\")\n    assert client.post(\"/login?next=https://evil.test/x\").headers[\"Location\"].endswith(\"/items\")\n"
+ },
+ "manual_migration": [
+  {
+   "file": "app/__init__.py",
+   "old": "    app = Flask(__name__)\n",
+   "new": "    app = Flask(__name__)\n    app.response_class.autocorrect_location_header = True  # Werkzeug 2.1+ sends relative Location\n"
+  },
+  {
+   "file": "app/__init__.py",
+   "old": "from app.jsonenc import ShopJSONEncoder\n",
+   "new": "from app.jsonenc import ShopJSONProvider\n"
+  },
+  {
+   "file": "app/__init__.py",
+   "old": "    app.json_encoder = ShopJSONEncoder\n",
+   "new": "    app.json = ShopJSONProvider(app)\n    app.json.sort_keys = False\n"
+  },
+  {
+   "file": "app/__init__.py",
+   "old": "    @app.before_first_request\n    def warm_up():\n        views.STATS[\"warm\"] += 1\n",
+   "new": "    views.STATS[\"warm\"] += 1\n"
+  },
+  {
+   "file": "app/jsonenc.py",
+   "old": "from flask.json import JSONEncoder\n",
+   "new": "from flask.json.provider import DefaultJSONProvider\n"
+  },
+  {
+   "file": "app/jsonenc.py",
+   "old": "class ShopJSONEncoder(JSONEncoder):",
+   "new": "class ShopJSONProvider(DefaultJSONProvider):"
+  },
+  {
+   "file": "app/jsonenc.py",
+   "old": "    def default(self, o):",
+   "new": "    @staticmethod\n    def default(o):"
+  },
+  {
+   "file": "app/jsonenc.py",
+   "old": "        return super().default(o)",
+   "new": "        return DefaultJSONProvider.default(o)"
+  },
+  {
+   "file": "app/views.py",
+   "old": "import io\nfrom decimal import Decimal\n",
+   "new": "import hmac\nimport io\nfrom decimal import Decimal\nfrom urllib.parse import urlsplit\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "from flask import (Blueprint, Markup, _app_ctx_stack, abort, current_app, escape, jsonify,\n                   redirect, request, safe_join, send_file)\n",
+   "new": "from flask import Blueprint, abort, current_app, g, jsonify, redirect, request, send_file\nfrom markupsafe import Markup, escape\n",
+   "if_present": true
+  },
+  {
+   "file": "app/views.py",
+   "old": "from flask import (Blueprint, _app_ctx_stack, abort, current_app, escape, jsonify,\n                   redirect, request, safe_join, send_file)\nfrom markupsafe import Markup\n",
+   "new": "from flask import Blueprint, abort, current_app, g, jsonify, redirect, request, send_file\nfrom markupsafe import Markup, escape\n",
+   "if_present": true,
+   "why": "the import as pymolt 0.2 leaves it after moving Markup (and not escape) to markupsafe"
+  },
+  {
+   "file": "app/views.py",
+   "old": "from werkzeug.security import safe_str_cmp\nfrom werkzeug.urls import url_parse\n",
+   "new": "from werkzeug.utils import safe_join\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "    top = _app_ctx_stack.top\n",
+   "new": "    top = g\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "attachment_filename=",
+   "new": "download_name=",
+   "if_present": true
+  },
+  {
+   "file": "app/views.py",
+   "old": "cache_timeout=60",
+   "new": "max_age=60",
+   "if_present": true
+  },
+  {
+   "file": "app/views.py",
+   "old": "    path = safe_join(current_app.config[\"FILES_DIR\"], sub)\n",
+   "new": "    path = safe_join(current_app.config[\"FILES_DIR\"], sub)\n    if path is None:\n        abort(404)\n"
+  },
+  {
+   "file": "app/views.py",
+   "old": "safe_str_cmp(token, ",
+   "new": "hmac.compare_digest(token, ",
+   "if_present": true
+  },
+  {
+   "file": "app/views.py",
+   "old": "url_parse(target).netloc",
+   "new": "urlsplit(target).netloc",
+   "if_present": true
+  }
+ ],
+ "scenarios": {
+  "equiv": {
+   "edits": [],
+   "expected_verdict": "pass"
+  },
+  "change": {
+   "edits": [
+    {
+     "file": "app/views.py",
+     "append": "\n\n@bp.route(\"/feedback\", methods=[\"POST\"])\ndef feedback():\n    data = request.get_json() or request.form.to_dict()\n    return jsonify({\"fields\": sorted(data)})\n"
+    },
+    {
+     "file": "tests/test_shop.py",
+     "append": "\n\ndef test_feedback_accepts_a_form(client):\n    # A weak test: it only checks the endpoint answers.\n    assert client.post(\"/feedback\", data={\"rating\": \"5\"}).status_code in (200, 415)\n"
+    }
+   ],
+   "expected_verdict": "fail",
+   "expected_changed": [
+    "werkzeug.wrappers.request.Request.get_json"
+   ],
+   "behaviour": "request.get_json() on a form POST: Werkzeug 2.0.3 returns None (the view falls back to request.form, 200); Werkzeug 2.3+/3.1.9 raises UnsupportedMediaType (415) because the Content-Type is not application/json. The same call now raises; the test accepts both status codes."
+  }
+ },
+ "ground_truth": [
+  {
+   "symbol": "flask.Flask.before_first_request",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/__init__.py:15",
+   "breaks": "AttributeError: 'Flask' object has no attribute 'before_first_request'. Did you mean: '_got_first_request'?",
+   "successor": null,
+   "fixable": "manual",
+   "source": "Flask 2.3.0 changelog (removed; deprecated in 2.2: run setup code when creating the app)",
+   "verified": {
+    "old": "2.0.3: works, no warning (the deprecation only came in 2.2)",
+    "new": "3.1.3: AttributeError at create_app(); no replacement API, the code moves into the factory"
+   }
+  },
+  {
+   "symbol": "flask.json.JSONEncoder",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/jsonenc.py:3",
+   "breaks": "ImportError: cannot import name 'JSONEncoder' from 'flask.json'",
+   "successor": "flask.json.provider.DefaultJSONProvider",
+   "fixable": "manual",
+   "source": "Flask 2.3.0 changelog (JSON provider API since 2.2)",
+   "verified": {
+    "old": "2.0.3: flask.json.JSONEncoder (a json.JSONEncoder subclass) used through app.json_encoder",
+    "new": "3.1.3: gone; a DefaultJSONProvider subclass with a static default() set as app.json gives the same output (a different object and protocol)"
+   }
+  },
+  {
+   "symbol": "flask.Flask.json_encoder",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/__init__.py:12",
+   "breaks": "silent: assigning app.json_encoder still succeeds (a plain instance attribute) but nothing reads it, so the custom encoder is ignored: jsonify of a set raises TypeError: Object of type set is not JSON serializable (500)",
+   "successor": "flask.Flask.json",
+   "fixable": "manual",
+   "source": "Flask 2.3.0 changelog (json_encoder/json_decoder removed)",
+   "verified": {
+    "old": "2.0.3: app.json_encoder is flask.json.JSONEncoder; a custom class serializes sets",
+    "new": "3.1.3: reading app.json_encoder raises AttributeError, assigning it is silently ignored (verified: 500 on a set)"
+   }
+  },
+  {
+   "symbol": "flask.Flask.config",
+   "kind": "BEHAVIOR",
+   "param": "JSON_SORT_KEYS",
+   "site": "app/__init__.py:9",
+   "breaks": "the JSON_SORT_KEYS config key is ignored since 2.3: jsonify sorts keys again ('{\"count\":2,\"items\":...' instead of '{\"items\":...'), test_items_json_keeps_key_order fails",
+   "successor": "app.json.sort_keys = False",
+   "fixable": "manual",
+   "source": "Flask 2.3.0 changelog (JSON_* config keys removed)",
+   "verified": {
+    "old": "2.0.3: JSON_SORT_KEYS=False keeps insertion order",
+    "new": "3.1.3: '{\"a\":2,\"b\":1}' for {'b': 1, 'a': 2} with the key set to False"
+   }
+  },
+  {
+   "symbol": "flask._app_ctx_stack",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/views.py:4",
+   "breaks": "ImportError: cannot import name '_app_ctx_stack' from 'flask'",
+   "successor": "flask.g",
+   "fixable": "manual",
+   "source": "Flask 3.0.0 changelog (removed; deprecated in 2.2)",
+   "verified": {
+    "old": "2.0.3: a werkzeug LocalStack; .top is the app context",
+    "new": "3.1.3: AttributeError on flask._app_ctx_stack; flask.g stores the same per-context cache"
+   }
+  },
+  {
+   "symbol": "flask.Markup",
+   "kind": "MOVED",
+   "param": null,
+   "site": "app/views.py:4",
+   "breaks": "ImportError: cannot import name 'Markup' from 'flask'",
+   "successor": "markupsafe.Markup",
+   "fixable": "codemod",
+   "source": "Flask 3.0.0 changelog (removed; deprecated in 2.3)",
+   "verified": {
+    "old": "2.0.3: flask.Markup is markupsafe.Markup -> True",
+    "new": "3.1.3: AttributeError; markupsafe.Markup present"
+   }
+  },
+  {
+   "symbol": "flask.escape",
+   "kind": "MOVED",
+   "param": null,
+   "site": "app/views.py:4",
+   "breaks": "ImportError: cannot import name 'escape' from 'flask' (after Markup)",
+   "successor": "markupsafe.escape",
+   "fixable": "codemod",
+   "source": "Flask 3.0.0 changelog",
+   "verified": {
+    "old": "2.0.3: flask.escape is markupsafe.escape -> True",
+    "new": "3.1.3: AttributeError; markupsafe.escape present"
+   }
+  },
+  {
+   "symbol": "flask.send_file",
+   "kind": "SIGNATURE",
+   "param": "attachment_filename",
+   "site": "app/views.py:40",
+   "breaks": "TypeError: send_file() got an unexpected keyword argument 'attachment_filename' (then 'cache_timeout'); the view answers 500",
+   "successor": "download_name",
+   "fixable": "codemod",
+   "source": "Flask 2.0.0 changelog (renamed attachment_filename -> download_name, cache_timeout -> max_age); old names removed in 2.2",
+   "verified": {
+    "old": "2.0.3: both old names work with DeprecationWarning \"The 'attachment_filename' parameter has been renamed to 'download_name'. The old name will be removed in Flask 2.1.\" (and the same for cache_timeout -> max_age); download_name/max_age already exist",
+    "new": "3.1.3: TypeError; download_name=..., max_age=60 give the same headers"
+   }
+  },
+  {
+   "symbol": "flask.safe_join",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/views.py:46",
+   "breaks": "ImportError: cannot import name 'safe_join' from 'flask'",
+   "successor": "werkzeug.utils.safe_join",
+   "fixable": "manual",
+   "source": "Flask 2.1.0 changelog (removed; deprecated in 2.0)",
+   "verified": {
+    "old": "2.0.3: flask.safe_join warns \"'flask.helpers.safe_join' is deprecated and will be removed in Flask 2.1. Use 'werkzeug.utils.safe_join' instead.\" and raises NotFound for an escaping path",
+    "new": "3.1.3: gone; werkzeug.utils.safe_join returns None for an escaping path instead of raising, so the caller adds abort(404): not a drop-in"
+   }
+  },
+  {
+   "symbol": "werkzeug.security.safe_str_cmp",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/views.py:53",
+   "breaks": "ImportError: cannot import name 'safe_str_cmp' from 'werkzeug.security'",
+   "successor": "hmac.compare_digest",
+   "fixable": "manual",
+   "source": "Werkzeug 2.1.0 changelog (removed; deprecated in 2.0)",
+   "verified": {
+    "old": "werkzeug 2.0.3: works, DeprecationWarning \"'safe_str_cmp' is deprecated and will be removed in Werkzeug 2.1. Use 'hmac.compare_digest' instead.\"",
+    "new": "3.1.9: gone; hmac.compare_digest (stdlib) gives the same results"
+   }
+  },
+  {
+   "symbol": "werkzeug.urls.url_parse",
+   "kind": "REMOVED",
+   "param": null,
+   "site": "app/views.py:61",
+   "breaks": "ImportError: cannot import name 'url_parse' from 'werkzeug.urls'",
+   "successor": "urllib.parse.urlsplit",
+   "fixable": "manual",
+   "source": "Werkzeug 3.0.0 changelog (removed; deprecated in 2.3)",
+   "verified": {
+    "old": "werkzeug 2.0.3: url_parse('http://evil.test/a').netloc == 'evil.test', no warning",
+    "new": "3.1.9: gone; urllib.parse.urlsplit(...).netloc gives the same"
+   }
+  },
+  {
+   "symbol": "werkzeug.wrappers.response.Response.autocorrect_location_header",
+   "kind": "DEFAULT",
+   "param": null,
+   "site": "app/views.py:63",
+   "breaks": "silent: redirect('/items/pen') now sends Location: /items/pen instead of http://localhost/items/pen (the test's endswith stays green; a client that needs an absolute URL breaks)",
+   "successor": "set autocorrect_location_header = True on the response class",
+   "fixable": "manual",
+   "source": "Werkzeug 2.1.0 changelog (autocorrect_location_header defaults to False)",
+   "verified": {
+    "old": "werkzeug 2.0.3: Response.autocorrect_location_header True; Location 'http://localhost/items/pen'",
+    "new": "3.1.9: False; '/items/pen'; app.response_class.autocorrect_location_header = True restores the absolute URL"
+   }
+  },
+  {
+   "symbol": "werkzeug.wrappers.request.Request.get_json",
+   "kind": "BEHAVIOR",
+   "param": null,
+   "site": "app/views.py:68",
+   "scenario": "change",
+   "breaks": "Only the change scenario: get_json() on a form POST returns None on Werkzeug 2.0.3 and raises UnsupportedMediaType (415) on 3.1.9",
+   "successor": "request.get_json(silent=True)",
+   "fixable": "manual",
+   "source": "Werkzeug 2.1 (400 on a wrong content type), 2.3 (415)",
+   "verified": {
+    "old": "feedback form POST: 200 {'fields': ['rating']}",
+    "new": "415 Unsupported Media Type"
+   }
+  }
+ ],
+ "expected_warnings": [
+  {
+   "symbol": "flask.send_file",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "flask.safe_join",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  },
+  {
+   "symbol": "werkzeug.security.safe_str_cmp",
+   "category": "DeprecationWarning",
+   "from_c": false,
+   "side": "old"
+  }
+ ],
+ "notes": "Flask 2.0.3 + Werkzeug 2.0.3 (+ Jinja2 3.0.3, itsdangerous 2.0.1, click 8.0.4, MarkupSafe 2.1.5: the set a 2022 lock file holds) on 3.10 -> Flask 3.1.3 + Werkzeug 3.1.9 on 3.12. The manifest lists Werkzeug too because the app imports it directly (safe_str_cmp, url_parse: the two most common Werkzeug breaks). Old-side warnings are only the ones 2.0.3 already had: send_file's renamed parameters, flask.safe_join and werkzeug's safe_str_cmp (Python-level DeprecationWarning). before_first_request, JSONEncoder/json_encoder, _app_ctx_stack, Markup/escape and url_parse were deprecated in 2.2/2.3 (a version between the two) and removed in 2.3/3.0, so the old side is silent for them. Silent breaks: app.json_encoder = X is still accepted (a plain attribute), JSON_SORT_KEYS is ignored, and Werkzeug 2.1 made redirect Location headers relative (autocorrect_location_header False); they only show as different output. The equivalent migration restores each (app.json provider with sort_keys False, autocorrect_location_header True). flask.safe_join -> werkzeug.utils.safe_join is not a drop-in: the werkzeug one returns None instead of raising NotFound. The equivalent migration moves before_first_request's body into the factory (it ran once per app on the first request; now at creation: the same count in these tests). S1: views return werkzeug Response objects (rendered by status code); the tests read bodies with get_json()/get_data(). manual_migration edits apply to the original text in order; 'if_present' skips a site pymolt already rewrote."
+}

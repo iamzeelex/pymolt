@@ -11,10 +11,12 @@ statically is ``ran-not-recorded`` when the executed record has a line of its fu
 ``uncovered`` counts the ``not-run`` and ``unobservable`` sites: unless a test reaches them they
 end ``needs_evidence``. ``tests`` stays None (the capture records no test ids).
 
-``effort.size``, first match: ``none`` (pymolt does it); ``large`` (a behaviour change, no
-known successor, or more than 20 sites); ``medium`` (the signature differs, 6 to 20 sites, or a
-review); ``trivial`` (one site, a known successor, the same signature); ``small`` (up to 5 sites
-and a known successor). ``why`` names the rule.
+``effort.size``, first match: ``none`` (pymolt does it); ``medium`` (a default decided at call
+time: ``None`` or a sentinel on either side, short of a ``high`` risk, so the outcome may well
+not change; the predicted risk is ``medium`` for the same reason); ``large`` (any other
+behaviour change, no known successor, or more than 20 sites); ``medium`` (the signature
+differs, 6 to 20 sites, or a review); ``trivial`` (one site, a known successor, the same
+signature); ``small`` (up to 5 sites and a known successor). ``why`` names the rule.
 
 ``do.manual`` gets, best effort and as data: the signature change of a SIGNATURE fact, the
 first site's statement (``before_after.before``), and pitfalls: the sites' baseline warnings,
@@ -135,8 +137,10 @@ def _successor_known(step: PlanStep) -> bool:
         return True
     if step.type in ("manual-rewrite", "review"):
         return bool(manual.suggestion) or step.type == "review"
-    if step.type == "python-manual" and not step.why.risk_ids:
-        return True                           # a compile finding: the message says what to do
+    if step.type == "python-manual" and not step.symbol.old:
+        # A compile finding (it names no symbol; the risks made from it are linked to it): the
+        # message says what to do.
+        return True
     if step.type in ("target-env", "manifest-pin"):
         return True
     return bool(manual.successor) or ("Rewrite these sites by hand:" in manual.summary)
@@ -169,6 +173,11 @@ def effort_of(step: PlanStep) -> StepEffort:
                     f"{sites} manifest line(s) to change")
     known = _successor_known(step)
     if step.type == "behaviour-change":
+        delta = step.why.delta
+        if (delta is not None and delta.kind == "DEFAULT" and step.why.tier != "high"
+                and (_call_time(delta.old) or _call_time(delta.new))):
+            return make("medium", "a default decided at call time (None or a sentinel): the "
+                                  "outcome may well not change")
         return make("large", "a behaviour change: a person decides the outcome")
     if not known:
         return make("large", "no successor is known")

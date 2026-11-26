@@ -7,6 +7,83 @@ All notable changes to pymolt. The format follows
 
 ## [Unreleased]
 
+### Added
+
+#### Capture and tracer
+
+- Each capture has an id, its UTC time and the first 8 hex of its recording's sha256, such as
+  `20261120T060620Z-b3e1a2c0`. `capture` prints it (`captured <id>: 15 events -> …`) and the
+  slot keeps it with the sha256 (`capture_id`, `trace_sha256`); a capture made by an earlier
+  pymolt gets its id computed when it is read. `verify` names the two captures it compared
+  (`baseline <id> → post-migration <id>`; `compared.before_capture_id` and `after_capture_id`
+  in `--json` and `verification.json`).
+
+#### Plan and apply
+
+- Plan files are schema 3 (`pymolt.plan/3`, `pymolt/schemas/migration_plan-3.schema.json`): a
+  plan also records its name, label, the pymolt version and git commit it was made with, the
+  baseline capture it was made from (`baseline.capture_id`), its lineage and a digest of its
+  content. A schema-2 plan made by pymolt 0.2 is read as it is, so its runs, frozen copies and
+  agent approvals hold; pymolt 0.2 refuses a schema-3 plan as newer.
+- `plan` warns when the baseline's recording changed since it was captured: the plan binds the
+  recording as it is now.
+- Plans are kept, one folder each: `plan` saves `.pymolt/plans/<name>/plan.json`, written once
+  and never changed, with its `PLAN.md` beside it, and makes it the current plan. A plan's name
+  is its UTC time to the minute and the first 8 hex of its id, such as
+  `20261120T0631Z-f74941c5`. `.pymolt/plans/current.json` names the current plan; it is local
+  state, listed in `.pymolt/.gitignore`, while the plan folders can be committed. A damaged
+  pointer, or one that names a plan the store does not hold, refuses `plan`, `apply` and
+  `verify`, and `status` reports it. A checkout with saved plans and no pointer makes none of
+  them current: `status` and `apply` name the newest and how to choose one.
+- A plan names no folder of the machine it was made on, so its folder can be committed: in what
+  pymolt writes about the machine (the interpreters the delta engine probed, the target
+  environment setup names, the baseline's command and each step's check command) a path inside
+  the project is relative to it and a path under the home folder is `~/...`. The project's own
+  text (sources, anchors, manifest lines) is kept as written. `status` shows the baseline's
+  command the same way.
+- `apply --plan` takes `current` (the default), a plan name, a plan id prefix (4 to 32 hex) or a
+  path. A reference that matches no plan, or several, exits 2. An `apply` that writes (a step,
+  `--skip`, `--record`) makes its plan the current plan; a plan file written with `plan -o` is
+  saved into `.pymolt/plans/` first. `--dry-run`, `--brief` and `--approve-agent` leave the
+  current plan as it is.
+- A project from pymolt 0.2 keeps working: `status`, `apply` and `verify` read its
+  `.pymolt/migration_plan.json` where it is, and its open run and agent approval hold. The first
+  `plan` moves that file, as it is, into `.pymolt/plans/` (and its `.pymolt/PLAN.md` into the
+  plan's folder). pymolt 0.2 does not read the moved plan.
+- A `plan` with the same steps, baseline capture, setup and target manifest as the current plan
+  saves nothing: it says "Unchanged: same steps, baseline, setup and target manifest as the
+  current plan. Nothing saved; its approvals still hold." and keeps the current plan, its id and
+  its agent approval. A plan that changed is saved and derived from the current plan: its
+  `lineage` records the parent's id, the lineage's first plan and the generation (recorded only:
+  nothing is inherited yet). `plan --fresh` starts a new lineage; `plan --label TEXT` adds a label
+  to the plan's name (`20261120T0631Z-f74941c5-numpy2`). Both always save a plan; a label outside
+  the rule (lowercase letters, digits, `.`, `_`, `-`) exits 2. The MCP `plan` tool takes `label`
+  and `fresh`. The two plans' baseline recordings are compared by the file they name, so a plan
+  an earlier 0.2 build saved with the recording's absolute path re-plans unchanged.
+- The plan panel, `PLAN.md`'s header and `status` show a plan's identity line: `plan f74941c5 ·
+  2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 (dirty) · derived
+  from 3c9e0d12` ("made by pymolt before 0.3" for a 0.2 plan). `PLAN.md` is titled by the plan's
+  name. `plan --json` and `--agent` add `plan_name`, `label`, `created_at`, `pymolt_version`,
+  `plan_source`, `baseline_capture_id`, `baseline_warning`, `lineage`, `content_digest`, `saved`,
+  `unchanged_from`, `moved_legacy` and `pruned`; the apply and rollback views add `plan_name`.
+- `plan` removes old plans: it keeps the current plan, its parent, every plan an apply run
+  references, every plan folder git tracks (one `git ls-files`) and the 20 newest. It removes
+  nothing when a state file it reads is damaged or git cannot say what it tracks, and `pruned`
+  says why.
+- `status` names the current plan and begins each capture's line with its capture id
+  (`plan`, `captures` in `--json` and `--agent`). It notes when the current plan was made at
+  another commit than `HEAD` (`drift`), and when a plan is still in the 0.2 layout; neither
+  changes a phase or the next command.
+
+### Changed
+
+#### Plan and apply
+
+- `apply --approve-agent` says what voids an approval: a new plan (a re-plan that changes
+  anything) or any change to the plan. A re-plan that changes nothing keeps it.
+
+## [0.2.0rc1] - 2026-11-25
+
 ### Breaking
 
 - The CLI has 12 commands instead of 31. A removed command prints its replacement and exits
@@ -43,8 +120,8 @@ All notable changes to pymolt. The format follows
   or when the smoke import finds a module that imported before and fails after. Running `apply`
   again on an applied plan exits 0 and writes nothing.
 - After `apply`, `verify` judges the whole recorded surface, as it does without a plan: a
-  changed call anywhere fails, and PASS needs every static symbol exercised, not only those on
-  the plan's API paths. Under `contract` in `verify --json`, `confirmed`, `blind`,
+  changed call anywhere fails, and PASS needs every static symbol a capture can record exercised,
+  not only those on the plan's API paths. Under `contract` in `verify --json`, `confirmed`, `blind`,
   `dynamic_only` and `static_targets` count the whole surface; the plan's paths are in the
   `impacted_*` keys. A migration that passed with 0.1.0 can now be INCONCLUSIVE or FAIL.
 - Some differences that failed with 0.1.0 are now review items, so the verdict is INCONCLUSIVE
@@ -89,19 +166,13 @@ All notable changes to pymolt. The format follows
 - `capture --accept-failing` keeps a run whose command exited non-zero, if it recorded calls,
   stamped red.
 - `capture --json` and `capture --agent`.
-- Each capture has an id, its UTC time and the first 8 hex of its recording's sha256, such as
-  `20261120T060620Z-b3e1a2c0`. `capture` prints it (`captured <id>: 15 events -> …`) and the
-  slot keeps it with the sha256 (`capture_id`, `trace_sha256`); a capture made by an earlier
-  pymolt gets its id computed when it is read. `verify` names the two captures it compared
-  (`baseline <id> → post-migration <id>`; `compared.before_capture_id` and `after_capture_id`
-  in `--json` and `verification.json`).
 - Each recorded call carries its canonical callee, whatever name the code used, and the
   arguments the caller passed; a parameter left at its default is recorded by name only.
 - Also recorded: the project lines that ran (3.12+) or the functions that started (3.6–3.11),
   the deprecation-family warnings each call issued (including warnings raised from C), the key
   order of each dict, and, per process, the runtime environment, without the hostname. A
   different key order is a review item unless it is shown to be deterministic.
-- Compiled calls and calls that fail to bind are recorded. Public Cython functions of
+- Compiled calls and calls that fail to bind are recorded. Plain public Cython functions of
   dependency modules are wrapped on every Python and recorded with arguments and results; other
   compiled calls past 2,000 per call site are counted.
 - Datetimes, decimals, UUIDs, enums, dataclasses, numpy and pandas objects, and plain objects
@@ -145,11 +216,21 @@ All notable changes to pymolt. The format follows
 - An "Impact focus" line in the `verify` report: the plan's changed API paths and the static
   symbols on them.
 - An INCONCLUSIVE verdict says whether it needs a person (`needs_review`: a review item) or
-  evidence (`needs_evidence`: BLIND symbols, a fact that could not be compared, a capture
-  missing or unlike the other, noise no baseline replicate measured). `verification.json`
-  (schema 2) keeps `inconclusive_kind` and every reason with its kind and what settles it
-  (`inconclusive_causes`); `verify` prints what settles it, and `status` names it. A schema-1
-  file reads with no kind. Both kinds exit 4.
+  evidence (`needs_evidence`: BLIND symbols a test can still reach, a fact that could not be
+  compared, a capture missing, stale or unlike the other, noise no baseline replicate measured).
+  The BLIND table says per kind what settles its rows; a `--probe-python` replay never does.
+  `verification.json` (schema 2) keeps `inconclusive_kind` and every reason with its kind and what
+  settles it (`inconclusive_causes`); `verify` prints what settles it, and `status` names it. A
+  schema-1 file reads with no kind. Both kinds exit 4.
+- Floats within 1024 ulps at each value's own precision (array elements too), never more than
+  2^-10 relative, are numeric drift, stamped in the verdict ("k value(s) equal within
+  floating-point rounding") and in `numeric_drift`; an input that differs only within rounding is
+  the same input. `verify --float-ulps N` sets the bound (0 is exact); `--strict` turns each such
+  pair into a review item.
+- A FAIL names the plan steps whose sites failed (`failing_steps` in `verification.json` and
+  `--agent`), says how to bring a rolled-back one back, and gives a person's two options: fix the
+  code and capture again, or accept an intended change with `pymolt verify DIR --accept ID` on a
+  terminal. `status` no longer suggests rolling back the whole run on a FAIL.
 
 #### Plan and apply
 
@@ -187,59 +268,19 @@ All notable changes to pymolt. The format follows
   same files; `--cascade` rolls back the steps that depend on it first.
 - An append-only apply ledger, and the step texts kept once by hash in `.pymolt/blobs/`, with a
   `.pymolt/.gitignore` for them. The project's own `.gitignore` is not touched.
-- Plan files are schema 3 (`pymolt.plan/3`, `pymolt/schemas/migration_plan-3.schema.json`): a
-  plan also records its name, label, the pymolt version and git commit it was made with, the
-  baseline capture it was made from (`baseline.capture_id`), its lineage and a digest of its
-  content. A schema-2 plan made by pymolt 0.2 is read as it is, so its runs, frozen copies and
-  agent approvals hold; pymolt 0.2 refuses a schema-3 plan as newer.
-- `plan` warns when the baseline's recording changed since it was captured: the plan binds the
-  recording as it is now.
-- Plans are kept, one folder each: `plan` saves `.pymolt/plans/<name>/plan.json`, written once
-  and never changed, with its `PLAN.md` beside it, and makes it the current plan. A plan's name
-  is its UTC time to the minute and the first 8 hex of its id, such as
-  `20261120T0631Z-f74941c5`. `.pymolt/plans/current.json` names the current plan; it is local
-  state, listed in `.pymolt/.gitignore`, while the plan folders can be committed. A damaged
-  pointer, or one that names a plan the store does not hold, refuses `plan`, `apply` and
-  `verify`, and `status` reports it. A checkout with saved plans and no pointer makes none of
-  them current: `status` and `apply` name the newest and how to choose one.
-- A plan names no folder of the machine it was made on, so its folder can be committed: in what
-  pymolt writes about the machine (the interpreters the delta engine probed, the target
-  environment setup names, the baseline's command and each step's check command) a path inside
-  the project is relative to it and a path under the home folder is `~/...`. The project's own
-  text (sources, anchors, manifest lines) is kept as written. `status` shows the baseline's
-  command the same way.
-- `apply --plan` takes `current` (the default), a plan name, a plan id prefix (4 to 32 hex) or a
-  path. A reference that matches no plan, or several, exits 2. An `apply` that writes (a step,
-  `--skip`, `--record`) makes its plan the current plan; a plan file written with `plan -o` is
-  saved into `.pymolt/plans/` first. `--dry-run`, `--brief` and `--approve-agent` leave the
-  current plan as it is.
-- A project from pymolt 0.2 keeps working: `status`, `apply` and `verify` read its
-  `.pymolt/migration_plan.json` where it is, and its open run and agent approval hold. The first
-  `plan` moves that file, as it is, into `.pymolt/plans/` (and its `.pymolt/PLAN.md` into the
-  plan's folder). pymolt 0.2 does not read the moved plan.
-- A `plan` with the same steps, baseline capture, setup and target manifest as the current plan
-  saves nothing: it says "Unchanged: same steps, baseline, setup and target manifest as the
-  current plan. Nothing saved; its approvals still hold." and keeps the current plan, its id and
-  its agent approval. A plan that changed is saved and derived from the current plan: its
-  `lineage` records the parent's id, the lineage's first plan and the generation (recorded only:
-  nothing is inherited yet). `plan --fresh` starts a new lineage; `plan --label TEXT` adds a label
-  to the plan's name (`20261120T0631Z-f74941c5-numpy2`). Both always save a plan; a label outside
-  the rule (lowercase letters, digits, `.`, `_`, `-`) exits 2. The MCP `plan` tool takes `label`
-  and `fresh`.
-- The plan panel, `PLAN.md`'s header and `status` show a plan's identity line: `plan f74941c5 ·
-  2026-11-20 06:31 UTC · baseline 20261120T060620Z-b3e1a2c0 · commit 1a2b3c4 (dirty) · derived
-  from 3c9e0d12` ("made by pymolt before 0.3" for a 0.2 plan). `PLAN.md` is titled by the plan's
-  name. `plan --json` and `--agent` add `plan_name`, `label`, `created_at`, `pymolt_version`,
-  `plan_source`, `baseline_capture_id`, `baseline_warning`, `lineage`, `content_digest`, `saved`,
-  `unchanged_from`, `moved_legacy` and `pruned`; the apply and rollback views add `plan_name`.
-- `plan` removes old plans: it keeps the current plan, its parent, every plan an apply run
-  references, every plan folder git tracks (one `git ls-files`) and the 20 newest. It removes
-  nothing when a state file it reads is damaged or git cannot say what it tracks, and `pruned`
-  says why.
-- `status` names the current plan and begins each capture's line with its capture id
-  (`plan`, `captures` in `--json` and `--agent`). It notes when the current plan was made at
-  another commit than `HEAD` (`drift`), and when a plan is still in the 0.2 layout; neither
-  changes a phase or the next command.
+- `plan` names successors from the library's own text and data: deprecation-helper arguments and
+  closure cells (the helpers are listed in `knowledge/deprecation_helpers.json`), warning helpers,
+  the new version's errors, and the callee the old body forwards to. A warning counts as evidence
+  about a symbol only when it names it or matches its own code. Each fact's `succession` gives its
+  trust, sources, caveats, candidates and rejected names. Several candidates are listed for an
+  agent, never chosen.
+- `rename-keyword`, `rename-member` and `forward-template` codemods, made only when the library's
+  code proves the rewrite and the probe's summary of the body is complete. An unknown decorator,
+  a helper handed the arguments, a call chained on the result, or an alias beside the forward
+  leaves the successor named for an agent. A rewrite touches one call in the statement's own
+  header, reached through its import on every path, and keeps the order arguments are evaluated
+  in. They run as basis `library-proof` steps (claim `preserve`); a member rename is gated by the
+  receivers the baseline recorded.
 
 #### Assess, scan and setup
 
@@ -278,6 +319,9 @@ All notable changes to pymolt. The format follows
   `docs/glossary.md`, and `docs/limits.md` (what pymolt cannot do yet, measured overhead, the
   projects it was tried on).
 - `docs/RELEASING.md` (versions, branches, release steps) and this changelog.
+- The README lists the libraries pymolt is tested on, with the benchmark's totals, and
+  `docs/limits.md` gives each library's numbers and why a migration that keeps its behaviour is
+  not PASS.
 
 #### Packaging and CI
 
@@ -288,11 +332,6 @@ All notable changes to pymolt. The format follows
 
 ### Changed
 
-- A plan stores the path of its baseline recording relative to the project
-  (`baseline_trace_path`), so a committed plan names no folder of the machine it was made on. A
-  plan saved by pymolt 0.2 keeps its absolute path and still binds the same recording.
-- `apply --approve-agent` says what voids an approval: a new plan (a re-plan that changes
-  anything) or any change to the plan. A re-plan that changes nothing keeps it.
 - CI runs the injected tracer's tests on Python 3.6 and 3.7 as well (3.8 and 3.11 ran already),
   checks pyflakes errors with ruff, installs from the lock file (`--locked`) and pins every
   GitHub Action by commit. The package no longer claims Python 3.13 (14 tests fail there; see
@@ -320,13 +359,47 @@ All notable changes to pymolt. The format follows
 - `verify`'s golden, canary and shadow options (`--golden-before`, `--golden-after`, `--policy`,
   `--metrics`, `--auto-rollback`, `--shadow`) are hidden until 0.3: no command makes their input
   files yet. They still work for a script that writes those files.
-- A dynamic-only symbol whose facts all compared equal no longer blocks PASS.
+- A dynamic-only symbol (one the static map missed) no longer blocks PASS when it is settled as
+  a static symbol would be: its facts compared equal, are calls its line did not make (compiled
+  code calling back, an implicit hook), or are calls an edit made with no partner (unverified
+  edited sites; a new raise there still fails). A new call a hand edit introduced kept every
+  equivalent migration with such an edit INCONCLUSIVE.
+- A dependency use no capture can record no longer blocks PASS: one no capture can observe (an
+  attribute read, a constant such as `yaml.SafeLoader`, a chain through a return value), and one
+  whose line ran while the watcher recorded no call there (a numpy ufunc, `polars.col`, an
+  implicit `__float__`). The verdict lists them ("N dependency use(s) cannot be observed by a
+  capture"), and `verify --agent` gives them as `unobservable_uses` (owner decisions). A BLIND
+  symbol a test can still reach keeps blocking.
+- `verify` compares a dependency object by its type and the attributes your code reads (old names
+  on the old side, new names on the new one); unread state that differs is counted as drift.
+  Values (builtins, containers, records your project declares, the opaque types of data packages
+  such as numpy and pandas) compare by content, as before. Places that read attributes by a
+  computed name are listed (`dynamic_attribute_reads` in `--agent`), not blocking; `--strict`
+  compares full state. This needs both captures' source snapshots: without them, or while a
+  project file does not parse here, objects compare in full, stamped in `quality.objects`.
+- A class change inside one top-level package is drift when your code never checks the class or
+  its package (`isinstance`, `issubclass`, `match`, `type(x) is C`, singledispatch; aliases and
+  base classes resolved) and reads nothing off the result the capture did not render. A class
+  change across packages is a review item until MRO tables arrive. Relocated structures and raises
+  compare equal; a type an edited line produced is judged with that edit, along its data chain.
+- A result is compared by what its statement observes of it: discarded (an object by its type,
+  unless the call handed back its receiver or an argument), unpacked or iterated (elements, not the
+  container type), `int()`/`float()`/`bool()`/`len()`, or a truth test. `--strict` compares the
+  full result.
+- Below line granularity, a contact that counts as ran only because its function or file ran may
+  not have run: coverage reads "at most" and recall "at least" (`coverage_bounded`), in `verify`,
+  `--agent` and `status`.
+- `verify` takes the interpreter of a workload as replaceable (`python3.11 -m pytest` and the
+  target env's `python -m pytest` are one workload), and "different commands" names the baseline's
+  command.
 - The baseline is judged against the environment the migration started from. Bumping the pins
   of the same manifest keeps both the baseline and the plan valid; another manifest file, base
   Python, toolset or container does not.
 - A rollback that restored files sets the post-migration capture aside, and `verify` names it; a
   rollback that restored no file keeps it.
-- The test runner is never traced, and its contacts are left out of coverage.
+- The test runner is never traced, and its symbols (`pytest.fixture`, `pytest.raises`) are left
+  out of the verdict, the counts and both numbers, with a note that counts them. A
+  `@pytest.fixture` used to keep a clean diff INCONCLUSIVE.
 - A step whose entries could not be compared, or may be run-to-run noise no baseline replicate
   measured, is `needs_evidence` (it was `needs_review`), and its judgement lists them
   (`uncomparable`, `noise`) with what settles them. `status` then names the baseline replicate
@@ -340,6 +413,17 @@ All notable changes to pymolt. The format follows
   lists it as manual work with each file and line it matched.
 - A rolled-back plan applies again without a new `plan` while its files are back at their
   planned text.
+- A successor named only by text is never rewritten, even with an equal signature (urllib3's
+  `get_host(url)` → `parse_url(url)` returns another thing): it is an agent step.
+- Plan schema 2 additions: `symbol.params`, `why.successor`, `do.manual.candidates`, `param` on
+  impacts, basis `library-proof`. Ledger entries of a successor step get `param_map`,
+  `member_map` and `materialized`.
+- A behaviour step for a default that is `None` or a sentinel on either side is `medium` effort,
+  not `large` (such a default is decided at call time), and its title shows a sentinel as "a
+  sentinel" instead of `<object object>` or `<no_default>`.
+- `plan`'s next command is `status`'s, printed for the dir you gave; `plan --agent` returns it
+  as `data.next` (the same shape as apply's), and `PLAN.md` renders it with the dir as `.`. With
+  no baseline it is the baseline capture, and the human output prints the "no baseline" warning.
 
 #### Assess, scan and setup
 
@@ -351,6 +435,10 @@ All notable changes to pymolt. The format follows
 - `setup` without a terminal takes the detected default for each missing choice and names it.
   The default target Python is the one the prompt offers, not the interpreter pymolt runs on.
 - `setup` offers only containers that mount the project, and says when it edits `.gitignore`.
+- When no manifest is chosen, `scan`, `setup`, `assess` and `plan` pick the same default: a lock,
+  then a canonical manifest, never a docs, dev or CI variant or a sub-root while something better
+  exists (blaze: `requirements-strict.txt`, where assess took `requirements-rtd.txt`). A
+  `setup.cfg` that declares no dependencies is no longer offered as a manifest.
 - Help and messages say what each command does. The project's current dependencies are the
   "base"; "baseline" means only the pre-migration capture. JSON keys (`baseline_tier`,
   `baseline_version`, ...) are unchanged.
@@ -380,6 +468,13 @@ All notable changes to pymolt. The format follows
 
 ### Fixed
 
+- Every printed next command names the project dir as you gave it (relative to the current
+  directory when it lies inside it), and capture commands add `--project-dir`: `pymolt scan
+  tests/artifacts/flasgger` suggested `pymolt setup .`, and `status` printed `apply --step ID
+  --record` with no dir. The MCP `status` and `apply` tools follow the same rule.
+- pymolt's own parsing of the project's files no longer prints `SyntaxWarning: invalid escape
+  sequence` on stderr; the compile check still reports each one as a finding.
+
 #### Capture and tracer
 
 - Version probes in Python 2.7–3.5 interpreters run; those interpreters and containers were
@@ -396,7 +491,30 @@ All notable changes to pymolt. The format follows
   seen: a builtin method bound to a dict, list or dependency object kept that receiver alive,
   as did a callable instance, a closure, a `functools.partial`, a decorator's wrapped method
   and, during the incremental settle, a recorded call's frame. Their `__del__` ran late or
-  never and weak references to them stayed alive. The same facts are recorded.
+  never and weak references to them stayed alive. Its per-class caches also held each class the
+  program made at run time (one per request, one per mock) and with it the class's namespace:
+  23 of locust's tests failed under capture on 3.12. The same facts are recorded.
+- The tracer's wrapper replaces only a plain function: a fused Cython function, a coroutine,
+  generator or async-generator function, a callable object (an `lru_cache` wrapper, a
+  `functools.partial`) and a callable that does not bind in a class keep their own object and are
+  listed in `skipped`. Any project that reached scipy's `gaussian_kde` (seaborn's `kdeplot`) could
+  not be captured, and `inspect.iscoroutinefunction` turned False. A wrapped function that C calls
+  with no Python frame above (an atexit callback, a thread's target) no longer raises into the
+  program.
+- Whether code is the project's is decided per namespace, not per module name: a script run as
+  `__main__` inside `python -m pytest` (streamlit's AppTest) recorded none of its calls under
+  `sys.monitoring`.
+- Code a dependency generates with `exec` is no longer taken for the project's. Such code runs
+  as `<string>` in a namespace with no `__file__`, and is now placed by the module its
+  `__name__` names: SQLAlchemy 2.0's mapped-class `__init__` and decorated methods made every
+  call they made inside SQLAlchemy a contact, and an equivalent 1.3 to 2.0 migration failed on
+  71 APPEARED entries. `python -c`, `<stdin>`, the REPL and notebook cells (`__main__`) stay
+  the user's.
+- A refused capture's hint fits the side: a failing post-migration run may be what the migration
+  broke (`--accept-failing` keeps it so verify compares it), a failing replicate may be flaky. A
+  run the test runner stopped before any test ran is named so ("N test file(s) could not be
+  collected", a usage error, no test selected), and no `--accept-failing` is offered for it.
+- After a baseline capture the next step names `pymolt plan`, then the post-migration capture.
 - gevent: the trace runtime stays off a monkeypatched `threading`, stdlib functions are never
   wrapped in place, and gevent-patched stdlib modules are not traced.
 - A forked child writes its own trace file, with its own writer and counters; it used to fill a
@@ -441,6 +559,49 @@ All notable changes to pymolt. The format follows
   baseline's tracer recorded that callable as a compiled call elsewhere: that tracer sees builtin
   C functions, so the baseline's "no raise" is evidence. It was not comparable, as for a Cython
   function the older tracer cannot see (which stays so).
+- Outcomes are matched with their counts, so one changed call in a loop, a call more or fewer,
+  or a raise count that moved fails, for a fact with one outcome too; clock readings keep their
+  counts. In a workload whose values vary between runs a moved count is a review a baseline
+  replicate settles. Scalar floats in a loop pair by sorted order, with no cap on distinct values.
+- A coroutine's marker is uncomparable (needs evidence: its awaited result is not recorded)
+  instead of equal; a value or a record that became a coroutine fails.
+- Call sites are identified across interpreters and library moves: PEP 709 comprehensions,
+  inherited constructors, a relocated decorator closure, a callee that moved and binds its
+  argument differently, calls compiled code made while the project's call ran, and numpy
+  dispatchers (dropped on both sides and counted, never under `--strict`).
+- A src-layout project's records are values; an unpacked library namedtuple compares its fields;
+  a read attribute present on one side only, a private attribute read by name, and a discarded
+  object of another kind are compared; calls on dependency records pair per record; an added
+  `None` default is counted drift (a review under `--strict`), and a decorator's wrapper named
+  differently is drift only when each side's callable is the decorated function, a closure or a
+  class the library made. A project file that does not parse here turns the read-set projections
+  off, stamped, and a deeply nested file no longer crashes verify.
+- An input change on an unedited line with a visible cause is judged by that cause: differing
+  values that are string literals a hand edit changed, and a call through a name a hand edit
+  re-bound, are judged as that edit (a new value is a review, a new raise fails); a parameter
+  bound to `None` on one side only is an added default (drift); an interpreter's own paths
+  (`certifi.where()`) are masked like the project root.
+- A proven keyword rename's inputs are compared in the old call's terms (`shift(periods=1)` →
+  `shift(n=1)`), and only for the rewritten call.
+- A post-migration capture whose recorded code changed since (a hand revert) is stale:
+  INCONCLUSIVE, needs evidence, naming the files (`stale_sources`) and the capture to take again.
+  It used to PASS, and `status` showed the saved PASS next to a capture it marked stale.
+- A recording named with `--baseline` or `--post-migration` needs its event-loss counters, from
+  its `<recording>.meta.json` (the one `pymolt capture` writes, or the watcher's, several gathered
+  under `processes`): two hand-written traces gave PASS. A `--probe-python` replay that changed
+  FAILs with one recording too, since it compares with the recording it replays.
+- With no capture at all, the verdict has one reason, "no captures", settled by capturing the
+  baseline, then post-migration.
+- Captures taken in different checkouts of the project compare: each capture's source snapshot
+  names the root it was taken in, and call sites are made relative to it. A failing entry from a
+  capture without a source snapshot taken elsewhere is uncomparable ("site-unplaced"), never a
+  FAIL.
+- A relative path in a container capture's executed record no longer stops the `/work/...` paths
+  mapping: zipline and locust read coverage 0%.
+- Observed call sites are printed relative to the project, as in the other tables.
+- A trace without call sites gets one granularity note (symbol), not a second one about files.
+- A review that no baseline replicate can settle (two recordings named on the command line) no
+  longer says to capture a replicate: it says to record the before side twice and compare.
 
 #### Plan and apply
 
@@ -470,6 +631,37 @@ All notable changes to pymolt. The format follows
 - `status` after `apply` and a new `plan` describes the new plan. The plan phase said "applied
   by migration run" for the earlier plan; it now shows the saved plan and names the earlier
   run, and the next command applies the new plan's steps.
+- `plan` reads setup's manifest relative to the project, not the working directory: run from
+  elsewhere (as agents and the MCP server do) it failed, or read another file with the same name.
+- A risk is rated by the name its site writes. A call that resolves through its receiver to a
+  method that still exists (`df.groupby` after pandas moved it off `NDFrame`, `pd.Timedelta`,
+  `.str.upper()`) is no longer `certain: removed` with a step that loosened verify there; the
+  delta probes the receiver's spelling, and REMOVED and MOVED facts carry `vanished_at`. A call
+  whose own spelling is unknown is `low`, unverified, with a check to run.
+- A Python-version risk is rated only for a call its statement makes: calls made by compiled code,
+  a resumed generator or a private implementation class (uvloop's `ensure_future(loop=...)` under
+  `asyncio.sleep(0)`) no longer make a site `certain`, and `self` or `cls` is never a missing
+  required parameter.
+- A curated rule (`DataFrame.append` → `pd.concat`) is dropped only when the delta probed one of
+  its symbols and found it still there, not when the delta never probed it.
+- A compile finding is planned once, as its compile step, not also as a risk step.
+- The `PLAN.md` header says how many dependency deltas are inconclusive, which packages, the
+  reason and what settles it (such as starting a stopped container and planning again).
+- The apply panel counts what this apply wrote and names each manifest pin it applied; it printed
+  the run's totals.
+- `status` reports the self-check per step in effect (compile on the target and the base, smoke
+  import), not the latest invocation's.
+- `status` and `apply` suggest the post-migration capture with the baseline's workload, mode and
+  options, run by the target environment's interpreter; a step's brief names the record commands
+  or `setup DIR --target-env PATH` instead of a bare capture that exits 2.
+- A refusal because of who asks or how (the `--agent` limits, the approval gate, options that do
+  not go together) is no longer printed as a plan conflict with a re-plan hint; an agent's refusal
+  says a person runs the same command on a terminal. Exit codes are unchanged (2).
+- A successor the old version's warning names is checked in the new version, so it is named when
+  it exists there; a candidate the new version was not asked about is listed as "was not probed
+  in the new version", where the plan said it "does not exist in the new version".
+- `plan --online` reads a module from an intermediate release's wheel with a cap on what it
+  inflates (4 MB) and on the sizes it accepts; a wheel past them is skipped with a note.
 
 #### Assess, scan and setup
 
@@ -478,6 +670,28 @@ All notable changes to pymolt. The format follows
 - `assess` keeps a base Python taken from setup's guess marked as assumed.
 - `status` recognises a migration made by hand; it called the post-migration capture stale.
 - `succession` says what its knowledge covers instead of "no known path".
+- A base version nothing observed is `unknown` (`baseline_version: "unknown"`, status
+  `base-unknown`), never a `>=` floor or `0.0.0`: assess showed `flask 0.10 -> 3.1.3`, the delta
+  engine fetched flask 0.10 as the old side, and `--risk` claimed CVEs cleared. Only an exact pin
+  is a version; a lock, the base interpreter or container, or a baseline capture settles the rest.
+- When the project's own build fails under the target Python (theano's `versioneer.py`), assess
+  resolves the dependencies it reads from the file without running it, stamped
+  `target_basis: static-read`; otherwise it says the build is the project's and hints at a fix
+  (`target_hint`). After a failed target resolve the CLI ends on the way forward.
+- A base manifest that does not resolve is reported with uv's first error line, the culprits and a
+  hint, in the CLI and over MCP (exit code 3).
+- Releases compare by PEP 440 (`3.2` is `3.2.0`), and a base dependency whose marker is false on
+  the target Python is `excluded`, not `removed`.
+- pip-compile output: inline comments are dropped from the requirements, `# via` provenance marks
+  transitive entries, and a declared-only base is stamped with what its declarations pin.
+- `assess --risk` never rates the base pins as the target: with no target graph it rates nothing
+  and says why (`not_rated`).
+- Texts: the target manifest's header names `assess`; the legacy hint names `--base-python`; a
+  Python read from the project is "(project config)"; scan warns once per `git://` package; a
+  failed throwaway-env install reads as one line; the BRONZE example comes from the project's own
+  requirements.
+- `scan` says "not ported to Python 3" only for an unguarded Python-2 import; one behind a
+  fallback guard is noted as a fallback.
 
 #### State files
 
@@ -498,10 +712,16 @@ All notable changes to pymolt. The format follows
   update of `contract_state.json`, `setup`, the saved plan and verdict, the assess overrides
   and the post-migration capture a `rollback` sets aside take turns under one lock. Two
   captures of different slots at once used to drop one of them.
+- A plan, a receipt and its frozen plans name the baseline capture and
+  `.pymolt/migrations/<run>/plan.json` by their path in the project, so a copied project (another
+  worktree, a CI workspace) keeps them: apply refused "the baseline capture was replaced", and
+  verify lost the plan's predictions. An absolute path an earlier 0.2 build stored is read through
+  this checkout's `.pymolt/`.
 
 ## [0.1.0] - 2026-09-26
 
 First public release on PyPI.
 
-[Unreleased]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/iamzeelex/pymolt/compare/v0.2.0rc1...HEAD
+[0.2.0rc1]: https://github.com/iamzeelex/pymolt/compare/v0.1.0...v0.2.0rc1
 [0.1.0]: https://github.com/iamzeelex/pymolt/releases/tag/v0.1.0

@@ -107,13 +107,25 @@ def test_bundle_maps_facts_to_rules_patterns_and_impacts(tmp_path, fake_deltas):
 
 def test_without_rules_a_move_is_a_plain_pattern(tmp_path, fake_deltas):
     report = _report()
-    report.facts = [f for f in report.facts if f.kind != "REMOVED"]  # no append: no rule
+    # The delta probed append and found it still there: no rule.
+    report.facts = [f for f in report.facts if f.kind != "REMOVED"] + [DeltaFact(
+        symbol="pandas.core.series.Series.append", kind="UNCHANGED")]
     fake_deltas["report"] = report
     bundle = LocalDeltaProvider(tmp_path).fetch_bundle([PANDAS])["pandas"]
     assert bundle.rules == []
     (pattern,) = bundle.patterns
     assert (pattern.kind, pattern.old_qualname, pattern.new_qualname, pattern.confidence) == (
         "rewrite-import", "pandas.io.json.json_normalize", "pandas.json_normalize", "high")
+
+
+def test_a_complete_delta_silent_about_the_rules_symbols_keeps_the_rule(tmp_path, fake_deltas):
+    """zipline (legacy QA P3): ``df = df.append(...)`` on a local in a test the baseline never
+    ran. The delta never probed ``DataFrame.append``; its silence rules nothing out."""
+    report = _report()
+    report.facts = [f for f in report.facts if f.kind != "REMOVED"]
+    fake_deltas["report"] = report
+    bundle = LocalDeltaProvider(tmp_path).fetch_bundle([PANDAS])["pandas"]
+    assert "$S.append($OTHER, ignore_index=$IGN)" in [r.match for r in bundle.rules]
 
 
 def test_inconclusive_delta_is_an_impact_never_silence(tmp_path, fake_deltas):
@@ -173,3 +185,27 @@ def test_plan_then_apply_writes_the_expected_rewrite(tmp_path, fake_deltas, monk
     assert "return pd.concat([s1, s2], ignore_index=True)" in after
     assert "from pandas import json_normalize" in after
     assert "xs.append(1)" in after  # list.append is not a pandas call: untouched
+
+
+def test_the_gate_takes_a_wrapper_record_only_from_the_members_own_wrapper(tmp_path):
+    """A polars call recorded under ``deprecate_renamed_parameter``'s generic wrapper lends its
+    receiver to no other call on the line (pandas ``pdf.groupby``)."""
+    from types import SimpleNamespace
+
+    from pymolt.delta.provider import BaselineSites
+
+    (tmp_path / "app").mkdir()
+    src = "def f(pdf, pl_df):\n    return pdf.groupby('k').sum(), pl_df.shift(periods=1)\n"
+    (tmp_path / "app" / "x.py").write_text(src)
+    wrapper = ("polars.utils.deprecation.deprecate_renamed_parameter.<locals>.decorate."
+               "<locals>.wrapper")
+    sites = BaselineSites(tmp_path)
+    sites.facts = [SimpleNamespace(
+        symbol=wrapper, text=src.splitlines()[1], file="app/x.py", line=2, lines=[2],
+        input={"bound": {}, "varargs": {"__tuple__": [
+            {"__object__": "polars.dataframe.frame.DataFrame"}]}})]
+    old = {"polars.dataframe.frame.DataFrame.groupby", "polars.DataFrame.groupby"}
+    groupby_wrapper = ["polars.utils.deprecation.deprecate_function.<locals>.decorate."
+                       "<locals>.wrapper"]
+    assert sites.gate(old, "groupby", "group_by", (), groupby_wrapper)[0] == []
+    assert sites.gate(old, "shift", "shift", (), [wrapper])[0]       # its own wrapper: a site

@@ -6,17 +6,32 @@ engine computed for the plan's migrations (``pymolt.delta/1``: REMOVED / MOVED /
 DEFAULT / DEPRECATED per symbol and parameter) and rates every call site:
 
 =========  ==============================================================================
-certain    the site's symbol is REMOVED (MOVED is its own, milder kind)
+certain    a name the site writes is REMOVED, or MOVED so that the name itself is gone: a
+           name on its statement (the static contact map; its function's, for a call that
+           lands elsewhere, like a generator's body), or the attribute it calls on its
+           receiver, whose class is still there in the new version
 high       a parameter the site left at its default has a DEFAULT change between concrete
            values, or one resolved at call time (None / a sentinel) that the site's own
            baseline warning names; or the site emitted a deprecation-family warning
 medium     a SIGNATURE change touching a parameter the site passes (or a new required one),
            or a DEFAULT change to or from None / a sentinel that no warning at the site names
            (a call-time default: the behaviour may well not change)
-low        DEPRECATED in the old version without a recorded warning at the site, MOVED, a
-           class-level SIGNATURE change, or any change on a symbol reached only statically
-           (BLIND: the baseline never ran it)
+low        DEPRECATED in the old version without a recorded warning at the site, a MOVED
+           name the site does not write, a class-level SIGNATURE change, any change on a
+           symbol reached only statically (BLIND: the baseline never ran it), or an
+           ``unverified`` existence fact (below)
 =========  ==============================================================================
+
+A dependency site is rated by what it writes, not by where the old version defined the
+callee: the baseline records ``df.groupby(...)`` as ``NDFrame.groupby``, and pandas moving
+``groupby`` off ``NDFrame`` breaks nothing while ``DataFrame.groupby`` resolves. A REMOVED or
+MOVED fact (or a deprecation that only accessing the name warns about) is about a name; it
+decides a site only when the site writes that name. About another name (the internal one the
+old version defined the call under), it says nothing when the site's own spelling was probed
+and still resolves, and otherwise gives a LOW risk marked ``unverified``: what is unknown, and
+the spelling to check (``spelling``). Object facts (signature, default, deprecation of the
+object) apply through any spelling of the object, but only those naming the site's own
+spelling once that was probed.
 
 One risk per (site, symbol) at its strongest tier; ``fact`` is the delta fact that decided
 it (None when the warning alone did), ``facts`` every delta fact that matched, ``evidence``
@@ -45,6 +60,7 @@ and says so (``status``/``notes``); a trace that predates warning capture is not
 
 from __future__ import annotations
 
+import ast
 import difflib
 import hashlib
 import logging
@@ -133,6 +149,14 @@ class PredictedRisk(BaseModel):
     # The plan step that addresses the risk (a pymolt step) or leaves it to an agent or a
     # person (a manual step); None outside a plan, or in a plan made before steps.
     step_id: str | None = None
+    # The name this site writes for the call (a name on its statement, or
+    # ``<receiver's class>.<attribute>``), when known: the one a REMOVED / MOVED fact decided
+    # on, or for an ``unverified`` risk the one to check in the target environment.
+    spelling: str | None = None
+    # The deciding REMOVED / MOVED fact is about a name the site does not write (the one the old
+    # version defined the call under), and the site's own spelling was not found resolving:
+    # whether the call breaks is unknown. Never above LOW; its step claims no successor.
+    unverified: bool = False
 
 
 class ListedSite(BaseModel):
@@ -433,17 +457,22 @@ def _leaf(symbol: str) -> str:
 
 
 def _fix_for(site: RiskSite, symbol: str,
-             rewrites: Mapping[str, list[_Block]]) -> _Block | None:
+             rewrites: Mapping[str, list[_Block]], param: str | None = None) -> _Block | None:
     """The planned change that rewrites this call: its line changes and the symbol's name is
-    no longer on it. A static site (no line) is fixed when its function's text loses it."""
+    no longer on it. A static site (no line) is fixed when its function's text loses it. A risk
+    about a parameter is fixed when the keyword it names leaves the line (a keyword rename)."""
     blocks = rewrites.get(site.file) or ()
     leaf = _leaf(symbol)
+    keyword = re.compile(rf"(?<![\w.]){re.escape(param)}\s*=(?!=)") if param else None
     for block in blocks:
         if site.line is not None and not (block.start <= site.line <= block.end):
             continue
         if site.line is None and leaf not in block.old_text:
             continue
         if leaf not in block.new_text:
+            return block
+        if keyword is not None and keyword.search(block.old_text) and \
+                not keyword.search(block.new_text):
             return block
     return None
 
@@ -465,10 +494,16 @@ class _SiteGroup:
         # The site names the symbol by its spelling (python sites): a MOVED fact about that
         # spelling means the spelling itself vanished (D12).
         self.spelling_site = False
+        # The classes of the receivers the calls were made on (``type(self)`` / ``cls``).
+        self.receivers: set[str] = set()
 
     def add(self, fact: Fact) -> None:
         self.calls += fact.count
         self.passed |= _passed_params(fact.input)
+        touched = _touched()
+        recv = touched._receiver_type(fact) if touched is not None else None
+        if recv is not None:
+            self.receivers.add(recv)
         if fact.defaulted is not None:
             self.defaulted_known = True
             for names in fact.defaulted:
@@ -493,6 +528,21 @@ class _SiteGroup:
 
     def site(self) -> RiskSite:
         return RiskSite(file=self.file, func=self.func, line=self.line, text=self.text)
+
+
+_TOUCHED: list[Any] = []
+
+
+def _touched():
+    """``pymolt.delta.touched`` (the receiver readers), or None when the delta engine is not
+    importable: the prediction then reads sites from the contact map alone."""
+    if not _TOUCHED:
+        try:
+            from pymolt.delta import touched
+        except ImportError:
+            return None
+        _TOUCHED.append(touched)
+    return _TOUCHED[0]
 
 
 def _passed_params(inputs: Any) -> set[str]:
@@ -529,27 +579,46 @@ def _as_dict(report: Any) -> dict[str, Any] | None:
     return None
 
 
+def _names(fact: Mapping[str, Any]) -> set[str]:
+    return {n for n in [fact.get("symbol"), *(fact.get("aliases") or ())]
+            if isinstance(n, str) and n}
+
+
 class _DeltaIndex:
-    """Every non-UNCHANGED delta fact by each of its spellings."""
+    """Every non-UNCHANGED delta fact by each of its spellings, and which spellings the delta
+    compared at all (``probed``) and found gone (``gone``: REMOVED / MOVED)."""
 
     def __init__(self, reports: Iterable[Mapping[str, Any]]):
         self.by_name: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+        self.probed: set[str] = set()
+        self.gone: set[str] = set()
         for rep in reports:
             package = str(rep.get("package") or "")
             for fact in rep.get("facts") or ():
-                if not isinstance(fact, Mapping) or fact.get("kind") in (None, "UNCHANGED"):
+                if not isinstance(fact, Mapping) or fact.get("kind") is None:
+                    continue
+                names = _names(fact)
+                self.probed |= names
+                if fact.get("kind") in ("REMOVED", "MOVED"):
+                    self.gone |= names
+                if fact.get("kind") == "UNCHANGED":
                     continue
                 fact = dict(fact)
-                for name in [fact.get("symbol"), *(fact.get("aliases") or ())]:
-                    if isinstance(name, str) and name:
-                        self.by_name[name].append((package, fact))
+                for name in names:
+                    self.by_name[name].append((package, fact))
 
     def __bool__(self) -> bool:
         return bool(self.by_name)
 
+    def resolves(self, name: str) -> bool:
+        """The delta compared ``name`` and it still resolves in the new version."""
+        return name in self.probed and name not in self.gone
+
     def match(self, symbol: str) -> list[tuple[str, dict, str]]:
         """``(package, fact, how)`` for every fact about ``symbol``: the symbol itself, the
-        class of a constructor, or an enclosing object (class, module) that was removed."""
+        class of a constructor, or an enclosing object (class, module) that was removed. A
+        name nested in a function (``f.<locals>.g``) has no enclosing object: the function
+        that made it going away says nothing about the name the site reached it by."""
         out: list[tuple[str, dict, str]] = []
         seen: set[int] = set()
 
@@ -566,9 +635,202 @@ class _DeltaIndex:
         parts = symbol.split(".")
         if len(parts) > 2 and parts[-1] in ("__init__", "__new__"):
             add(self.by_name.get(".".join(parts[:-1]), []), "constructor", False)
-        for i in range(len(parts) - 1, 1, -1):
-            add(self.by_name.get(".".join(parts[:i]), []), "enclosing", True)
+        if "<" not in symbol:
+            for i in range(len(parts) - 1, 1, -1):
+                add(self.by_name.get(".".join(parts[:i]), []), "enclosing", True)
         return out
+
+    def about(self, names: Iterable[str]) -> list[tuple[str, dict, str]]:
+        """``(package, fact, "spelling")`` for every fact naming one of ``names``."""
+        out: list[tuple[str, dict, str]] = []
+        seen: set[int] = set()
+        for name in names:
+            for package, fact in self.by_name.get(name, ()):
+                if id(fact) not in seen:
+                    seen.add(id(fact))
+                    out.append((package, fact, "spelling"))
+        return out
+
+
+# ── what a site writes ────────────────────────────────────────────────────────────────────
+
+_CTOR = ("__init__", "__new__")
+_ACCESS_TAGS = ("getattr:", "access-warning:")
+
+
+def _about_a_name(fact: Mapping[str, Any]) -> bool:
+    """A fact about a name rather than the object it names: REMOVED, MOVED, or a deprecation
+    that only accessing that name warns about (a module ``__getattr__``, an access warning,
+    ``numpy.core`` -> ``numpy._core``)."""
+    kind = fact.get("kind")
+    if kind in ("REMOVED", "MOVED"):
+        return True
+    if kind != "DEPRECATED":
+        return False
+    tags = [str(e).removeprefix("deprecated-in-new:") for e in fact.get("evidence") or ()
+            if not str(e).startswith("warning:")]
+    return bool(tags) and all(t.startswith(_ACCESS_TAGS) for t in tags)
+
+
+def _header_names(node: ast.AST) -> set[str]:
+    """Identifiers a statement spells: names, attributes, imported names. A compound
+    statement counts by its header only (its body holds statements of their own)."""
+    if isinstance(node, ast.For | ast.AsyncFor):
+        parts: list[Any] = [node.target, node.iter]
+    elif isinstance(node, ast.While | ast.If):
+        parts = [node.test]
+    elif isinstance(node, ast.With | ast.AsyncWith):
+        parts = list(node.items)
+    elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        parts = [*node.decorator_list, node.args, *( [node.returns] if node.returns else [])]
+    elif isinstance(node, ast.ClassDef):
+        parts = [*node.decorator_list, *node.bases, *node.keywords]
+    elif isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
+        parts = []
+    elif isinstance(node, ast.Match):
+        parts = [node.subject]
+    else:
+        parts = [node]
+    out: set[str] = set()
+    for part in parts:
+        for n in ast.walk(part):
+            if isinstance(n, ast.Attribute):
+                out.add(n.attr)
+            elif isinstance(n, ast.Name):
+                out.add(n.id)
+            elif isinstance(n, ast.alias):
+                out.add((n.asname or n.name).split(".")[-1])
+                out.add(n.name.split(".")[-1])
+    return out
+
+
+class _Statements:
+    """The project's files, each parsed once: what the statement at a line spells."""
+
+    def __init__(self, root: str | Path | None):
+        self.root = Path(root) if root is not None else None
+        self._trees: dict[str, list[ast.stmt] | None] = {}
+
+    def _stmts(self, file: str) -> list[ast.stmt] | None:
+        if file not in self._trees:
+            found = None
+            if self.root is not None and file and not Path(file).is_absolute():
+                try:
+                    tree = ast.parse((self.root / file).read_text(encoding="utf-8"))
+                    found = [n for n in ast.walk(tree) if isinstance(n, ast.stmt)]
+                except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+                    found = None
+            self._trees[file] = found
+        return self._trees[file]
+
+    def names(self, file: str, line: int | None, text: str | None) -> set[str] | None:
+        """Identifiers the statement at ``line`` spells; from the site's line text when the
+        file cannot be read; None when neither is known."""
+        stmts = self._stmts(file) if line is not None else None
+        if stmts:
+            covering = [n for n in stmts
+                        if n.lineno <= line <= (n.end_lineno or n.lineno)]  # type: ignore[operator]
+            if covering:
+                node = max(covering, key=lambda n: (n.lineno, -(n.end_lineno or n.lineno)))
+                return _header_names(node)
+        if text is None:
+            return None
+        return set(re.findall(r"[A-Za-z_]\w*", text))
+
+
+class _StaticIndex:
+    """The static contacts by file, with the statement lines each one is on, and by the
+    function that makes them."""
+
+    def __init__(self, contacts: Iterable[Any], root: str | Path | None):
+        self.by_file: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+        self.by_func: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for contact in contacts:
+            target = _attr(contact, "target")
+            if not isinstance(target, str) or not target:
+                continue
+            file = _relative(_attr(contact, "file"), root)
+            caller = _attr(contact, "caller")
+            if isinstance(caller, str) and caller:
+                self.by_func[(file, caller.rsplit(".", 1)[-1])].add(target)
+            spans = _attr(contact, "spans") or ()
+            placed = False
+            for span in spans:
+                if isinstance(span, list | tuple) and len(span) == 3:
+                    self.by_file[file].append((int(span[1]), int(span[2]), target))
+                    placed = True
+            line = _attr(contact, "line")
+            if not placed and isinstance(line, int):
+                self.by_file[file].append((line, line, target))
+
+    def on(self, file: str, line: int | None) -> set[str]:
+        """The dependency names the statement at ``file:line`` writes."""
+        if line is None:
+            return set()
+        return {t for first, last, t in self.by_file.get(file, ()) if first <= line <= last}
+
+    def in_function(self, file: str, func: str) -> set[str]:
+        """The dependency names a function writes, on any of its statements."""
+        return set(self.by_func.get((file, func), ()))
+
+
+class _SiteNames:
+    """What one baseline call site writes for its call.
+
+    ``static``: the dependency names its statement writes (the contact map); ``own``: those
+    that are this call (the same last name, or the class for a constructor) and the call's
+    receiver spellings, ``<class>.<attribute>`` under the receiver's class and each public
+    candidate of it; ``spelled``: the statement names the attribute the call was made by."""
+
+    def __init__(self, group: _SiteGroup, statements: _Statements, statics: _StaticIndex,
+                 receiver_of) -> None:
+        touched = _touched()
+        symbol = group.symbol
+        leaf = symbol.rsplit(".", 1)[-1]
+        classes = sorted(c for c in (receiver_of(r) for r in group.receivers) if c)
+        self.static = statics.on(group.file, group.line)
+        call = leaf
+        if leaf in _CTOR:
+            call = (classes[0] if classes else symbol.rsplit(".", 2)[0]).rsplit(".", 1)[-1]
+        self.receiver: list[str] = []
+        if "<" not in symbol and touched is not None:
+            for cls in classes:
+                if "<" not in cls:
+                    self.receiver += [f"{c}.{leaf}" for c in touched.public_candidates(cls)]
+        self.own = [t for t in sorted(self.static) if t.rsplit(".", 1)[-1] == call] \
+            + self.receiver
+        named = statements.names(group.file, group.line, group.text) or set()
+        self.spelled = call in named or any(t.rsplit(".", 1)[-1] == call for t in self.static)
+        # A call recorded at a statement that does not name it and has no receiver: a
+        # generator's body runs where it is consumed (``max(parts)`` for ``parts =
+        # nx.connected_component_subgraphs(G)``). The names its function writes elsewhere
+        # are the ones that made the call.
+        self.function: set[str] = set()
+        if not self.spelled and not classes:
+            self.function = {t for t in statics.in_function(group.file, group.func)
+                             if t.rsplit(".", 1)[-1] == call}
+        # A protocol method (``__setitem__``, ``__iter__``, ``__array_wrap__``): the statement
+        # makes the call without naming it.
+        self.protocol = leaf.startswith("__") and leaf.endswith("__") and leaf not in _CTOR
+
+
+def _written(fact: Mapping[str, Any], site: _SiteNames) -> str | None:
+    """The name of ``fact`` this site writes: one on its statement (or a module or class a
+    name on it is read through: ``Cls`` of ``Cls.run``), or a receiver spelling of an attribute
+    the statement names whose class still resolves in the new version (``vanished_at`` says
+    the name alone went). None: the fact is about another name."""
+    names = _names(fact)
+    hit = sorted(n for n in names
+                 if any(t == n or t.startswith(n + ".") for t in site.static | site.function))
+    if hit:
+        return hit[0]
+    if not site.spelled:
+        return None
+    vanished = fact.get("vanished_at") if isinstance(fact.get("vanished_at"), Mapping) else {}
+    for name in site.receiver:
+        if name in names and vanished.get(name) == name:
+            return name
+    return None
 
 
 def _fact_label(package: str, fact: Mapping[str, Any]) -> str:
@@ -629,11 +891,22 @@ def _rate(group: _SiteGroup, package: str, fact: dict, how: str
             return RiskTier.MEDIUM, f"the signature changes for {param}, which this site " \
                 "passes", evidence
         if fact.get("old") in _ABSENT and fact.get("new") not in _ABSENT:
+            if param in _RECEIVERS:
+                # ``update(*args, **kwds)`` -> ``update(self, other=(), /, **kwds)``: a bound
+                # method call passes its receiver; ``self`` is never a parameter it misses.
+                return None
             evidence.append(f"baseline: this site does not pass the new parameter {param}")
             return RiskTier.MEDIUM, f"a new required parameter {param} that this site does " \
                 "not pass", evidence
         return None
     if kind == "DEPRECATED":
+        if param:
+            # A deprecated parameter concerns only the sites that pass it.
+            if param not in group.passed:
+                return None
+            evidence.append(f"baseline: this site passes {param}")
+            return (RiskTier.LOW, f"the parameter {param} is deprecated in the new version"
+                    + (f"; use {fact['successor']}" if fact.get("successor") else ""), evidence)
         if fact.get("deprecated_in_old"):
             return (RiskTier.LOW, "deprecated in the old version, no warning recorded at this "
                     "site", evidence)
@@ -720,16 +993,40 @@ def predict_risks(
         for k, n in warnings_acc(sw.warnings).items():
             group.warnings[k] = group.warnings.get(k, 0) + n
 
+    contacts = list(static_contacts) if static_contacts is not None else None
+    statements = _Statements(root)
+    statics = _StaticIndex(contacts or (), root)
+    receiver_of = _receiver_resolver(root)
     matched_facts: set[int] = set()
     for group in groups.values():
-        best: tuple[RiskTier, str, dict | None, str | None] | None = None
+        best: tuple[RiskTier, str, dict | None, str | None, str | None] | None = None
         evidence: list[str] = []
         facts: list[dict] = []
         if group.warnings:
             evidence.extend(_warning_texts(group.warnings))
             (cat, msg), _n = sorted(group.warnings.items())[0]
-            best = (RiskTier.HIGH, f"it emitted {cat} in the baseline: {msg}", None, None)
-        for package, fact, how in index.match(group.symbol) if index else ():
+            best = (RiskTier.HIGH, f"it emitted {cat} in the baseline: {msg}", None, None, None)
+        site = _SiteNames(group, statements, statics, receiver_of) if index else None
+        # The site's own spellings the delta found still resolving: a change on another
+        # spelling of the same old object does not reach the site. (A spelling of its own
+        # that is gone exhibits nothing, so then the object's facts apply as they are.)
+        own_probed = {n for n in site.own if index.resolves(n)} if site is not None else set()
+        internal: list[tuple[str, dict]] = []
+        found = index.match(group.symbol) if index else []
+        if site is not None:
+            known = {id(f) for _p, f, _h in found}
+            found += [item for item in index.about(site.own) if id(item[1]) not in known]
+        for package, fact, how in found:
+            written = None
+            if _about_a_name(fact):
+                written = _written(fact, site) if site is not None else None
+                if written is None:
+                    # Not this site's name: the statements that write it (if any) are rated
+                    # from the contact map (``_add_static_risks``).
+                    internal.append((package, fact))
+                    continue
+            elif own_probed and not _names(fact) & own_probed:
+                continue            # a change on another spelling of the same old object
             matched_facts.add(id(fact))
             rated = _rate(group, package, fact, how)
             if rated is None:
@@ -739,32 +1036,64 @@ def predict_risks(
                     and group.warnings):
                 tier = RiskTier.HIGH            # the warning at this site confirms it
                 reason = "deprecated in the old version, and it warned at this site"
+            if fact.get("kind") == "MOVED" and written is not None:
+                # The site writes the very spelling that vanished: the call fails as written
+                # (the same object lives on elsewhere, so the fix is a rename).
+                tier = RiskTier.CERTAIN
+                reason = f"the spelling {written} no longer exists" + (
+                    f"; the same object is at {fact['successor']}" if fact.get("successor")
+                    else "")
+            if written is not None and written != group.symbol:
+                ev = [*ev, f"site: this statement writes {written}"]
             facts.append(fact)
             evidence.extend(e for e in ev if e not in evidence)
             if best is None or TIER_ORDER[tier] < TIER_ORDER[best[0]] or (
                     best[2] is None and TIER_ORDER[tier] == TIER_ORDER[best[0]]):
-                best = (tier, reason, fact, package)
+                best = (tier, reason, fact, package, written)
+        unverified = False
+        # A deprecation of another name (its access warns) is no question about this site.
+        internal = [(p, f) for p, f in internal if f.get("kind") in ("REMOVED", "MOVED")]
+        if internal and site is not None:
+            resolving = [n for n in site.own if index.resolves(n)]
+            for package, fact in internal:
+                facts.append(fact)
+                if resolving:
+                    evidence.append(f"delta: {fact.get('symbol')} is gone in the new version, "
+                                    f"but {resolving[0]}, what this site calls, still resolves")
+            # Only a call the statement makes: one it names, or one made on a receiver it
+            # handles (a protocol method, ``dict(row)`` calling ``row.keys``). A function the
+            # statement neither names nor reaches through a receiver ran under it from compiled
+            # code or a resumed generator (``mv.any()`` -> numpy's ``_methods._any``).
+            if not resolving and (site.spelled or site.protocol or site.receiver):
+                package, fact = internal[0]
+                reason, check = _unverified_reason(group, fact, site, index)
+                evidence.extend(e for e in [_fact_label(package, fact), reason]
+                                if e not in evidence)
+                if best is None:
+                    best = (RiskTier.LOW, reason, fact, package, check)
+                    unverified = True
         if best is None:
             continue
-        tier, reason, fact, package = best
+        tier, reason, fact, package, spelling = best
         if fact is not None and group.warnings:
             reason += "; it warned in the baseline"
-        site = group.site()
         report.risks.append(PredictedRisk(
             id="", tier=tier, symbol=group.symbol,
-            package=package or (_package_of(facts) if facts else None), site=site,
+            package=package or (_package_of(facts) if facts else None), site=group.site(),
             basis="trace", reason=reason, fact=fact, facts=facts, evidence=evidence,
             warnings=[CallWarning(category=c, message=m, count=n)
                       for (c, m), n in sorted(group.warnings.items())],
-            calls=group.calls))
+            calls=group.calls, spelling=spelling, unverified=unverified))
 
-    if index and static_contacts is not None:
-        _add_static_risks(report, index, matched_facts, static_contacts, root)
+    if index and contacts is not None:
+        _add_static_risks(report, index, matched_facts, contacts, root)
     assign_risk_ids(report.risks)
 
     rebinds = planned_rebinds(changes or (), rewrites) if rewrites else {}
     for risk in report.risks:
-        block = _fix_for(risk.site, risk.symbol, rewrites) or _rebind_fix_for(risk, rebinds)
+        param = (risk.fact or {}).get("param") if isinstance(risk.fact, Mapping) else None
+        block = _fix_for(risk.site, risk.symbol, rewrites, param) or \
+            _rebind_fix_for(risk, rebinds)
         if block is not None:
             risk.fixed_by_plan = True
             risk.fixed_by = list(block.recipes)
@@ -785,6 +1114,68 @@ def predict_risks(
             "recorded warning may still have warned" if baseline.warnings_capture is None
             else f"baseline warning capture: {baseline.warnings_capture}")
     return report
+
+
+def _receiver_resolver(root: str | Path | None):
+    """``class -> the dependency class it stands for``: itself, or for a project class its
+    first dependency base (``touched.dependency_bases``; None without one). The project's
+    classes are parsed once, and only when a receiver's package is in the project."""
+    touched = _touched()
+    cache: dict[str, str | None] = {}
+    classes: dict[str, Any] | None = None
+
+    here = Path(root) if root is not None else None
+
+    def in_project(name: str) -> bool:
+        top = name.split(".", 1)[0]
+        return here is not None and ((here / top).is_dir() or (here / f"{top}.py").is_file())
+
+    def resolve(name: str) -> str | None:
+        nonlocal classes
+        if name in cache:
+            return cache[name]
+        out: str | None = name
+        if touched is not None and in_project(name):
+            if classes is None:
+                try:
+                    classes, _ = touched.project_classes(here)
+                except OSError:
+                    classes = {}
+            # A project name: its first dependency base, else no dependency class at all
+            # (``Base = declarative_base()`` is a project name, not a class it defines).
+            bases = [b for b in (touched.dependency_bases(name, classes)
+                                 if name in classes else []) if not in_project(b)]
+            out = bases[0] if bases else None
+        cache[name] = out
+        return out
+
+    return resolve
+
+
+def _unverified_reason(group: _SiteGroup, fact: Mapping[str, Any], site: _SiteNames,
+                       index: _DeltaIndex) -> tuple[str, str | None]:
+    """``(reason, spelling to check)`` of a site whose only existence fact is about a name it
+    does not write. The spelling is given only where its resolving settles the question: the
+    attribute under the receiver's recorded class, which the old version resolved, when the
+    delta did not probe it. A protocol call, or a class gone too, settles nothing that way."""
+    gone = str(fact.get("symbol") or group.symbol)
+    leaf = group.symbol.rsplit(".", 1)[-1]
+    probed_gone = [n for n in site.own if n in index.gone]
+    if probed_gone and not site.spelled:
+        return (f"{probed_gone[0]} is gone in the new version, but the statement does not call "
+                f"`{leaf}` by name (Python or compiled code makes this call), so whether the "
+                "statement breaks is unknown", None)
+    if probed_gone:
+        return (f"{probed_gone[0]} is gone in the new version together with its class; the "
+                "receiver may be of another class there, so whether the call still resolves "
+                "is unknown", None)
+    what = f"the name the old version defined it under ({gone}) is gone in the new version"
+    check = site.receiver[0] if site.receiver else None
+    if check is not None and not site.protocol:
+        return (f"{what}; {check}, the name this site calls, was not probed, so whether the "
+                "call still resolves is unknown", check)
+    return (f"{what}; the name this site calls it by was not probed, so whether the call "
+            "still resolves is unknown", None)
 
 
 def _package_of(facts: list[dict]) -> str | None:
@@ -1254,11 +1645,16 @@ def python_runtime_facts(baseline: FactSet | Iterable[Fact], root: str | Path | 
     return out
 
 
-def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
+def _aliased_python_fact(index: dict[str, dict], group: Any,
+                         recorded: set[tuple] | None = None) -> dict | None:
     """A python fact for a spelling the site wrote but the runtime did not record
     (``self.assertEquals(...)`` is recorded as ``unittest.case.TestCase.assertEqual``): the
-    receiver's spelling plus an attribute the statement names, among the facts that are not
-    UNCHANGED."""
+    receiver's spelling plus an attribute the statement names. Only a fact about the name
+    (REMOVED, MOVED, DEPRECATED): the recorded call's arguments are another callee's, so they
+    say nothing about the parameters of the spelling the site wrote (uvloop's compiled
+    ``ensure_future(coro, loop=self)`` recorded at ``await asyncio.sleep(0)`` never passed
+    ``loop`` to ``sleep``). ``recorded``: the ``(symbol, file, line)`` of every call recorded
+    at a site; a spelling recorded there itself is another call, not an alias."""
     parent, _, leaf = group.symbol.rpartition(".")
     if not parent or not group.text:
         return None
@@ -1268,8 +1664,11 @@ def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
         if attr == leaf:
             continue
         for p in parents:
-            fact = index.get(f"{p}.{attr}")
-            if fact is not None and fact.get("kind") not in (None, "UNCHANGED"):
+            spelling = f"{p}.{attr}"
+            if recorded is not None and (spelling, group.file, group.line) in recorded:
+                continue
+            fact = index.get(spelling)
+            if fact is not None and fact.get("kind") in ("REMOVED", "MOVED", "DEPRECATED"):
                 return fact
     return None
 
@@ -1277,7 +1676,13 @@ def _aliased_python_fact(index: dict[str, dict], group: Any) -> dict | None:
 def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: dict[str, dict],
                           target: str | None, target_version: Any, root: str | Path | None,
                           seen: set[tuple]) -> None:
-    """Rate every observed call site of a stdlib symbol against the python delta."""
+    """Rate every observed call site of a stdlib symbol against the python delta.
+
+    Only the calls the statement makes count: a callee it names (or a class it constructs).
+    A call recorded at the line that the line did not write (made from compiled code, like
+    uvloop's ``_set_running_loop``, or the body of a generator its ``for`` resumed, like
+    ``dis._get_instructions_bytes``) is rated only as an alias of a name the statement does
+    write, and then by facts about that name alone (``_aliased_python_fact``)."""
     groups: dict[tuple, _SiteGroup] = {}
     for fact in facts:
         file = _relative(fact.file, root)
@@ -1287,12 +1692,17 @@ def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: d
             group = groups[key] = _SiteGroup(fact.symbol, file, fact.func, fact.line, fact.text)
             group.spelling_site = True
         group.add(fact)
+    statements = _Statements(root)
+    recorded = {(g.symbol, g.file, g.line) for g in groups.values()}
     for group in groups.values():
         if (group.symbol, group.file, group.line) in seen:
             continue                              # the static pass rated this spelling here
         delta, how = _python_fact(index, group.symbol)
+        if delta is not None and delta.get("kind") != "UNCHANGED" and not _names_its_callee(
+                group, statements):
+            delta = None                          # not this statement's call
         if delta is None or delta.get("kind") == "UNCHANGED":
-            delta = _aliased_python_fact(index, group)
+            delta = _aliased_python_fact(index, group, recorded)
             if delta is None:
                 continue
             how = "symbol"
@@ -1332,6 +1742,22 @@ def _python_runtime_risks(out: PredictionReport, facts: Iterable[Fact], index: d
             evidence=evidence, scope="python", reached_at="call", calls=group.calls,
             warnings=[CallWarning(category=c, message=m, count=n)
                       for (c, m), n in sorted(group.warnings.items())]))
+
+
+def _names_its_callee(group: _SiteGroup, statements: _Statements) -> bool:
+    """The statement names the call's callee: its last name, or for a constructor its class.
+    A protocol method on a public class (``Version.__ge__`` for ``a >= b``) is the statement's
+    own operation; one on a private class (``_AssertLogsContext.__enter__`` under ``with
+    self.assertLogs(...)``) is the implementation of a name the statement does write. True when
+    the statement is not known (no file to read, no line text): only evidence that the line did
+    not write the call drops it."""
+    parts = group.symbol.split(".")
+    leaf = parts[-1]
+    if leaf.startswith("__") and leaf.endswith("__") and leaf not in _CTOR:
+        return not any(p.startswith("_") and not p.startswith("__") for p in parts)
+    call = parts[-2] if len(parts) > 1 and leaf in _CTOR else leaf
+    named = statements.names(group.file, group.line, group.text)
+    return named is None or call in named
 
 
 def merge_python_risks(dependency: PredictionReport | None,

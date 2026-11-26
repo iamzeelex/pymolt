@@ -11,7 +11,7 @@ import yaml
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixation
 from pymolt.core.graph import DependencyGraph, Edge, Node
-from pymolt.ingestion.detect import detect_project_python_version
+from pymolt.ingestion.detect import detect_project_python_version, pinned_version
 
 logger = logging.getLogger(__name__)
 
@@ -426,11 +426,12 @@ def ingest(env_file: str | Path, lock_file: str | Path | None = None, container_
         for dep in parsed["dependencies"]:
             parts = re.split(r"[>=<!]", dep)
             conda_name = parts[0].strip().lower()
-            version_str = dep[len(parts[0]):].strip()
-            
+
+            # Only an exact pin is a version; ``>=1.22`` or ``=3.12`` is a constraint.
             nodes[conda_name] = Node(
                 name=conda_name,
-                version=version_str if version_str else None,
+                version=pinned_version(dep),
+                declared_requirement=dep,
                 mode=Mode.CONDA,
                 provenance=Provenance.CONDA_FORGE,
                 direct=True,
@@ -442,11 +443,11 @@ def ingest(env_file: str | Path, lock_file: str | Path | None = None, container_
         for dep in parsed["pip"]:
             parts = re.split(r"[>=<!]", dep)
             pip_name = parts[0].strip().lower()
-            version_str = dep[len(parts[0]):].strip()
-            
+
             nodes[pip_name] = Node(
                 name=pip_name,
-                version=version_str if version_str else None,
+                version=pinned_version(dep),
+                declared_requirement=dep,
                 mode=Mode.CONDA,
                 provenance=Provenance.PIP_IN_CONDA,
                 direct=True,

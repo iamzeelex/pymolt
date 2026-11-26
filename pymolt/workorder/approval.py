@@ -122,7 +122,7 @@ def require_approval(project_dir: str | Path, plan: MigrationPlan, run_id: str, 
 
         raise StepRefusal(
             f"under --agent, pymolt {command} only on a plan a person approved for agents, and "
-            f"{why}",
+            f"{why}", conflict=False,
             hint="A person runs `pymolt apply . --approve-agent` on a terminal, or runs "
                  f"`pymolt {command}` without --agent.")
 

@@ -167,6 +167,12 @@ class TestExitCodes:
                 json.dumps({"t": "return", "q": "dep.f", "in": {"bound": {}},
                             "result": result_value}) + "\n"
             )
+            # the watcher's sidecar: without its event-loss counters a recording is never
+            # compared to a verdict (QA V2-1)
+            (path.parent / (path.name + ".meta.json")).write_text(json.dumps({"counters": {
+                name: 0 for name in ("events_seen", "events_written", "sampling_dropped",
+                                     "backpressure_dropped", "write_failures",
+                                     "sink_failures", "shutdown_dropped")}}))
             return str(path)
 
         old = rec(tmp_path / "old.jsonl", 1)
@@ -349,3 +355,21 @@ class TestOptionNames:
         plan_help = _ANSI.sub("", runner.invoke(app, ["plan", "--help"]).output)
         assert "--patch" in plan_help
         assert "--target-file" not in plan_help
+
+
+
+def test_parsing_project_source_prints_no_syntax_warning(tmp_path):
+    """QA H6: `plan` printed `<unknown>:78: SyntaxWarning: invalid escape sequence` from parsing
+    the project's files; the compile check already reports each one as a finding."""
+    import ast
+    import warnings
+
+    (tmp_path / "requirements.txt").write_text("flask==2.0.3\n", encoding="utf-8")
+    runner.invoke(app, ["status", str(tmp_path)])
+    source = "pattern = '" + "\\" + "s'\n"
+    with warnings.catch_warnings(record=True) as caught:
+        ast.parse(source)
+        compile(source, "app.py", "exec")
+    shown = [w.filename for w in caught if issubclass(w.category, SyntaxWarning)]
+    # The parse in pymolt's process is quiet; a compile that names a file keeps its warning.
+    assert shown == ["app.py"]

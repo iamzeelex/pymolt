@@ -15,6 +15,7 @@ from pymolt.migration_state import MigrationReceipt
 from pymolt.status import build_status
 from pymolt.verify import service as verify_service
 from pymolt.verify.models import CaptureMode
+from pymolt.workorder.render import plan_md_path
 
 runner = CliRunner()
 
@@ -415,3 +416,73 @@ def test_plan_warns_when_the_baseline_recording_changed_since_its_capture(tmp_pa
     assert "changed since its capture" in " ".join(result.stderr.split())
     plan = MigrationPlan.load(tmp_path)
     assert plan.baseline.trace_sha256 == plan.baseline_trace_sha256 != slot.trace_sha256
+
+
+def test_plan_without_a_baseline_points_at_the_baseline_capture(tmp_path, monkeypatch):
+    """QA H3: with no baseline, `apply` refuses the plan, so plan's next is the baseline capture
+    (human, --agent and PLAN.md alike), and the human output says why and claims no risk check."""
+    _configured_project(tmp_path)
+    (tmp_path / ".pymolt" / "contract_state.json").unlink()
+    _mock_plan_services(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    human = runner.invoke(app, ["plan", "."])
+    assert human.exit_code == 0, human.output
+    assert "Next: pymolt capture baseline --mode tests -- " in human.stdout
+    assert "pymolt apply" not in human.stdout.split("Next:")[1]
+    assert "No baseline capture is bound to this plan" in human.stderr
+    assert "the call sites the baseline exercised" not in human.stdout
+    plan_md = plan_md_path(MigrationPlan.load(tmp_path), tmp_path).read_text(encoding="utf-8")
+    assert "Next: `pymolt capture baseline --mode tests -- " in plan_md
+
+    agent = json.loads(runner.invoke(app, ["plan", ".", "--agent"]).stdout)
+    assert agent["data"]["next"]["command"].startswith(
+        "pymolt capture baseline --mode tests -- ")
+    assert agent["data"]["warnings"][0].startswith("No baseline capture is bound")
+    assert "Record the calls your code makes" in agent["hint"]
+
+
+def test_a_plan_saved_elsewhere_is_applied_with_its_file(tmp_path, monkeypatch):
+    _configured_project(tmp_path)
+    _mock_plan_services(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    out = runner.invoke(app, ["plan", ".", "--output", "other-plan.json"])
+    assert out.exit_code == 0, out.output
+    assert "Next: pymolt apply . --plan other-plan.json" in out.stdout
+
+
+def test_a_plan_only_exported_names_its_file_to_apply_human_agent_and_plan_md(tmp_path,
+                                                                              monkeypatch):
+    """`plan -o FILE` writes a new plan only there: status reads the current plan, so the next
+    command is `apply --plan FILE`, a bare FILE spelled as a path (`./FILE`): `apply --plan`
+    reads a bare word as a plan name or id."""
+    _configured_project(tmp_path)
+    _mock_plan_services(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    agent = json.loads(runner.invoke(app, ["plan", ".", "--output", "exported",
+                                           "--agent"]).stdout)
+    assert agent["ok"] and agent["data"]["saved"] is False
+    assert agent["data"]["next"]["command"] == "pymolt apply . --plan ./exported"
+    assert "`pymolt apply . --plan PATH` saves and applies it" in agent["summary"]
+    plan_md = (tmp_path / ".pymolt" / "PLAN.md").read_text(encoding="utf-8")
+    assert "Next: `pymolt apply . --plan ./exported`" in plan_md
+    human = runner.invoke(app, ["plan", ".", "--output", "exported2"])
+    assert "Next: pymolt apply . --plan ./exported2\n" in human.stdout
+    dry = runner.invoke(app, ["apply", ".", "--plan", "./exported", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+
+
+def test_no_risks_without_a_baseline_is_not_a_clean_bill(capsys):
+    """Deltas but no baseline: no site was exercised to rate, so the plan must not say the
+    baseline's call sites carry no risk (QA H3)."""
+    from types import SimpleNamespace
+
+    from pymolt.interfaces.cli import commands
+
+    report = SimpleNamespace(risks=[], needs_attention=[], fixed=[], notes=[],
+                             deltas=[SimpleNamespace(subject="dependency", quality="complete")])
+    commands._render_risks(report, baseline=False)
+    assert "the baseline exercised" not in capsys.readouterr().out
+    commands._render_risks(report, baseline=True)
+    assert "the baseline exercised" in capsys.readouterr().out

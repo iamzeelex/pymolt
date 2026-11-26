@@ -110,9 +110,13 @@ def _cached_package(cache_root, name, client) -> dict | None:
 def _assess_one(name, b_node, t_node, py_tag, cache_root, client) -> tuple[PackageRisk, bool]:
     """Build risk for one package. Second tuple item flags a data-source failure."""
     baseline_version = b_node.version if b_node else None
-    target_version = (t_node.version if t_node else None) or baseline_version
+    # The version you would run after migrating: the target's, never the base pin.
+    target_version = t_node.version if t_node else None
     risk = PackageRisk(name=name, baseline_version=baseline_version, target_version=target_version)
 
+    if t_node is None:
+        risk.reasons.append("not in the target — not assessed")
+        return risk, False
     # Unpinned packages have no concrete version to query.
     if not target_version:
         risk.reasons.append("unpinned — not assessed")
@@ -194,9 +198,13 @@ def assess_risk(
     Network-backed (OSV + PyPI) but cached on disk; failures degrade per-package
     rather than aborting. Returns a :class:`RiskReport`.
     """
-    names = sorted(set(baseline_graph.nodes) | set(target_graph.nodes if target_graph else []))
-    py_tag = _cp_tag(target_python)
     report = RiskReport(target_python=target_python)
+    if target_graph is None:
+        report.not_rated = ("the target did not resolve, so there is no target version to "
+                            "rate (the base pins are not one)")
+        return report
+    names = sorted(set(baseline_graph.nodes) | set(target_graph.nodes))
+    py_tag = _cp_tag(target_python)
 
     with httpx.Client(timeout=timeout, headers={"User-Agent": "pymolt"}) as client:
         for name in names:

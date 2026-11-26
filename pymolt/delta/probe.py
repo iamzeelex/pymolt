@@ -47,7 +47,7 @@ import time
 import types
 import warnings
 
-PROBE_VERSION = 8
+PROBE_VERSION = 11
 MARK = "@@pymolt-delta@@ "
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 _MAX_MSG = 400
@@ -373,21 +373,158 @@ def _name(node):
     return None
 
 
+_WARN_LEAVES = ("warn", "warning", "warn_deprecated", "_warn", "warn_explicit")
+_NOT_WARN = ("simplefilter", "filterwarnings", "catch_warnings", "resetwarnings",
+             "showwarning", "formatwarning")
+_TEXT_FUNCS = ("dedent", "cleandoc", "strip", "rstrip", "lstrip")
+
+
+def _is_warn_name(name):
+    """A call that warns or logs about a deprecation: ``warnings.warn``, ``logger.warning``,
+    ``_api.warn_deprecated``, or a package's own helper (``issue_deprecation_warning``,
+    ``show_deprecation_warning``, ``make_deprecated_name_warning``)."""
+    leaf = (name or "").split(".")[-1]
+    low = leaf.lower()
+    if not leaf or low in _NOT_WARN:
+        return False
+    return leaf in _WARN_LEAVES or low.endswith("warn") or low.endswith("_warning") \
+        or "deprecat" in low
+
+
+def _nodes(tree):
+    """``ast.walk`` without decorator lists: a decorator call is no statement of the body
+    (``@deprecate_renamed_function("group_by")`` is not a warning whose text is "group_by")."""
+    todo = [tree]
+    while todo:
+        node = todo.pop()
+        yield node
+        for name, value in ast.iter_fields(node):
+            if name == "decorator_list":
+                continue
+            if isinstance(value, list):
+                todo.extend(v for v in reversed(value) if isinstance(v, ast.AST))
+            elif isinstance(value, ast.AST):
+                todo.append(value)
+
+
+def _text_of(node, assigned):
+    """A string a message argument holds: a literal (``_const_str``), a text helper applied to
+    one (``textwrap.dedent(...)``), or a local name bound to one (one step, ``msg = "..."``)."""
+    text = _const_str(node)
+    if text is not None:
+        return text
+    if isinstance(node, ast.Call) and node.args and \
+            (_name(node.func) or "").split(".")[-1] in _TEXT_FUNCS:
+        return _text_of(node.args[0], assigned)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+            node.func.attr in _TEXT_FUNCS:
+        return _text_of(node.func.value, assigned)
+    if isinstance(node, ast.Name):
+        found = [t for line, t in assigned.get(node.id, ()) if line <= getattr(node, "lineno", 0)]
+        if found:
+            return found[-1]
+    return None
+
+
+def _assigned_texts(tree):
+    """``{name: [(line, text)]}``: the strings local names are bound to (``msg = "..."``,
+    ``msg += "..."``), in line order, for one step of message propagation."""
+    out = {}
+    for node in _nodes(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and \
+                isinstance(node.targets[0], ast.Name):
+            text = _text_of(node.value, out)
+            if text is not None:
+                out.setdefault(node.targets[0].id, []).append((node.lineno, text))
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and \
+                isinstance(node.op, ast.Add):
+            prev = out.get(node.target.id)
+            more = _text_of(node.value, out)
+            if prev and more is not None:
+                prev.append((node.lineno, prev[-1][1] + more))
+    for name in out:
+        out[name].sort(key=lambda item: item[0])
+    return out
+
+
+def _lit(node):
+    """A literal argument as JSON (str, number, bool, None, lists of them); else
+    ``{"expr": <name or node type>}``."""
+    text = _const_str(node)
+    if text is not None:
+        return text[:_MAX_MSG]
+    if _HAS_CONSTANT:
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float, bool,
+                                                                      type(None))):
+            return node.value
+    else:
+        if isinstance(node, ast.Num):
+            return node.n
+        if isinstance(node, ast.NameConstant):
+            return node.value
+    if isinstance(node, (ast.Tuple, ast.List)) and len(node.elts) <= 8:
+        items = [_lit(e) for e in node.elts]
+        if not any(isinstance(i, dict) for i in items):
+            return items
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _lit(node.operand)
+        if isinstance(inner, (int, float)) and not isinstance(inner, bool):
+            return -inner
+    return {"expr": _name(node) or type(node).__name__}
+
+
+def _top_calls(tree):
+    """The ids of the calls a ``def`` makes as statements of its own body, outside any branch,
+    loop or ``try``: they run on every call."""
+    body = getattr(tree, "body", None)
+    if not isinstance(tree, (ast.FunctionDef, getattr(ast, "AsyncFunctionDef", ast.FunctionDef))):
+        return set()
+    out = set()
+    for stmt in body or []:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            out.add(id(stmt.value))
+    return out
+
+
 def _warn_calls(tree):
+    """Warnings and deprecation logs in the body (decorators excluded): their message, with a
+    local message variable followed one step, and the call's literal arguments when it is a
+    package helper (``make_deprecated_name_warning("experimental_rerun", "rerun", ...)``).
+    ``always``: the call is a statement of the body itself, so every call warns."""
     out = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and (_name(node.func) or "").split(".")[-1] in (
-            "warn",
-            "warn_deprecated",
-            "_warn",
-        ):
-            msg = _const_str(node.args[0]) if node.args else None
-            cat = _name(node.args[1]) if len(node.args) > 1 else None
+    assigned = _assigned_texts(tree)
+    top = _top_calls(tree)
+    for node in _nodes(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _name(node.func) or ""
+        if not _is_warn_name(name):
+            continue
+        msg = _text_of(node.args[0], assigned) if node.args else None
+        if msg is None:
             for kw in node.keywords:
-                if kw.arg == "category":
-                    cat = _name(kw.value)
-            if msg:
-                out.append({"category": cat, "message": msg[:_MAX_MSG]})
+                if kw.arg in ("message", "msg", "text"):
+                    msg = _text_of(kw.value, assigned)
+        cat = _name(node.args[1]) if len(node.args) > 1 else None
+        for kw in node.keywords:
+            if kw.arg == "category":
+                cat = _name(kw.value)
+        leaf = name.split(".")[-1]
+        entry = {"category": cat, "message": (msg or "")[:_MAX_MSG]}
+        if id(node) in top:
+            entry["always"] = True
+        if leaf not in _WARN_LEAVES and leaf.lower() not in ("warning", "warn"):
+            entry["callee"] = name
+            entry["args"] = [_lit(a) for a in node.args[:6]]
+            kws = dict((kw.arg, _lit(kw.value)) for kw in node.keywords[:8] if kw.arg)
+            if kws:
+                entry["kwargs"] = kws
+        if entry.get("callee") and " " not in (msg or ""):
+            entry["message"] = ""             # a name argument, not prose
+        if msg or entry.get("callee"):
+            out.append(entry)
+        if len(out) >= 16:
+            break
     return out
 
 
@@ -395,12 +532,246 @@ def _raise_messages(tree):
     """Constant messages of ``raise X("...")`` statements: where a callable says what it no
     longer accepts (pydantic ``Field``: "`regex` is removed. use `pattern` instead")."""
     out = []
-    for node in ast.walk(tree):
+    assigned = _assigned_texts(tree)
+    for node in _nodes(tree):
         if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and node.exc.args:
-            msg = _const_str(node.exc.args[0])
+            msg = _text_of(node.exc.args[0], assigned)
             if msg:
                 out.append({"message": msg[:_MAX_MSG]})
         if len(out) >= 12:
+            break
+    return out
+
+
+def _decorator_calls(node, fn):
+    """``[{name, qualname, args, kwargs}]`` of the decorator calls on a ``def``
+    (``@deprecate_renamed_parameter("periods", "n", version="0.19.11")``): the decorator as
+    written, the function it resolves to in the defining module (None if it does not), and its
+    literal arguments. Raw data: the host reads them against ``knowledge/deprecation_helpers``."""
+    out = []
+    globs = getattr(fn, "__globals__", None) if fn is not None else None
+    for dec in getattr(node, "decorator_list", []) or []:
+        if not isinstance(dec, ast.Call):
+            continue
+        name = _name(dec.func)
+        if not name:
+            continue
+        entry = {"name": name, "args": [_lit(a) for a in dec.args[:8]],
+                 "kwargs": dict((kw.arg, _lit(kw.value)) for kw in dec.keywords[:12] if kw.arg)}
+        qual = None
+        if isinstance(globs, dict):
+            try:
+                parts = name.split(".")
+                obj = globs.get(parts[0])
+                if obj is None:
+                    import builtins as _b
+                    obj = getattr(_b, parts[0], None)
+                for attr in parts[1:]:
+                    if obj is None:
+                        break
+                    obj = getattr(obj, attr, None)
+                if obj is not None:
+                    qual = _qual(obj)
+            except Exception:
+                qual = None
+        entry["qualname"] = qual
+        out.append(entry)
+    return out
+
+
+def _cell_lit(value, depth=0):
+    """A closure cell's value as JSON when it is data a helper keeps (a name, a version, a
+    message, a mapping of names), a function or class by its name; else None."""
+    if isinstance(value, str):
+        return value[:_MAX_MSG]
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
+    if depth == 0 and isinstance(value, (tuple, list)) and len(value) <= 8 and \
+            all(isinstance(v, str) for v in value):
+        return [v[:80] for v in value]
+    if depth == 0 and isinstance(value, dict) and len(value) <= 24 and \
+            all(isinstance(k, str) and isinstance(v, (str, type(None))) for k, v in value.items()):
+        return dict((k[:80], v if v is None else v[:120]) for k, v in value.items())
+    if inspect.isroutine(value) or inspect.isclass(value):
+        try:
+            sym = _function_sym(value) if inspect.isroutine(value) else _qual(value)
+        except Exception:
+            sym = None
+        return {"ref": sym} if sym else None
+    return None
+
+
+def _cells(obj):
+    """The closure cells of each wrapper along ``obj``'s ``__wrapped__`` chain, read before
+    anything unwraps it: ``[{code, module, cells}]`` where ``code`` is the wrapper's code
+    qualname (``deprecate_renamed_parameter.<locals>.decorate.<locals>.wrapper``) and ``cells``
+    its data cells (``{"old_name": "periods", "new_name": "n", "version": "0.19.11"}``)."""
+    out = []
+    cur = getattr(obj, "fget", None) or obj
+    for _ in range(5):
+        if cur is None:
+            break
+        fn = getattr(cur, "__func__", cur)
+        code = getattr(fn, "__code__", None)
+        closure = getattr(fn, "__closure__", None)
+        if code is not None and closure:
+            cells = {}
+            for name, cell in zip(code.co_freevars, closure):
+                try:
+                    value = cell.cell_contents
+                except ValueError:
+                    continue
+                lit = _cell_lit(value)
+                if lit is not None:
+                    cells[name] = lit
+                if len(cells) >= 12:
+                    break
+            if cells:
+                out.append({"code": _code_qualname(fn) or code.co_name,
+                            "module": _frame_module(fn), "cells": cells})
+        try:
+            cur = getattr(cur, "__wrapped__", None)
+        except Exception:
+            cur = None
+    return out
+
+
+_HELPER_CACHE = {}
+_DEPRECATION_WORDS = re.compile(r"deprecat|renamed|will be removed|no longer|instead|in favou?r",
+                                re.IGNORECASE)
+
+
+def _arg_desc(node, params):
+    if isinstance(node, ast.Name):
+        return {"p": node.id} if node.id in params else {"n": node.id}
+    lit = _lit(node)
+    if not isinstance(lit, dict):
+        return {"c": lit}
+    return {"x": lit.get("expr")}
+
+
+def _params_of(node):
+    args = getattr(node, "args", None)
+    if args is None:
+        return []
+    names = [a.arg for a in getattr(args, "posonlyargs", [])] + [a.arg for a in args.args]
+    if args.vararg is not None:
+        names.append(args.vararg.arg)
+    names += [a.arg for a in args.kwonlyargs]
+    if args.kwarg is not None:
+        names.append(args.kwarg.arg)
+    return names
+
+
+def _returns_param(node, params):
+    """The parameter a helper hands back unchanged (``return interpolation``) when every
+    ``return`` returns that one name and the body never rebinds it; else None."""
+    found = set()
+    assigned = set()
+    for n in _nodes(node):
+        if isinstance(n, ast.Return):
+            if isinstance(n.value, ast.Name) and n.value.id in params:
+                found.add(n.value.id)
+            else:
+                return None
+        targets = n.targets if isinstance(n, ast.Assign) else (
+            [n.target] if isinstance(n, (ast.AugAssign, ast.AnnAssign)) else [])
+        for t in targets:
+            if isinstance(t, ast.Name):
+                assigned.add(t.id)
+    name = found.pop() if len(found) == 1 else None
+    return name if name is not None and name not in assigned else None
+
+
+def _helper_summary(helper):
+    """One level down: what a package helper says when it warns (its messages), its
+    parameters, and the parameter it returns unchanged. Cached per function."""
+    key = id(helper)
+    if key in _HELPER_CACHE:
+        return _HELPER_CACHE[key][1]
+    summary = None
+    try:
+        src = textwrap.dedent(inspect.getsource(helper))
+        tree = ast.parse(src)
+        node = tree.body[0] if tree.body else None
+        if isinstance(node, (ast.FunctionDef, getattr(ast, "AsyncFunctionDef", ast.FunctionDef))):
+            msgs = [w["message"] for w in _warn_calls(node) if w.get("message")]
+            msgs = [m for m in msgs if _DEPRECATION_WORDS.search(m)]
+            if msgs:
+                params = _params_of(node)
+                summary = {"helper": _function_sym(helper), "params": params,
+                           "messages": msgs[:6],
+                           "returns": _returns_param(node, params)}
+                aliases = []
+                for stmt in node.body:
+                    aliases += _alias_stmt(stmt, params) or []
+                if aliases:
+                    summary["aliases"] = aliases[:8]
+                    summary["loads"] = _loads(node.body, params)
+    except Exception:
+        summary = None
+    _HELPER_CACHE[key] = (helper, summary)
+    return summary
+
+
+def _helper_warns(node, fn):
+    """The package helpers a body calls that warn about a deprecation (one level down):
+    ``[{helper, params, messages, returns, args, kwargs, assign}]``. ``args``/``kwargs`` say
+    what the call passes (``{"p": param}`` for one of the caller's parameters), ``assign`` the
+    local name the result is bound to (``method = _check_interpolation_as_method(...)``)."""
+    globs = getattr(fn, "__globals__", None)
+    if not isinstance(globs, dict) or node is None:
+        return []
+    params = set(_params_of(node))
+    targets = {}
+    guards = {}
+    for n in _nodes(node):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and \
+                isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call):
+            targets[id(n.value)] = n.targets[0].id
+        if isinstance(n, ast.If):
+            for stmt in n.body:
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+                    guards[id(stmt.value)] = n.test
+    out = []
+    seen = set()
+    for n in _nodes(node):
+        if not isinstance(n, ast.Call) or isinstance(n.func, ast.Call):
+            continue
+        name = _name(n.func)
+        if not name or name.split(".")[0] in ("self", "cls", "super") or _is_warn_name(name):
+            continue
+        if not name.split(".")[-1].startswith("_"):
+            continue                      # a public function is an API call, not a helper
+        try:
+            parts = name.split(".")
+            obj = globs.get(parts[0])
+            for attr in parts[1:]:
+                if obj is None:
+                    break
+                obj = getattr(obj, attr, None)
+        except Exception:
+            obj = None
+        if not isinstance(obj, types.FunctionType) or obj is fn or id(obj) in seen:
+            continue
+        if not _is_dep(getattr(obj, "__module__", None)):
+            continue
+        seen.add(id(obj))
+        summary = _helper_summary(obj)
+        if summary is None:
+            continue
+        entry = dict(summary)
+        entry["args"] = [_arg_desc(a, params) for a in n.args[:8]]
+        entry["kwargs"] = dict((kw.arg, _arg_desc(kw.value, params)) for kw in n.keywords[:16]
+                               if kw.arg)
+        if id(n) in targets:
+            entry["assign"] = targets[id(n)]
+            fed = [a.id for a in n.args if isinstance(a, ast.Name)]
+            test = guards.get(id(n))
+            entry["guard"] = "none" if test is None else (
+                next((g for g in (_guard(test, x) for x in fed) if g != "other"), "other"))
+        out.append(entry)
+        if len(out) >= 6:
             break
     return out
 
@@ -417,8 +788,315 @@ def _rejects_kwargs(fn):
     return False
 
 
+def _desc(node, params):
+    """One argument of a forwarding call: ``{"p": param}`` (one of the caller's parameters),
+    ``{"star": param}`` / ``{"dstar": param}`` (passed through ``*`` / ``**``), ``{"c": literal}``,
+    else ``{"x": <what it is>}`` (an expression the host cannot rebuild)."""
+    star = getattr(ast, "Starred", None)
+    if star is not None and isinstance(node, star):
+        inner = node.value
+        if isinstance(inner, ast.Name) and inner.id in params:
+            return {"star": inner.id}
+        return {"x": "starred"}
+    if isinstance(node, ast.Name):
+        return {"p": node.id} if node.id in params else {"x": "name:" + node.id}
+    lit = _lit(node)
+    if not isinstance(lit, dict):
+        return {"c": lit}
+    return {"x": lit.get("expr")}
+
+
+def _call_desc(call, params):
+    """A forwarding call: its callee as written, its arguments (``_desc``), and the method calls
+    chained on its result (``F.len().alias("count")``)."""
+    chain = []
+    cur = call
+    while isinstance(cur, ast.Call) and isinstance(cur.func, ast.Attribute) and \
+            isinstance(cur.func.value, ast.Call):
+        chain.insert(0, [cur.func.attr, [_desc(a, params) for a in cur.args],
+                         [[k.arg, _desc(k.value, params)] for k in cur.keywords if k.arg]])
+        cur = cur.func.value
+    if not isinstance(cur, ast.Call):
+        return None
+    callee = _name(cur.func)
+    if not callee or isinstance(cur.func, ast.Call):
+        return None
+    kwargs = []
+    for k in cur.keywords:
+        if k.arg is None:
+            inner = k.value
+            kwargs.append(["**", {"dstar": inner.id} if isinstance(inner, ast.Name)
+                           and inner.id in params else {"x": "dstar"}])
+        else:
+            kwargs.append([k.arg, _desc(k.value, params)])
+    out = {"callee": callee, "args": [_desc(a, params) for a in cur.args], "kwargs": kwargs}
+    if chain:
+        out["chain"] = chain
+    return out
+
+
+def _noise(stmt, params=()):
+    """A statement a forwarding body may hold besides its forward: a docstring, a warning (or a
+    deprecation log), a message built for it (``msg = "..."``, a local that is no parameter),
+    or an ``if`` whose body is only those or a raise (a conflict check:
+    ``if new is not None: raise TypeError(...)``)."""
+    if isinstance(stmt, ast.Expr):
+        if _const_str(stmt.value) is not None:
+            return True
+        if isinstance(stmt.value, ast.Call) and _is_warn_name(_name(stmt.value.func) or "") \
+                and not _receives(stmt.value, params):
+            return True
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and \
+            isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id not in params and \
+            _text_of(stmt.value, {}) is not None:
+        return True
+    if isinstance(stmt, ast.If) and not stmt.orelse and stmt.body and \
+            all(_noise(s, params) or isinstance(s, ast.Raise) for s in stmt.body):
+        return True
+    if isinstance(stmt, ast.Pass):
+        return True
+    return False
+
+
+def _receives(call, params):
+    """The call is handed one of the caller's parameters (or ``self``) as is, so it may change
+    it (``_handle_deprecated_kwargs(kwargs)``): never a mere warning."""
+    names = set(params) | set(["self", "cls"])
+    star = getattr(ast, "Starred", None)
+    for arg in list(call.args) + [k.value for k in call.keywords]:
+        node = arg.value if star is not None and isinstance(arg, star) else arg
+        if isinstance(node, ast.Name) and node.id in names:
+            return True
+    return False
+
+
+def _slice_text(sub):
+    """The constant string a subscript indexes with (``kwargs["height"]``), on every Python:
+    3.8 and before wrap it in ``ast.Index``."""
+    sl = sub.slice
+    index = getattr(ast, "Index", None)
+    if index is not None and isinstance(sl, index):
+        sl = sl.value
+    return _const_str(sl)
+
+
+def _guard(test, old):
+    """How an ``if`` guards an alias of ``old``: ``not_none`` (``old is not None``),
+    ``sentinel`` (``old is not <a module constant>``: any value a caller passes),
+    ``in`` (``"old" in kwargs``), else ``other``."""
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        left, op, right = test.left, test.ops[0], test.comparators[0]
+        if isinstance(left, ast.Name) and left.id == old and isinstance(op, ast.IsNot):
+            none = (_HAS_CONSTANT and isinstance(right, ast.Constant) and right.value is None) \
+                or (not _HAS_CONSTANT and isinstance(right, getattr(ast, "NameConstant", ()))
+                    and right.value is None)
+            if none:
+                return "not_none"
+            if isinstance(right, (ast.Name, ast.Attribute)):
+                return "sentinel"
+        if isinstance(op, ast.In) and _const_str(left) == old:
+            return "in"
+    return "other"
+
+
+def _alias_stmt(stmt, params):
+    """``[{old, new, how}]`` when the statement makes one parameter the other's alias: ``new =
+    old``; ``if old is not None: [warn]; new = old``; ``kwargs["new"] = kwargs.pop("old")``
+    (inside ``if "old" in kwargs:``). None for any other statement."""
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        t, v = stmt.targets[0], stmt.value
+        if isinstance(t, ast.Name) and isinstance(v, ast.Name) and t.id in params and \
+                v.id in params and t.id != v.id:
+            return [{"old": v.id, "new": t.id, "how": "assign"}]
+        if isinstance(t, ast.Subscript) and isinstance(v, ast.Call) and \
+                isinstance(v.func, ast.Attribute) and v.func.attr == "pop" and v.args:
+            new = _slice_text(t)
+            old = _const_str(v.args[0])
+            base_t, base_v = _name(t.value), _name(v.func.value)
+            if new and old and base_t and base_t == base_v and base_t in params and \
+                    len(v.args) == 1:
+                return [{"old": old, "new": new, "how": "pop"}]
+    if isinstance(stmt, ast.If) and not stmt.orelse:
+        names = set()
+        for n in ast.walk(stmt.test):
+            if isinstance(n, ast.Name):
+                names.add(n.id)
+            text = _const_str(n)
+            if text:
+                names.add(text)
+        rest = [s for s in stmt.body if not (_noise(s, params) or isinstance(s, ast.Raise))]
+        found = []
+        for s in rest:
+            got = _alias_stmt(s, params)
+            if got is None:
+                return None
+            found += got
+        if found and all(a["old"] in names for a in found):
+            return [dict(a, guard=_guard(stmt.test, a["old"])) for a in found]
+    return None
+
+
+def _setdefault_stmt(stmt, params):
+    """``{key: literal}`` for ``kwargs.setdefault("kind", "point")``: a default the body
+    materializes before forwarding. None otherwise."""
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+        call = stmt.value
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "setdefault" and \
+                _name(call.func.value) in params and len(call.args) == 2:
+            key = _const_str(call.args[0])
+            value = _lit(call.args[1])
+            if key and not isinstance(value, dict):
+                return {key: value}
+    return None
+
+
+def _cond(test, params):
+    """A branch condition the call's own arguments decide: ``not p`` / ``p`` / ``p is None`` /
+    ``p is not None`` (``{"falsy": p}``...). None for any other test."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and \
+            isinstance(test.operand, ast.Name) and test.operand.id in params:
+        return {"falsy": test.operand.id}
+    if isinstance(test, ast.Name) and test.id in params:
+        return {"truthy": test.id}
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and \
+            isinstance(test.left, ast.Name) and test.left.id in params:
+        right = test.comparators[0]
+        none = (_HAS_CONSTANT and isinstance(right, ast.Constant) and right.value is None) or \
+            (not _HAS_CONSTANT and isinstance(right, getattr(ast, "NameConstant", ()))
+             and right.value is None)
+        if none and isinstance(test.ops[0], ast.Is):
+            return {"none": test.left.id}
+        if none and isinstance(test.ops[0], ast.IsNot):
+            return {"not_none": test.left.id}
+    return None
+
+
+def _body_key(stmts):
+    import hashlib
+    try:
+        dumped = "\n".join(ast.dump(s) for s in stmts)
+    except Exception:
+        return None
+    return hashlib.sha1(dumped.encode("utf-8")).hexdigest()[:16]
+
+
+def _body_summary(node):
+    """What a body proves, as raw data: ``forward`` (after its docstring, warnings and conflict
+    checks, it is one ``return f(...)``, or ``return self.x``), ``cond_forward`` (``if <test on
+    a parameter>: [warn]; return f(...)`` then another ``return``), ``aliases`` (parameters made
+    one another's alias), ``materialize`` (``kwargs.setdefault``) and ``key`` (a hash of the
+    body without its warnings: equal keys are twins)."""
+    params = _params_of(node)
+    body = [s for s in node.body if not _noise(s, params)]
+    out = {}
+    aliases, materialize, rest = [], {}, []
+    for stmt in body:
+        got = _alias_stmt(stmt, params)
+        if got is not None:
+            aliases += got
+            continue
+        got = _setdefault_stmt(stmt, params)
+        if got is not None:
+            materialize.update(got)
+            continue
+        rest.append(stmt)
+    if aliases:
+        out["aliases"] = aliases[:8]
+    if materialize:
+        out["materialize"] = materialize
+    if len(rest) == 1 and isinstance(rest[0], ast.Return) and rest[0].value is not None:
+        value = rest[0].value
+        if isinstance(value, ast.Call):
+            fwd = _call_desc(value, params)
+            if fwd:
+                out["forward"] = fwd
+        elif isinstance(value, ast.Attribute) and _name(value.value) == "self":
+            out["forward"] = {"attr": value.attr}
+    elif len(rest) == 2 and isinstance(rest[0], ast.If) and isinstance(rest[1], ast.Return) \
+            and not rest[0].orelse:
+        branch = [s for s in rest[0].body if not _noise(s, params)]
+        cond = _cond(rest[0].test, params)
+        if cond and len(branch) == 1 and isinstance(branch[0], ast.Return) and \
+                isinstance(branch[0].value, ast.Call):
+            fwd = _call_desc(branch[0].value, params)
+            if fwd:
+                out["cond_forward"] = {"cond": cond, "forward": fwd,
+                                       "warns": any(_noise(s, params)
+                                                    for s in rest[0].body)}
+    key = _body_key(body)
+    if key:
+        out["key"] = key
+    out["loads"] = _loads(body, params)
+    return out
+
+
+def _loads(stmts, params):
+    """How often each parameter is read in the statements a summary keeps (warnings left
+    out): an alias is a proof only when the old parameter has no other use."""
+    counts = {}
+    todo = list(stmts)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.stmt) and _noise(node, params):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in params:
+            counts[node.id] = counts.get(node.id, 0) + 1
+        for child in ast.iter_child_nodes(node):
+            todo.append(child)
+    return counts
+
+
+def _decorator_names(node, fn):
+    """Every decorator on a ``def``, by the function it resolves to in the defining module
+    (else as written)."""
+    out = []
+    globs = getattr(fn, "__globals__", None)
+    for dec in getattr(node, "decorator_list", []) or []:
+        expr = dec.func if isinstance(dec, ast.Call) else dec
+        name = _name(expr) or type(expr).__name__
+        qual = None
+        if isinstance(globs, dict):
+            obj = _resolve_in(fn, name)
+            if obj is None:
+                import builtins as _b
+                obj = getattr(_b, name, None) if "." not in name else None
+            import functools
+            if isinstance(obj, functools.partial):      # numpy: partial(array_function_dispatch)
+                obj = obj.func
+            if obj is not None:
+                try:
+                    qual = _qual(obj)
+                except Exception:
+                    qual = None
+        out.append(qual or name)
+    return out
+
+
+def _layers(obj):
+    """The wrappers on ``obj``'s ``__wrapped__`` chain, outermost first: each by its code
+    (``{module, code}``) or, for an object that is no Python function, by its type."""
+    out = []
+    cur = getattr(obj, "fget", None) or obj
+    for _ in range(6):
+        nxt = getattr(cur, "__wrapped__", None)
+        if nxt is None:
+            break
+        fn = getattr(cur, "__func__", cur)
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            out.append({"module": _frame_module(fn), "code": _code_qualname(fn) or code.co_name})
+        else:
+            t = type(cur)
+            out.append({"type": "%s.%s" % (t.__module__, t.__qualname__)})
+        cur = nxt
+    return out
+
+
 def _mine(obj):
-    """Static facts from the object's own source: warn() prose, one-line forwarding."""
+    """Static facts from the object's own source: warn() prose (message variables followed one
+    step, a package's own deprecation helpers included), raise texts, one-line forwarding, the
+    decorator calls with their literal arguments, and the warning helpers it calls one level
+    down."""
     fn = getattr(obj, "fget", obj)
     try:
         fn = inspect.unwrap(fn)
@@ -440,7 +1118,7 @@ def _mine(obj):
                     _const_str(s.value) is not None
                     or (
                         isinstance(s.value, ast.Call)
-                        and (_name(s.value.func) or "").endswith("warn")
+                        and _is_warn_name(_name(s.value.func) or "")
                     )
                 )
             )
@@ -452,10 +1130,10 @@ def _mine(obj):
         ):
             forwards = _name(body[0].value.func)
     out = {}
-    warns = _warn_calls(tree)
+    warns = _warn_calls(node if node is not None else tree)
     if warns:
         out["warns"] = warns
-    raises = _raise_messages(tree)
+    raises = _raise_messages(node if node is not None else tree)
     if raises:
         out["raises"] = raises
     if isinstance(tree.body[0] if tree.body else None, (ast.FunctionDef,)) \
@@ -466,11 +1144,98 @@ def _mine(obj):
     decorators = [d for d in decorators if d]
     if decorators:
         out["decorators"] = decorators
+    calls = _decorator_calls(node, fn)
+    if calls:
+        out["decorator_calls"] = calls
+    if isinstance(node, func_types):
+        try:
+            helpers = _helper_warns(node, fn)
+        except Exception:
+            helpers = []
+        if helpers:
+            out["helper_warns"] = helpers
+        try:
+            body = _body_summary(node)
+            body["decorators"] = _decorator_names(node, fn)
+            body["layers"] = _layers(obj)
+        except Exception:
+            body = {}
+        if body:
+            out["body"] = body
+            fwd = body.get("forward") or (body.get("cond_forward") or {}).get("forward")
+            callee = (fwd or {}).get("callee") or ""
+            head, _sep, rest = callee.partition(".")
+            if callee and head not in ("self", "cls"):
+                found = _resolve_in(fn, callee)
+                if found is not None:
+                    out["_callee"] = (found, callee.split(".")[-1])
+            elif rest and "." not in rest:
+                out["_member"] = rest
     return out
 
 
+def _safe_mine(obj):
+    """``_mine``, which must never lose a path's other facts to one callable it cannot read."""
+    try:
+        return _mine(obj)
+    except Exception:
+        return {}
+
+
+def _resolve_in(fn, dotted):
+    """What ``dotted`` names in the module that defines ``fn`` (its globals, then builtins)."""
+    globs = getattr(fn, "__globals__", None)
+    if not isinstance(globs, dict):
+        return None
+    parts = dotted.split(".")
+    obj = globs.get(parts[0])
+    try:
+        for attr in parts[1:]:
+            if obj is None:
+                return None
+            obj = getattr(obj, attr)
+    except Exception:
+        return None
+    return obj
+
+
+def _callee_spellings(obj, owner, leaf):
+    """Public spellings, in this interpreter, of the very object a forward calls: beside the
+    spelling being resolved (``numpy.prod`` for ``numpy.product``), its home and its package's
+    exports (a ``functools.partial`` by its function's module)."""
+    cands = []
+    if inspect.ismodule(owner):
+        cands.append(owner.__name__ + "." + leaf)
+    import functools
+
+    module = getattr(obj, "__module__", None)
+    if isinstance(obj, functools.partial) or not isinstance(module, str):
+        # a partial's ``__module__`` is functools': its function's module is its home
+        module = getattr(getattr(obj, "func", None), "__module__", None)
+    qual = getattr(obj, "__qualname__", None)
+    if isinstance(module, str):
+        if isinstance(qual, str) and "<" not in qual:
+            cands.append(module + "." + qual)
+        parts = module.split(".")
+        for i in range(len(parts), 0, -1):
+            cands.append(".".join(parts[:i]) + "." + leaf)
+    out = []
+    for cand in cands:
+        if cand in out:
+            continue
+        try:
+            if _resolve_spelling(cand) is obj:
+                out.append(cand)
+        except _Timeout:
+            raise
+        except Exception:
+            continue
+    return sorted(out, key=lambda c: (not _public_name(c), c.count("."), c))[:6]
+
+
 def _module_getattr_warns(module, attr):
-    """Warnings in a PEP 562 ``__getattr__`` branch that serves ``attr``."""
+    """Warnings in a PEP 562 ``__getattr__`` branch that serves ``attr``, and the messages it
+    raises there (``raise AttributeError("... Use st.cache_data instead")``)."""
     hook = vars(module).get("__getattr__") if inspect.ismodule(module) else None
     if hook is None:
         return []
@@ -485,6 +1250,7 @@ def _module_getattr_warns(module, attr):
             if attr in consts:
                 for stmt in node.body:
                     out.extend(_warn_calls(stmt))
+                    out.extend(dict(r, category="raise") for r in _raise_messages(stmt))
     return out
 
 
@@ -585,9 +1351,17 @@ def _describe(step, nxt, in_class):
     qual = getattr(real_next, "__qualname__", None)
     if kind in ("class", "callable") and isinstance(mod, str) and isinstance(qual, str):
         step["defined_as"] = mod + "." + qual
+    if kind in ("class", "callable") or isinstance(real_next, property):
+        cells = _cells(real_next)
+        if cells:
+            step["cells"] = cells
+    if isinstance(real_next, property):
+        mined = _safe_mine(real_next)
+        if mined:
+            step.update(mined)
     if kind in ("class", "callable"):
         step["shape"] = _shape(real_next)
-        step.update(_mine(real_next))
+        step.update(_safe_mine(real_next))
         doc = _doc_deprecations(real_next)
         if doc:
             step["doc"] = doc
@@ -610,7 +1384,41 @@ def _describe(step, nxt, in_class):
             step["bases"] = ["%s.%s" % (b.__module__, b.__qualname__) for b in real_next.__bases__]
         except Exception:
             pass
+        attrs = _instance_attrs(real_next)
+        if attrs:
+            step["instance_attrs"] = attrs
     return real_next
+
+
+def _instance_attrs(cls):
+    """Public names the class's own ``__init__`` (and its package bases') assigns on ``self``
+    (``self.status = status``): attributes an instance has that the class does not."""
+    out = []
+    try:
+        mro = inspect.getmro(cls)
+    except Exception:
+        mro = (cls,)
+    for klass in mro[:6]:
+        if not _is_dep(getattr(klass, "__module__", None)):
+            continue
+        init = vars(klass).get("__init__")
+        if not isinstance(init, types.FunctionType):
+            continue
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(init)))
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            targets = node.targets if isinstance(node, ast.Assign) else (
+                [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else [])
+            for t in targets:
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and \
+                        t.value.id == "self" and not t.attr.startswith("_") and \
+                        t.attr not in out:
+                    out.append(t.attr)
+        if len(out) >= 60:
+            break
+    return out[:60]
 
 
 def _import_origin(name):
@@ -724,6 +1532,23 @@ def resolve(path):
             return out
         step["exists"] = True
         real_next = _describe(step, nxt, not inspect.ismodule(real))
+        step["oid"] = id(real_next)
+        callee = step.pop("_callee", None)
+        member = step.pop("_member", None)
+        try:
+            if callee is not None:
+                obj, leaf = callee
+                step["callee"] = {"spellings": _callee_spellings(obj, real, leaf),
+                                  "shape": _shape(obj)}
+            elif member is not None and inspect.isclass(real) and "." not in member:
+                target = getattr(real, member, None)
+                if target is not None:
+                    step["callee"] = {"spellings": [], "shape": _shape(target),
+                                      "member": member}
+        except _Timeout:
+            raise
+        except Exception:
+            pass
         same, home = _same_object_as(real_next, spelling)
         aliases = _class_alias_spellings(real, attr, spelling)
         if aliases:

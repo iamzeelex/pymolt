@@ -145,6 +145,8 @@ def test_the_capture_is_stale_when_a_file_it_recorded_changed(tmp_path):
     status = build_status(tmp_path)
     assert status.phase("post-migration").state == "stale"
     assert "app/m.py changed since it was captured" in status.phase("post-migration").detail
+    # The commands name the dir they were asked for, not a file the detail lists.
+    assert build_status(tmp_path, shown="proj").next_command == "pymolt apply proj"
 
     rollback_steps(tmp_path, step="mech-2")                     # back at the recorded text
     assert build_status(tmp_path).phase("post-migration").state == "done"
@@ -229,7 +231,7 @@ def test_rule_3_a_step_being_recorded(tmp_path):
     receipt.steps[f"{plan.plan_id}:env-1"] = StepReceipt(status="in_progress")
     receipt.save(tmp_path)
 
-    assert build_status(tmp_path).next_command == "pymolt apply --step env-1 --record --done"
+    assert build_status(tmp_path).next_command == "pymolt apply . --step env-1 --record --done"
 
 
 def test_rule_4_pymolt_steps_whose_dependencies_are_in_effect(tmp_path):
@@ -253,7 +255,7 @@ def test_rule_5_a_stale_pymolt_step(tmp_path):
 
     status = build_status(tmp_path)
 
-    assert status.next_command == "pymolt apply --step mech-2 --dry-run"
+    assert status.next_command == "pymolt apply . --step mech-2 --dry-run"
     assert "is lost" in status.next_reason and "pymolt plan ." in status.next_reason
     assert status.next_step == "mech-2"
 
@@ -264,9 +266,9 @@ def test_rule_6_a_step_for_a_person_is_recorded_and_named_with_its_brief(tmp_pat
 
     status = build_status(tmp_path)
 
-    assert status.next_command == "pymolt apply --step env-1 --record"
+    assert status.next_command == "pymolt apply . --step env-1 --record"
     assert status.next_step == "env-1"
-    assert "`pymolt apply --step env-1 --brief`" in status.next_reason
+    assert "`pymolt apply . --step env-1 --brief`" in status.next_reason
 
 
 def test_rules_7_and_8_the_capture_then_the_verdict(tmp_path):
@@ -279,7 +281,7 @@ def test_rules_7_and_8_the_capture_then_the_verdict(tmp_path):
 
 
 @pytest.mark.parametrize(("judgement", "command", "reason"), [
-    ("failed", "pymolt rollback --step mech-1", "failed verify"),
+    ("failed", "pymolt rollback . --step mech-1", "failed verify"),
     ("needs_review", "pymolt verify . --step mech-1", "review"),
     ("needs_evidence", None, "add a test that reaches its sites"),
 ])

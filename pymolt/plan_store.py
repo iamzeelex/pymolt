@@ -616,7 +616,9 @@ def _move_plan_md(root: Path, plan: MigrationPlan) -> None:
         return
     from pymolt.workorder.render import write_plan_md
 
-    write_plan_md(plan, root, plan_folder(root, _stamp_name(plan)) / PLAN_MD_FILE)
+    # Not with status's next command: the move is mid-way, and the plan need not be current.
+    write_plan_md(plan, root, plan_folder(root, _stamp_name(plan)) / PLAN_MD_FILE,
+                  status_next=False)
     old.unlink()
 
 

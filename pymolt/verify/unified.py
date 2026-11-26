@@ -65,6 +65,12 @@ class UnifiedVerificationReport(BaseModel):
     # evidence; ``steps_run``: the run they are for.
     steps: dict[str, dict[str, Any]] = Field(default_factory=dict)
     steps_run: str | None = None
+    # A FAIL's plan steps whose sites failed, in effect or not (``judge.failing_steps``): what
+    # the FAIL output, ``--agent`` and ``status`` name.
+    failing_steps: list[dict[str, Any]] = Field(default_factory=list)
+    # Floats the fact diff found equal only within floating-point rounding (``FactDiff.
+    # numeric_drift``): entries, values, the largest distance in ulps and relatively, the bound.
+    numeric_drift: dict[str, Any] | None = None
 
     def save(self, project_dir: str | Path) -> Path:
         """Write the verdict (with its steps' judgements) atomically, under the state lock;
@@ -187,7 +193,24 @@ def build_unified_verification(
         rollback=rollback,
         steps=steps,
         steps_run=steps_run,
+        failing_steps=(_failing_steps(contract) if verdict is VerificationVerdict.FAIL
+                       else []),
+        numeric_drift=(contract.all_fact_diff or contract.fact_diff or {}).get("numeric_drift"),
     )
+
+
+def _failing_steps(contract: ContractReport) -> list[dict]:
+    """The plan steps whose sites failed (``workorder.judge.failing_steps``); none when the
+    report did not compare the two captures, or the lookup failed (noted)."""
+    if getattr(contract, "_fact_diff", None) is None:
+        return []
+    try:
+        from pymolt.workorder.judge import failing_steps
+
+        return failing_steps(contract.root, contract)
+    except Exception as exc:  # noqa: BLE001 - the verdict stands without naming steps
+        contract.notes.append(f"failing steps not named ({type(exc).__name__}: {exc})")
+        return []
 
 
 def _judge_steps(contract: ContractReport) -> tuple[str | None, dict]:

@@ -17,12 +17,16 @@ HOST side, pure over the plan's parts and the T0 texts. Every predicted risk get
 Each H5 item (a rule that matched but is not applied) becomes a ``manual-rewrite`` step per
 (rule, file); each rule advisory a ``manual-rewrite`` (``not-applied``) or a ``review``
 (``precondition``) step per (rule, file); the target's compile findings a ``python-manual``
-step per kind. Low BLIND risks are steps too (PLAN.md collapses them).
+step per kind, which also takes the risks made from those findings (they get no step of their
+own). Low BLIND risks are steps too (PLAN.md collapses them).
 
 A manual step's claim follows the kind of successor its delta fact shows (``default_claim``):
 ``preserve`` for the same object, a behaviour change, or no fact about the successor;
 ``intended`` with the expectation ``representation`` for another object. ``why.claim`` says
-which, so PLAN.md and the briefs show it.
+which, so PLAN.md and the briefs show it. An ``unverified`` risk (its fact is about the name
+the old version defined the call under, not the one the site writes) makes a step of its own:
+check that the site's spelling still resolves, with the command to run, claiming ``preserve``
+and naming no successor.
 """
 
 from __future__ import annotations
@@ -230,15 +234,47 @@ _EXECUTOR_OF = {"manual-rewrite": "agent", "api-change": "agent", "python-manual
                 "behaviour-change": "person", "review": "person"}
 
 
+def _unverified(risk: Any) -> bool:
+    return bool(getattr(risk, "unverified", False))
+
+
+def _check_command(spelling: str) -> str:
+    """A one-line check, run in the target environment, that exits 0 when ``spelling``
+    resolves (``pydoc.locate`` imports the longest module prefix, then reads attributes)."""
+    return (f"python -c \"import pydoc, sys; sys.exit(pydoc.locate('{spelling}') is None)\"")
+
+
+_SENTINELS = {"<object object>": "a sentinel", "<no_default>": "a sentinel (no_default)",
+              "<NoDefault.no_default>": "a sentinel (no_default)",
+              "<_NoDefault.no_default>": "a sentinel (no_default)",
+              "<no value>": "a sentinel (no value)", "<sentinel>": "a sentinel"}
+
+
+def readable_default(value: Any) -> str:
+    """A default as a person reads it: a sentinel object (``<object object>``, pandas'
+    ``<no_default>``, numpy's ``<no value>``) is "a sentinel", not its repr."""
+    text = "?" if value is None else str(value)
+    return _SENTINELS.get(text.strip(), text)
+
+
+def _resolved_at_call(value: Any) -> bool:
+    text = "" if value is None else str(value).strip()
+    return text == "None" or (text.startswith("<") and text.endswith(">"))
+
+
 def _title(step_type: str, risk: Any, target: str | None) -> str:
     fact = _fact(risk)
     kind, param = fact.get("kind"), fact.get("param")
     name = f"`{_short(risk.symbol)}`"
     successor = fact.get("successor")
     where = f" in {risk.package} {target}" if risk.package and target else ""
+    if _unverified(risk):
+        spelling = getattr(risk, "spelling", None)
+        return _cap(f"`{_short(spelling or risk.symbol)}`: check it still resolves{where}", 120)
     if step_type == "behaviour-change":
         if kind == "DEFAULT":
-            return _cap(f"{name}: default `{param}` {fact.get('old')} → {fact.get('new')}", 120)
+            return _cap(f"{name}: default `{param}` {readable_default(fact.get('old'))} → "
+                        f"{readable_default(fact.get('new'))}", 120)
         if kind == "BEHAVIOR":
             return _cap(f"{name}: its behaviour changes on Python {target or '?'}", 120)
         return _cap(f"{name}: it warned in the baseline", 120)
@@ -261,24 +297,54 @@ def _title(step_type: str, risk: Any, target: str | None) -> str:
 def _summary(step_type: str, risk: Any, hint: str = "") -> str:
     fact = _fact(risk)
     kind, param, successor = fact.get("kind"), fact.get("param"), fact.get("successor")
+    if _unverified(risk):
+        gone = fact.get("symbol") or risk.symbol
+        spelling = getattr(risk, "spelling", None)
+        head = (f"Only `{gone}`, the name the old version defined this call under, is known to "
+                "be gone; whether the call as these sites write it breaks is not known.")
+        if spelling:
+            return (f"{head} Check that `{spelling}` still resolves in the target environment "
+                    f"(`{_check_command(spelling)}` exits 0). If it does, these sites need no "
+                    "change; if not, rewrite the calls keeping each call's outcome.")
+        return (f"{head} Run these sites in the target environment; rewrite only a call that "
+                "fails, keeping its outcome.")
     if step_type == "behaviour-change":
         if kind == "DEFAULT":
             # Passing the old default explicitly keeps the old outcome only if the new version
             # still gives that value its old meaning (pandas 2 reads numeric_only=None as False),
             # which the delta does not know: say so instead of promising it.
-            new = f" to {fact.get('new')}" if fact.get("new") is not None else ""
-            return (f"Decide at each site: the default of {param} changed from "
-                    f"{fact.get('old')}{new}. Passing {param}={fact.get('old')} keeps the old "
-                    "outcome only if the new version still reads that value the old way: check "
-                    "it, or keep the new default (a person attests the new outcome).")
+            old, new_value = fact.get("old"), fact.get("new")
+            new = f" to {readable_default(new_value)}" if new_value is not None else ""
+            head = (f"Decide at each site: the default of {param} changed from "
+                    f"{readable_default(old)}{new}.")
+            if (_resolved_at_call(old) or _resolved_at_call(new_value)) and \
+                    _tier(risk.tier) != "high":       # high: the site's own warning names it
+                head += (" A side is resolved when the call runs, so the outcome may well not "
+                         "change.")
+            if str(old or "").startswith("<"):
+                return (f"{head} The old default is a sentinel: no value passed explicitly "
+                        "restores it. Keep the new default if the outcome holds (a person "
+                        "attests the new outcome), or pass the value the old version used.")
+            return (f"{head} Passing {param}={old} keeps the old outcome only if the new "
+                    "version still reads that value the old way: check it, or keep the new "
+                    "default (a person attests the new outcome).")
         if kind == "BEHAVIOR":
             return "Check the code at these sites against the new behaviour."
         return ("The baseline warned at these sites; find what the warning announces and act "
                 "on it.")
     if risk.scope == "python":
         return "Rewrite these sites by hand" + (f": {hint}" if hint else ".")
+    candidates = [c.get("name") for c in (fact.get("succession") or {}).get("candidates") or ()
+                  if c.get("name")]
+    if param and successor:
+        return (f"Pass `{successor}=` instead of `{param}=` at these calls, keeping each call's "
+                "outcome.")
     if successor:
         return f"Replace the calls with `{successor}`, keeping each call's outcome."
+    if candidates:
+        return ("The library names several successors: choose one of "
+                + ", ".join(f"`{c}`" for c in candidates[:4]) + " at each site, keeping each "
+                "call's outcome.")
     if kind == "SIGNATURE":
         return f"Adapt the calls to the new signature{f' of {param}' if param else ''}."
     if kind == "DEPRECATED":
@@ -331,7 +397,20 @@ def default_claim(step_type: str, risk: Any | None) -> tuple[str, str | None, st
     fact = _fact(risk) if risk is not None else {}
     kind, successor = fact.get("kind"), fact.get("successor")
     name = f"`{_short(risk.symbol)}`" if risk is not None else "?"
+    if risk is not None and _unverified(risk):
+        return "preserve", None, _cap(
+            f"{_NOT_LOOSENED}the delta found {name} gone only under the name the old version "
+            "defined it under, not under the name these sites call it by")
     another = None
+    rec = fact.get("succession") or {}
+    if kind in ("REMOVED", "DEPRECATED", "SIGNATURE") and fact.get("successor") and (
+            rec.get("trust") in ("identity", "proof") or rec.get("equivalent")):
+        # The evidence asserts the successor does the same: a proof in the library's code, a
+        # chain of them, or the library's own words ("for the same effect").
+        how = ("the library's code proves it" if rec.get("trust") in ("identity", "proof")
+               else "the library says it does the same")
+        return "preserve", None, _cap(f"`{fact.get('successor')}` replaces {name} and {how} "
+                                      f"({rec.get('trust') or 'named'}); the outcome must hold")
     if kind == "MOVED":
         return "preserve", None, _cap(f"the delta shows {name} is the same object as "
                                       f"`{successor or fact.get('new') or '?'}` (MOVED)")
@@ -410,14 +489,62 @@ def _order_key(risks: list[Any]) -> tuple:
             first.site.line or 0, first.symbol)
 
 
+def _successor_of(fact: Mapping[str, Any]):
+    """The step's successor provenance (``StepSuccessor``), from the fact's ``succession``."""
+    from pymolt.workorder.models import StepSuccessor
+
+    rec = fact.get("succession") or {}
+    if not rec.get("trust") and not rec.get("candidates"):
+        return None
+    proof = rec.get("proof") or {}
+    return StepSuccessor(trust=rec.get("trust"),
+                         proof=_cap(f"{proof.get('kind')}: {proof.get('locus')}")
+                         if proof else None,
+                         version=proof.get("version"), transfer=rec.get("transfer"),
+                         caveats=[_cap(c) for c in rec.get("caveats") or ()][:10])
+
+
+def _render(template: Mapping[str, Any] | None, fact: Mapping[str, Any]) -> str | None:
+    """A forward's template as code with the old parameters' names (``x.replace_strict(mapping,
+    default=default)``): the suggestion for a proven successor pymolt does not apply."""
+    if not template or not template.get("callee"):
+        return None
+    names = {p[0]: p for p in template.get("old_shape") or ()}
+
+    def arg(desc: Mapping[str, Any]) -> str | None:
+        if "p" in desc:
+            return desc["p"]
+        if "c" in desc:
+            return repr(desc["c"])
+        if "star" in desc:
+            return "*" + desc["star"]
+        if "dstar" in desc:
+            return "**" + desc["dstar"]
+        return None
+
+    parts = [arg(d) for d in template.get("args") or ()]
+    parts += [f"{k}={arg(d)}" if k != "**" else arg(d) for k, d in template.get("kwargs") or ()]
+    if any(p is None for p in parts):
+        return None
+    callee = str(template["callee"])
+    head = ("x." + callee.rsplit(".", 1)[-1]) if template.get("member") else callee
+    text = f"{head}({', '.join(parts)})"
+    for attr, args, _kw in template.get("chain") or ():
+        text += f".{attr}({', '.join(a for a in (arg(d) for d in args) if a)})"
+    del names
+    return _cap(text, 200)
+
+
 def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
                python_move: tuple[str, str] | None,
                versions: Mapping[str, tuple[str | None, str | None]]) -> dict:
     lead = group[0]
     fact = _fact(lead)
+    rec = fact.get("succession") or {}
     scope = "python" if lead.scope == "python" else "dependency"
     ident = "|".join(str(x) for x in (scope, lead.package, lead.symbol, fact.get("kind"),
-                                      fact.get("param")))
+                                      fact.get("param"))) + ("|unverified" if _unverified(lead)
+                                                             else "")
     files = list(dict.fromkeys(r.site.file for r in group))
     from_, to = ((python_move or (None, None)) if scope == "python"
                  else versions.get(lead.package or "", (None, None)))
@@ -427,15 +554,23 @@ def _risk_step(group: list[Any], step_type: str, target: str | None, t0: T0,
         title=_title(step_type, lead, to), executor=_EXECUTOR_OF[step_type],
         claim=claim, basis="manual", scope=scope,
         package=lead.package if scope == "dependency" else None, from_=from_, to=to,
-        symbol={"old": lead.symbol, "new": fact.get("successor")},
+        symbol={"old": lead.symbol,
+                "new": None if _unverified(lead) or fact.get("param") else fact.get("successor"),
+                "params": (dict(rec.get("params")) if rec.get("params") and not _unverified(lead)
+                           else None)},
         where=_where(group, t0),
         why=StepWhy(evidence=_evidence(group), tier=_max_tier(_tier(r.tier) for r in group),
                     risk_ids=[r.id for r in group],
                     baseline=StepBaseline(calls=sum(r.calls for r in group), sites=len(group),
                                           warnings=_warnings(group)),
-                    delta=_delta(lead), claim=reason),
-        do=StepDo(manual=ManualDo(summary=_summary(step_type, lead, _hint(lead)),
-                                  successor=fact.get("successor"))),
+                    delta=_delta(lead), claim=reason,
+                    successor=None if _unverified(lead) else _successor_of(fact)),
+        do=StepDo(manual=ManualDo(
+            summary=_summary(step_type, lead, _hint(lead)),
+            successor=None if _unverified(lead) else fact.get("successor"),
+            candidates=[] if _unverified(lead) else [
+                c["name"] for c in rec.get("candidates") or () if c.get("name")][:10],
+            suggestion=None if _unverified(lead) else _render(rec.get("template"), fact))),
         verify=verify,
         effort=StepEffort(sites=len(group), files=len(files)),
     )
@@ -494,13 +629,37 @@ def _item_steps(manual_items: list[Any], advisories: list[Any], t0: T0) -> list[
     return out
 
 
+def _compile_kind(finding: Mapping[str, Any]) -> str:
+    return str(finding.get("kind") or "finding")
+
+
+def _compile_risks(risks: Iterable[Any], findings: list[Mapping[str, Any]]
+                   ) -> dict[int, str]:
+    """The risks ``verify.predict`` made from compile findings (a python risk with no fact, its
+    symbol the finding's kind, at the finding's file and line), by ``id()``, to their finding's
+    kind: they belong to that kind's compile step, not to a step of their own (QA H6: the same
+    SyntaxWarning sites were planned twice)."""
+    where = {(f.get("file"), f.get("line"), str(f.get("kind") or "SyntaxError")): _compile_kind(f)
+             for f in findings}
+    out: dict[int, str] = {}
+    for risk in risks:
+        kind = where.get((risk.site.file, risk.site.line, risk.symbol))
+        if kind is not None and risk.scope == "python" and not _fact(risk):
+            out[id(risk)] = kind
+    return out
+
+
 def _compile_steps(findings: list[Mapping[str, Any]], t0: T0,
-                   python_move: tuple[str, str] | None, target: str | None) -> list[dict]:
+                   python_move: tuple[str, str] | None, target: str | None,
+                   risks: Mapping[str, list[Any]] | None = None) -> list[dict]:
+    """One ``python-manual`` step per kind of compile finding; ``risks``: the risks made from
+    the findings, by kind, which it takes (ids, tier, baseline)."""
     groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for f in findings:
-        groups[str(f.get("kind") or "finding")].append(f)
+        groups[_compile_kind(f)].append(f)
     out = []
     for kind, items in groups.items():
+        linked = list((risks or {}).get(kind) or ())
         where = list({a.id: a for a in (t0.anchor(f.get("file"), f.get("line")) for f in items)
                       if a is not None}.values())
         evidence = []
@@ -516,12 +675,17 @@ def _compile_steps(findings: list[Mapping[str, Any]], t0: T0,
             title=f"{kind} on Python {target or '?'}: {len(items)} site(s)",
             executor="agent", claim=claim, basis="manual", scope="python",
             from_=(python_move or (None, None))[0], to=(python_move or (None, None))[1],
-            where=where, why=StepWhy(evidence=evidence[:_EVIDENCE_CAP], claim=reason),
+            where=where, why=StepWhy(
+                evidence=evidence[:_EVIDENCE_CAP], claim=reason,
+                tier=_max_tier(_tier(r.tier) for r in linked), risk_ids=[r.id for r in linked],
+                baseline=StepBaseline(calls=sum(r.calls for r in linked), sites=len(linked),
+                                      warnings=_warnings(linked))),
             do=StepDo(manual=ManualDo(summary=f"Make these files compile on Python "
                                               f"{target or 'the target'} without the {kind}.")),
             verify=verify,
             effort=StepEffort(sites=len(items),
                               files=len({f.get("file") for f in items})),
+            _risks=linked,
         ))
     return out
 
@@ -545,7 +709,12 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
     t0 = t0 if t0 is not None else T0(Path(root), changes, base)
     linked: dict[str, list[Any]] = defaultdict(list)
     groups: dict[tuple, list[Any]] = {}
+    compiled = _compile_risks(getattr(risks, "risks", None) or (), compile_findings)
+    by_kind: dict[str, list[Any]] = defaultdict(list)
     for risk in getattr(risks, "risks", None) or ():
+        if id(risk) in compiled:
+            by_kind[compiled[id(risk)]].append(risk)
+            continue
         if risk.fixed_by_plan:
             step = fixing_step(risk, automated, t0)
             if step is not None:
@@ -553,7 +722,8 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
                 linked[step.id].append(risk)
                 continue
         fact = _fact(risk)
-        key = (risk.scope, risk.package, risk.symbol, fact.get("kind"), fact.get("param"))
+        key = (risk.scope, risk.package, risk.symbol, fact.get("kind"), fact.get("param"),
+               _unverified(risk))
         groups.setdefault(key, []).append(risk)
     for step in automated:
         _attach(step, linked.get(step.id) or [], t0)
@@ -566,7 +736,7 @@ def link_and_manual_steps(automated: list[PlanStep], *, root: str | Path, change
         drafts.append(dict(_risk_step(group, step_type, target, t0, python_move, versions),
                            _risks=group))
     drafts += _item_steps(manual_items, advisories, t0)
-    drafts += _compile_steps(compile_findings, t0, python_move, target_python)
+    drafts += _compile_steps(compile_findings, t0, python_move, target_python, by_kind)
 
     counters = {phase: 0 for phase in PHASES}
     for step in automated:

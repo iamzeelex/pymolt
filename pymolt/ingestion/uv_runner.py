@@ -11,8 +11,10 @@ from pymolt.core.enums import Mode, Provenance, ResolutionQuality, SourceFixatio
 from pymolt.core.graph import DependencyGraph, Edge, Node
 from pymolt.ingestion.detect import (
     DiscoveredSource,
+    _classify_specs,
     extract_declared_requirements,
     normalize_pkg_name,
+    pinned_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,15 +71,19 @@ def graph_from_declared_requirements(
     manifest_name: str,
     declared_reqs: dict[str, str]
 ) -> DependencyGraph:
-    """Build a baseline DependencyGraph directly from declared requirements when no legacy interpreter is available."""
+    """A base graph read from the declared requirements, when nothing could resolve them.
+
+    Only an exact pin (``==``) is a version. A floor (``>=0.10``) or a bare name says what
+    may be installed, not what is, so its version is unknown (None): the graph is stamped
+    ``declared-only`` and every consumer treats a missing version as unknown, never as the
+    floor or ``0.0.0``.
+    """
     nodes = {}
     roots = []
     for norm_name, spec_line in declared_reqs.items():
-        version_match = re.search(r"==\s*([^\s,;]+)|>=\s*([^\s,;]+)|~=\s*([^\s,;]+)", spec_line)
-        version = version_match.group(1) or version_match.group(2) or version_match.group(3) if version_match else "0.0.0"
         node = Node(
             name=norm_name,
-            version=version,
+            version=pinned_version(spec_line),
             mode=Mode.PYPI,
             provenance=Provenance.PYPI,
             direct=True,
@@ -91,7 +97,8 @@ def graph_from_declared_requirements(
         edges=[],
         roots=roots,
         resolution_quality=ResolutionQuality.DECLARED_ONLY,
-        source_fixation=SourceFixation.INTENT,
+        # What the declarations pin: a fully pinned manifest read as declared is pinned.
+        source_fixation=_classify_specs(declared_reqs.values()),
     )
 
 

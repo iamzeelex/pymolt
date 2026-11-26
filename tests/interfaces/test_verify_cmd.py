@@ -51,6 +51,25 @@ def test_capture_before_setup_is_refused(tmp_path):
     assert not (tmp_path / ".pymolt" / "contract_state.json").exists()
 
 
+def test_capture_hints_name_the_project_dir(tmp_path, monkeypatch):
+    """QA H1: the commands capture prints carry the dir the user gave."""
+    monkeypatch.chdir(tmp_path.parent)
+    rel = tmp_path.name
+    started = runner.invoke(cli, ["capture", "post-migration", "--mode", "attach",
+                                  "--project-dir", rel])
+    assert started.exit_code == 0, started.output
+    shown = " ".join(re.sub("[│╭╮╰╯─]", " ", started.output).split())
+    assert f"pymolt capture post-migration --project-dir {rel} --mode attach --collect" in shown
+    missing = runner.invoke(cli, ["capture", "baseline", "--mode", "attach",
+                                  "--project-dir", rel, "--collect"])
+    assert f"pymolt capture baseline --project-dir {rel} --mode attach" in " ".join(
+        missing.output.split())
+    (tmp_path / ".pymolt" / "env_config.json").unlink()
+    refused = runner.invoke(cli, ["capture", "baseline", "--mode", "tests",
+                                  "--project-dir", rel, "--", "python", "-c", "1"])
+    assert f"pymolt setup {rel}" in " ".join(refused.output.split())
+
+
 def _write_app(tmp_path, *, third_party: bool):
     p = tmp_path / "app.py"
     if third_party:
@@ -306,6 +325,103 @@ def test_verify_without_comparable_pair_is_inconclusive(tmp_path):
     assert payload["contract"]["verdict_reasons"]
 
 
+def _probe_project(tmp_path, result):
+    """TESTING §D: a hand-written one-call trace of yaml.safe_load, replayed by the probe."""
+    project = tmp_path / "proj"
+    (project / "app").mkdir(parents=True)
+    (project / "app" / "__init__.py").write_text("")
+    (project / "app" / "m.py").write_text(
+        "import yaml\ndef load():\n    return yaml.safe_load(\"a: 1\")\n"
+        "def dump():\n    return yaml.dump({})\n")
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({"q": "yaml.safe_load", "in": {"bound": {"stream": "a: 1"}},
+                                 "result": result, "t": "return"}) + "\n")
+    return project, trace
+
+
+def test_a_changed_probe_replay_fails_with_one_capture(tmp_path):
+    """QA V4: the replay compares with the recording it replays, not with the missing side."""
+    project, trace = _probe_project(tmp_path, {"__dict__": [["a", 2]]})
+    args = ["verify", str(project), "--post-migration", str(trace),
+            "--probe-python", sys.executable, "--json"]
+    result = runner.invoke(cli, args)
+    assert result.exit_code == EXIT_FINDING, result.output
+    payload = json.loads(result.output)
+    assert payload["verdict"] == "fail"
+    assert payload["contract"]["verdict_reasons"] == ["sandbox replay changed behavior"]
+    assert any("FAIL rests on the probe replay alone" in n for n in payload["contract"]["notes"])
+
+    # The hand-written recording carries no event-loss counters (QA V2-1): that blocks a
+    # version diff, not the replay, which compares each call with its own recorded outcome.
+    assert any("trace.jsonl has no event-loss counters" in n
+               for n in payload["contract"]["notes"])
+
+    stable, trace = _probe_project(tmp_path / "stable", {"__dict__": [["a", 1]]})
+    result = runner.invoke(cli, ["verify", str(stable), "--post-migration", str(trace),
+                                 "--probe-python", sys.executable, "--json"])
+    assert result.exit_code == EXIT_INCONCLUSIVE    # a stable replay proves no PASS alone
+    assert json.loads(result.output)["contract"]["verdict_reasons"] == [
+        "no baseline trace is available for a version diff",
+        "the post-migration recording trace.jsonl has no event-loss counters"]
+
+
+_LOSSLESS = {"events_seen": 1, "events_written": 1, "sampling_dropped": 0,
+             "backpressure_dropped": 0, "write_failures": 0, "sink_failures": 0,
+             "shutdown_dropped": 0}
+
+
+def test_explicit_recordings_need_their_event_loss_counters(tmp_path):
+    """QA V2-1: two identical hand-written recordings passed PASS (and a changed pair FAIL)
+    with no counters to say they lost no event; a capture without them is INCONCLUSIVE. The
+    watcher's own sidecar, one process's or several gathered under ``processes``, carries
+    them; a recording that dropped events stays INCONCLUSIVE."""
+    project, old = _probe_project(tmp_path, {"__dict__": [["a", 1]]})
+    (project / "app" / "m.py").write_text(
+        "import yaml\ndef load():\n    return yaml.safe_load(\"a: 1\")\n")
+    old.write_text(old.read_text().replace(
+        '"t": "return"', '"t": "return", "where": {"file": "app/m.py", "line": 3}'))
+    new = tmp_path / "new.jsonl"
+    new.write_text(old.read_text())
+    changed = tmp_path / "changed.jsonl"
+    changed.write_text(old.read_text().replace('["a", 1]', '["a", 2]'))
+
+    def verify(after):
+        result = runner.invoke(cli, ["verify", str(project), "--baseline", str(old),
+                                     "--post-migration", str(after), "--json"])
+        return result.exit_code, json.loads(result.output)
+
+    for after in (new, changed):
+        code, payload = verify(after)
+        assert code == EXIT_INCONCLUSIVE, payload["contract"]["verdict_reasons"]
+        assert payload["contract"]["verdict_reasons"] == [
+            f"the post-migration recording {after.name} has no event-loss counters",
+            "the baseline recording trace.jsonl has no event-loss counters"]
+        assert all(c["kind"] == "needs_evidence" for c in payload["inconclusive_causes"])
+        assert "`.meta.json` sidecar" in payload["inconclusive_causes"][0]["settle"]
+
+    # one process's own sidecar, and a merged recording's sidecars gathered
+    (tmp_path / "trace.jsonl.meta.json").write_text(json.dumps({"counters": _LOSSLESS}))
+    for after in (new, changed):
+        (tmp_path / f"{after.name}.meta.json").write_text(json.dumps(
+            {"processes": [{"counters": _LOSSLESS}, {"counters": _LOSSLESS}]}))
+    code, payload = verify(new)
+    assert (code, payload["verdict"]) == (EXIT_OK, "pass"), payload["contract"]["verdict_reasons"]
+    code, payload = verify(changed)
+    assert (code, payload["verdict"]) == (EXIT_FINDING, "fail")
+
+    # a process without complete counters, or one that dropped events
+    (tmp_path / "new.jsonl.meta.json").write_text(json.dumps(
+        {"processes": [{"counters": _LOSSLESS}, {"pid": 7}]}))
+    assert verify(new)[1]["contract"]["verdict_reasons"] == [
+        "the post-migration recording new.jsonl has no event-loss counters"]
+    (tmp_path / "new.jsonl.meta.json").write_text(json.dumps(
+        {"counters": {**_LOSSLESS, "backpressure_dropped": 3}}))
+    code, payload = verify(new)
+    assert code == EXIT_INCONCLUSIVE
+    assert payload["contract"]["verdict_reasons"] == [
+        "the post-migration recording new.jsonl dropped 3 event(s)"]
+
+
 def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeypatch):
     """The headline is coverage and recall over contacts, stamped with how "ran" was known,
     the BLIND split, and the symbol-matching tiers from exact-join up."""
@@ -346,3 +462,98 @@ def test_report_renders_coverage_recall_and_the_identity_tiers(tmp_path, monkeyp
     assert {c["target"]: c["status"] for c in data["contacts"]} == {
         "fakedep.fetch": "recorded", "fakedep.other": "not-run"}
     assert "trust" not in data
+
+
+def test_the_blind_table_says_what_settles_each_kind_and_the_verdict_agrees(tmp_path,
+                                                                           monkeypatch):
+    """QA V2b/V5: a probe never settles a BLIND symbol, and no test settles one no capture can
+    record: the caption says per kind what does, and the verdict box and --agent agree."""
+    site = tmp_path / "site" / "fakedep"
+    site.mkdir(parents=True)
+    (site / "__init__.py").write_text("from fakedep._impl import fetch, other, SETTING\n")
+    (site / "_impl.py").write_text("SETTING = 1\n\ndef fetch(value):\n    return value\n\n"
+                                   "def other():\n    return 2\n")
+    monkeypatch.setenv("PYTHONPATH", str(site.parent))
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "app.py").write_text("import fakedep\nfrom fakedep import fetch, other\n\n"
+                                    "def run():\n    fetch(fakedep.SETTING)\n\n"
+                                    "def never():\n    other()\n")
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(json.dumps({
+        "t": "return", "q": "fakedep._impl.fetch", "sym": "fakedep._impl.fetch",
+        "in": {"bound": {}}, "result": 1,
+        "where": {"file": str(project / "app.py"), "line": 5, "func": "run"},
+    }) + "\n")
+    (tmp_path / "trace.jsonl.meta.json").write_text(json.dumps({"processes": [{"executed": {
+        "v": 1, "granularity": "line", "complete": True, "until": None,
+        "files": {str(project / "app.py"): {"lines": "1,2,4,5,7"}}}, "counters": _LOSSLESS}]}))
+    args = ["verify", str(project), "--baseline", str(trace), "--post-migration", str(trace)]
+
+    text = " ".join(re.sub(r"[│╭╮╰╯─]", " ", runner.invoke(
+        cli, args, env={"COLUMNS": "200"}).output).split())
+
+    assert "probe-python" not in text
+    assert "unobservable: no capture can record them, a person reviews each use" in text
+    assert "not run: a test that reaches them settles them" in text
+    # The unobservable SETTING keeps nothing from PASS (the owner's decision): the verdict
+    # lists it instead of making it a reason.
+    assert ("1 dependency use(s) cannot be observed by a capture, so this verdict does not "
+            "cover them; a person may glance at: fakedep.SETTING") in text
+    view = json.loads(runner.invoke(cli, [*args, "--agent"]).output)
+    assert view["data"]["unobservable_uses"] == ["fakedep.SETTING"]
+    kinds = {c["reason"]: c["kind"] for c in view["data"]["inconclusive_causes"]}
+    assert not any("fakedep.SETTING" in reason for reason in kinds)
+    assert kinds["contract: 1 static dependency symbol(s) were not exercised (1 not run by "
+                 "the workload)"] == "needs_evidence"
+
+
+def test_noise_against_another_recording_is_not_settled_by_a_replicate(tmp_path):
+    """QA V2-3 (TESTING §F): verify suggested `pymolt capture baseline --replicate` for an input
+    change between two recordings named on the command line, where there is no baseline
+    capture to replicate (it fails: "no valid baseline to replicate"), and a replicate of one
+    would not measure another recording's noise. It suggests what works instead."""
+    project = tmp_path / "proj"
+    (project / "app").mkdir(parents=True)
+    (project / "app" / "__init__.py").write_text("")
+    (project / "app" / "m.py").write_text(
+        "import yaml\ndef load(s):\n    return yaml.safe_load(s)\n")
+    counters = {name: 0 for name in ("events_seen", "events_written", "sampling_dropped",
+                                     "backpressure_dropped", "write_failures", "sink_failures",
+                                     "shutdown_dropped")}
+    for name, value in (("old", 1), ("new", 2)):
+        (tmp_path / f"{name}.jsonl").write_text(json.dumps({
+            "q": "yaml.safe_load", "in": {"bound": {"stream": f"a: {value}"}},
+            "result": {"__dict__": [["a", value]]}, "t": "return",
+            "where": {"file": "app/m.py", "line": 3, "func": "load"}}) + "\n")
+        (tmp_path / f"{name}.jsonl.meta.json").write_text(json.dumps({"counters": counters}))
+    args = ["verify", str(project), "--baseline", str(tmp_path / "old.jsonl"),
+            "--post-migration", str(tmp_path / "new.jsonl")]
+
+    view = json.loads(runner.invoke(cli, [*args, "--agent"]).output)
+    (found,) = view["data"]["inconclusive_causes"]
+    assert found["cause"] == "noise" and "input changed" in found["reason"]
+    assert "--replicate" not in found["reason"] + found["settle"]
+    assert "--baseline RUN1 --post-migration RUN2" in found["settle"]
+
+    text = " ".join(runner.invoke(cli, args, env={"COLUMNS": "200"}).output.split())
+    assert "pymolt capture baseline --replicate" not in text
+    assert "Review — input changed: 1 entry at 1 site(s). Action: record the before side" in text
+    assert "noise not measured (the before side is not the baseline capture" in text
+
+
+def test_one_recording_given_names_only_the_side_that_is_missing(tmp_path):
+    """Only `--post-migration FILE` (or only `--baseline FILE`): the settle names the other side,
+    not "the baseline, then post-migration"."""
+    project, trace = _probe_project(tmp_path, {"__dict__": [["a", 1]]})
+
+    for flag, wanted in (("--post-migration", "capture baseline"),
+                         ("--baseline", "capture post-migration")):
+        result = runner.invoke(cli, ["verify", str(project), flag, str(trace), "--json"])
+        assert result.exit_code == EXIT_INCONCLUSIVE, result.output
+        causes = json.loads(result.output)["contract"]["inconclusive_causes"]
+        settles = [c["settle"] for c in causes if "baseline trace" in c["reason"]
+                   or "no current trace" in c["reason"]]
+        assert settles, causes
+        assert all(s.startswith(wanted) for s in settles), settles
+        assert not any("then post-migration" in c["settle"] for c in causes), causes

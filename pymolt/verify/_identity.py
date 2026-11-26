@@ -78,16 +78,22 @@ _TYPE_MODULE = type.__dict__["__module__"]
 
 _RECEIVERS = ("self", "cls")
 _OWNER_CACHE_MAX = 20000
-_OWNERS = {}                # id(type) -> (type, "module.qualname" | None)
+_OWNERS = {}                # id(type) -> (held(type), "module.qualname" | None)
 _RECV_CACHE_MAX = 20000
 _TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_FLAGS = type.__dict__["__flags__"]
+_HEAPTYPE = 512             # Py_TPFLAGS_HEAPTYPE: a class defined in Python (or a heap C type)
 
 # ── what a decision cache keeps of the object it decided ─────────────────────
 # A cache keyed by ``id(obj)`` must know ``obj`` again (an id is reused once its object
 # dies), but must not keep it alive: a tracer may not change how long the traced program's
 # objects live. A builtin method bound to a receiver holds the receiver, a closure its
 # cells, a ``functools.partial`` its arguments; holding them ran their finalizers late or
-# never and kept weak references alive.
+# never and kept weak references alive. A class holds its namespace (methods, their
+# closures, class attributes), and a class may be made at run time and dropped again
+# (Flask's debug helper makes one per request, ``unittest.mock`` one per mock): the locust
+# suite's ``isinstance`` over ``gc.get_objects()`` met a dead ``weakref.proxy`` that a
+# cached per-request class still reached.
 _WEAKREF = weakref.ref
 _BUILTIN = types.BuiltinFunctionType
 _MODULE = types.ModuleType
@@ -97,15 +103,19 @@ _DESCRIPTOR_TYPES = (type(str.join), type(object.__init__), type(dict.__dict__["
 
 
 def held(obj):
-    """What a cache keeps of ``obj`` to know it again (``is_held``): ``obj`` itself when its
-    class or module keeps it alive anyway (a class, a builtin descriptor, a builtin function
-    of a module, a function its module's namespace names: ``_named_by_module``), else a weak
-    reference, or None when ``obj`` takes none (never known again: every later object is a
+    """What a cache keeps of ``obj`` to know it again (``is_held``): ``obj`` itself when it
+    lives as long as the interpreter or its class or module keeps it alive anyway (a static C
+    type, a builtin descriptor, a builtin function of a module, a function its module's
+    namespace names: ``_named_by_module``), else a weak reference (a class defined in Python
+    among them), or None when ``obj`` takes none (never known again: every later object is a
     different one). Never runs user code."""
     t = type(obj)
-    if t in _DESCRIPTOR_TYPES or issubclass(t, type):
+    if t in _DESCRIPTOR_TYPES:
         return obj
-    if t is _BUILTIN:
+    if issubclass(t, type):
+        if not (_TYPE_FLAGS.__get__(obj, type) & _HEAPTYPE):
+            return obj
+    elif t is _BUILTIN:
         owner = obj.__self__
         if owner is None or type(owner) is _MODULE:
             return obj
@@ -177,17 +187,21 @@ def _receiver_of(posnames, sym):
 def type_label(t):
     """``module.qualname`` of a class (per-type cache, C accessors only)."""
     ent = _OWNERS.get(id(t))
-    if ent is not None and ent[0] is t:
-        return ent[1]
+    if ent is not None:
+        ref = ent[0]                        # ``is_held``, inline (per call)
+        if ref is t or (type(ref) is _WEAKREF and ref() is t):
+            return ent[1]
     try:
         mod = _TYPE_MODULE.__get__(t, type)
         qual = _TYPE_QUALNAME.__get__(t, type)
         label = mod + "." + qual if isinstance(mod, str) and mod else qual
     except Exception:
         label = None
-    if len(_OWNERS) >= _OWNER_CACHE_MAX:
-        _OWNERS.clear()
-    _OWNERS[id(t)] = (t, label)          # holds the type: its id cannot be recycled
+    ref = held(t)
+    if ref is not None:
+        if len(_OWNERS) >= _OWNER_CACHE_MAX:
+            _OWNERS.clear()
+        _OWNERS[id(t)] = (ref, label)
     return label
 
 
@@ -560,7 +574,8 @@ class IdentityResolver:
         self._index = {}    # module -> [namespace size, index, rebuilds, globals]
         self._inner = {}    # id(func) -> (held(func), InnerIdentity | None)
         self._inner_m = {}  # id(method.__func__) -> (held(func), InnerIdentity | None)
-        self._recv = {}     # (id(code), id(receiver type)) -> (code, type, CodeIdentity | None)
+        # (id(code), id(receiver type)) -> (code, held(type), CodeIdentity | None)
+        self._recv = {}
 
     # ── per code object ────────────────────────────────────────────────────────
     def code_identity(self, code, module, g):
@@ -610,8 +625,10 @@ class IdentityResolver:
             t = value
         key = (id(code), id(t))
         ent = self._recv.get(key)
-        if ent is not None and ent[0] is code and ent[1] is t:
-            return ent[2]
+        if ent is not None and ent[0] is code:
+            ref = ent[1]                    # ``is_held``, inline (per call)
+            if ref is t or (type(ref) is _WEAKREF and ref() is t):
+                return ent[2]
         try:
             owner, func = class_member(t, code)
             rci = None
@@ -624,9 +641,11 @@ class IdentityResolver:
                 rci.defaults = _defaults_of(func, code)
         except Exception:
             rci = None
-        if len(self._recv) >= _RECV_CACHE_MAX:
-            self._recv.clear()
-        self._recv[key] = (code, t, rci)       # holds both: their ids cannot be recycled
+        ref = held(t)
+        if ref is not None:
+            if len(self._recv) >= _RECV_CACHE_MAX:
+                self._recv.clear()
+            self._recv[key] = (code, ref, rci)  # holds the code: its id cannot be recycled
         return rci
 
     def _lookup(self, code, module, g):

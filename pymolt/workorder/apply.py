@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 
 from pymolt.apply_check import SelfCheck, SmokeCheck
 from pymolt.migration_plan import (
+    PERSON_RUNS_IT,
     Invocation,
     InvocationFile,
     MigrationCheckError,
@@ -61,6 +62,7 @@ from pymolt.migration_plan import (
     _now,
     _plan_runs,
     _project_file,
+    _project_relative,
     _pythons,
     _restore_ledger,
     _run_dir,
@@ -94,8 +96,8 @@ class StepRefusal(MigrationConflictError):
     """The invocation is refused (exit 2) before any write. ``refused``: step id -> reasons."""
 
     def __init__(self, message: str, *, refused: dict[str, list[str]] | None = None,
-                 hint: str | None = None) -> None:
-        super().__init__(message, hint=hint)
+                 hint: str | None = None, conflict: bool = True) -> None:
+        super().__init__(message, hint=hint, conflict=conflict)
         self.refused = dict(refused or {})
 
 
@@ -144,7 +146,8 @@ AGENT_REFUSAL = ("under --agent, pymolt applies its steps only for a plan a pers
 def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | None = None,
                 through: str | None = None, dry_run: bool = False,
                 allow_no_baseline: bool = False, smoke: bool = False,
-                agent: bool = False, smoke_reason: str | None = None) -> ApplyResult:
+                agent: bool = False, smoke_reason: str | None = None,
+                shown: str = ".") -> ApplyResult:
     """Apply the selected pymolt steps of ``plan`` (module docstring). Under ``agent`` the
     plan must be approved for agents (``workorder.approval``), except for a dry run.
     ``smoke_reason``: why the smoke import is not run, for the receipts (``--no-smoke``, an MCP
@@ -153,14 +156,14 @@ def apply_steps(project_dir: str | Path, plan: MigrationPlan, *, step: str | Non
     ``MigrationEvidenceError`` (exit 4), ``MigrationCheckError`` (exit 1) or
     ``MigrationPlanError`` / ``OSError`` (exit 3)."""
     if step and through:
-        raise StepRefusal("--step and --through cannot be combined")
+        raise StepRefusal("--step and --through cannot be combined", conflict=False)
     if agent and allow_no_baseline:
         raise StepRefusal("--allow-no-baseline is refused under --agent: a person decides to "
-                          "apply without a baseline")
+                          "apply without a baseline", hint=PERSON_RUNS_IT, conflict=False)
     with _migration_lock(project_dir, "apply"):
         return _apply(Path(project_dir).resolve(), plan, step=step, through=through,
                       dry_run=dry_run, allow_no_baseline=allow_no_baseline, smoke=smoke,
-                      agent=agent, smoke_reason=smoke_reason)
+                      agent=agent, smoke_reason=smoke_reason, shown=shown)
 
 
 def skip_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, reason: str, *,
@@ -168,9 +171,11 @@ def skip_step(project_dir: str | Path, plan: MigrationPlan, step_id: str, reason
     """Mark a step ``skipped`` (design 4.1 row 16): a ``skip`` event, no file written. Allowed
     while it is planned, rolled back or stale, never in effect; its dependents stay blocked."""
     if agent:
-        raise StepRefusal("--skip is refused under --agent: a person declines a step")
+        raise StepRefusal("--skip is refused under --agent: a person declines a step",
+                          hint=PERSON_RUNS_IT, conflict=False)
     if not (reason or "").strip():
-        raise StepRefusal("--skip needs --reason TEXT: why the step is declined")
+        raise StepRefusal("--skip needs --reason TEXT: why the step is declined",
+                          conflict=False)
     with _migration_lock(project_dir, "skip"):
         return _skip(Path(project_dir).resolve(), plan, step_id, reason.strip())
 
@@ -409,7 +414,7 @@ def _classify(decisions: list[FileDecision]) -> str:
 
 def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | None,
            dry_run: bool, allow_no_baseline: bool, smoke: bool, agent: bool = False,
-           smoke_reason: str | None = None) -> ApplyResult:
+           smoke_reason: str | None = None, shown: str = ".") -> ApplyResult:
     receipt = MigrationReceipt.load(root)
     run_id, state = run_for(root, plan, receipt)
     _check_frozen(root, run_id, plan)
@@ -426,7 +431,7 @@ def _apply(root: Path, plan: MigrationPlan, *, step: str | None, through: str | 
     if not dry_run:
         from pymolt.workorder.record import refuse_open_record
 
-        refuse_open_record(receipt, "apply")
+        refuse_open_record(receipt, "apply", shown)
     ledger = _load_ledger(root, receipt)
     start_fp, start_setup, baseline = _preconditions(
         root, plan, receipt, run_id, allow_no_baseline=allow_no_baseline)
@@ -636,7 +641,7 @@ def _commit(root: Path, plan: MigrationPlan, run_id: str, state: MigrationRunSta
         new_receipt = receipt_after_apply(
             root, receipt, plan, run_id, appended, check, now=now, start_fp=start_fp,
             start_setup=start_setup, baseline=baseline, allow_no_baseline=allow_no_baseline,
-            frozen=str(frozen), invocation=invocation.id,
+            frozen=_project_relative(root, str(frozen)), invocation=invocation.id,
             files={s.id: [d.file for d in ds] for s, ds in decided})
         new_receipt.save(root)
         steps_state = {**(base_state.steps or {}), **{s.id: "applied" for s, _e in appended}}
@@ -761,7 +766,8 @@ def receipt_after_apply(root: Path, prior, plan: MigrationPlan, run_id: str, app
             target_python=plan.target_python, source_manifest=plan.source_manifest,
             target_manifest_path=(str(_project_file(root, plan.target_manifest_path))
                                   if plan.target_manifest_path else None),
-            baseline_trace_path=baseline.trace_path if baseline else None,
+            baseline_trace_path=(_project_relative(root, baseline.trace_path)
+                                 if baseline else None),
             baseline_captured_at=baseline.captured_at if baseline else None,
             environment_fingerprint=start_fp, environment_setup_fingerprint=start_setup,
             allow_no_baseline=allow_no_baseline, self_check=check,
@@ -832,7 +838,7 @@ def _receipt_for_noop(root: Path, plan: MigrationPlan, run_id: str, state, recei
         files_changed=[str(_project_file(root, c.path)) for c in plan.changes],
         patterns_applied=sum(c.sites for c in plan.changes),
         no_codemods_required=not plan.changes,
-        plan_path=str(_run_dir(root, run_id) / "plan.json"))
+        plan_path=_project_relative(root, str(_run_dir(root, run_id) / "plan.json")))
     out.mark_outcome("already_applied")
     return out
 
@@ -981,14 +987,15 @@ def _receipt_with_run(root: Path, receipt, plan: MigrationPlan, run_id: str, now
             baseline_trace_path=plan.baseline_trace_path,
             baseline_captured_at=plan.baseline_captured_at,
             no_codemods_required=not plan.changes,
-            plan_path=str(_run_dir(root, run_id) / "plan.json"))
+            plan_path=_project_relative(root, str(_run_dir(root, run_id) / "plan.json")))
     if receipt.run(run_id) is None:
         for run in receipt.runs:
             if not run.closed:
                 run.closed, run.closed_at = True, now
         receipt.runs.append(ReceiptRun(
             run_id=run_id, plan_id=plan.plan_id,
-            plan_path=str(_run_dir(root, run_id) / "plan.json"), opened_at=now,
+            plan_path=_project_relative(root, str(_run_dir(root, run_id) / "plan.json")),
+            opened_at=now,
             starting_fingerprint=environment_fingerprint(root),
             setup_fingerprint=environment_setup_fingerprint(root),
             target_manifest_sha256=plan.target_manifest_sha256))

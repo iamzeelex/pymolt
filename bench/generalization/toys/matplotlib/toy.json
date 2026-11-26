@@ -1,0 +1,250 @@
+{
+  "name": "matplotlib",
+  "ecosystem": "plotting (C++ Agg backend)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "matplotlib==3.6.3",
+      "numpy==1.26.4",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "matplotlib==3.10.9",
+      "numpy==2.3.5",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "matplotlib",
+    "numpy"
+  ],
+  "target_manifest": [
+    "matplotlib==3.10.9",
+    "numpy==2.3.5"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/charts.py": "\"\"\"Report charts rendered off-screen with matplotlib (Agg backend).\"\"\"\nimport warnings\n\nimport matplotlib\n\nmatplotlib.use(\"Agg\")\nimport matplotlib.pyplot as plt  # noqa: E402\nimport numpy as np  # noqa: E402\nfrom matplotlib import cbook, cm  # noqa: E402\nfrom matplotlib.colors import ListedColormap, to_hex  # noqa: E402\n\nwarnings.filterwarnings(\"ignore\", category=cbook.mplDeprecation)\n\nBRAND = ListedColormap([\"#1b9e77\", \"#d95f02\", \"#7570b3\"], name=\"brand\")\ncm.register_cmap(name=\"brand\", cmap=BRAND)\n\n\ndef palette(n, name=\"viridis\"):\n    \"\"\"``n`` hex colours sampled from a registered colormap.\"\"\"\n    cmap = cm.get_cmap(name, n)\n    return [to_hex(cmap(i)) for i in range(n)]\n\n\ndef line_chart(series, style=\"seaborn-whitegrid\"):\n    plt.style.use(style)\n    fig, ax = plt.subplots(figsize=(4, 3), dpi=50)\n    for label, values in series.items():\n        ax.plot(values, label=label)\n    legend = ax.legend(ncol=2)\n    labels = [handle.get_label() for handle in legend.legendHandles]\n    return fig, labels\n\n\ndef to_pixels(fig):\n    \"\"\"The rendered figure as an (h, w, 3) uint8 array.\"\"\"\n    fig.canvas.draw()\n    width, height = fig.canvas.get_width_height()\n    pixels = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)\n    plt.close(fig)\n    return pixels.reshape(height, width, 3)\n",
+    "app/stats_plots.py": "\"\"\"Statistical figures: contour levels and box plots.\"\"\"\nimport matplotlib\n\nmatplotlib.use(\"Agg\")\nimport matplotlib.pyplot as plt  # noqa: E402\nimport numpy as np  # noqa: E402\n\n\ndef contour_count(levels=3):\n    \"\"\"How many contour levels a radial surface is drawn with.\"\"\"\n    x, y = np.meshgrid(np.linspace(-1, 1, 20), np.linspace(-1, 1, 20))\n    fig, ax = plt.subplots()\n    contours = ax.contour(x, y, x ** 2 + y ** 2, levels=levels)\n    n = len(contours.collections)\n    plt.close(fig)\n    return n\n\n\ndef box_medians(groups):\n    \"\"\"Median per group, read back from the drawn box plot.\"\"\"\n    fig, ax = plt.subplots()\n    parts = ax.boxplot(list(groups.values()), labels=list(groups))\n    medians = [float(line.get_ydata()[0]) for line in parts[\"medians\"]]\n    names = [tick.get_text() for tick in ax.get_xticklabels()]\n    plt.close(fig)\n    return dict(zip(names, medians))\n",
+    "tests/test_charts.py": "from app import charts\n\n\ndef test_palette():\n    colours = charts.palette(3)\n    assert colours == [\"#440154\", \"#21918c\", \"#fde725\"]\n\n\ndef test_brand_palette_is_registered():\n    assert charts.palette(3, \"brand\") == [\"#1b9e77\", \"#d95f02\", \"#7570b3\"]\n\n\ndef test_line_chart_legend():\n    fig, labels = charts.line_chart({\"north\": [1, 3, 2], \"south\": [2, 2, 4]})\n    assert labels == [\"north\", \"south\"]\n    pixels = charts.to_pixels(fig)\n    assert pixels.shape == (150, 200, 3)\n    assert pixels.dtype.name == \"uint8\"\n",
+    "tests/test_stats_plots.py": "from app import stats_plots\n\n\ndef test_contour_count():\n    assert stats_plots.contour_count(3) == 5\n\n\ndef test_box_medians():\n    medians = stats_plots.box_medians({\"a\": [1, 2, 3], \"b\": [4, 6, 8]})\n    assert medians == {\"a\": 2.0, \"b\": 6.0}\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/charts.py",
+      "old": "category=cbook.mplDeprecation)",
+      "new": "category=matplotlib.MatplotlibDeprecationWarning)"
+    },
+    {
+      "file": "app/charts.py",
+      "old": "cm.register_cmap(name=\"brand\", cmap=BRAND)",
+      "new": "matplotlib.colormaps.register(BRAND, name=\"brand\")"
+    },
+    {
+      "file": "app/charts.py",
+      "old": "cm.get_cmap(name, n)",
+      "new": "matplotlib.colormaps[name].resampled(n)"
+    },
+    {
+      "file": "app/charts.py",
+      "old": "style=\"seaborn-whitegrid\"",
+      "new": "style=\"seaborn-v0_8-whitegrid\""
+    },
+    {
+      "file": "app/charts.py",
+      "old": "legend.legendHandles",
+      "new": "legend.legend_handles"
+    },
+    {
+      "file": "app/charts.py",
+      "old": "np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)",
+      "new": "np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()"
+    },
+    {
+      "file": "app/stats_plots.py",
+      "old": "len(contours.collections)",
+      "new": "len(contours.get_paths())"
+    },
+    {
+      "file": "app/stats_plots.py",
+      "old": "labels=list(groups))",
+      "new": "tick_labels=list(groups))"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/stats_plots.py",
+          "append": "\n\ndef heatmap_meta(z):\n    \"\"\"How a matrix is drawn: the image's interpolation and colour limits.\"\"\"\n    fig, ax = plt.subplots()\n    image = ax.imshow(z)\n    meta = {\"interpolation\": image.get_interpolation(),\n            \"clim\": [float(v) for v in image.get_clim()]}\n    plt.close(fig)\n    return meta\n"
+        },
+        {
+          "file": "tests/test_stats_plots.py",
+          "append": "\n\ndef test_heatmap_limits():\n    # Only the colour limits are checked, not how the image is resampled.\n    assert stats_plots.heatmap_meta([[0.0, 1.0], [1.0, 0.0]])[\"clim\"] == [0.0, 1.0]\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "matplotlib.image._ImageBase.get_interpolation"
+      ],
+      "behaviour": "rcParams['image.interpolation'] defaults to 'antialiased' in 3.6.3 and to 'auto' from 3.10 (the antialiased mode was renamed and made the default name), so AxesImage.get_interpolation() returns a different string for the same imshow call; the test only checks the colour limits"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "matplotlib.cbook.mplDeprecation",
+      "kind": "MOVED",
+      "param": null,
+      "site": "app/charts.py:12",
+      "breaks": "AttributeError: module 'matplotlib.cbook' has no attribute 'mplDeprecation'",
+      "successor": "matplotlib.MatplotlibDeprecationWarning",
+      "fixable": "auto",
+      "source": "matplotlib 3.6 deprecated cbook.mplDeprecation / cbook.MatplotlibDeprecationWarning; removed in 3.8",
+      "verified": {
+        "old": "3.6.3: cbook.mplDeprecation is matplotlib.MatplotlibDeprecationWarning -> True; attribute access warns MatplotlibDeprecationWarning 'mplDeprecation was deprecated in Matplotlib 3.6 ... Use matplotlib.MatplotlibDeprecationWarning instead.'",
+        "new": "3.10.9: AttributeError at import of app.charts"
+      }
+    },
+    {
+      "symbol": "matplotlib.cm.register_cmap",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/charts.py:15",
+      "breaks": "AttributeError: module 'matplotlib.cm' has no attribute 'register_cmap'",
+      "successor": "matplotlib.colormaps.register",
+      "fixable": "manual",
+      "source": "matplotlib 3.7 deprecated cm.register_cmap; removed in 3.9",
+      "verified": {
+        "old": "3.6.3: works with PendingDeprecationWarning 'The register_cmap function will be deprecated in a future version. Use matplotlib.colormaps.register(name) instead.'",
+        "new": "3.10.9: AttributeError; colormaps.register(cmap, name=) works on both (a different signature: the colormap comes first)"
+      }
+    },
+    {
+      "symbol": "matplotlib.cm.get_cmap",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/charts.py:20",
+      "breaks": "no break on 3.10.9: MatplotlibDeprecationWarning 'The get_cmap function was deprecated in Matplotlib 3.7 and will be removed in 3.11. Use matplotlib.colormaps[name] or matplotlib.colormaps.get_cmap() or pyplot.get_cmap() instead.'",
+      "successor": "matplotlib.colormaps.get_cmap",
+      "fixable": "manual",
+      "source": "matplotlib 3.7 deprecated cm.get_cmap (removal in 3.11)",
+      "verified": {
+        "old": "3.6.3: works with PendingDeprecationWarning; cm.get_cmap is matplotlib.colormaps.get_cmap -> False (lut= has no counterpart: colormaps[name].resampled(lut))",
+        "new": "3.10.9: works and warns; same hex colours"
+      }
+    },
+    {
+      "symbol": "matplotlib.pyplot.style.use",
+      "kind": "BEHAVIOR",
+      "param": "style",
+      "site": "app/charts.py:25",
+      "breaks": "OSError: 'seaborn-whitegrid' is not a valid package style, path of style file, URL of style file, or library style name (library styles are listed in `style.available`)",
+      "successor": "seaborn-v0_8-whitegrid",
+      "fixable": "manual",
+      "source": "matplotlib 3.6 renamed the bundled seaborn styles to seaborn-v0_8-*; the old names were removed in 3.8",
+      "verified": {
+        "old": "3.6.3: works with MatplotlibDeprecationWarning 'The seaborn styles shipped by Matplotlib are deprecated since 3.6 ... available as seaborn-v0_8-<style>'",
+        "new": "3.10.9: OSError for the old name; 'seaborn-v0_8-whitegrid' works on both"
+      }
+    },
+    {
+      "symbol": "matplotlib.legend.Legend.legendHandles",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/charts.py:30",
+      "breaks": "AttributeError: 'Legend' object has no attribute 'legendHandles'",
+      "successor": "matplotlib.legend.Legend.legend_handles",
+      "fixable": "auto",
+      "source": "matplotlib 3.7 renamed Legend.legendHandles to legend_handles; removed in 3.9",
+      "verified": {
+        "old": "3.6.3: an instance attribute (not on the class), no warning; legend_handles does not exist",
+        "new": "3.10.9: AttributeError; legend_handles holds the same handles"
+      }
+    },
+    {
+      "symbol": "matplotlib.backends.backend_agg.FigureCanvasAgg.tostring_rgb",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/charts.py:38",
+      "breaks": "AttributeError: 'FigureCanvasAgg' object has no attribute 'tostring_rgb'",
+      "successor": "matplotlib.backends.backend_agg.FigureCanvasAgg.buffer_rgba",
+      "fixable": "manual",
+      "source": "matplotlib 3.8 deprecated tostring_rgb; removed in 3.10",
+      "verified": {
+        "old": "3.6.3: returns 3 bytes per pixel, no warning",
+        "new": "3.10.9: AttributeError; buffer_rgba() returns 4 bytes per pixel (drop the alpha channel for the same array)"
+      }
+    },
+    {
+      "symbol": "matplotlib.contour.ContourSet.collections",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/stats_plots.py:14",
+      "breaks": "AttributeError: 'QuadContourSet' object has no attribute 'collections'",
+      "successor": "matplotlib.contour.ContourSet.get_paths",
+      "fixable": "manual",
+      "source": "matplotlib 3.8 made ContourSet a single Collection (collections deprecated); removed in 3.10",
+      "verified": {
+        "old": "3.6.3: an instance attribute, one collection per level (5 for levels=3); get_paths does not exist on ContourSet",
+        "new": "3.10.9: AttributeError; get_paths() returns one path per level (5)"
+      }
+    },
+    {
+      "symbol": "matplotlib.axes.Axes.boxplot",
+      "kind": "DEPRECATED",
+      "param": "labels",
+      "site": "app/stats_plots.py:22",
+      "breaks": "no break on 3.10.9: MatplotlibDeprecationWarning \"The 'labels' parameter of boxplot() has been renamed 'tick_labels' since Matplotlib 3.9; support for the old name will be dropped in 3.11.\"",
+      "successor": "tick_labels",
+      "fixable": "auto",
+      "source": "matplotlib 3.9 renamed boxplot(labels=) to tick_labels=",
+      "verified": {
+        "old": "3.6.3: labels= works, no warning; tick_labels= raises TypeError",
+        "new": "3.10.9: labels= works and warns; tick_labels= works"
+      }
+    },
+    {
+      "symbol": "matplotlib.image._ImageBase.get_interpolation",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/stats_plots.py:33",
+      "scenario": "change",
+      "breaks": "no raise: returns 'auto' instead of 'antialiased'",
+      "successor": null,
+      "fixable": "manual",
+      "source": "matplotlib 3.10 API changes (image.interpolation default renamed to 'auto')",
+      "verified": {
+        "old": "3.6.3: ax.imshow(z).get_interpolation() -> 'antialiased'",
+        "new": "3.10.9: -> 'auto'"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "matplotlib.cm.register_cmap",
+      "category": "PendingDeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "matplotlib.cm.get_cmap",
+      "category": "PendingDeprecationWarning",
+      "from_c": false,
+      "side": "old+new"
+    },
+    {
+      "symbol": "matplotlib.pyplot.style.use",
+      "category": "MatplotlibDeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    }
+  ],
+  "notes": "Old: matplotlib 3.6.3 on Python 3.11 with numpy 1.26.4 (3.6 has no wheels for Python 3.12 and needs numpy<2). New: 3.10.9 with numpy 2.3.5 on Python 3.12 (the 3.9/3.10 migration; 3.11 removes cm.get_cmap outright). The Agg backend is set in the app, nothing is shown. Legend.legendHandles and ContourSet.collections are instance attributes on 3.6.3 (not on the class), so an API probe of the class cannot see them; tostring_rgb has no same-format successor (buffer_rgba is RGBA). The style rename is data (a string argument), so it is BEHAVIOR. cm.get_cmap and boxplot(labels=) still work on 3.10 (DEPRECATED); cm.get_cmap warns on both sides. The module-level warnings.filterwarnings(..., category=cbook.mplDeprecation) is the common real use of that alias. numpy is a direct dependency too (frombuffer, meshgrid), so its 1.26 -> 2.3 delta shows up in the plan; the calls used are unchanged."
+}

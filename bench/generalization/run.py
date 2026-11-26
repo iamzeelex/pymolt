@@ -557,12 +557,14 @@ def plan_candidates(plan: dict) -> list[dict]:
             continue
         cands.append({"symbol": imp.get("path"), "aliases": imp.get("aliases") or [],
                       "kind": imp.get("kind"), "successor": imp.get("replacement_path"),
+                      "param": imp.get("param"),
                       "package": imp.get("package"), "risk": imp.get("risk"), "src": "impact"})
     for risk in (plan.get("risks") or {}).get("risks") or []:
         for fact in [risk.get("fact") or {}, *(risk.get("facts") or [])]:
             if fact.get("symbol"):
                 cands.append({"symbol": fact["symbol"], "aliases": fact.get("aliases") or [],
                               "kind": fact.get("kind"), "successor": fact.get("successor"),
+                              "param": fact.get("param"),
                               "package": risk.get("package"), "risk": risk.get("tier"),
                               "src": "risk"})
     return cands
@@ -574,6 +576,13 @@ def spellings(c: dict) -> list[str]:
 
 def leaf(s: str | None) -> str:
     return (s or "").rsplit(".", 1)[-1]
+
+
+def gt_leaf(s: str | None) -> str:
+    """The last name of a ground-truth successor, which may carry prose after the name
+    ("django.urls.re_path (same regex semantics...)", "pattern= (same kwarg, renamed)")."""
+    m = re.match(r"\s*([A-Za-z_][\w.]*)", s or "")
+    return leaf(m.group(1)) if m else leaf(s)
 
 
 # ── metrics ───────────────────────────────────────────────────────────────────────────────
@@ -606,17 +615,28 @@ def metric_a(toy: dict, scens: dict[str, dict], plan_key: str = "plan") -> dict:
         matched_idx.update(i for i, _ in hits)
         c = pick[1]
         succ = g.get("successor")
+        # Every successor the plan names for the entry: each matching fact's (not only the first
+        # one's), and the successor of each step about the symbol (``symbol.new``, the manual
+        # ``successor``, a parameter map). A fact about a parameter names it by the parameter.
+        # A parameter entry whose successor is a parameter (``periods`` -> ``n``) is credited
+        # only by a fact about that parameter; one whose successor is an object
+        # (``validator(each_item=)`` -> ``field_validator``) by the object's facts too.
+        param_succ = bool(g.get("param")) and "." not in (succ or "").split(" ")[0]
+        named = [x["successor"] for _, x in (exact or hits) if x.get("successor")
+                 and (not param_succ or x.get("param") == g["param"])]
+        named += step_successors(scens, g, names)
+        named = list(dict.fromkeys(named))
         succ_ok = None
-        if succ or (c and c.get("successor")):
-            succ_ok = bool(c and succ and c.get("successor")
-                           and leaf(succ) == leaf(c["successor"]))
+        if succ or named:
+            succ_ok = bool(succ and any(gt_leaf(succ) == leaf(n) for n in named))
         per.append({"symbol": g["symbol"], "kind": g["kind"],
                     "sites": g.get("sites") or ([g["site"]] if g.get("site") else []),
                     "scenario": g.get("scenario"), "fixable": g.get("fixable"),
                     "status": "detected" if exact else ("other_kind" if hits else "missed"),
                     "plan_kind": c["kind"] if c else None, "src": c["src"] if c else None,
                     "successor": succ, "plan_successor": c.get("successor") if c else None,
-                    "successor_ok": succ_ok})
+                    "plan_successors": named, "successor_ok": succ_ok,
+                    "successor_wrong": bool(succ and named and not succ_ok)})
     fp, seen = [], set()
     for i, c in enumerate(cands):
         if i not in matched_idx and (c["symbol"], c["kind"]) not in seen and c["src"] == "impact":
@@ -637,7 +657,53 @@ def metric_a(toy: dict, scens: dict[str, dict], plan_key: str = "plan") -> dict:
                                   "symbols": [p["symbol"] for p in behavior]},
             "successors_expected": len(with_succ),
             "successors_correct": sum(bool(p["successor_ok"]) for p in with_succ),
+            "successors_wrong": sum(bool(p["successor_wrong"]) for p in with_succ),
+            "trust": trust_counts(scens, plan_key),
             "fp_candidates": fp, "per_entry": per}
+
+
+def step_successors(scens: dict[str, dict], g: dict, names) -> list[str]:
+    """The successors the plans' steps name for a ground-truth entry: a step whose old symbol is
+    the entry's (``names``) names ``symbol.new``, its manual ``successor``, and, for a parameter
+    entry, the new name its parameter map gives the entry's parameter."""
+    out: list[str] = []
+    for s in scens.values():
+        for st in s["plan"].get("steps") or []:
+            sym = st.get("symbol") or {}
+            if not sym.get("old") or not names(sym["old"]):
+                continue
+            params = sym.get("params") or {}
+            if g.get("param"):
+                if g["param"] in params:
+                    out.append(params[g["param"]])
+                manual = (st.get("do") or {}).get("manual") or {}
+                delta = (st.get("why") or {}).get("delta") or {}
+                if delta.get("param") == g["param"] and manual.get("successor"):
+                    out.append(manual["successor"])
+                continue
+            for name in (sym.get("new"), ((st.get("do") or {}).get("manual") or {})
+                         .get("successor")):
+                if name:
+                    out.append(name)
+    return out
+
+
+def trust_counts(scens: dict[str, dict], plan_key: str = "plan") -> dict[str, int]:
+    """How many distinct facts the plans name a successor for, by the successor's trust
+    (``succession.trust``; ``none`` for a successor with no succession record)."""
+    seen: dict[tuple, str] = {}
+    for s in scens.values():
+        for risk in (s[plan_key].get("risks") or {}).get("risks") or []:
+            for fact in [risk.get("fact") or {}, *(risk.get("facts") or [])]:
+                if not fact.get("successor") and not fact.get("succession"):
+                    continue
+                key = (fact.get("symbol"), fact.get("kind"), fact.get("param"))
+                trust = (fact.get("succession") or {}).get("trust") or "none"
+                seen.setdefault(key, trust)
+    out: dict[str, int] = {}
+    for trust in seen.values():
+        out[trust] = out.get(trust, 0) + 1
+    return dict(sorted(out.items()))
 
 
 def risks_for(plan: dict, symbol: str) -> list[dict]:
@@ -742,6 +808,16 @@ def metric_c(scens: dict[str, dict], expected_rewrites: int = 0) -> dict:
             out["wrong"] = sum(p["result"] == "wrong" for p in per)
             out["unknown"] = sum(p["result"] == "unknown" for p in per)
             out["per_rewrite"] = per
+        # A wrong rewrite made by a step whose basis is a proof from the library's code: the
+        # proof was falsified (a pymolt bug, counted on its own).
+        proofs = {leaf((st.get("symbol") or {}).get("old"))
+                  for st in eq["plan"].get("steps") or []
+                  if st.get("executor") == "pymolt" and st.get("basis") == "library-proof"}
+        out["proof_steps"] = len(proofs)
+        out["proof_falsified"] = sum(1 for p in per if p["result"] == "wrong"
+                                     and leaf(p.get("symbol")) in proofs)
+        if rc not in (0, None) and proofs:
+            out["proof_falsified"] = max(out["proof_falsified"], 1)
     return out
 
 
@@ -791,18 +867,18 @@ def detection_of(symbol: str, entries: list[dict], root: Path) -> str | None:
 def verdict_ok(scenario: str, verdict: str | None, expected: str,
                fact_diff: dict) -> tuple[bool, str]:
     """Whether a scenario's verdict is the expected one. The equivalent scenario is expected to
-    be "not fail" (round 3): PASS, or INCONCLUSIVE with no changed entry and no failing edited
-    site, i.e. only review items or unverified edited sites. Any other scenario must match its
-    expected verdict exactly."""
+    be "not fail" (round 3): PASS, or INCONCLUSIVE with no failing entry and no failing edited
+    site, i.e. only review items or unverified edited sites (a review on an unedited line is a
+    CHANGED entry that does not fail). Any other scenario must match its expected verdict
+    exactly."""
     v = (verdict or "").lower()
     if scenario == "equiv" and expected.lower() == "pass":
         if v == "pass":
             return True, "not fail"
-        counts = fact_diff.get("counts") or {}
+        failing = any(e.get("fails") for e in fact_diff.get("entries") or ())
         failed = (fact_diff.get("edited_sites") or {}).get("failed") or 0
         fact_ok = (fact_diff.get("verdict") or "").lower() != "fail"
-        return v == "inconclusive" and fact_ok and not counts.get("changed") and not failed, \
-            "not fail"
+        return v == "inconclusive" and fact_ok and not failing and not failed, "not fail"
     return v == expected.lower(), expected
 
 
@@ -821,9 +897,16 @@ def metric_d(toy: dict, scens: dict[str, dict]) -> dict:
             if e.get("level") in lv:
                 lv[e["level"]] += 1
         exp_changed = spec.get("expected_changed") or []
-        by = {x: detection_of(x, entries, s["root"]) for x in exp_changed}
+        # The scorecard gate: an expected change counts only when verify FAILS on its symbol
+        # (a failing entry), never for a review item, noise or an entry explained away; a
+        # change scenario that fails on other symbols only is not a detection.
+        failing = [e for e in entries if e.get("fails")]
+        by = {x: detection_of(x, failing, s["root"]) for x in exp_changed}
         found = [x for x in exp_changed if by[x]]
         ok, expected = verdict_ok(name, verdict, spec["expected_verdict"], fd)
+        if ok and name == "change" and exp_changed and len(found) < len(exp_changed):
+            missing = ", ".join(x for x in exp_changed if x not in found)
+            ok, expected = False, f"{expected} on {missing}"
         out["scenarios"][name] = {
             "expected_changed_by": {x: v for x, v in by.items() if v},
             "verdict": verdict, "expected": expected,
@@ -831,7 +914,14 @@ def metric_d(toy: dict, scens: dict[str, dict]) -> dict:
             "ok": ok,
             "changed": changed, "expected_changed_found": found,
             "expected_changed_missing": [x for x in exp_changed if x not in found],
-            "counts": {k: v for k, v in (fd.get("counts") or {}).items() if v}}
+            "counts": {k: v for k, v in (fd.get("counts") or {}).items() if v},
+            # what each comparison relaxation absorbed (``FactDiff.absorbed``), and whether
+            # any absorbed entry is an expected change (it must never be)
+            "absorbed": dict(fd.get("absorbed") or {}),
+            "absorbed_expected": sorted({x for x in exp_changed for e in entries
+                                         if e.get("absorbed") and not e.get("fails")
+                                         and detection_of(x, [e], s["root"])}),
+            "numeric_drift": fd.get("numeric_drift")}
     tot = lv["exact"] + lv["type"]
     out["levels"] = lv
     out["exact_share"] = lv["exact"] / tot if tot else None
@@ -1148,7 +1238,9 @@ def write_scorecard(out: Path, rows: list[dict], meta: dict) -> None:
         corr = frac(r["A"]["successors_correct"], r["A"]["successors_expected"])
         lines.append(f"- A successors correct {corr}"
                      + (f" online, {frac(off['successors_correct'], off['successors_expected'])}"
-                        " offline" if off else ""))
+                        " offline" if off else "")
+                     + f"; named but wrong {r['A'].get('successors_wrong', 0)}"
+                     + f"; trust {r['A'].get('trust') or {}}")
         if r["A"]["fp_candidates"]:
             lines.append(f"- A fp candidates ({len(r['A']['fp_candidates'])}): "
                          + "; ".join(r["A"]["fp_candidates"][:8]))
@@ -1174,13 +1266,18 @@ def write_scorecard(out: Path, rows: list[dict], meta: dict) -> None:
             lines.append(f"- D {n}: {d['verdict']} (expected {d['expected']}), "
                          f"counts {d['counts']}, missing changed {d['expected_changed_missing']}, "
                          f"detected by {d.get('expected_changed_by')}")
+            if d.get("absorbed"):
+                lines.append(f"- D {n} absorbed {d['absorbed']}"
+                             + (f"; ABSORBED AN EXPECTED CHANGE: {d['absorbed_expected']}"
+                                if d.get("absorbed_expected") else ""))
         lines.append(f"- D levels {r['D']['levels']}, opaque share {pct(r['D']['opaque_share'])}")
         for o in r["E"].get("post_migration", []):
             lines.append(f"- E post-migration (new side) {o['symbol']} {o['category']}"
                          f"{' [C-level]' if o['from_c'] else ''}: "
                          f"{'observed' if o['observed_post'] else 'not observed'}")
         lines.append(f"- C expected rewrites {r['C'].get('expected')}, "
-                     f"proposed {r['C']['proposed']}")
+                     f"proposed {r['C']['proposed']}, proof steps {r['C'].get('proof_steps', 0)}, "
+                     f"proof falsified {r['C'].get('proof_falsified', 0)}")
         lines.append(f"- F delta sides {r['F']['delta_sides']}")
         if r["E"]["missed"]:
             lines.append(f"- E missed: {r['E']['missed']}")

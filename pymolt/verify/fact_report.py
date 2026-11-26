@@ -49,6 +49,11 @@ RULES = {
     "unmeasured-noise": "facts._gate_unmeasured",
     "replicate": "replicate.apply_noise_profile",
     "order": "facts._judge_order",
+    "handle-state": "facts._handles_match (a dependency object, by what the project reads of it)",
+    "type-drift": "facts._handle_types_relate / _wrapper_naming / _carry_edit_types",
+    "projected": "facts.compare_outcomes (the consuming statement, source_uses.consumer_at)",
+    "numeric": "facts._floats_close (equal within --float-ulps at the value's precision)",
+    "record-input": "facts._judge_record_inputs (a dependency record input keyed by its type)",
 }
 
 # review reason (the review text's prefix) -> the one action that settles it
@@ -67,6 +72,13 @@ ACTIONS = {
     "the value differs on a hand-edited line": "review the hand edit at the call site",
     "not reached": "check that the code around the call still runs under the tests",
     "no longer a dependency call here": "check what the name refers to on that line now",
+    "carried from the edit": "review the edit the type comes from (each finding prints its id)",
+    "call count changed at an edited statement": "review the edit: the call now runs a "
+                                                 "different number of times",
+    "class changed across packages": "check that the code using the result works with the new "
+                                     "class, then accept it (`pymolt verify . --accept ID`)",
+    "record-input": "review the calls on those dependency records (which record got which "
+                    "result)",
 }
 _DEFAULT_ACTION = "review the entry"
 # The reasons a baseline replicate settles. Once one was measured and the entry still stands,
@@ -77,10 +89,20 @@ AFTER_REPLICATE = ("a measured baseline replicate did not explain it: review it 
                    "or accept an intended change with `pymolt verify . --accept ID`)")
 
 
-def review_action(reason: str, noise_measured: bool) -> str:
-    """The one action that settles a review reason, given whether a replicate was measured."""
+#: The action for those reasons when no replicate can apply: the diff's "before" side is a
+#: recording other than the baseline capture (``FactDiff.replicate_applies``).
+NO_REPLICATE = ("record the before side a second time and verify the two runs against each "
+                "other (pymolt verify . --baseline RUN1 --post-migration RUN2): a baseline "
+                "replicate does not apply to another recording")
+
+
+def review_action(reason: str, noise_measured: bool, replicate_applies: bool = True) -> str:
+    """The one action that settles a review reason, given whether a replicate was measured,
+    and whether one could be (QA V2-3: never suggest a replicate that cannot apply)."""
     if noise_measured and reason in _REPLICATE_SETTLES:
         return AFTER_REPLICATE
+    if not replicate_applies and reason in _REPLICATE_SETTLES:
+        return NO_REPLICATE
     return ACTIONS.get(reason, _DEFAULT_ACTION)
 
 
@@ -345,7 +367,8 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
                           key=lambda f: (-f["entries"], f["symbol"], f["site"]))
         review.append({
             "reason": reason, "entries": len(group), "findings_total": len(findings),
-            "action": review_action(reason, bool(diff.noise_measured)),
+            "action": review_action(reason, bool(diff.noise_measured),
+                                    diff.replicate_applies),
             "findings": findings[:FINDINGS_CAP],
         })
 
@@ -366,11 +389,15 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
     levels = Counter(e.level.value for e in compared)
     total = sum(levels.values()) or 1
     quality = {
-        "noise": diff.noise_measured or "not measured (no baseline replicate)",
+        "noise": diff.noise_measured or ("not measured (no baseline replicate)"
+                                         if diff.replicate_applies else
+                                         "not measured (the before side is not the baseline "
+                                         "capture: no replicate applies)"),
         "dropped": {"old": diff.old_summary.dropped_events,
                     "new": diff.new_summary.dropped_events},
         "backends": {"old": diff.old_summary.backends, "new": diff.new_summary.backends},
         "dict_order": diff.dict_order or "not recorded (old, new)",
+        "objects": diff.handle_comparison or "full: no source snapshot",
         "environment": _environment_stamp(diff, by_class),
         "levels": {k: {"entries": v, "share": round(v / total, 3)}
                    for k, v in sorted(levels.items())},
@@ -410,6 +437,8 @@ def summarize(diff: FactDiff) -> dict[str, Any]:
         "accepted": accepted,
         "accepted_total": len(by_class["accepted"]),
         "explained": table,
+        "absorbed": diff.absorbed,
+        "numeric_drift": diff.numeric_drift,
         "quality": quality,
     }
 

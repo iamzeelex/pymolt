@@ -195,7 +195,8 @@ def test_setup_view_says_what_saving_changed_besides_the_config(tmp_path):
 _ASSESS_KEYS = {
     "target_python", "verdict", "baseline_tier", "baseline_unresolved", "source_manifest",
     "source_fixation", "resolution_quality", "target_resolved", "target_error",
-    "target_error_detail", "target_culprits", "changes_format", "changes", "changes_total",
+    "target_error_detail", "target_culprits", "target_basis", "changes_format", "changes",
+    "changes_total",
     "unchanged", "status_counts",
     "manual_zone", "manual_zone_count", "risk", "target_manifest_path", "target_env",
     "baseline_env",
@@ -368,11 +369,60 @@ def test_capture_refusal_hint_follows_the_cause(tmp_path):
     # pytest's short summary names them: the hint says which, and where the full output is.
     log.write_text("".join(f"FAILED tests/test_{n}.py::test_it - AssertionError\n"
                            for n in "abcd") + "=== 4 failed, 10 passed in 1.2s ===\n")
-    view = views.capture_view(red, when="baseline-replicate", state=state)
+    view = views.capture_view(red, when="baseline", state=state)
     assert view["hint"] == (
         "4 test(s) failed (exit 1): tests/test_a.py::test_it, tests/test_b.py::test_it, "
         f"tests/test_c.py::test_it and 1 more (see {log}). Fix or deselect them, or keep a "
         "red baseline with --accept-failing.")
+    # QA V2-2: the hint fits the capture refused, never "a red baseline" for another one.
+    replicate = views.capture_view(red, when="baseline-replicate", state=state)["hint"]
+    assert "may be flaky" in replicate and "keep a red replicate with --accept-failing" in replicate
+    post = views.capture_view(red, when="post-migration", state=state)["hint"]
+    assert post.startswith("4 test(s) failed (exit 1): tests/test_a.py::test_it")
+    assert "baseline" not in post
+    assert "may be what it broke" in post and "--accept-failing" in post
+
+    # pytest stopped on collection errors (theano's post-migration capture): no test failed,
+    # none ran; the files are named, and --accept-failing is not offered for a run of nothing.
+    log.write_text(
+        "=========================== short test summary info ============================\n"
+        + "".join(f"ERROR theano/scalar/tests/test_{n}.py\n" for n in "abcd")
+        + "!!!!!!!!!!!!!!!!!!! Interrupted: 4 errors during collection !!!!!!!!!!!!!!!!!!!!\n"
+        "13 warnings, 4 errors in 0.62s\n")
+    collected = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=2, events=162,
+                         command_log=str(log))
+    post = views.capture_view(collected, when="post-migration", state=state)["hint"]
+    assert post.startswith(
+        "4 test file(s) could not be collected (exit 2): theano/scalar/tests/test_a.py, "
+        "theano/scalar/tests/test_b.py, theano/scalar/tests/test_c.py and 1 more")
+    assert "stopped before any test ran" in post and "removed module" in post
+    assert "failed" not in post and "--accept-failing" not in post
+    # the same with nothing recorded (zipline's): still named, not "recorded no call"
+    collected.events = 0
+    hint = views.capture_view(collected, when="baseline", state=state)["hint"]
+    assert hint.startswith("4 test file(s) could not be collected (exit 2)")
+
+    # a command line the runner rejected
+    log.write_text("ERROR: usage: pytest [options] [file_or_dir] [file_or_dir] [...]\n"
+                   "pytest: error: unrecognized arguments: -n\n  inifile: pyproject.toml\n")
+    usage = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=4, events=3,
+                     command_log=str(log))
+    assert views.capture_view(usage, when="post-migration", state=state)["hint"] == (
+        "The command line was rejected (usage error, exit 4): unrecognized arguments: -n "
+        f"(see {log}). Fix the command and capture again; the slot is unchanged.")
+    log.write_text("ERROR: file or directory not found: tests/nope.py\n\nno tests ran in 0.01s\n")
+    assert "usage error, exit 4): file or directory not found: tests/nope.py" in \
+        views.capture_view(usage, when="baseline", state=state)["hint"]
+    log.write_text("collected 0 items\n\n============ no tests ran in 0.01s ============\n")
+    usage.returncode = 5
+    assert views.capture_view(usage, when="baseline", state=state)["hint"].startswith(
+        "The command selected no test (exit 5)")
+    # a test's own output that prints a usage line is not a usage error once tests ran
+    log.write_text("usage: tool [-h]\ntool: error: bad\nFAILED tests/test_a.py::test_it\n"
+                   "=== 1 failed, 2 passed in 0.1s ===\n")
+    usage.returncode = 1
+    assert views.capture_view(usage, when="baseline", state=state)["hint"].startswith(
+        "1 test(s) failed (exit 1): tests/test_a.py::test_it")
 
     dead = _refused(validity=CaptureValidity.COMMAND_FAILED, returncode=127, events=0)
     hint = views.capture_view(dead, when="baseline", state=state)["hint"]
@@ -399,6 +449,7 @@ def test_capture_accepted_points_at_the_other_side():
     view = views.capture_view(slot, when="baseline", state=ContractState(baseline=slot))
     assert view["data"]["filled_slots"] == ["baseline"]
     assert "post-migration" in view["hint"]
+    assert "`pymolt plan .`" in view["hint"]     # QA V2-6: the next step names plan
 
 
 # ── plan ─────────────────────────────────────────────────────────────────────
@@ -452,11 +503,13 @@ def test_plan_shows_manual_review_and_an_unbound_baseline():
 
 _VERIFY_KEYS = {
     "verdict", "reasons", "inconclusive_kind", "inconclusive_causes", "saved_path",
-    "compared_recordings", "baseline_stale",
+    "compared_recordings", "baseline_stale", "stale_sources",
     "static_targets", "confirmed",
-    "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "blind_split",
+    "blind", "dynamic_only", "coverage_pct", "recall_pct", "granularity", "coverage_bounded",
+    "blind_split",
     "unobservable_contacts", "compared", "changes", "change_counts", "calibration",
-    "impact_focus",
+    "impact_focus", "failing_steps", "unobservable_uses", "dynamic_attribute_reads",
+    "numeric_drift",
 }
 
 

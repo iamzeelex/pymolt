@@ -303,3 +303,96 @@ def test_a_plan_keeps_the_representation_expectation_and_shows_why(tmp_path):
         "preserve", None)
     with pytest.raises(StepRefusal, match="loosens it"):
         check_claim(step, claim=None, expect="any", attested=False)
+
+
+def test_a_compile_finding_and_its_risk_make_one_step(tmp_path):
+    """QA H6: predict rates each compile finding as a python risk too. The risk used to become a
+    step of its own ("`SyntaxWarning`: changed", no successor) beside the compile step, for the
+    same sites; it now joins the compile step."""
+    root, plan = _automated(tmp_path)
+    findings = [{"file": "app.py", "line": 14, "kind": "SyntaxWarning",
+                 "message": "invalid escape sequence '\\d'", "base": None},
+                {"file": "c_only.py", "line": 5, "kind": "SyntaxWarning",
+                 "message": "invalid escape sequence '\\w'", "base": None}]
+    compiled = [_risk("SyntaxWarning", f["file"], f["line"], "", tier=RiskTier.LOW,
+                      scope="python", package="python") for f in findings]
+    other = _risk("imp.find_module", "app.py", 1, "<module>", scope="python", package=None,
+                  fact={"kind": "REMOVED", "symbol": "imp.find_module"})
+    risks = PredictionReport(risks=[*compiled, other])
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=risks,
+                                  manual_items=[], advisories=[], compile_findings=findings,
+                                  python_move=("3.11", "3.12"))
+    python = [s for s in steps if s.type == "python-manual"]
+    assert [s.title for s in python] == ["`imp.find_module`: removed on Python 3.12",
+                                         "SyntaxWarning on Python 3.12: 2 site(s)"]
+    compile_step = python[1]
+    assert compile_step.why.risk_ids == [r.id for r in compiled]
+    assert {r.step_id for r in compiled} == {compile_step.id}
+    assert compile_step.why.tier == "low" and other.step_id == python[0].id
+    from pymolt.workorder.verify_effort import effort_of
+
+    # The message says what to do: linking its risks does not make it "no successor known".
+    assert effort_of(compile_step).size == "small"
+
+
+def test_an_unverified_risk_is_a_check_with_no_successor_and_a_preserve_claim(tmp_path):
+    """A removal known only under the name the old version defined the call under (legacy QA
+    P1: ``NDFrame.groupby`` on pandas 3) asks to check the site's own spelling, with the command
+    to run; it claims no successor and does not loosen verify. A real removal of the same
+    symbol at another site keeps a step of its own."""
+    root, plan = _automated(tmp_path)
+    gone = {"kind": "REMOVED", "symbol": "pandas.core.generic.NDFrame.groupby",
+            "successor": "pandas.core.series.Series.groupby"}
+    unverified = _risk("pandas.core.generic.NDFrame.groupby", "app.py", 11, "frame",
+                       tier=RiskTier.LOW, fact=gone)
+    unverified.unverified = True
+    unverified.spelling = "pandas.core.frame.DataFrame.groupby"
+    certain = _risk("pandas.core.generic.NDFrame.groupby", "app.py", 7, "combine", fact=gone)
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes,
+                                  risks=PredictionReport(risks=[unverified, certain]),
+                                  manual_items=[], advisories=[], compile_findings=[],
+                                  dependencies=PANDAS)
+    check = next(s for s in steps if unverified.id in s.why.risk_ids)
+    other = next(s for s in steps if certain.id in s.why.risk_ids)
+    assert check.id != other.id and check.key != other.key
+    assert check.title == "`DataFrame.groupby`: check it still resolves in pandas 2.2.3"
+    assert check.claim == "preserve" and "not loosened" in check.why.claim
+    assert check.do.manual.successor is None and check.symbol.new is None
+    summary = check.do.manual.summary
+    assert "pydoc.locate('pandas.core.frame.DataFrame.groupby')" in summary
+    assert "No successor" not in summary and "Replace the calls" not in summary
+    assert other.claim == "intended"
+
+
+def test_a_call_time_default_reads_as_a_sentinel_and_is_medium_effort(tmp_path):
+    """Legacy QA P5: zipline's person steps "`Timestamp`: default `tz` None → <object
+    object>" and "`dropna` True → <no_default>" were all large; a default decided at call time
+    is a medium risk (docs/plan.md), and its effort says so."""
+    from pymolt.workorder.manual import readable_default
+    from pymolt.workorder.verify_effort import finish_steps
+
+    root, plan = _automated(tmp_path)
+    tz = {"kind": "DEFAULT", "symbol": "pandas._libs.tslibs.timestamps.Timestamp.__new__",
+          "param": "tz", "old": "None", "new": "<object object>"}
+    dropna = {"kind": "DEFAULT", "symbol": "pandas.core.frame.DataFrame.stack",
+              "param": "dropna", "old": "True", "new": "<no_default>"}
+    concrete = {"kind": "DEFAULT", "symbol": "pandas.core.frame.DataFrame.rank",
+                "param": "method", "old": "'average'", "new": "'min'"}
+    risks = PredictionReport(risks=[
+        _risk(tz["symbol"], "app.py", 7, "combine", tier=RiskTier.MEDIUM, fact=tz),
+        _risk(dropna["symbol"], "app.py", 11, "frame", tier=RiskTier.MEDIUM, fact=dropna),
+        _risk(concrete["symbol"], "app.py", 11, "frame", tier=RiskTier.HIGH, fact=concrete)])
+    t0 = T0(root, plan.changes, "3.11")
+    steps = link_and_manual_steps(_pymolt(plan), root=root, changes=plan.changes, risks=risks,
+                                  manual_items=[], advisories=[], compile_findings=[],
+                                  dependencies=PANDAS, t0=t0)
+    finish_steps(steps, risks, root=root, t0=t0)
+    by_param = {s.why.delta.param: s for s in steps if s.why.delta is not None}
+    assert by_param["tz"].title == "`Timestamp`: default `tz` None → a sentinel"
+    assert by_param["dropna"].title == ("`DataFrame.stack`: default `dropna` True → "
+                                        "a sentinel (no_default)")
+    assert by_param["tz"].effort.size == by_param["dropna"].effort.size == "medium"
+    assert "may well not change" in by_param["tz"].do.manual.summary
+    assert by_param["method"].effort.size == "large"
+    assert readable_default("<no value>") == "a sentinel (no value)"
+    assert readable_default("'raise'") == "'raise'"

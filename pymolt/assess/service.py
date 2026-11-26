@@ -20,7 +20,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from pymolt.core.graph import DependencyGraph
-from pymolt.ingestion.detect import detect_sources, find_source
+from pymolt.ingestion.detect import detect_sources, find_source, pick_default_source
 from pymolt.ingestion.orchestrator import orchestrate_ingestion
 from pymolt.risk.models import RiskReport
 from pymolt.state_io import atomic_write_text
@@ -43,6 +43,13 @@ class AssessResult(BaseModel):
     # failure lines name. Only culprits get a "conflict" row; the rest are "unresolved".
     target_error_detail: str | None = None
     target_culprits: list[str] = Field(default_factory=list)
+    # What to do about a target that does not resolve, when pymolt knows better than
+    # "fix or loosen the culprits" (the project's own build fails on the target Python).
+    target_hint: str | None = None
+    # Where the target's dependency set came from: "manifest" (the manifest resolved), or
+    # "static-read" (the project's own build fails on the target Python, so the
+    # dependencies pymolt reads from it without running it were resolved instead).
+    target_basis: str = "manifest"
     # The legacy baseline could not be resolved (no legacy interpreter). The
     # target side is still resolved, but there is nothing honest to compare it to.
     baseline_unresolved: bool = False
@@ -88,16 +95,20 @@ class TargetResolveError(str):
     """A one-line resolver failure summary that also carries the resolver's evidence.
 
     A ``str`` so every existing ``target_error`` consumer keeps working;
-    ``detail`` is the stderr tail and ``culprits`` the packages its failure lines name.
+    ``detail`` is the stderr tail, ``culprits`` the packages its failure lines name, and
+    ``hint`` what to do when pymolt knows (the project's own build fails).
     """
 
     detail: str | None
     culprits: list[str]
+    hint: str | None
 
-    def __new__(cls, summary: str, detail: str | None = None, culprits: list[str] | None = None):
+    def __new__(cls, summary: str, detail: str | None = None, culprits: list[str] | None = None,
+                hint: str | None = None):
         obj = super().__new__(cls, summary)
         obj.detail = detail
         obj.culprits = list(culprits or [])
+        obj.hint = hint
         return obj
 
 
@@ -181,6 +192,31 @@ def describe_resolver_failure(exc: BaseException) -> TargetResolveError:
     )
 
 
+class BaseResolveError(ValueError):
+    """The base manifest does not resolve: the resolver's first error line, its stderr
+    tail (``detail``), the packages it names (``culprits``) and what to do (``hint``)."""
+
+    def __init__(self, message: str, detail: str | None, culprits: list[str], hint: str):
+        super().__init__(message)
+        self.detail = detail
+        self.culprits = list(culprits)
+        self.hint = hint
+
+
+def base_resolve_failure(exc: BaseException, chosen, sources, project_dir) -> BaseResolveError:
+    """``exc`` from resolving the base manifest ``chosen``, as a :class:`BaseResolveError`:
+    never a bare ``Command [...] returned non-zero exit status 2``."""
+    found = describe_resolver_failure(exc)
+    name = chosen.ref(project_dir)
+    others = [s.ref(project_dir) for s in sources if s.path != chosen.path]
+    culprits = f"Culprit(s): {', '.join(found.culprits)}. " if found.culprits else ""
+    another = (f", or assess another manifest: `pymolt setup . --manifest {others[0]}`"
+               if others else "")
+    return BaseResolveError(
+        f"the base manifest {name} does not resolve: {found}", found.detail, found.culprits,
+        f"{culprits}Fix {name}{another}; then assess again.")
+
+
 def manifest_fixation(source) -> str:
     """How firmly the *manifest* pins its versions (``pinned`` / ``intent`` / ...).
 
@@ -197,7 +233,8 @@ def failure_evidence(target_error) -> tuple[str | None, list[str]]:
 
 
 def resolve_chosen_source(sources, manifest_name: str | None, project_dir=None):
-    """Pick the source manifest by name or relative path, or default to the first lock/manifest.
+    """Pick the source manifest by name or relative path, or the default one setup would
+    assume (:func:`pick_default_source`).
 
     Raises ``ValueError`` when a named manifest is not found (the caller decides
     how to surface it).
@@ -208,8 +245,7 @@ def resolve_chosen_source(sources, manifest_name: str | None, project_dir=None):
             return found
         discovered = [s.path.name for s in sources]
         raise ValueError(f"Manifest '{manifest_name}' not found. Discovered: {discovered}")
-    lock_sources = [s for s in sources if s.is_lock]
-    return lock_sources[0] if lock_sources else sources[0]
+    return pick_default_source(sources)
 
 
 def write_constraints_file(project_path: Path, upgrade_constraint, overrides) -> Path | None:
@@ -260,6 +296,12 @@ def extract_constraint(declared: str | None) -> str | None:
         return text or "any"
 
 
+#: A base version pymolt did not observe: the base graph names the package but no lock,
+#: interpreter, container or exact pin said which version is installed (a ``declared-only``
+#: base). Never a version to compute API changes from.
+UNKNOWN_VERSION = "unknown"
+
+
 def build_comparison_rows(
     baseline_graph, target_graph, target_python, target_error, target_culprits=None,
 ) -> list[dict]:
@@ -267,11 +309,15 @@ def build_comparison_rows(
 
     When the target did not resolve, only the packages the resolver named
     (``target_culprits``, else the ones ``target_error`` carries) are ``conflict``;
-    every other row is ``unresolved``: the resolver never judged it.
+    every other row is ``unresolved``: the resolver never judged it. A base package
+    whose version is unknown is ``base-unknown`` with ``baseline_version`` "unknown",
+    never an ``upgrade``: nothing says it moves.
 
     Shared by the CLI table renderer and ``--json``. One row per package
     in the union; visibility filtering is the renderer's concern.
     """
+    from pymolt.core.versions import marker_excludes, same_version
+
     rows = []
     if target_culprits is None:
         target_culprits = getattr(target_error, "culprits", None)
@@ -291,7 +337,7 @@ def build_comparison_rows(
         elif t and t.declared_requirement:
             declared = t.declared_requirement
 
-        baseline_version = b.version if (b and b.version) else ("unpinned" if b else None)
+        baseline_version = (b.version or UNKNOWN_VERSION) if b else None
 
         if target_python:
             if target_error:
@@ -301,10 +347,16 @@ def build_comparison_rows(
                 target_version = t.version or "unpinned"
                 if not b:
                     status = "added"
-                elif b.version != t.version:
-                    status = "upgrade"
+                elif not b.version:
+                    status = "base-unknown"
+                elif not same_version(b.version, t.version):
+                    status = "upgrade"             # 3.2 and 3.2.0 are one release
                 else:
                     status = "unchanged"
+            elif b and marker_excludes(b.declared_requirement, target_python):
+                # Gated by a marker that is false on the target (PyPy only, < 2.7.9): it
+                # does not apply there, which is not the same as dropping it.
+                target_version, status = None, "excluded"
             else:
                 target_version, status = None, "removed"
         else:
@@ -323,11 +375,121 @@ def build_comparison_rows(
     return rows
 
 
+_BUILD_MANIFESTS = ("setup.py", "setup.cfg", "pyproject.toml")
+_EXCEPTION_LINE = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Error|Exception|Exit)\b.*)$")
+
+
+def own_build_failed(error, source) -> bool:
+    """Whether a target resolve failed in the project's own build, not in a dependency.
+
+    Resolving ``setup.py``/``pyproject.toml`` runs the project's build backend under the
+    target Python to read its metadata. When that fails and the resolver names no
+    dependency, the project itself does not build there (theano's ``versioneer.py`` uses
+    ``configparser.SafeConfigParser``, gone in 3.12): its dependencies were never judged.
+    """
+    if error is None or getattr(source, "path", None) is None:
+        return False
+    if source.path.name.lower() not in _BUILD_MANIFESTS or getattr(error, "culprits", None):
+        return False
+    evidence = f"{error}\n{getattr(error, 'detail', None) or ''}".lower()
+    return "build backend" in evidence
+
+
+def _exception_line(detail: str | None) -> str | None:
+    """The last ``SomeError: message`` line of a traceback, if any."""
+    found = None
+    for line in (detail or "").splitlines():
+        m = _EXCEPTION_LINE.match(line)
+        if m:
+            found = m.group(1).strip()
+    return found
+
+
+def _static_requirements(source) -> tuple[list[str], list[str]]:
+    """The main dependencies pymolt reads from a build manifest without running it, and
+    what it could not read (computed values)."""
+    from pymolt.ingestion.detect import extract_declared_requirements
+    from pymolt.ingestion.setup_reqs import MAIN_GROUP, parse_setup_file
+
+    if source.path.name.lower() == "pyproject.toml":
+        return list(extract_declared_requirements(source.path).values()), []
+    deps = parse_setup_file(source.path)
+    specs = [r.raw + (f"; {r.marker}" if r.marker else "")
+             for r in deps.requirements if r.group == MAIN_GROUP]
+    return specs, list(deps.notes)
+
+
+def _requirements_alternative(project_path: Path) -> str:
+    """A requirements manifest of the project to point setup at, or a placeholder."""
+    for src in detect_sources(project_path):
+        if src.path.name.lower() not in _BUILD_MANIFESTS and not src.is_lock:
+            return src.ref(project_path)
+    return "<requirements file>"
+
+
+def _resolve_static(project_dir, project_path, source, target_python, constraint_path,
+                    use_cache, tool, failure, notes):
+    """Resolve what pymolt reads from ``source`` statically, after its own build failed on
+    the target Python; ``(graph, None)`` with a note, or ``(None, error)`` with a hint."""
+    from pymolt.core.enums import Mode, SourceFixation
+    from pymolt.ingestion.detect import DiscoveredSource
+
+    name = source.path.name
+    raised = _exception_line(getattr(failure, "detail", None)) or str(failure)
+    alternative = _requirements_alternative(project_path)
+    hint = (f"Fix the project's build for Python {target_python}, or point setup at a "
+            f"requirements file: `pymolt setup . --manifest {alternative}`; then assess "
+            "again.")
+    own = f"the project's own {name} does not build on Python {target_python} ({raised})"
+    specs, unread = _static_requirements(source)
+    if not specs:
+        why = (f"; pymolt could not read its dependencies without running it "
+               f"({', '.join(unread)})" if unread
+               else "; pymolt reads no dependencies from it without running it")
+        return None, TargetResolveError(own + why, getattr(failure, "detail", None), [], hint)
+    static = project_path / ".pymolt" / "cache" / "requirements-static.txt"
+    try:
+        static.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(static, "\n".join(specs) + "\n")
+        graph, _ = orchestrate_ingestion(
+            project_dir,
+            chosen_source=DiscoveredSource(path=static, mode=Mode.PYPI, is_lock=False,
+                                           fixation=SourceFixation.INTENT),
+            target_python=target_python, base_python=target_python,
+            constraint_file=constraint_path, force_recompile=True, use_cache=use_cache,
+            tool=tool,
+        )
+    except Exception as exc:  # the static set does not resolve either: say both
+        second = describe_resolver_failure(exc)
+        return None, TargetResolveError(
+            f"{own}; the {len(specs)} dependencies read from it do not resolve either: "
+            f"{second}", second.detail, second.culprits, hint)
+    finally:
+        try:
+            static.unlink()
+        except OSError:
+            pass
+    unread_text = f" Not read: {', '.join(unread)}." if unread else ""
+    notes.append(
+        f"{own[:1].upper()}{own[1:]}: the target is resolved from the {len(specs)} "
+        f"dependencies pymolt reads from {name} without running it (a static read).{unread_text} "
+        f"The project itself must build on Python {target_python} before the "
+        "post-migration capture.")
+    return graph, None
+
+
 def resolve_target_graph(
     project_dir, project_path, chosen_source, target_python, container_id,
-    upgrade_constraint, overrides, use_cache=True, tool=None,
+    upgrade_constraint, overrides, use_cache=True, tool=None, notes: list[str] | None = None,
 ):
-    """Resolve the prospective target-Python graph; return (graph_or_None, error_or_None)."""
+    """Resolve the prospective target-Python graph; return (graph_or_None, error_or_None).
+
+    When the project's own build fails on the target Python (:func:`own_build_failed`), the
+    dependencies pymolt reads from the manifest statically are resolved instead, and a
+    note saying so is appended to ``notes`` (pass a list to allow this; the caller then
+    stamps the result ``target_basis="static-read"``). Without a static read, the error
+    says it is the project's build and carries a ``hint``.
+    """
     if not target_python:
         return None, None
     constraint_path = write_constraints_file(project_path, upgrade_constraint, overrides)
@@ -345,7 +507,11 @@ def resolve_target_graph(
         )
         return graph, None
     except Exception as e:
-        return None, describe_resolver_failure(e)
+        failure = describe_resolver_failure(e)
+        if notes is None or not own_build_failed(failure, chosen_source):
+            return None, failure
+        return _resolve_static(project_dir, Path(project_path), chosen_source, target_python,
+                               constraint_path, use_cache, tool, failure, notes)
     finally:
         if constraint_path and constraint_path.exists():
             try:
@@ -419,7 +585,8 @@ def write_target_manifest(project_path, target_graph, selected_tool, target_pyth
                 break
             hashes_by_pkg[name] = digests
 
-    header = [f"# Generated by pymolt audit for Python {target_python}", f"# Base Tool: {selected_tool}"]
+    header = [f"# Generated by pymolt assess for Python {target_python}",
+              f"# Base Tool: {selected_tool}"]
     if with_hashes and not use_hashes:
         header.append("# NOTE: hashes omitted — could not resolve PyPI hashes for every package.")
     out = ["\n".join(header), ""]
@@ -490,10 +657,34 @@ def baseline_tests_passed(project_dir: str | Path) -> bool:
     return isinstance(slot, dict) and slot.get("returncode") == 0
 
 
+def unpinned_example(rows: list[dict]) -> str | None:
+    """One of the project's own unpinned requirements that resolved to a newer release on the
+    target than in the base, as ``"`pandas>=0.18` → 3.1.1"``: the BRONZE verdict's example (QA
+    V2-6: it always said `tensorflow>=1.3`, whatever the project). A direct dependency and a
+    new major version first. None when no row is one."""
+    def pinned(constraint: str | None) -> bool:
+        return bool(constraint) and str(constraint).lstrip().startswith("==")
+
+    def major(version: object) -> str:
+        return str(version).split(".", 1)[0]
+
+    moved = [r for r in rows if r.get("status") == "upgrade" and r.get("target_version")
+             and not pinned(r.get("declared_constraint"))]
+    if not moved:
+        return None
+    best = min(moved, key=lambda r: (not r.get("direct"),
+                                     major(r.get("baseline_version")) == major(r["target_version"]),
+                                     r["name"]))
+    constraint = best.get("declared_constraint")
+    spelled = best["name"] + (constraint if constraint and constraint != "any" else "")
+    return f"`{spelled}` → {best['target_version']}"
+
+
 def compatibility_verdict(
     target_python: str | None,
     target_error: str | None,
     baseline_tier: BaselineTier,
+    example: str | None = None,
 ) -> tuple[str, str, str] | None:
     """The honest target-Python verdict as ``(title, body, style)`` — or None.
 
@@ -502,7 +693,8 @@ def compatibility_verdict(
     verdict can honestly say is bounded by the base's medallion tier — Gold/Silver
     earn a green verdict, Bronze/None stay amber — and it always points at
     ``pymolt capture`` + ``pymolt verify`` for behavioural proof. Bronze→Silver is an
-    explicit upgrade path (run the baseline's tests), not a dead end.
+    explicit upgrade path (run the baseline's tests), not a dead end. ``example``: one of the
+    project's unpinned requirements and where it resolved (``unpinned_example``), or None.
     """
     if not target_python:
         return None
@@ -527,9 +719,9 @@ def compatibility_verdict(
         return (
             f"⚠ BRONZE base — resolves, migration unproven (Python {tp})",
             f"The latest releases matching your UNPINNED bounds install on Python {tp} — not "
-            "evidence the code migrates, and the base is an unvalidated reconstruction "
-            "(e.g. `tensorflow>=1.3` → 2.x). Capture and verify: if the project's tests "
-            "pass it becomes SILVER; pin the manifest to reach GOLD.",
+            "evidence the code migrates, and the base is an unvalidated reconstruction"
+            + (f" (e.g. {example})" if example else "") + ". Capture and verify: if the "
+            "project's tests pass it becomes SILVER; pin the manifest to reach GOLD.",
             "yellow",
         )
     if baseline_tier == BaselineTier.SILVER:
@@ -707,15 +899,20 @@ def run_assess(
     overrides = overrides if overrides is not None else config.get("target_overrides", {})
 
     _p("baseline", 0.1)
-    baseline_graph, report, _degrade_warning = _resolve_baseline_graph(
-        project_dir=str(project_dir),
-        chosen=chosen,
-        target_python=target_python,
-        container_id=container_id,
-        base_python=base_python,
-        use_cache=use_cache,
-        tool=tool,
-    )
+    try:
+        baseline_graph, report, _degrade_warning = _resolve_baseline_graph(
+            project_dir=str(project_dir),
+            chosen=chosen,
+            target_python=target_python,
+            container_id=container_id,
+            base_python=base_python,
+            use_cache=use_cache,
+            tool=tool,
+        )
+    except Exception as exc:
+        if _process_error(exc) is None:
+            raise
+        raise base_resolve_failure(exc, chosen, sources, project_path) from exc
     _p("target", 0.45)
     # The container/legacy interpreter is the *baseline* environment. The TARGET
     # graph is resolved fresh for the new Python via uv's `--python-version`
@@ -724,9 +921,11 @@ def run_assess(
     # the legacy (e.g. 3.6) container to resolve a modern target is both wrong and
     # the cause of the spurious "container not matching" error.
     target_tool = "uv" if tool == "container" else tool
+    target_notes: list[str] = []
     target_graph, target_error = resolve_target_graph(
         str(project_dir), project_path, chosen, target_python,
         None, upgrade_constraint, overrides, use_cache=use_cache, tool=target_tool,
+        notes=target_notes,
     )
     _p("compare", 0.8)
     rows = build_comparison_rows(baseline_graph, target_graph, target_python, target_error)
@@ -763,6 +962,8 @@ def run_assess(
         target_error=None if target_error is None else str(target_error),
         target_error_detail=error_detail,
         target_culprits=error_culprits,
+        target_hint=getattr(target_error, "hint", None),
+        target_basis="static-read" if target_notes else "manifest",
         baseline_unresolved=baseline_graph is None,
         baseline_tier=classify_baseline_tier(
             baseline_resolved=baseline_graph is not None,
@@ -771,7 +972,7 @@ def run_assess(
             base_python_assumed=base_python_assumed(config, base_python),
         ).value,
         target_manifest_path=target_manifest_path,
-        warnings=report.warnings,
+        warnings=[*report.warnings, *target_notes],
         manual_zone=report.manual_zone,
         rows=rows,
         baseline_graph=baseline_graph,

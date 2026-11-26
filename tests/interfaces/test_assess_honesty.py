@@ -83,6 +83,31 @@ def test_verdict_bronze_is_amber_with_upgrade_path():
     assert "SILVER" in body and "GOLD" in body  # names the explicit upgrade path
 
 
+def test_verdict_bronze_example_is_the_projects_own():
+    """QA V2-6: the example was always `tensorflow>=1.3` → 2.x, whatever the project."""
+    from pymolt.assess.service import unpinned_example
+
+    _title, body, _style = compatibility_verdict("3.12", None, BaselineTier.BRONZE)
+    assert "tensorflow" not in body and "e.g." not in body
+    rows = [
+        {"name": "numpy", "declared_constraint": ">=1.10", "baseline_version": "1.16.6",
+         "target_version": "1.26.4", "direct": True, "status": "upgrade"},
+        {"name": "pandas", "declared_constraint": ">=0.18", "baseline_version": "0.22.0",
+         "target_version": "3.1.1", "direct": True, "status": "upgrade"},
+        {"name": "pytz", "declared_constraint": None, "baseline_version": "2017.2",
+         "target_version": "2025.2", "direct": False, "status": "upgrade"},
+        {"name": "six", "declared_constraint": "==1.10.0", "baseline_version": "1.10.0",
+         "target_version": "1.17.0", "direct": True, "status": "upgrade"},
+        {"name": "scipy", "declared_constraint": ">=0.14", "baseline_version": "1.2.0",
+         "target_version": "1.2.0", "direct": True, "status": "unchanged"},
+    ]
+    example = unpinned_example(rows)
+    assert example == "`pandas>=0.18` → 3.1.1"      # direct, and a new major version
+    _title, body, _style = compatibility_verdict("3.12", None, BaselineTier.BRONZE, example)
+    assert "(e.g. `pandas>=0.18` → 3.1.1)." in body
+    assert unpinned_example([r for r in rows if r["name"] in ("six", "scipy")]) is None
+
+
 def test_verdict_silver_is_green_but_scoped():
     title, body, style = compatibility_verdict("3.12", None, BaselineTier.SILVER)
     assert style == "green" and "SILVER" in title and "capture and verify" in body

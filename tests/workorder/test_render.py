@@ -94,7 +94,7 @@ def test_plan_md_matches_the_golden_file(tmp_path, monkeypatch):
     monkeypatch.setattr("pymolt.__version__", "9.9.9")      # the plan's version is shown
     _root, plan = _plan(tmp_path)
     plan = _identified(plan, baseline_trace_sha256="b3e1a2c0" + "f" * 56)
-    text = plan_markdown(plan)
+    text = plan_markdown(plan, "pymolt apply .")
     if os.environ.get("PYMOLT_REGEN_GOLDEN"):
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(text, encoding="utf-8")
@@ -154,6 +154,31 @@ def test_plan_md_header_is_the_plans_name_and_identity(tmp_path, monkeypatch):
     assert " · baseline 20261120T060620Z · " in plan_markdown(no_sha).splitlines()[1]
     memory = plan.model_copy(update={"name": None})              # never stored: its id
     assert plan_markdown(memory).splitlines()[0] == f"# Migration plan {plan.plan_id[:8]}"
+
+
+def test_the_header_says_once_which_api_changes_are_unknown_and_what_settles_it(tmp_path):
+    """Legacy QA P4: with zipline's container stopped, the CLI said "API changes unknown for
+    32 of 41 package(s)" while PLAN.md ended its header "Next: `pymolt apply .`"."""
+    from pymolt.verify.predict import DeltaSummary
+
+    _root, plan = _plan(tmp_path)
+    down = "container pymolt-qa-z is not running: `docker start pymolt-qa-z`"
+    deltas = [DeltaSummary(package="pandas", quality="complete"),
+              DeltaSummary(package="cython", quality="inconclusive",
+                           notes=["new: throwaway environment", f"no old interpreter: {down}"]),
+              DeltaSummary(package="lxml", quality="inconclusive",
+                           notes=[f"no old interpreter: {down}"]),
+              DeltaSummary(package="python", subject="python", quality="inconclusive")]
+    risks = plan.risks.model_copy(update={"deltas": deltas})
+    header = plan_markdown(plan.model_copy(update={"risks": risks}), "pymolt apply .")
+    lines = [ln for ln in header.splitlines() if "API changes unknown" in ln]
+    assert lines == [
+        "API changes unknown for 2 of 3 package(s) (cython, lxml): no old interpreter: "
+        f"{down}. Their steps are missing from this plan: start the container "
+        "(`docker start pymolt-qa-z`) and run `pymolt plan` again."]
+    assert header.index(lines[0]) < header.index("Next: `pymolt apply .`")
+    # Every delta computed: no such line.
+    assert "API changes unknown" not in plan_markdown(plan, "pymolt apply .")
 
 
 def test_plan_md_collapses_low_steps_the_baseline_never_ran(tmp_path):
@@ -223,7 +248,13 @@ def test_a_brief_keeps_hostile_text_as_capped_clean_data(tmp_path):
     (where,) = data["where"]
     assert (where["status"], where["line"]) == ("match", 13)
     assert step.where[0].line == 11
-    assert data["commands"] == ["pymolt capture post-migration", "pymolt verify ."]
+    # The record around the edit; the capture's command is status's (never a bare one).
+    assert data["commands"] == [f"pymolt apply . --step {step.id} --record",
+                                f"pymolt apply . --step {step.id} --record --done"]
+    assert "`pymolt capture post-migration`" not in data["expected"]
+    assert "`pymolt status .`" in data["expected"]
+    shown = brief_data(plan, step, root, "proj")
+    assert shown["commands"][0] == f"pymolt apply proj --step {step.id} --record"
 
 
 def test_a_markdown_brief_fences_hostile_text(tmp_path):
@@ -279,5 +310,14 @@ def test_plan_writes_plan_md_and_lists_the_steps(tmp_path, monkeypatch):
     assert data["steps_total"] == 3 and data["steps_by_executor"] == {
         "pymolt": 2, "agent": 0, "person": 1}
     assert data["steps"][2].startswith("mech-1 codemod [pymolt, ")
-    assert data["next"] == {"command": "pymolt apply .", "step": None, "brief": None}
+    # The next command is status's, the one PLAN.md names too (QA H4).
+    from pymolt.status import shown_dir
+
+    assert data["next"]["command"] == f"pymolt apply {shown_dir(tmp_path)}"
+    assert (data["next"]["step"], data["next"]["brief"]) == (None, None)
+    assert "Next: `pymolt apply .`" in (folder / "PLAN.md").read_text()
+    monkeypatch.chdir(tmp_path)
+    human = runner.invoke(app, ["plan", "."])
+    assert "Next: pymolt apply .\n" in human.stdout
+    assert "--plan" not in human.stdout.split("Next:")[1]
     assert "3 step(s): 2 by pymolt, 1 for a person" in agent["summary"]

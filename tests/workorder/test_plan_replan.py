@@ -17,6 +17,7 @@ import pymolt
 from pymolt.interfaces.cli.commands import app
 from pymolt.migration_plan import DEFAULT_PLAN_PATH, LABEL_RULE, MigrationPlan
 from pymolt.plan_store import check_label, load_pointer, saved_plans, stored_plan_file
+from pymolt.status import shown_dir
 from pymolt.workorder.apply import apply_steps
 from pymolt.workorder.approval import approve, check_approval, plan_digest
 from tests.fixtures.v02_loader import legacy_plan_digest, materialize
@@ -354,11 +355,13 @@ def test_plan_agent_carries_the_same_identity(cli_project):
     assert again["summary"].splitlines()[1].startswith(f"plan {first['data']['plan_id'][:8]} · ")
 
 
-def test_plan_says_unchanged_and_names_the_next_command(cli_project):
+def test_plan_says_unchanged_and_names_the_next_command(cli_project, monkeypatch):
     root = cli_project
+    monkeypatch.chdir(root)     # the next command names the dir relative to here: `.`
     first = runner.invoke(app, ["plan", str(root)])
     assert first.exit_code == 0, first.output
-    assert "Next: pymolt apply ." in " ".join(first.output.split())
+    assert f"Next: pymolt apply {shown_dir(root)}\n" in first.output
+    assert shown_dir(root) == "."
     plan_md = stored_plan_file(root, load_pointer(root).name).parent / "PLAN.md"
     plan_md.write_text("kept\n")
 

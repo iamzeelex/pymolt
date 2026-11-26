@@ -57,6 +57,7 @@ from pymolt.verify.facts import (
     OrderCause,
     diff_facts,
     load_facts,
+    recorded_root,
 )
 from pymolt.verify.identity_resolver import ResolvedIdentity
 from pymolt.verify.models import BoundaryDiff, InconclusiveCause, VerificationVerdict
@@ -70,9 +71,10 @@ RAN_NOT_RECORDED = "ran-not-recorded"
 NOT_RUN = "not-run"
 UNOBSERVABLE = "unobservable"
 # Symbol classes (``SymbolStatus.contact_class``) whose contacts no trace can record: a chain
-# through a call's return value, a dependency missing where the capture ran, the test runner
-# (not traced), interpreter code reached by a protocol (``type.__or__``).
-UNOBSERVABLE_CLASSES = ("returned-value", "absent-dependency", "test-runner", "interpreter")
+# through a call's return value, a dependency missing where the capture ran, interpreter code
+# reached by a protocol (``type.__or__``). The test runner's symbols are not the project's
+# dependency surface at all: they are left out of the report (``test_runner_symbols``).
+UNOBSERVABLE_CLASSES = ("returned-value", "absent-dependency", "interpreter")
 # How "ran" was known, finest first: the executed record's lines (3.12+) or functions (below
 # 3.12, and 3.12 code objects too large for line events), the files the trace recorded call
 # sites in (older captures), or nothing but the symbol (a trace without call sites).
@@ -195,12 +197,21 @@ class ContractReport(BaseModel):
     recall: float | None = None
     coverage_granularity: str | None = None
     granularity_counts: dict[str, int] = Field(default_factory=dict)
+    # Some contact counts as ran only because its function or file ran (ran-not-recorded at
+    # function or file granularity): its statement may not have run (a branch not taken), so
+    # coverage is an upper bound and recall a lower bound.
+    coverage_bounded: bool = False
     contacts_total: int = 0
     contacts_recorded: int = 0
     contacts_ran_not_recorded: int = 0
     contacts_not_run: int = 0
     contacts_unobservable: int = 0
     unobservable_by_reason: dict[str, int] = Field(default_factory=dict)
+    # Static symbols of the test runner (``TEST_RUNNER_PACKAGES``: ``pytest.fixture`` in a test
+    # file), which captures do not trace unless a target names it: not the project's dependency
+    # surface, so they are in no count, no table and no reason, only a counted note.
+    test_runner_symbols: list[str] = Field(default_factory=list)
+    test_runner_contacts: int = 0
     # The executed record covered every process for its whole run (False: a process had
     # none, or it stopped early; None: no record, the file rule decided).
     executed_complete: bool | None = None
@@ -232,6 +243,16 @@ class ContractReport(BaseModel):
     # one on disk now: the verdict below still describes the old world. False
     # means checked-and-current; None means there was nothing to check against.
     baseline_stale: bool | None = None
+    # The current-side capture's source staleness (post-migration, or a lone baseline): the
+    # files it recorded whose text differs on disk now, by capture. Its evidence describes
+    # code that is no longer there. ``sources_unchecked``: a current-side capture that keeps
+    # no source snapshot, so this cannot be checked (never read as fresh).
+    stale_sources: dict[str, list[str]] = Field(default_factory=dict)
+    sources_unchecked: list[str] = Field(default_factory=list)
+    # The BLIND symbols no capture can observe that do not keep the verdict from PASS
+    # (``inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS``): the verdict lists them, so a PASS never
+    # hides uses it could not see.
+    unobservable_uses: list[str] = Field(default_factory=list)
     verdict: VerificationVerdict = VerificationVerdict.INCONCLUSIVE
     verdict_reasons: list[str] = Field(default_factory=list)
     # An INCONCLUSIVE verdict's reasons, each with its kind (needs_review / needs_evidence) and
@@ -388,6 +409,9 @@ class _Observation:
     legacy: set[str] = field(default_factory=set)  # the v1 ``q`` spellings seen
     sites: dict[str, None] = field(default_factory=dict)  # ordered set of file:line
     site_lines: set[tuple[str, int]] = field(default_factory=set)  # (raw file, line)
+    # Only another name of an observed call (a subclass's inherited constructor, ``own``):
+    # it confirms a static target, never counts as an observation of its own.
+    alias: bool = False
 
 
 @dataclass
@@ -429,6 +453,7 @@ def _load_observations(path: str | Path) -> _TraceView:
             obs = view.observations[name] = _Observation(name=name, canonical=sym is not None)
         elif sym:
             obs.canonical = True
+        obs.alias = False
         if q:
             obs.legacy.add(q)
             view.q_names.add(q)
@@ -440,6 +465,21 @@ def _load_observations(path: str | Path) -> _TraceView:
         line = where.get("line")
         if isinstance(file, str) and file and isinstance(line, int):
             obs.site_lines.add((file, line))
+        # A constructor inherited from a base (``Response.__init__`` recording a
+        # ``PlainTextResponse(...)`` call) names the class constructed in ``own``: the call is
+        # also an observation of that class's constructor, so its contact is recorded.
+        own = rec.get("own")
+        leaf = name.rsplit(".", 1)[-1]
+        if (sym and isinstance(own, str) and own and leaf in ("__init__", "__new__")
+                and not name.startswith(own + ".")):
+            alias = f"{own}.{leaf}"
+            extra = view.observations.get(alias)
+            if extra is None:
+                extra = view.observations[alias] = _Observation(name=alias, canonical=True,
+                                                                alias=True)
+            extra.sites.setdefault(f"{where.get('file', '?')}:{where.get('line', '?')}", None)
+            if isinstance(file, str) and file and isinstance(line, int):
+                extra.site_lines.add((file, line))
     return view
 
 
@@ -490,30 +530,32 @@ class _IdentityIndex:
 
 
 def _map_files(
-    raw_files: Iterable[str], root: Path, contact_files: Iterable[str]
+    raw_files: Iterable[str], root: Path, contact_files: Iterable[str],
+    taken_in: str | None = None,
 ) -> tuple[dict[str, str], str | None]:
     """Runtime file names (``where.file``, ``co_filename``) -> contact files, as the contact map
-    spells them. A path under the project root maps by its relative path; when every path
-    lies outside the root (a container capture, a moved checkout) they map by path suffix,
-    the longest contact path first, rather than claim nothing ran."""
+    spells them. A path under the root the capture was taken in (``taken_in``, its recorded
+    root: a checkout elsewhere) or under the project root maps by its relative path; when no
+    absolute path lies under either (a container capture, a capture that records no root) the
+    absolute ones map by path suffix, the longest contact path first, rather than claim nothing
+    ran. A relative path (a Cython module's ``co_filename``, a script run by a relative name)
+    maps when it is a contact file's own path; it never says where the capture ran, so it
+    never stops the suffix mapping (QA V2-4: one such path made every container path
+    unmapped, and coverage 0%)."""
     by_posix = {Path(f).as_posix(): f for f in contact_files}
     mapping: dict[str, str] = {}
     under_root = False
     outside: list[str] = []
+    bases = [Path(b) for b in dict.fromkeys((taken_in, str(root))) if b]
     for raw in raw_files:
         if raw.startswith("<"):  # <string>, <frozen ...>: no file to attribute
             continue
         path = Path(raw)
-        rel = None
         if not path.is_absolute():
-            rel = path.as_posix()
-        else:
-            for candidate in (path, Path(os.path.realpath(raw))):
-                try:
-                    rel = candidate.relative_to(root).as_posix()
-                    break
-                except ValueError:
-                    continue
+            if path.as_posix() in by_posix:
+                mapping[raw] = by_posix[path.as_posix()]
+            continue
+        rel = _relative_to_any((path, Path(os.path.realpath(raw))), bases)
         if rel is None:
             outside.append(raw)
             continue
@@ -533,6 +575,35 @@ def _map_files(
         "the trace's call sites lie outside the project root; executed files were "
         "matched by path suffix"
     )
+
+
+def _relative_to_any(candidates: Iterable[Path], bases: Iterable[Path]) -> str | None:
+    """The first candidate path relative to the first base it lies under (each base as given,
+    then its real path); None when none does."""
+    candidates = list(candidates)
+    for base in bases:
+        for b in dict.fromkeys((base, Path(os.path.realpath(base)))):
+            for candidate in candidates:
+                try:
+                    return candidate.relative_to(b).as_posix()
+                except ValueError:
+                    continue
+    return None
+
+
+def _site_label(site: str, root: Path, file_map: Mapping[str, str],
+                taken_in: str | None = None) -> str:
+    """A trace's ``file:line`` as the report prints it: project-relative when the file is the
+    project's (by the file map, else under the root the capture was taken in or the project
+    root), as recorded otherwise."""
+    file, sep, line = site.rpartition(":")
+    if not sep or not line.isdigit():
+        return site
+    rel = file_map.get(file)
+    if rel is None and Path(file).is_absolute():
+        rel = _relative_to_any((Path(file), Path(os.path.realpath(file))),
+                               [Path(b) for b in dict.fromkeys((taken_in, str(root))) if b])
+    return f"{rel}:{line}" if rel else site
 
 
 @dataclass
@@ -633,11 +704,14 @@ def build_contract_report(
     predictions: Mapping[str, Any] | None = None,
     diff_context: Any = None,
     noise_profile: tuple[Mapping[str, Any], str] | None = None,
+    replicate_applies: bool = True,
 ) -> ContractReport:
     """Build the unified report.
 
     ``noise_profile`` (``(profile, label)``, from a baseline replicate): the run-to-run noise
-    the fact diff is judged with (``replicate.apply_noise_profile``).
+    the fact diff is judged with (``replicate.apply_noise_profile``). ``replicate_applies``:
+    whether a baseline replicate could measure it at all (``against`` is the baseline capture's
+    recording); what settles possible noise says so.
 
     ``diff_context`` (a ``facts.DiffContext``): the snapshots, apply ledger, contact maps and
     successors that let the fact diff judge an edited site by who edited it.
@@ -740,7 +814,7 @@ def build_contract_report(
         hits = index.match(obs)
         for target in hits:
             matched[target].append(obs)
-        if not hits:
+        if not hits and not obs.alias:
             unmatched.append(obs)
 
     contact_files = {f for s in static.values() for f in s["files"]}
@@ -748,7 +822,8 @@ def build_contract_report(
     raw_files = set(view.files)
     if executed is not None:
         raw_files |= set(executed.lines) | set(executed.functions)
-    file_map, scope_note = _map_files(raw_files, root, contact_files)
+    taken_in = recorded_root(trace) if trace else None
+    file_map, scope_note = _map_files(raw_files, root, contact_files, taken_in)
     if scope_note and (view.events or executed is not None):
         report.notes.append(_container_path_note(scope_note, trace, root))
     executed_files: set[str] = set()
@@ -774,9 +849,17 @@ def build_contract_report(
         impact_names[path] = names
 
     observed_tops = {name.split(".", 1)[0] for name in (*view.observations, *view.q_names)}
+    # The test runner is not traced (the runtime keeps the same list), unless a target names
+    # one of the family, which lifts the exclusion for all of it: its static symbols are not
+    # the project's dependency surface, and no capture could confirm them.
+    runner_untraced = not observed_tops & TEST_RUNNER_PACKAGES
     symbols: list[SymbolStatus] = []
     for target, s in static.items():
         hits = matched[target]
+        if (runner_untraced and not hits
+                and s["dep"].split(".")[0] in TEST_RUNNER_PACKAGES):
+            report.test_runner_symbols.append(target)
+            continue
         identity = identities.get(target)
         klass = (
             "behavioural"
@@ -797,12 +880,6 @@ def build_contract_report(
             ):
                 unobservable = None
             klass = unobservable or klass
-        if (klass == "behavioural" and s["dep"].split(".")[0] in TEST_RUNNER_PACKAGES
-                and not hits and not observed_tops & TEST_RUNNER_PACKAGES):
-            # the capture does not trace the test runner (unless a target names one of the
-            # family, which lifts the exclusion for all of it), so its contacts can never be
-            # confirmed; counting them would lower coverage for nothing
-            klass = "test-runner"
         names = [target]
         if identity is not None and identity.resolved:
             names.append(identity.sym)
@@ -817,7 +894,7 @@ def build_contract_report(
                 status="confirmed" if hits else "blind",
                 callers=sorted(s["callers"]),
                 files=sorted(s["files"]),
-                observed_at=list(sites),
+                observed_at=[_site_label(site, root, file_map, taken_in) for site in sites],
                 contact_kinds=sorted(s["kinds"]),
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
@@ -841,7 +918,8 @@ def build_contract_report(
                 target=obs.name,
                 dep=dep,
                 status="dynamic-only",
-                observed_at=list(obs.sites),
+                observed_at=[_site_label(site, root, file_map, taken_in)
+                             for site in obs.sites],
                 impacted=bool(matched_paths) if impact_filter_active else None,
                 matched_impact_paths=matched_paths,
             )
@@ -870,8 +948,20 @@ def build_contract_report(
     report.all_confirmed = all_counts["confirmed"]
     report.all_blind = all_counts["blind"]
     report.all_dynamic_only = all_counts["dynamic-only"]
-    report.all_static_targets = len(static)
-    report.all_observed_targets = len(view.observations)
+    report.all_static_targets = len(static) - len(report.test_runner_symbols)
+    if report.test_runner_symbols:
+        runner = set(report.test_runner_symbols)
+        report.test_runner_contacts = len({(c.file, line, c.target, c.kind)
+                                           for c in cmap.contacts if c.target in runner
+                                           for line, _first, _last in
+                                           (c.spans or [(c.line, c.line, c.line)])})
+        names = sorted(runner)
+        sample = ", ".join(names[:3]) + (", …" if len(names) > 3 else "")
+        report.notes.append(
+            f"{report.test_runner_contacts} contact(s) of {len(names)} test-runner symbol(s) "
+            f"({sample}) are left out of the verdict, coverage and recall: they belong to the "
+            "test runner, which captures do not trace, not to the project's dependencies")
+    report.all_observed_targets = sum(1 for o in view.observations.values() if not o.alias)
     report.all_by_dep = _by_dep(symbols)
 
     report.impacted_symbols = [symbol for symbol in symbols if symbol.impacted]
@@ -970,6 +1060,7 @@ def build_contract_report(
                     context=diff_context,
                     order_causes=_order_causes(root, old_facts, new_facts, report.notes),
                 )
+                fdiff.replicate_applies = replicate_applies
                 if noise_profile is not None:
                     from pymolt.verify.replicate import apply_noise_profile, timing_difference
 
@@ -998,7 +1089,6 @@ _UNOBSERVABLE_NOTES = {
                       "statically unnameable, so neither BLIND nor confirmable",
     "absent-dependency": "target a package that is not installed in the capture's "
                          "interpreter, so no trace there can exercise them",
-    "test-runner": "belong to the test runner, which captures do not trace",
     "interpreter": "resolve to interpreter code, not dependency code",
 }
 
@@ -1209,6 +1299,16 @@ def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
     elif traced:
         report.coverage_granularity = "file" if sited or not events else "symbol"
     report.executed_complete = executed.complete if executed is not None else None
+    coarse = Counter(c.granularity for c in counted
+                     if c.status == RAN_NOT_RECORDED and c.granularity in ("function", "file"))
+    report.coverage_bounded = bool(coarse)
+    if coarse:
+        how = " and ".join(f"{n} by their {g}" for g, n in sorted(coarse.items()))
+        report.notes.append(
+            f"{sum(coarse.values())} contact(s) count as ran only because their function or "
+            f"file ran ({how}): a statement in a branch not taken counts as ran, so coverage is "
+            "an upper bound and recall a lower bound (the recall misses are not all tracer "
+            "gaps)")
 
     by_target: dict[str, list[ContactStatus]] = {}
     for c in contacts:
@@ -1245,10 +1345,13 @@ def _stamp_coverage(report: ContractReport, contacts: list[ContactStatus],
     if not traced:
         return
     if executed is None:
-        report.notes.append(
-            "the capture has no executed-code record (an older runtime, a watch-mode capture, "
-            "or PYMOLT_TRACE_EXECUTED=0): a contact counts as run when the trace recorded a "
-            "call site in its file (granularity file)")
+        # A trace without call sites is judged by symbol, and its own note says so: the file
+        # rule cannot apply where no file was recorded (QA V3: both notes, two granularities).
+        if sited or not events:
+            report.notes.append(
+                "the capture has no executed-code record (an older runtime, a watch-mode "
+                "capture, or PYMOLT_TRACE_EXECUTED=0): a contact counts as run when the trace "
+                "recorded a call site in its file (granularity file)")
     else:
         note = (f"executed-code record: granularity {executed.granularity}, from "
                 f"{executed.processes} process(es)")
@@ -1418,18 +1521,31 @@ def _unresolvable_class(error: str, dep: str) -> str | None:
 
 
 def _compared_equal_symbols(fdiff: FactDiff) -> list[str]:
-    """Symbols whose every fact was compared on both sides and found equal.
+    """Symbols whose facts settle them: every entry is one that does not keep a static symbol's
+    verdict from PASS either.
 
     Equal, DRIFT (only the library's defaults moved) and REWRITTEN-with-equal-outcome all
-    count as compared-equal; any other entry for a symbol — changed, vanished, appeared,
-    uncomparable, unpaired — disqualifies it.
+    count as compared-equal. So does a call the project's line did not make: compiled code
+    calling back (``FactDiff.via_symbols``) or an implicit hook explained away (``explained``
+    "implicit: ..."), which is no contact of the project's. So does an unverified edited site
+    (a call a hand or recorded edit made with no partner on the other side), which the edited
+    site rules judge (a new raise there fails on its own) and the report counts. Any other entry
+    for a symbol (changed, vanished, appeared, uncomparable, a review) disqualifies it.
     """
-    settled: set[str] = set()
+    settled: set[str] = set(getattr(fdiff, "via_symbols", None) or ())
     unsettled: set[str] = set()
     for entry in fdiff.entries:
         names = {entry.symbol, *([entry.new_symbol] if entry.new_symbol else [])}
-        equal = entry.comparison is Comparison.EQUAL and entry.category in (
-            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN,
-        )
-        (settled if equal else unsettled).update(names)
+        (settled if _settles_symbol(entry) else unsettled).update(names)
     return sorted(settled - unsettled)
+
+
+def _settles_symbol(entry: Any) -> bool:
+    """Whether this entry leaves its symbol verified for the dynamic-only rule
+    (``_compared_equal_symbols``)."""
+    if entry.comparison is Comparison.EQUAL and entry.category in (
+            FactCategory.EQUAL, FactCategory.DRIFT, FactCategory.REWRITTEN):
+        return True
+    if entry.fails or entry.inconclusive:
+        return False
+    return entry.unverified or (entry.explained or "").startswith("implicit:")

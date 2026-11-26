@@ -31,95 +31,18 @@ from pymolt.state_io import atomic_write_bytes, atomic_write_text
 
 MAX_RELEASES = 8
 _TAIL = 65536
-
-_ID = r"([A-Za-z_][\w\.]*)"
-_Q = r"['\"`]?"
-_ROLE = r"(?::\w+:)?`?~?"
-
-# Successor prose, most specific first. Each pattern captures the successor name once.
-SUCCESSOR_RES = [
-    re.compile(r"[Ii]mport\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?\s+instead"),
-    re.compile(r"[Uu]se\s+:\w+:`~?([A-Za-z_][\w\.]*)`"),
-    re.compile(r"[Uu]se\s+['\"`]?([A-Za-z_][\w\.\(\)]*)['\"`]?\s+(?:instead|to )"),
-    re.compile(r"[Ii]mport (?:them|it) directly from\s+['\"`]?([\w\.]+)"),
-    # "Instead access pandas.testing directly", "instead, import X directly"
-    re.compile(r"\b[Ii]nstead,?\s+(?:access|import|use)\s+" + _ROLE + _Q + _ID + _Q
-               + r"\s+directly"),
-    re.compile(r"[Ss]ubclass(?:ing)?\s+['\"`]?([A-Za-z_][\w\.]*)['\"`]?"),
-    # "use `X`" / "Please use 'X'" with the name quoted: any continuation
-    re.compile(r"\b[Uu]se\s+(?:the\s+)?[`'\"]~?@?" + _ID + r"(?:\(\))?[`'\"]"),
-    # "is renamed to 'X'", "has been renamed to X", "was renamed to `X`"
-    re.compile(r"\brenamed\s+to\s+" + _ROLE + _Q + _ID),
-    re.compile(r"\bmoved\s+to\s+" + _ROLE + _Q + _ID),
-    # "deprecated in favor of X", "in favour of `X`"
-    re.compile(r"\bin\s+favou?r\s+of\s+" + _ROLE + _Q + _ID),
-    re.compile(r"\b(?:replaced|superseded)\s+(?:by|with)\s+" + _ROLE + _Q + _ID),
-    re.compile(r"\b[Mm]igrate\s+to\s+(?:[\w ]+?style\s+)?`@?" + _ID + r"`"),
-    # bare "use X instead" / "Please use X." with a name that looks like code
-    re.compile(r"\b[Uu]se\s+" + _Q + r"([A-Za-z_][\w]*(?:[_\.][\w\.]*|\(\)))" + _Q),
-]
-
-# Words the patterns can capture that are English, not a successor.
-_STOPWORDS = frozenset("""
-a an the this that these those it its them they their your you we our one ones any some each
-either neither both other another same new old more less most least only also just now then
-instead rather please note see here there which what when where while who whom whose why how
-and or but nor not no yes if else of to in on at by for from with without as is are was were
-be been being will would can could should may might must do does did has have had
-version versions release releases python python2 python3 module function method class object
-type value values name names argument arguments parameter parameters option options feature
-api code docs documentation following above below example later earlier future
-""".split())
-
-# Generic verbs a "use X to <do something>" sentence puts in X's slot. Never a successor
-# unless the prose quotes them as code (`apply`).
-_DENYLIST = frozenset("""
-operate apply dispatch call calls invoke execute run runs process handle perform evaluate
-resolve fire emit trigger supply provide produce create build make get set pass wrap
-convert transform generate compute construct implement override extend inherit define
-declare register configure specify describe indicate represent return returns yield
-""".split())
-
-
-def _acceptable(found: str, quoted: bool) -> bool:
-    name = found.strip("`'\"~").rstrip(".")
-    while name.endswith("()"):
-        name = name[:-2]
-    if not name or not re.match(r"^[A-Za-z_][\w\.]*$", name):
-        return False
-    low = name.lower()
-    if low in _STOPWORDS:
-        return False
-    codey = "_" in name or "." in name or any(c.isupper() for c in name[1:])
-    if not quoted and not codey and low in _DENYLIST:
-        return False
-    if not quoted and not codey and name.islower() and len(name) < 3:
-        return False
-    return True
-
+# A wheel is untrusted input: a central directory or a module past these sizes is not read, and
+# a member is inflated only up to ``_MAX_MEMBER`` (a zip bomb stops there, as a FetchError).
+_MAX_CENTRAL_DIRECTORY = 16 * 1024 * 1024
+_MAX_MEMBER = 4 * 1024 * 1024
 
 def successor_from(messages: list[str]) -> str | None:
-    """The successor named by a deprecation message ("Use X instead", "renamed to X", "in favor
-    of X", "replaced by X", "moved to X", "superseded by X", ...): the earliest acceptable
-    mention in the first message that names one; stopwords and generic verbs never count."""
-    for msg in messages:
-        text = msg or ""
-        hits: list[tuple[int, int, str]] = []
-        for order, rx in enumerate(SUCCESSOR_RES):
-            for m in rx.finditer(text):
-                raw = m.group(1)
-                quoted = text[max(0, m.start(1) - 1): m.start(1)] in "`'\""
-                if _acceptable(raw, quoted):
-                    hits.append((m.start(1), order, raw))
-                    break
-        if hits:
-            _, _, raw = min(hits)
-            found = raw.strip("`'\"~").rstrip(".")
-            while found.endswith("()"):
-                found = found[:-2]
-            if found:
-                return found
-    return None
+    """The one successor ``messages`` name (``succession.first_successor``): the first message
+    that names exactly one; a message that offers a choice ("use X ... otherwise use Y", "X or
+    Y") names none. ``succession.candidates_from`` gives every candidate with its role."""
+    from pymolt.delta.succession import first_successor
+
+    return first_successor(messages)
 
 
 class FetchError(RuntimeError):
@@ -199,6 +122,8 @@ class Fetcher:
         if eocd < 0:
             raise FetchError("no zip end-of-central-directory record in the tail")
         _, _, _, _, _, cd_size, cd_off, _ = struct.unpack("<IHHHHIIH", tail[eocd: eocd + 22])
+        if cd_size > _MAX_CENTRAL_DIRECTORY:
+            raise FetchError(f"zip central directory of {cd_size} bytes is past the cap")
         if cd_off >= tail_start:
             cd = tail[cd_off - tail_start: cd_off - tail_start + cd_size]
         else:
@@ -210,16 +135,30 @@ class Fetcher:
             )
             name = cd[pos + 46: pos + 46 + nlen].decode("utf-8", "replace")
             if name == member:
+                if csize > _MAX_MEMBER:
+                    raise FetchError(f"{member} is {csize} bytes compressed, past the cap")
                 hdr = self._get(url, lho, lho + 30 + nlen + 512 + csize)
                 lnlen, lelen = struct.unpack("<HH", hdr[26:30])
                 start = 30 + lnlen + lelen
                 data = hdr[start: start + csize]
                 if len(data) < csize:
                     data = self._get(url, lho + start, lho + start + csize - 1)
-                raw = zlib.decompress(data, -15) if method == 8 else data
-                return raw.decode("utf-8", "replace")
+                return _inflate(data, method, member).decode("utf-8", "replace")
             pos += 46 + nlen + elen + clen
         return None
+
+
+def _inflate(data: bytes, method: int, member: str) -> bytes:
+    """A zip member's bytes, stored (0) or deflated (8), never more than ``_MAX_MEMBER``."""
+    if method == 0:
+        return data
+    if method != 8:
+        raise FetchError(f"{member} uses zip compression method {method}")
+    inflater = zlib.decompressobj(-15)
+    raw = inflater.decompress(data, _MAX_MEMBER)
+    if inflater.unconsumed_tail:
+        raise FetchError(f"{member} inflates past {_MAX_MEMBER} bytes")
+    return raw
 
 
 def _safe(text: str) -> str:

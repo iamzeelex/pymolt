@@ -1,0 +1,219 @@
+{
+  "name": "plotly",
+  "ecosystem": "interactive plotting",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "plotly==5.24.1",
+      "pandas==2.2.3",
+      "numpy==1.26.4",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "plotly==6.9.0",
+      "pandas==2.2.3",
+      "numpy==1.26.4",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "plotly",
+    "pandas"
+  ],
+  "target_manifest": [
+    "plotly==6.9.0",
+    "pandas==2.2.3",
+    "numpy==1.26.4"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/figures.py": "\"\"\"Dashboard figures built with plotly; tests inspect them as data, nothing is rendered.\"\"\"\nimport plotly.express as px\nimport plotly.graph_objects as go\nfrom plotly import tools\n\n\ndef sales_scatter(df):\n    fig = px.scatter(df, x=\"visits\", y=\"sales\", color=\"shop\")\n    fig.update_layout(title_text=\"Visits vs sales\", titlefont=dict(size=18))\n    return fig\n\n\ndef styled_axes(fig, x_title, y_title):\n    fig.update_xaxes(title_text=x_title, titlefont=dict(size=12))\n    fig.update_yaxes(title_text=y_title, titlefont=dict(size=12))\n    return fig\n\n\ndef busy_hours(z):\n    \"\"\"Hour-by-weekday heat map (WebGL variant for big grids).\"\"\"\n    return go.Figure(go.Heatmapgl(z=z, colorscale=\"Viridis\"))\n\n\ndef shop_map(df):\n    return px.scatter_mapbox(df, lat=\"lat\", lon=\"lon\", hover_name=\"shop\", zoom=4)\n\n\ndef side_by_side(df):\n    fig = tools.make_subplots(rows=1, cols=2)\n    fig.append_trace(go.Bar(x=df[\"shop\"], y=df[\"sales\"]), 1, 1)\n    fig.append_trace(go.Scatter(x=df[\"visits\"], y=df[\"sales\"], mode=\"markers\"), 1, 2)\n    return fig\n",
+    "tests/conftest.py": "import pandas as pd\nimport pytest\n\n\n@pytest.fixture\ndef df():\n    return pd.DataFrame({\"shop\": [\"A\", \"B\", \"C\", \"D\"], \"visits\": [120, 80, 150, 60],\n                         \"sales\": [30.5, 22.0, 41.0, 12.5],\n                         \"lat\": [52.37, 51.92, 52.09, 51.44], \"lon\": [4.90, 4.48, 5.12, 5.47]})\n",
+    "tests/test_figures.py": "from app import figures\n\n\ndef test_sales_scatter(df):\n    fig = figures.sales_scatter(df)\n    assert fig.layout.title.text == \"Visits vs sales\"\n    assert fig.layout.title.font.size == 18\n    assert len(fig.data) == 4\n\n\ndef test_styled_axes(df):\n    fig = figures.styled_axes(figures.sales_scatter(df), \"visits\", \"sales\")\n    assert fig.layout.xaxis.title.text == \"visits\"\n    assert fig.layout.yaxis.title.font.size == 12\n\n\ndef test_busy_hours():\n    fig = figures.busy_hours([[1, 2], [3, 4]])\n    assert [list(row) for row in fig.data[0].z] == [[1, 2], [3, 4]]\n\n\ndef test_shop_map(df):\n    fig = figures.shop_map(df)\n    assert list(fig.data[0].lat) == [52.37, 51.92, 52.09, 51.44]\n\n\ndef test_side_by_side(df):\n    fig = figures.side_by_side(df)\n    assert [t.type for t in fig.data] == [\"bar\", \"scatter\"]\n    assert fig.data[1].xaxis == \"x2\"\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/figures.py",
+      "old": "from plotly import tools",
+      "new": "from plotly.subplots import make_subplots"
+    },
+    {
+      "file": "app/figures.py",
+      "old": "titlefont=dict(size=18)",
+      "new": "title_font=dict(size=18)"
+    },
+    {
+      "file": "app/figures.py",
+      "old": "titlefont=dict(size=12)",
+      "new": "title_font=dict(size=12)",
+      "replace_all": true
+    },
+    {
+      "file": "app/figures.py",
+      "old": "go.Heatmapgl(",
+      "new": "go.Heatmap("
+    },
+    {
+      "file": "app/figures.py",
+      "old": "px.scatter_mapbox(",
+      "new": "px.scatter_map("
+    },
+    {
+      "file": "app/figures.py",
+      "old": "tools.make_subplots(",
+      "new": "make_subplots("
+    },
+    {
+      "file": "app/figures.py",
+      "old": "fig.append_trace(go.Bar(x=df[\"shop\"], y=df[\"sales\"]), 1, 1)",
+      "new": "fig.add_trace(go.Bar(x=df[\"shop\"], y=df[\"sales\"]), row=1, col=1)"
+    },
+    {
+      "file": "app/figures.py",
+      "old": "fig.append_trace(go.Scatter(x=df[\"visits\"], y=df[\"sales\"], mode=\"markers\"), 1, 2)",
+      "new": "fig.add_trace(go.Scatter(x=df[\"visits\"], y=df[\"sales\"], mode=\"markers\"), row=1, col=2)"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/figures.py",
+          "append": "\n\ndef first_trace_payload(fig):\n    \"\"\"The x/y data of the first trace, as the frontend receives it.\"\"\"\n    trace = fig.to_dict()[\"data\"][0]\n    return {\"x\": trace[\"x\"], \"y\": trace[\"y\"]}\n"
+        },
+        {
+          "file": "tests/test_figures.py",
+          "append": "\n\ndef test_first_trace_payload(df):\n    # Only checks the payload's keys.\n    assert set(figures.first_trace_payload(figures.sales_scatter(df))) == {\"x\", \"y\"}\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "plotly.basedatatypes.BaseFigure.to_dict"
+      ],
+      "behaviour": "plotly 6 serialises numpy arrays as base64 typed arrays: fig.to_dict()['data'][0]['x'] is array([120]) on 5.24.1 and {'dtype': 'i1', 'bdata': 'eA=='} on 6.9.0 (to_json and to_plotly_json alike); the test only checks the payload's keys"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "plotly.graph_objects.Figure.update_layout",
+      "kind": "BEHAVIOR",
+      "param": "titlefont",
+      "site": "app/figures.py:9",
+      "breaks": "ValueError: Invalid property specified for object of type plotly.graph_objs.Layout: 'titlefont' Did you mean \"title\"?",
+      "successor": "title_font",
+      "fixable": "auto",
+      "source": "plotly 6.0 removed the deprecated titlefont/titleside properties",
+      "verified": {
+        "old": "5.24.1: update_layout(titlefont=dict(size=18)) sets layout.title.font.size, no warning; go.Layout.__init__ has a titlefont parameter",
+        "new": "6.9.0: ValueError (update_layout takes **kwargs, so the signature is unchanged; go.Layout.__init__ lost titlefont); title_font= works on both"
+      }
+    },
+    {
+      "symbol": "plotly.graph_objects.Figure.update_xaxes",
+      "kind": "BEHAVIOR",
+      "param": "titlefont",
+      "site": "app/figures.py:14",
+      "breaks": "ValueError: Invalid property specified for object of type plotly.graph_objs.layout.XAxis: 'titlefont' Did you mean \"tickfont\"?",
+      "successor": "title_font",
+      "fixable": "auto",
+      "source": "plotly 6.0 removed the deprecated titlefont properties",
+      "verified": {
+        "old": "5.24.1: works, no warning; go.layout.XAxis.__init__ has titlefont",
+        "new": "6.9.0: ValueError; title_font= works on both"
+      }
+    },
+    {
+      "symbol": "plotly.graph_objects.Heatmapgl",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/figures.py:21",
+      "breaks": "AttributeError: module 'plotly.graph_objects' has no attribute 'Heatmapgl'",
+      "successor": "plotly.graph_objects.Heatmap",
+      "fixable": "auto",
+      "source": "plotly 6.0 (plotly.js 3) removed the heatmapgl and pointcloud traces",
+      "verified": {
+        "old": "5.24.1: works, no warning",
+        "new": "6.9.0: AttributeError; go.Heatmap(z=...) keeps the same z"
+      }
+    },
+    {
+      "symbol": "plotly.express.scatter_mapbox",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/figures.py:25",
+      "breaks": "no break on 6.9.0: DeprecationWarning '*scatter_mapbox* is deprecated! Use *scatter_map* instead. Learn more at: https://plotly.com/python/mapbox-to-maplibre/'",
+      "successor": "plotly.express.scatter_map",
+      "fixable": "auto",
+      "source": "plotly 5.24 added the MapLibre traces; 6.0 deprecated the Mapbox ones",
+      "verified": {
+        "old": "5.24.1: works, no warning (scatter_map already exists)",
+        "new": "6.9.0: works and warns; scatter_map gives the same lat/lon"
+      }
+    },
+    {
+      "symbol": "plotly.tools.make_subplots",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/figures.py:29",
+      "breaks": "no break on 6.9.0: DeprecationWarning 'plotly.tools.make_subplots is deprecated, please use plotly.subplots.make_subplots instead'",
+      "successor": "plotly.subplots.make_subplots",
+      "fixable": "auto",
+      "source": "plotly 4.0 moved make_subplots to plotly.subplots",
+      "verified": {
+        "old": "5.24.1: works and warns the same; plotly.tools.make_subplots is plotly.subplots.make_subplots -> False (a forwarding wrapper)",
+        "new": "6.9.0: same"
+      }
+    },
+    {
+      "symbol": "plotly.basedatatypes.BaseFigure.append_trace",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/figures.py:30",
+      "breaks": "no break on 6.9.0: DeprecationWarning 'The append_trace method is deprecated and will be removed in a future version. Please use the add_trace method with the row and col parameters.'",
+      "successor": "plotly.graph_objects.Figure.add_trace",
+      "fixable": "manual",
+      "source": "plotly 4.0 deprecated append_trace",
+      "verified": {
+        "old": "5.24.1: works and warns the same (go.Figure.append_trace is defined on plotly.basedatatypes.BaseFigure)",
+        "new": "6.9.0: same; add_trace(trace, row=, col=) gives the same subplot axes"
+      }
+    },
+    {
+      "symbol": "plotly.basedatatypes.BaseFigure.to_dict",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/figures.py:37",
+      "scenario": "change",
+      "breaks": "no raise: numpy-backed trace data comes back as {'dtype': ..., 'bdata': <base64>} instead of an array",
+      "successor": null,
+      "fixable": "manual",
+      "source": "plotly 6.0 changelog (base64 encoding of typed arrays)",
+      "verified": {
+        "old": "5.24.1: px.scatter(...).to_dict()['data'][0]['x'] -> array([120])",
+        "new": "6.9.0: {'dtype': 'i1', 'bdata': 'eA=='}"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "plotly.tools.make_subplots",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old+new"
+    },
+    {
+      "symbol": "plotly.basedatatypes.BaseFigure.append_trace",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old+new"
+    }
+  ],
+  "notes": "Old: plotly 5.24.1 on Python 3.11 (the last 5.x). New: 6.9.0 on Python 3.12, the newest 6.x (7.x exists; 5 -> 6 is the migration people face). pandas 2.2.3 and numpy 1.26.4 are the same on both sides so only plotly moves (narwhals comes in with plotly 6). titlefont goes through update_layout(**kwargs) / update_xaxes(**kwargs), so the call binds and the generated validators raise ValueError: no signature change on the called method (go.Layout.__init__ does lose titlefont). make_subplots and append_trace warn on both sides: they are DEPRECATED, not breaks. The default 'plotly' template differs only in the heatmapgl/scattermap entries, so figure objects are not equal in full between the versions even after migration; the equivalent tests only read data and layout fields. Not covered: colorbar titleside (a dict key), go.Pointcloud, write_image (needs kaleido), to_json of a whole figure (the embedded template changes)."
+}

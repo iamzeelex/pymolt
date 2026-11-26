@@ -117,7 +117,16 @@ validity.
   archive, and `verify` names it. A rollback that restored no file keeps it.
 - **Diagnostics:** failed, empty or malformed runs are kept under `contract_traces/diagnostics/`.
   They never replace active evidence.
-- **Freshness:** the post-migration capture must match the environment on disk now. The baseline
+- **Checkout path:** call sites are compared relative to the project root each capture was taken
+  in, which its source snapshot records. Captures taken in different checkouts of the project (a
+  copy, a second worktree, a CI workspace) compare as one project. A capture without a source
+  snapshot records no root: a call it recorded in another checkout cannot be placed in this one
+  and is UNCOMPARABLE.
+- **Freshness:** the post-migration capture must match the environment on disk now, and every file
+  it recorded must still have the recorded text (whatever changed it: a later step, a revert, a
+  hand edit); a capture without a source snapshot cannot be checked and counts as not fresh. The
+  verdict names the changed files, and `status` shows a saved verdict on such a capture as stale.
+  The baseline
   must match the environment the migration started from. `pymolt apply` records that starting
   point. A baseline still counts as the starting point when only the *contents* of the same manifest
   changed between it and the apply, or, for a migration done by hand, since it (bumped pins).
@@ -132,8 +141,113 @@ then compares the two sides.
 | CHANGED | same call, different outcome | yes |
 | DISAPPEARED / APPEARED | the call happens on one side only, at a call site whose code did not change | yes, unless the name no longer refers to a dependency there or the function never ran (then inconclusive), or the other side makes the same call there with other inputs (an [input change](#run-noise)) |
 | REWRITTEN | the call site's line was edited; the call is compared with the one that replaced it | see [Edited lines](#edited-lines) |
-| DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view) | no, reported |
-| UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape | makes the verdict inconclusive |
+| DRIFT | same outcome, but the library added or removed a parameter the call leaves at its default; or, on a hand-edited line, the same values in another container (list vs view); or floats equal within rounding ([`--float-ulps`](#dependency-objects-and-values)); or unread state of a dependency object (`handle-state`); or a result equal only as its statement uses it (`projected`); or another class of the same package that your code never introspects (`type drift`) | no, reported |
+| UNCOMPARABLE | the two sides could not record the call the same way: one dropped events, capped a compiled-call site, or recorded the call in another shape; or one, taken in another checkout, records no project root; or the call is a coroutine, whose awaited result is not recorded; or an attribute your code reads off the object it returned is not in one side's recording | makes the verdict inconclusive |
+
+### Dependency objects and values
+
+A returned value is compared by what your code can observe of it:
+- **Values** compare by content: builtins and containers (each element on its own), arrays and
+  frames, dates, enums, and records your project declares (a dataclass, attrs, pydantic or
+  namedtuple class in your code).
+- **Dependency objects** (*handles*: any other object a dependency returns, including a record a
+  dependency declares) compare by their type, and by the attributes your code reads by name
+  (`x.name`, `getattr(x, "name")`), as each capture's source snapshot shows them. A private
+  attribute is compared only when your code reads it by name (`p._cursor`). An attribute your code only indexes with literal keys
+  (`app.config["SEED"]`) compares under those keys. Unread state that differs is counted, not
+  compared: the entry is DRIFT with "handle state not observed". The calls your code makes on the
+  object are facts of their own. An attribute your code reads that one side's recording lacks
+  is a change when that recording holds the whole record (a dataclass): it is gone. An object is
+  otherwise recorded by its instance state, which holds no property and no cached or class
+  attribute (SQLAlchemy 1.3's `Table.c` is a property, 2.0 caches it in the instance), so the
+  attribute is not recorded there and the call is UNCOMPARABLE (it needs evidence: a test that
+  asserts on the attribute). When only the other side's code reads it (an edit moved the read
+  to another name), or no code does, it is counted with the unread state.
+- A capture without a source snapshot compares every object by its full state, as
+  `verify --strict` does, and so does a diff with any project file that does not parse here
+  (its reads are unknown). The report says which (`quality.objects`). The post-migration
+  snapshot keeps only the files with calls in them; the read set takes the other files from the
+  checkout, else from the baseline snapshot.
+- Places that read attributes by a computed name (`getattr(x, name)`, `vars(x)`, `x.__dict__`,
+  `asdict(x)`, `dir(x)`) cannot be projected. When an object's unread state differed, the verdict
+  lists them; they do not block PASS, like the [unobservable uses](#the-verdict).
+- A dependency record in a call's input, or as its receiver, is keyed by its type
+  (`record-input`, counted). The calls on one record still pair with each other: a result that
+  moved to another record fails. When the records themselves differ between the captures, a call
+  with several results cannot be paired call by call and is a review item.
+
+What a statement does with a call's result decides what of it is compared (from the source
+snapshot, the same on both sides):
+
+| The statement | Compared |
+|---|---|
+| discards it (`resp.raise_for_status()` on its own line) | outcome kind and raise type; an object other than one the call was handed (a lazy result, an `AsyncResult`, a `Deferred`: discarding one may mean its work did not run) by its type; a value, or the receiver or an argument handed back, not at all |
+| unpacks or iterates it (`x, y = np.meshgrid(...)`, `for r in f()`) | the elements and their number, not the container type |
+| passes it alone to `int`, `float`, `bool` or `len` (not rebound in the file) | the converted value: `int(bar.get_height())` makes 4.0 and 4 equal |
+| tests its truth (`if f():`, `not f()`) | truthiness |
+| anything else | the full result |
+
+A pair equal only once projected is DRIFT (`projected`), with both types shown: the library did
+change what it returns, and the plan's scoring still sees that. `--strict` compares the full
+result.
+
+Two floats are equal when they differ by at most 1024 units in the last place (ulps), at their
+own precision: a float64 by float64 ulps, an array's float32 values by float32 ulps. Each value
+scales by the larger of its own pair, an array element too (never by the array's largest), and
+no pair further apart than 2^-10 relatively is ever within rounding (float16's 1024 ulps would
+be all of it). Zero against non-zero, int against float, and values of different dtypes are
+never within rounding. Such a pair is DRIFT at level `numeric`, with the largest distance in ulps
+and relatively; the same holds for a call's input (`matched-modulo-numeric`: the same call given
+the same input). The verdict says how many values needed it ("k values equal within
+floating-point rounding (≤1024 ulps)"), and `verification.json` keeps `numeric_drift`.
+`verify --float-ulps N` changes the bound (0 compares floats exactly); `--strict` makes each such
+pair a review item. Masks apply first, and measured run noise as before; the bound never widens
+with it.
+
+A type that changed is judged by a ladder:
+- **Values and raises**: strict. A class that moved within its package (same top-level package,
+  same class name: `numpy.ma.core.MaskedArray` is `numpy.ma.MaskedArray`) is the only allowance.
+  A type-only rendering of a data package's object (numpy, pandas, polars, pyarrow, torch, jax,
+  datetime, pathlib, decimal, ...) is a value too.
+- **Dependency objects**: a relocation is equal; otherwise the class relation is unknown (pymolt
+  records no MRO yet). A change to a class of another top-level package (werkzeug's `Response`
+  to `flask.wrappers.Response`) under the same conditions is a review item, "class changed
+  across packages" (needs a person; `--strict` fails it). A change to another class of the same
+  top-level package is drift
+  (`type drift`) when your code never introspects either class: no `isinstance`, `issubclass`,
+  `match`, `type(x) is C` or singledispatch names it or any class of its top-level package (an
+  import alias resolved: with no MRO, a base class may be the one checked), no `except` names
+  it, and nothing reads a type's name
+  (`type(x).__name__`). Your code then
+  sees the object through the calls it makes on it and the attributes it reads, both compared.
+  Introspected, or when your code reads or probes (`hasattr`) off the call's result a name
+  neither rendering holds (a class attribute, a property): it fails.
+- **A decorator's wrapper** of the same function of yours, named differently by the new version
+  (`WrappedAPIView` vs `View.as_view.<locals>.view`: a closure, or a name your code defines
+  nowhere; never another function of yours), is drift unless your code reads a
+  callable's `__name__` or `__qualname__`.
+- **A callable a dependency returned** (a decorator factory's `dec`, a Cython function) against
+  another one is drift (`type-drift:callable`), on an edited line too: what it does shows in the
+  calls that apply it, compared as facts of their own. It fails when your code reads a
+  callable's `__name__` or `__qualname__`, when the other side returned a value, and for a
+  callable of yours (another of your functions is never the same one).
+- **A type an edited line produced** (`go.Heatmapgl(...)` edited to `go.Heatmap(...)`) that
+  reappears at an unedited call along the edit's data chain (`fig.data`, on the figure the
+  edited line built) is judged with that edit: a review when the edit is one, a failure when it
+  fails. An edit whose result is discarded carries nothing, and nothing is carried onto a class
+  your code introspects.
+- On an edited line, a new class is the edit's, judged by its claim ([Edited lines](#edited-lines)).
+
+The outcomes at one fact (a call in a loop, over hidden receivers) are matched call by call,
+with their counts, whenever every call was counted. A call that changed among N, a call more or
+fewer (`call-count-changed`, one outcome or several), or counts that moved between outcome kinds
+(`outcome-kinds-moved`) is a change. A value that moved between calls at a fact whose input is
+not fully observed, and a call count that moved in a workload whose values vary between runs,
+go through the [unmeasured-noise](#run-noise) review; a baseline replicate that shows the count
+varying makes it noise.
+
+Every relaxation counts what it absorbed: the fact diff's `absorbed` gives the entries each one
+made equal where the full comparison would not have.
 
 ### Edited lines
 
@@ -149,13 +263,27 @@ A line diff of the source each capture stored decides who edited a call's line:
   later apply of the same step replaced them, the earlier edits are judged by hand. When the
   post-migration capture predates a step (its source still has the statements from before
   the step), the report says so: capture post-migration again;
+- **a call through a name an edit rebound** (an unedited `safe_join(...)` after the import
+  changed from `flask` to `werkzeug.utils`): the edit chose the callee, so the call is judged as
+  that edit's site;
 - **edited by hand**: the old and new calls are paired only by the same symbol, by an old → new
   symbol from the plan or the ledger, or by a one-statement edit. An equal outcome is REWRITTEN
   equal. A different value is a review item, which makes the verdict inconclusive. A new raise
-  fails. A call with no partner is counted as an unverified edited site; it does not block PASS.
+  fails. A call with no partner is counted as an unverified edited site; it does not block PASS,
+  unless it is a new-side call that raises while no call of the old statement's function raised
+  there (it fails, as a new raise does, unless a person attested that raise), or one that
+  fails to bind its arguments (it fails whatever the claim). A `__getattr__` asked for a dunder
+  name (the import system's `__path__` probe of a module) that raises AttributeError is a probe
+  answering "absent", not a new raise.
 
 A ledger entry is judged by its claim, whoever made the edit: pymolt, or an agent or a person
-who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls. A recorded
+who recorded it (`apply --step ID --record`). Its old → new symbol pairs the calls. A
+successor rewrite also records the keywords it renamed and the defaults it wrote out
+([plan.md](plan.md#codemods)): before the inputs are compared, the new call's keywords take
+their old names back, and a written-out default equal to the old one counts as left at its
+default, so `shift(n=1)` compares with the baseline's `shift(periods=1)`. Only the rewritten
+callable's own calls are taken back (the entry's old or new symbol, or that callable moved within
+its package); another call on the statement keeps its keys, and its input change shows. A recorded
 edit carries its step's claim: `preserve`, or `intended` expecting `representation` for a step
 that moves to another object ([plan.md](plan.md#the-plan-as-steps)). `--claim` and `--expect`
 can only tighten it; loosening it needs a person's attestation.
@@ -167,7 +295,10 @@ can only tighten it; loosening it needs a person's attestation.
 | different value | review | FAIL | review; FAIL if it expects `representation` | ACCEPTED if it expects `return:<Type>` and gets one; else FAIL |
 | type changed, values not visible | review | FAIL | review | ACCEPTED if it expects `return:<Type>` and gets one; not comparable if it expects `representation`; else FAIL |
 | new raise | FAIL | FAIL | FAIL | ACCEPTED if it expects `raise:<Type>` and gets one; else FAIL |
+| fails to bind its arguments | FAIL | FAIL | FAIL | FAIL |
+| no partner, new side raises (the old statement raised nothing) | FAIL | FAIL | FAIL | unverified if it expects that raise; else FAIL |
 | no partner | unverified | unverified | unverified | unverified |
+| the call runs more or fewer times, every value equal | review | review | review | review |
 
 Values are not visible when the call was compared by type only, or when a value on either side
 was recorded as opaque, truncated or cyclic. Then an `intended` claim expecting `representation`
@@ -209,12 +340,18 @@ layers:
 
 A value is masked as volatile when an entropy source returned it on that side (uuid4, random,
 secrets, datetime.now, tempfile names), when it is a reading of the capture's own clock, the
-project root or the Python version, or when an input carried such a value into an output.
+project root, the interpreter's prefix (a venv's `site-packages` path) or the Python version, or
+when an input carried such a value into an output.
 - **Fresh inputs.** A call site whose inputs never recur (a port, an id) is judged as one group.
   Its calls pair by their masked input and compare by value.
 - **Input changes.** On an unedited line, an input that changed with no visible cause is a review
   item: what reached the call changed, which is not proof that the dependency did. A new raise or
-  a new type still fails.
+  a new type still fails. Three causes are visible:
+  - a string literal of an edited line (`def chart(style="seaborn-v0_8-whitegrid")` edited from
+    `"seaborn-whitegrid"`): the call is judged as that hand edit;
+  - a parameter bound on one side only, to None (numpy 2's `linspace(device=None)`): an added
+    default, drift (`added-default-none`, counted; a review under `--strict`);
+  - floats within rounding: the same input (`matched-modulo-numeric`).
   - This includes an input seen on one side only, at a call both sides make with the same outcome
     kinds and types and the same signature, such as a poll that saw one more intermediate value.
 - **The replicate.** A difference is noise only where the replicate shows the same kind of
@@ -226,6 +363,9 @@ project root or the Python version, or when an input carried such a value into a
     tracer, their per-call overhead differs. An input or presence difference the replicate
     repeats exactly then still fails, but is called reproducible in the replicate, not
     deterministic.
+  - The replicate measures the baseline capture only. Against another recording
+    (`verify --baseline`), record that side a second time and verify the two runs against each
+    other: what differs there is run-to-run noise.
 - **Dict key order.** A different order is a review item. It fails only with proof that the order
   is deterministic: a replicate with random hash seeds that agreed on 5 or more keys, a pinned hash
   seed, or a known cause, such as the field order Python 3.9 gives a TypedDict.
@@ -241,6 +381,7 @@ The report leads with findings, not with every compared fact:
 
 Each comparison states its level:
 - `exact`: the values were compared;
+- `numeric`: the values were compared, floats within rounding;
 - `type`: one side was opaque, or `--profile shape` was used;
 - `kind`: from counts only, return versus raise type, when values were not sampled.
 
@@ -257,7 +398,21 @@ Two captures from different Python versions are compared fairly:
   comparable;
 - a decorator's call is attributed to the `def` line before 3.11 and to its `@` line after. It
   is compared within its decorated statement, including several decorators from one factory
-  stacked on one function.
+  stacked on one function, and a closure whose module moved within its package
+  (`flask.scaffold.decorator` vs `flask.sansio.scaffold.Scaffold.route.<locals>.decorator`);
+- a comprehension's call runs in a `<listcomp>` frame before 3.12 and in its function after
+  (PEP 709): the function is read from the source snapshot when no other call on that line
+  names it;
+- a callee that moved to another module and binds its argument under another name
+  (`abort(status=403)` vs `abort(code=403)`) pairs at its call site by the argument values;
+- a call compiled code made while another call on your line ran (a C function or type calling
+  back into Python: `RandomState(0)` calling `concatenate`, markupsafe's C `escape` building a
+  `Markup`), and numpy's dispatchers (`_round_dispatcher`), are not calls your code made: they
+  are not compared, only counted (`via`). A call your line names, directly or through an
+  import or assignment alias (`mse(y, p)` for `mean_squared_error`), is always compared, and so
+  is every call on a line that calls through a variable or parameter. `--strict` drops nothing;
+- an inherited constructor (`Response.__init__` for `PlainTextResponse(...)`) also confirms the
+  subclass's static contact.
 
 ## Coverage
 
@@ -303,7 +458,9 @@ Whether a statement ran comes from the capture. The numbers say how (**granulari
 The record is in each process's capture metadata (`executed`). Below 3.12, a long-run capture
 records functions only until it switches from discovery to the targeted wrappers, and the report
 notes it. When contacts were judged at different granularities, the headline gives the coarsest
-and the count for each.
+and the count for each. When a contact counts as ran only because its function or file ran, the
+report, `--agent` (`coverage_bounded`) and `status` give coverage as "at most" (an upper bound)
+and recall as "at least" (a lower bound): such a miss may be a branch not taken, not a tracer gap.
 
 **Unobservable** contacts are left out of both numbers and counted on their own line:
 - attribute reads, base classes and constants (`Loader=yaml.SafeLoader`, `class V(dep.Base)`,
@@ -312,9 +469,12 @@ and the count for each.
   run when it did not;
 - chains through a function's return value (`typer.prompt().strip`), which have no static name;
 - dependencies that are not installed where the capture ran;
-- the test runner (`pytest`, `pluggy` and similar), which captures do not trace, unless a target
-  names it;
 - protocol use that resolves to interpreter code (`A | B` on two classes runs `type.__or__`).
+
+The test runner's symbols (`pytest`, `pluggy` and similar, e.g. `@pytest.fixture` in a test) are
+not your project's dependency surface: captures do not trace the runner, so they are left out of
+every count, table and verdict reason, and a note counts them. A target that names the runner
+lifts this, and they count like any dependency.
 
 BLIND symbols are split the same way: not run, ran but not recorded, unobservable. The report also
 shows **symbol matching**: the share of static symbols the exact string join confirms, then the
@@ -325,17 +485,29 @@ share canonical identity confirms (what *confirmed* uses).
 Comparability is checked first. If either capture is invalid or stale, lacks event-loss counters
 or dropped events, skipped instrumentation, or ran partly untraced, or if the two used different
 commands, targets, modes, privacy profiles or sampling rates, the verdict is INCONCLUSIVE, even
-when facts changed. Sampled captures must also have complete call counts.
+when facts changed. Sampled captures must also have complete call counts. A recording passed with
+`--baseline` or `--post-migration` answers the same from its `<recording>.meta.json` sidecar: a
+hand-written trace, or JSONL merged with `cat` without its sidecars, has no event-loss counters.
 
 - **FAIL**: a compared fact failed anywhere in the recording, or a `--probe-python` replay failed.
+  A replay compares with the recording it replays, so it fails the verdict even when only one
+  capture exists or the recording has no event-loss counters (it must be otherwise sound).
 - **PASS** requires all of the following, over the whole recorded surface (after `apply` too):
   - no fact failed, none was uncomparable, and there is no review item;
   - at least one fact compared equal (or was accepted). Noise a replicate measured, a call
     explained away as implicit and an unverified edited site do not fail, but they show nothing
     unchanged: a diff made only of them is INCONCLUSIVE;
-  - no static symbol is BLIND, of any contact kind (attribute reads, constants and unobservable
-    contacts included);
-  - every dynamic-only symbol had all its facts compared equal.
+  - no static symbol is BLIND that a capture could record. A symbol no capture can record does
+    not keep the verdict from PASS: one whose every contact is unobservable (an attribute read, a
+    constant such as `yaml.SafeLoader`, a chain through a return value), or one whose statement
+    ran at line granularity while the watcher recorded no call there (a numpy ufunc such as
+    `np.isnan`, `polars.col`, an implicit `__float__`), which capturing again repeats. The verdict
+    lists it instead ("N dependency use(s) cannot be observed by a capture, so this verdict does
+    not cover them"), and `--agent` gives it as `unobservable_uses`;
+  - every dynamic-only symbol is settled as a static one would be: each of its facts compared
+    equal, is a call its line did not make (compiled code calling back, an implicit hook
+    explained away), or is an unverified edited site (a call an edit made with no partner,
+    judged by the edited-site rules, where a new raise fails).
 - **INCONCLUSIVE**: anything else. The reasons name the missing evidence, for example "2 static
   dependency symbol(s) were not exercised (1 not run by the workload; 1 ran but not recorded)" or
   "capture freshness could not be established". Review
@@ -345,8 +517,11 @@ when facts changed. Sampled captures must also have complete call counts.
 An INCONCLUSIVE verdict also says who settles it. Each reason is one of two kinds:
 - **needs a person** (`needs_review`): a review item. A person fixes the code, or accepts an
   intended change with `pymolt verify . --accept ID`. A difference a baseline replicate measured
-  and still could not settle is one too.
-- **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols, a fact
+  and still could not settle is one too. (BLIND symbols no capture can record, whether every
+  contact is unobservable or the line ran without a recorded call, are no reason at all: the
+  verdict lists them, see PASS above.)
+- **needs evidence** (`needs_evidence`): more or better captures settle it. BLIND symbols a test
+  can still reach (not run, or "ran" only by their function or file), a fact
   that could not be compared, a capture that is missing, invalid, stale or unlike the other, a
   value that may be run-to-run noise while no baseline replicate was measured, an environment
   difference between the two captures, a diff in which no fact compared equal.

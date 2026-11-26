@@ -502,6 +502,30 @@ def test_executed_scope_relative_suffix_and_missing_sites(tmp_path, monkeypatch)
     assert rep.executed_files == ["app/main.py"]
     assert any("matched by path suffix" in n for n in rep.notes)
 
+    # QA V2-4 (zipline, locust): a container capture whose executed record also names one
+    # relative file (a Cython module's ``co_filename``, a temporary locustfile) that is no
+    # project file. That path says nothing about where the capture ran: the container paths
+    # are still matched by suffix, and the contacts in them ran.
+    container = _write_trace(
+        tmp_path / "container.jsonl",
+        [{**fetch, "where": {"file": "/work/app/main.py", "line": 11}}])
+    (tmp_path / "container.jsonl.meta.json").write_text(json.dumps({"processes": [{
+        "executed": {"v": 1, "granularity": "line", "complete": True, "until": None,
+                     "files": {"/work/app/main.py": {"lines": "1,2,9,10,11,12"},
+                               "bcolz/carray_ext.pyx": {"lines": "1"}}}}]}))
+    rep = build_contract_report(root, trace=container)
+    assert rep.executed_files == ["app/main.py"]
+    assert rep.coverage > 0 and rep.contacts_recorded == 1
+    # a relative path that IS a project file still maps, and decides nothing either
+    (tmp_path / "container.jsonl.meta.json").write_text(json.dumps({"processes": [{
+        "executed": {"v": 1, "granularity": "line", "complete": True, "until": None,
+                     "files": {"/work/app/main.py": {"lines": "1,2,9,10,11,12"},
+                               "app/cold.py": {"lines": "1,3,4"}}}}]}))
+    rep = build_contract_report(root, trace=container)
+    by = {c.target: c.status for c in rep.contacts}
+    assert by["fakedep.fetch"] == "recorded"
+    assert by["fakedep.helper"] == "ran-not-recorded"
+
     no_sites = _write_trace(tmp_path / "nosites.jsonl", [fetch])
     rep = build_contract_report(root, trace=no_sites)
     assert rep.executed_scope is False
@@ -616,14 +640,21 @@ def test_absent_dependency_leaves_coverage_only_with_capture_interpreter_evidenc
     assert set(classes.values()) == {"behavioural"}
 
 
-def test_test_runner_contacts_are_left_out_of_coverage_unless_traced(tmp_path):
-    """Captures never trace the test runner, so its contacts can't be confirmed: they are
-    unobservable, left out of coverage and recall. Traced (a target named it) they count."""
-    root = _project(tmp_path)
+def test_test_runner_contacts_are_left_out_of_the_surface_unless_traced(tmp_path):
+    """Captures never trace the test runner, so its symbols are not the project's dependency
+    surface: in no count (static, BLIND), no coverage or recall denominator and no reason, only
+    a counted note (QA V2: `@pytest.fixture` kept a PASS diff INCONCLUSIVE as BLIND).
+    Traced (a target named it) they count as any dependency."""
+    (tmp_path / "proj").mkdir()
+    root = _project(tmp_path / "proj")
     (root / "tests").mkdir()
     (root / "tests" / "test_views.py").write_text(
         "import pytest\nfrom myapp import views\n\n"
-        "def test_handler():\n"
+        "@pytest.fixture\n"
+        "def rows():\n"
+        "    return [1]\n\n"
+        "@pytest.mark.slow\n"
+        "def test_handler(rows):\n"
         "    with pytest.raises(ZeroDivisionError):\n"
         "        1 / 0\n"
         "    assert views.handler()\n",
@@ -631,23 +662,49 @@ def test_test_runner_contacts_are_left_out_of_coverage_unless_traced(tmp_path):
     )
     trace = _trace(tmp_path, [
         {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 5}}])
+    (tmp_path / "plain").mkdir()
+    plain = build_contract_report(_project(tmp_path / "plain"), trace=trace)
     rep = build_contract_report(root, trace=trace)
-    runner = [s for s in rep.symbols if s.dep == "pytest"]
-    assert runner and {s.contact_class for s in runner} == {"test-runner"}
-    assert any("test runner" in note for note in rep.notes)
-    # flask.Flask recorded, with_appcontext ran (its file did) unrecorded; pytest.raises is in
-    # neither denominator
-    assert rep.unobservable_by_reason == {"test-runner": 1}
+
+    assert not [s for s in rep.symbols if s.dep == "pytest"]
+    assert rep.test_runner_symbols == ["pytest.fixture", "pytest.mark.slow", "pytest.raises"]
+    assert rep.test_runner_contacts == 3
+    assert (rep.static_targets, rep.blind, rep.blind_unobservable) == (
+        plain.static_targets, plain.blind, plain.blind_unobservable)
+    assert "test-runner" not in rep.unobservable_by_reason
+    # flask.Flask recorded, with_appcontext ran (its file did) unrecorded
     assert (rep.coverage, rep.recall) == (1.0, 0.5)
+    note = next(n for n in rep.notes if "test-runner symbol(s)" in n)
+    assert note.startswith("3 contact(s) of 3 test-runner symbol(s) (pytest.fixture, "
+                           "pytest.mark.slow, pytest.raises) are left out of the verdict")
 
     traced = _trace(tmp_path, [
         {"q": "flask.Flask", "where": {"file": "myapp/views.py", "line": 5}},
-        {"q": "_pytest.python_api.raises", "where": {"file": "tests/test_views.py", "line": 5}}])
+        {"q": "_pytest.python_api.raises", "where": {"file": "tests/test_views.py", "line": 11}}])
     rep = build_contract_report(root, trace=traced)
-    assert {s.contact_class for s in rep.symbols if s.dep == "pytest"} == {"behavioural"}
+    assert rep.test_runner_symbols == []
+    assert {s.target for s in rep.symbols if s.dep == "pytest"} == {
+        "pytest.fixture", "pytest.mark.slow", "pytest.raises"}
 
 
 def test_the_report_and_the_runtime_agree_on_the_test_runner_packages():
     from pymolt.verify import _backend, report
 
     assert report.TEST_RUNNER_PACKAGES == _backend.TEST_RUNNER_PACKAGES
+
+
+def test_observed_sites_are_printed_relative_to_the_project(tmp_path):
+    """QA V9: the DYNAMIC-ONLY table printed absolute paths, wrapping each row over three
+    lines; sites in the project are now project-relative, like the BLIND table's."""
+    (tmp_path / "proj").mkdir()
+    root = _project(tmp_path / "proj")
+    views = str(root / "myapp" / "views.py")
+    trace = _trace(tmp_path, [
+        {"q": "flask.Flask", "where": {"file": views, "line": 5}},
+        {"q": "flask.helpers.url_for", "where": {"file": views, "line": 5}},
+        {"q": "flask.helpers.url_for", "where": {"file": "/elsewhere/lib/x.py", "line": 7}}])
+    rep = build_contract_report(root, trace=trace, resolve_identities=False)
+    by = {s.target: s for s in rep.symbols}
+    assert by["flask.Flask"].observed_at == ["myapp/views.py:5"]
+    assert by["flask.helpers.url_for"].status == "dynamic-only"
+    assert by["flask.helpers.url_for"].observed_at == ["myapp/views.py:5", "/elsewhere/lib/x.py:7"]

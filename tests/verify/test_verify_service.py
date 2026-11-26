@@ -832,8 +832,11 @@ class TestMissingSideReason:
         assert "no baseline capture" in report.verdict_reasons
 
     def test_no_captures(self, tmp_path):
+        """QA V7: one reason, settled by capturing the baseline first."""
         report = self._reasons(tmp_path, None, [])
-        assert "no captures" in report.verdict_reasons
+        assert report.verdict_reasons == ["no captures"]
+        (why,) = report.inconclusive_causes
+        assert why.settle == "capture the baseline, then post-migration"
 
 
 class TestStdlibTracing:
@@ -939,6 +942,29 @@ class TestStdlibTracing:
             "import shutil\nimport imp\nfrom collections import Iterable\n\n\n\n"
             "def size():\n    return shutil.get_terminal_size()\n")
         assert "shutil" in service.stdlib_trace_modules(project, "post_migration")
+
+    def test_site_text_recorded_in_another_checkout_still_marks_the_edited_line(self, tmp_path):
+        """The baseline's site text names files by the paths its capture ran at: read against
+        the root its source snapshot records (a checkout elsewhere), not only this one."""
+        import gzip
+
+        (tmp_path / "here").mkdir()
+        project = self._project(tmp_path / "here")
+        trace = project / ".pymolt" / "contract_traces" / "baseline.jsonl"
+        trace.parent.mkdir(parents=True)
+        trace.write_text("")
+        ContractState(baseline=service.ContractSlot(
+            trace_path=str(trace), captured_at="t", mode=CaptureMode.TEST_SUITE,
+        )).save(service._state_path(project))
+        elsewhere = tmp_path / "ci" / "workspace"
+        service.sources_path(trace).write_bytes(gzip.compress(json.dumps(
+            {"schema": "pymolt.sources/1", "root": str(elsewhere), "files": {}}).encode()))
+        from pymolt.verify.facts import store_site_text
+        store_site_text(trace, {f"{elsewhere}/app.py:6": "return click.get_terminal_size()"})
+        (project / "app.py").write_text(
+            "import imp\nfrom collections import Iterable\n\n"
+            "def size():\n    import shutil\n    return shutil.get_terminal_size()\n")
+        assert service._edited_stdlib_modules(project) == {"shutil"}
 
     def test_an_explicit_target_gets_no_automatic_stdlib(self, tmp_path, monkeypatch):
         monkeypatch.delenv("PYMOLT_TRACE_STDLIB", raising=False)

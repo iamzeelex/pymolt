@@ -136,12 +136,6 @@ def _hunk_diff(step: PlanStep) -> list[str]:
     return out
 
 
-def next_command(plan) -> str:
-    if any(s.executor == "pymolt" and s.phase == "mechanical" for s in plan.steps):
-        return "pymolt apply ."
-    return "pymolt capture post-migration"
-
-
 def _utc_minutes(value: str | None) -> str | None:
     """``2026-11-20T06:31:09+00:00`` as ``2026-11-20 06:31 UTC``; None when it does not parse."""
     if not value:
@@ -216,7 +210,32 @@ def identity_line(plan, *, version: bool = False) -> str:
     return _plain(" · ".join(parts), 500)
 
 
-def _header(plan) -> list[str]:
+_COMMAND = re.compile(r"`([^`]+)`")
+
+
+def _unknown_api_changes(plan) -> str | None:
+    """The header line naming the dependencies whose API changes the plan could not compute
+    (an inconclusive delta), the first reason, and what settles it; None when every delta was
+    computed. Their steps are missing from the plan, not absent from the migration."""
+    deltas = [d for d in (getattr(plan.risks, "deltas", None) or ())
+              if getattr(d, "subject", "dependency") == "dependency"]
+    unknown = [d for d in deltas if getattr(d, "quality", None) == "inconclusive"]
+    if not unknown:
+        return None
+    names = [d.package for d in unknown]
+    shown = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+    notes = [str(n) for d in unknown for n in (d.notes or ())]
+    reasons = [n for n in notes if not n.startswith(("old: ", "new: "))]
+    reason = f": {reasons[0]}" if reasons else ""
+    commands = [m.group(1) for n in notes for m in _COMMAND.finditer(n)
+                if m.group(1).startswith("docker start ")]
+    settle = (f"start the container (`{commands[0]}`) and run `pymolt plan` again" if commands
+              else "fix that and run `pymolt plan` again")
+    return (f"API changes unknown for {len(unknown)} of {len(deltas)} package(s) ({shown})"
+            f"{reason}. Their steps are missing from this plan: {settle}.")
+
+
+def _header(plan, next_command: str | None = None) -> list[str]:
     moves = [f"{d.name} {d.from_version} → {d.to_version}" for d in plan.dependencies]
     if plan.python:
         moves.append(f"Python {plan.python.get('from')} → {plan.python.get('to')}")
@@ -226,19 +245,24 @@ def _header(plan) -> list[str]:
     lines = [f"# Migration plan {title}", identity_line(plan, version=True)]
     if moves:
         lines.append(_plain(" · ".join(moves), 500))
+    unknown = _unknown_api_changes(plan)
+    if unknown:
+        lines.append(_plain(unknown, 500))
     lines.append(f"{len(plan.steps)} steps" + (f": {parts}" if parts else "")
-                 + f". Next: `{next_command(plan)}`")
+                 + (f". Next: `{_plain(next_command, 500)}`" if next_command
+                    else ". Next: `pymolt status .` names it"))
     return lines
 
 
 # ── PLAN.md ───────────────────────────────────────────────────────────────────────────────
 
 
-def plan_markdown(plan) -> str:
-    """The plan as markdown for a person (design 1.9)."""
+def plan_markdown(plan, next_command: str | None = None) -> str:
+    """The plan as markdown for a person (design 1.9). ``next_command``: status's next command
+    when the plan was made (``status.plan_next``), for the project dir as ``.``."""
     main = [s for s in plan.steps if not collapsed(s)]
     low = [s for s in plan.steps if collapsed(s)]
-    lines = [*_header(plan), ""]
+    lines = [*_header(plan, next_command), ""]
     if not plan.steps:
         lines += ["The plan has no step: nothing to change.", ""]
         return "\n".join(lines)
@@ -348,27 +372,41 @@ def plan_md_path(plan, project_dir: str | Path) -> Path:
     return root / LEGACY_PLAN_MD
 
 
-def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None) -> Path:
-    """Write PLAN.md (default ``plan_md_path``) and return its path."""
+def write_plan_md(plan, project_dir: str | Path, path: str | Path | None = None, *,
+                  plan_file: str | Path | None = None, status_next: bool = True) -> Path:
+    """Write PLAN.md (default ``plan_md_path``) and return its path. Its next command is
+    status's (``status.plan_next``) once the plan is saved (``plan_file``: the file a new plan
+    was only written to, ``plan -o``), naming the project dir ``.``: PLAN.md is read from the
+    project. ``status_next`` False: a plan status does not project (the 0.2 plan file moved
+    into the store), whose PLAN.md then points at ``pymolt status .``."""
     root = Path(project_dir).resolve()
     out = Path(path).expanduser() if path else plan_md_path(plan, root)
     if not out.is_absolute():
         out = root / out
     from pymolt.state_io import atomic_write_text
+    from pymolt.status import plan_next
 
-    atomic_write_text(out, plan_markdown(plan))
+    command = None
+    if status_next:
+        try:
+            command = plan_next(root, plan_file)[0]
+        except Exception:  # noqa: BLE001 - PLAN.md stands without it: it then points at status
+            command = None
+    atomic_write_text(out, plan_markdown(plan, command))
     return out
 
 
-def write_saved_plan_md(saved, project_dir: str | Path, path: str | Path | None = None) -> Path:
+def write_saved_plan_md(saved, project_dir: str | Path, path: str | Path | None = None, *,
+                        plan_file: str | Path | None = None) -> Path:
     """PLAN.md after ``plan`` saved (``plan_store.PlanSaveResult``): written for a new plan;
     for an unchanged re-plan, only when the current plan's PLAN.md is missing, or to ``path``
-    (``--plan-md``) when given. Returns where it is."""
+    (``--plan-md``) when given. ``plan_file``: the file a new plan was only written to
+    (``plan -o``), which its next command applies. Returns where it is."""
     if saved.unchanged_from and not path:
         out = plan_md_path(saved.plan, project_dir)
         if out.is_file():
             return out
-    return write_plan_md(saved.plan, project_dir, path)
+    return write_plan_md(saved.plan, project_dir, path, plan_file=plan_file)
 
 
 # ── briefs ────────────────────────────────────────────────────────────────────────────────
@@ -419,14 +457,31 @@ def _constraints(step: PlanStep) -> list[str]:
     return out
 
 
-def _brief_commands(step: PlanStep) -> list[str]:
+def _brief_commands(step: PlanStep, shown: str = ".") -> list[str]:
+    """What runs the step: pymolt's apply; the environment named to setup; else the record
+    around the edit (``--record`` before it, ``--record --done`` after)."""
+    from pymolt.status import command
+
     if step.executor == "pymolt":
-        return ["pymolt apply ."] if step.phase == "mechanical" else []
-    return ["pymolt capture post-migration", "pymolt verify ."]
+        return [command(shown, "apply")] if step.phase == "mechanical" else []
+    if step.type == "target-env":
+        return [command(shown, "setup", "--target-env", "PATH")]
+    return [command(shown, "apply", "--step", step.id, "--record"),
+            command(shown, "apply", "--step", step.id, "--record", "--done")]
 
 
-def brief_data(plan, step: PlanStep, root: str | Path | None = None) -> dict:
-    """The step's brief as JSON (``--agent``): untrusted text under ``data``."""
+def _expected(shown: str = ".") -> str:
+    from pymolt.status import command
+
+    return (f"Then the post-migration capture records the new code (`{command(shown, 'status')}` "
+            "prints it: the baseline's workload in the target environment) and "
+            f"`{command(shown, 'verify')}` judges it.")
+
+
+def brief_data(plan, step: PlanStep, root: str | Path | None = None,
+               shown: str = ".") -> dict:
+    """The step's brief as JSON (``--agent``): untrusted text under ``data``. ``shown``: the
+    project dir as its commands name it (``status.shown_dir``)."""
     manual = step.do.manual
     root_path = Path(root).resolve() if root is not None else None
     python = plan.target_python if plan.target_python != "unknown" else None
@@ -462,16 +517,16 @@ def brief_data(plan, step: PlanStep, root: str | Path | None = None) -> dict:
                    "sites": [s.model_dump() for s in sites[:LIST_CAP]],
                    "sites_total": len(sites), "uncovered": step.verify.uncovered,
                    "note": step.verify.note},
-        "commands": _brief_commands(step),
-        "expected": "Then `pymolt capture post-migration` records the new code and "
-                    "`pymolt verify .` judges it.",
+        "commands": _brief_commands(step, shown),
+        "expected": _expected(shown),
         "depends_on": list(step.depends_on),
     }
 
 
-def brief_markdown(plan, step: PlanStep, root: str | Path | None = None) -> str:
+def brief_markdown(plan, step: PlanStep, root: str | Path | None = None,
+                   shown: str = ".") -> str:
     """The step's brief as markdown: the same content, data in fences."""
-    data = brief_data(plan, step, root)
+    data = brief_data(plan, step, root, shown)
     lines = [f"# Step {step.id}: {data['goal']}", "",
              f"Who: {step.executor}. Claim: {claim_label(step)}."
              + (f" {_sentence(data['claim_why'])}" if data["claim_why"] else ""), "",
@@ -503,8 +558,3 @@ def brief_markdown(plan, step: PlanStep, root: str | Path | None = None) -> str:
                      "reaches them, or verify cannot judge them.")
     lines += ["", "## Commands", *(f"- `{c}`" for c in data["commands"]), "", data["expected"]]
     return "\n".join(lines) + "\n"
-
-
-def next_agent_step(plan) -> PlanStep | None:
-    """The first step an agent acts on, in plan order, whose dependencies are pymolt's."""
-    return next((s for s in plan.steps if s.executor == "agent"), None)

@@ -1,10 +1,15 @@
 from pathlib import Path
 
-from pymolt.core.enums import Mode, Provenance
+from pymolt.core.enums import Mode, Provenance, ResolutionQuality
 from pymolt.core.graph import DependencyGraph, NameMapping
 from pymolt.core.layers import IngestionReport
 from pymolt.ingestion import conda_ingest, resolve_cache, uv_runner
-from pymolt.ingestion.detect import DiscoveredSource, detect_project_python_version, detect_sources
+from pymolt.ingestion.detect import (
+    DiscoveredSource,
+    detect_project_python_version,
+    detect_sources,
+    pick_default_source,
+)
 from pymolt.ingestion.name_mapping import NameMapper
 
 
@@ -38,21 +43,7 @@ def orchestrate_ingestion(
     
     # Detect project's Python version
     detected_python = base_python or detect_project_python_version(project_path)
-    if detected_python:
-        try:
-            import re
-            match = re.match(r"^(\d+)\.(\d+)", detected_python)
-            if match:
-                major = int(match.group(1))
-                minor = int(match.group(2))
-                if major < 3 or (major == 3 and minor < 7):
-                    warnings.append(
-                        f"Project specifies legacy Python {detected_python} (< 3.7). "
-                        "Using pip-compile fallback workflow with local python interpreter or Docker container for dependency resolution."
-                    )
-        except Exception:
-            pass
-            
+
     if not sources:
         raise ValueError(f"No python dependency sources detected in directory {project_dir}")
         
@@ -60,14 +51,8 @@ def orchestrate_ingestion(
     selected_source = chosen_source
     if not selected_source:
         if len(sources) > 1:
-            # Auto-select the first lock file, or pyproject.toml, or requirements.txt
-            # Add warnings about competing/complementary sources
-            lock_sources = [s for s in sources if s.is_lock]
-            if lock_sources:
-                selected_source = lock_sources[0]
-            else:
-                selected_source = sources[0]
-                
+            # The default setup would assume; the others are named in a warning.
+            selected_source = pick_default_source(sources)
             warnings.append(
                 f"Multiple dependency sources detected: {[s.path.name for s in sources]}. "
                 f"Auto-selected {selected_source.path.name}. Consider explicit selection to resolve ambiguity."
@@ -105,6 +90,21 @@ def orchestrate_ingestion(
             graph = uv_runner.ingest(selected_source, current_python=detected_python, container_id=container_id, constraint_file=constraint_file, force_recompile=force_recompile, tool=tool)
         if use_cache:
             resolve_cache.store(project_path, cache_key, graph)
+
+    if selected_source.mode == Mode.PYPI and not selected_source.is_lock:
+        # A pip-compile output read as a manifest lists every package; its `# via`
+        # comments say which ones only other packages pulled in.
+        from pymolt.ingestion.detect import compiled_transitive, normalize_pkg_name
+
+        transitive = compiled_transitive(selected_source.path)
+        for key, node in graph.nodes.items():
+            if node.direct and normalize_pkg_name(key) in transitive:
+                node.direct = False
+        graph.roots = [r for r in graph.roots if normalize_pkg_name(r) not in transitive]
+
+    how = _how_resolved(graph, selected_source, detected_python, container_id)
+    if how:
+        warnings.append(how)
 
     # Warn if the source is not pinned
     if selected_source.fixation != "pinned":
@@ -152,3 +152,31 @@ def orchestrate_ingestion(
     )
     
     return graph, report
+
+
+def _legacy(python: str | None) -> bool:
+    import re
+
+    match = re.match(r"^(\d+)\.(\d+)", python or "")
+    return bool(match) and (int(match.group(1)), int(match.group(2))) < (3, 7)
+
+
+def _how_resolved(graph: DependencyGraph, source: DiscoveredSource, python: str | None,
+                  container_id: str | None) -> str | None:
+    """What the base graph rests on, when that is not a plain resolve or lock: said after
+    the fact, so it never names a workflow that did not run."""
+    if graph.resolution_quality == ResolutionQuality.DECLARED_ONLY:
+        unknown = sum(1 for node in graph.nodes.values() if not node.version)
+        why = (f"No Python {python} interpreter or container resolved it, so the base"
+               if _legacy(python) else "The base")
+        text = f"{why} is read from {source.path.name}'s declarations (declared-only)"
+        if not unknown:
+            return text + "; every declared version is an exact pin."
+        return (f"{text}: {unknown} base version(s) are unknown (a floor or a bare name is "
+                "not what is installed). A lock, the base interpreter or container, an "
+                "exact pin, or a baseline capture settles them.")
+    if graph.resolution_quality == ResolutionQuality.RESOLVED and _legacy(python):
+        where = f"in container {container_id}" if container_id else "with a local interpreter"
+        return (f"Project specifies legacy Python {python} (< 3.7): the base was resolved "
+                f"with pip-compile {where}.")
+    return None

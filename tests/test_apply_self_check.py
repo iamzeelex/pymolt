@@ -263,7 +263,24 @@ def test_status_and_the_cli_show_the_self_check(tmp_path):
     assert "Self-check: compile on the target 3.12: 1 file(s) ok" in applied.output
     assert "smoke import on 3.12: 1 module(s) ok" in " ".join(applied.output.split())
     detail = build_status(tmp_path).phase("migration").detail
-    assert "self-check: compile on the target 3.12: 1 file(s) ok" in detail
+    assert detail.endswith("self-check: compile on the target ok (mech-1); smoke import ok "
+                           "(mech-1); no Python file to check (env-1)")
+
+
+def test_status_reports_the_runs_checks_not_the_last_invocations(tmp_path):
+    """QA H7: after `apply --step mech-1` (compile ok, smoke ok) then `apply --step env-1` (a
+    manifest pin: no file compiled), status read "compile: no file changed; smoke import not
+    checked", the last invocation's self-check, as the migration's."""
+    _plan(tmp_path, GOOD_OLD, GOOD_NEW, target_env=True)
+    runner = CliRunner()
+    for step in ("mech-1", "env-1"):
+        applied = runner.invoke(app, ["apply", str(tmp_path), "--step", step])
+        assert applied.exit_code == 0, applied.output
+    receipt = MigrationReceipt.load(tmp_path)
+    assert receipt.self_check.summary().startswith("compile: no file changed")
+    detail = build_status(tmp_path).phase("migration").detail
+    assert detail.endswith("self-check: compile on the target ok (mech-1); smoke import ok "
+                           "(mech-1); no Python file to check (env-1)")
 
 
 def test_no_smoke_skips_the_import_and_the_receipt_says_so(tmp_path):
@@ -275,6 +292,18 @@ def test_no_smoke_skips_the_import_and_the_receipt_says_so(tmp_path):
     assert "smoke import not checked (--no-smoke)" in " ".join(applied.output.split())
     steps = MigrationReceipt.load(tmp_path).steps.values()
     assert {s.checks["smoke_import"] for s in steps} == {"not checked: --no-smoke"}
+
+
+def test_the_apply_panel_counts_what_this_apply_wrote(tmp_path):
+    """QA H7: a manifest pin applied after a rewrite reported the run's "rewrite sites: 1"."""
+    _plan(tmp_path, GOOD_OLD, GOOD_NEW, target_env=True)
+    runner = CliRunner()
+    first = runner.invoke(app, ["apply", str(tmp_path), "--step", "mech-1", "--no-smoke"])
+    assert "Files changed: 1   rewrite sites: 1" in first.stdout
+    pin = runner.invoke(app, ["apply", str(tmp_path), "--step", "env-1", "--no-smoke"])
+    assert pin.exit_code == 0, pin.output
+    assert "Files changed: 1   rewrite sites: 0" in pin.stdout
+    assert "env-1 pinned the target versions in requirements.txt." in pin.stdout
 
 
 def test_the_cli_refusal_carries_the_self_check_and_exits_as_a_finding(tmp_path):

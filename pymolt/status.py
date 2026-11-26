@@ -21,6 +21,7 @@ commit than ``HEAD`` (``drift``): advisories, never a phase state or a next comm
 
 from __future__ import annotations
 
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -95,6 +96,111 @@ class FunnelStatus(BaseModel):
         return next((p for p in self.phases if p.phase == name), None)
 
 
+def shown_dir(project_dir: str | Path, cwd: str | Path | None = None) -> str:
+    """The project dir as a printed command names it, shell-quoted: as the user gave it, or
+    relative to the current directory when it lies inside it (``.`` for that directory)."""
+    path = Path(project_dir)
+    if path.is_absolute():
+        here = Path(cwd) if cwd is not None else Path.cwd()
+        for inner, outer in ((path, here), (path.resolve(), here.resolve())):
+            try:
+                path = inner.relative_to(outer)
+                break
+            except ValueError:
+                continue
+    return shlex.quote(str(path))
+
+
+def command(shown: str, verb: str, *args: str) -> str:
+    """``pymolt VERB DIR ARGS``: a command for the project ``shown`` (``shown_dir``) names."""
+    return " ".join(("pymolt", verb, shown, *args))
+
+
+def capture_command(shown: str, when: str, *args: str) -> str:
+    """``pymolt capture WHEN [--project-dir DIR] ARGS``: capture takes its project dir as an
+    option, left out for the current directory."""
+    where = () if shown == "." else ("--project-dir", shown)
+    return " ".join(("pymolt", "capture", when, *where, *args))
+
+
+def plan_next(project_dir: str | Path, plan_file: str | Path | None = None,
+              shown: str = ".") -> tuple[str | None, str, str | None]:
+    """``(command, reason, step)`` after ``plan`` saved a plan: status's next (QA H4: plan,
+    PLAN.md and status name one next command). A plan written only to a file (``plan
+    --output``) is not the current plan, which status reads: its next is ``apply --plan`` of
+    that file."""
+    from pymolt.migration_plan import plan_path
+
+    if plan_file is not None and plan_path(project_dir, plan_file) != plan_path(project_dir):
+        return (command(shown, "apply", "--plan", shlex.quote(_plan_file_ref(plan_file))),
+                "status follows the current plan; `apply --plan` saves and applies this one.",
+                None)
+    status = build_status(project_dir, shown=shown)
+    return status.next_command, status.next_reason, status.next_step
+
+
+def _plan_file_ref(plan_file: str | Path) -> str:
+    """``plan_file`` as ``apply --plan`` reads it as a path (``plan_store.resolve_plan_ref``):
+    a bare name that is not ``*.json`` would be read as a plan name or id, so it gets ``./``."""
+    text = str(plan_file)
+    if "/" in text or "\\" in text or text.endswith(".json"):
+        return text
+    return f"./{text}"
+
+
+#: Stands for the target Python in a printed command when setup names no target environment.
+TARGET_PYTHON = "<target-python>"
+_MODE_FLAG = {"test_suite": "tests", "live_command": "command", "live_attach": "attach"}
+
+
+def _target_interpreter(project_path: Path, config) -> str | None:
+    """The target environment's interpreter as setup names it (capture runs commands in the
+    project dir, so a relative environment stays relative); None without one that exists."""
+    if config is None or not config.target_env_path:
+        return None
+    env = Path(config.target_env_path)
+    for rel in (Path("bin") / "python", Path("Scripts") / "python.exe"):
+        if (env if env.is_absolute() else project_path / env).joinpath(rel).is_file():
+            return str(env / rel)
+    return None
+
+
+def post_capture_command(project_path: str | Path, config, baseline_slot,
+                         shown: str = ".") -> str | None:
+    """The post-migration capture verify can compare with the baseline: the baseline's mode,
+    target, privacy and sample rate, and its workload (its command after the interpreter, the
+    part ``verify.service`` compares), run by the target environment's interpreter, or by
+    ``TARGET_PYTHON`` when setup names none. None without a baseline."""
+    if baseline_slot is None:
+        return None
+    from pymolt.verify.models import CaptureMode
+    from pymolt.verify.service import default_sample_rate
+
+    mode = CaptureMode(getattr(baseline_slot.mode, "value", baseline_slot.mode))
+    args = ["--mode", _MODE_FLAG[mode.value]]
+    if baseline_slot.target and baseline_slot.target != "all":
+        args += ["--target", shlex.quote(baseline_slot.target)]
+    if baseline_slot.privacy_profile != ("values" if mode is CaptureMode.TEST_SUITE
+                                         else "shape"):
+        args += ["--privacy", shlex.quote(baseline_slot.privacy_profile)]
+    if abs(baseline_slot.sample_rate - default_sample_rate(mode)) > 1e-9:
+        args += ["--sample-rate", f"{baseline_slot.sample_rate:g}"]
+    if mode is CaptureMode.LIVE_ATTACH:
+        return capture_command(shown, "post-migration", *args)
+    if not baseline_slot.command:
+        return None
+    head, rest = baseline_slot.command[0], list(baseline_slot.command[1:])
+    if Path(head).name.lower().startswith("python"):
+        interpreter = _target_interpreter(Path(project_path), config)
+        head = shlex.quote(interpreter) if interpreter else TARGET_PYTHON
+    else:
+        # A tool (pytest, tox): by name, which capture runs from the target environment
+        # when setup names one.
+        head = shlex.quote(Path(head).name)
+    return capture_command(shown, "post-migration", *args, "--",
+                           " ".join([head, *map(shlex.quote, rest)]))
+
+
 def detect_workload_command(project_dir: str | Path) -> list[str]:
     """Return the most likely repeatable workload, without executing anything."""
     root = Path(project_dir)
@@ -119,7 +225,8 @@ def detect_workload_command(project_dir: str | Path) -> list[str]:
     return []
 
 
-def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck]:
+def environment_checks(project_dir: str | Path, config, shown: str = "."
+                       ) -> list[EnvironmentCheck]:
     """Whether the configured baseline and target environments exist.
 
     Writes nothing. A container baseline is checked with ``docker inspect``, which
@@ -164,7 +271,7 @@ def environment_checks(project_dir: str | Path, config) -> list[EnvironmentCheck
         checks.append(EnvironmentCheck(
             name="target environment", state="warning",
             detail="no target environment configured",
-            hint="Build it, then re-run `pymolt setup . --target-env PATH`.",
+            hint=f"Build it, then re-run `{command(shown, 'setup', '--target-env', 'PATH')}`.",
         ))
     return checks
 
@@ -363,7 +470,9 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
         f"{receipt.patterns_applied} rewrite(s)"
     )
     check = getattr(receipt, "self_check", None)
-    detail += f" · self-check: {check.summary()}" if check is not None else \
+    by_step = _run_checks(receipt)
+    detail += f" · self-check: {by_step}" if by_step else \
+        f" · self-check: {check.summary()}" if check is not None else \
         " · self-check: not recorded (applied before it existed)"
     if receipt.allow_no_baseline:
         return PhaseState(
@@ -387,6 +496,45 @@ def _migration_phase(receipt, baseline: PhaseState, baseline_slot,
             detail=f"{detail} — baseline was replaced after this migration",
         )
     return PhaseState(phase="migration", state=DONE, detail=detail)
+
+
+_CHECK_LABELS = (("compile_target", "compile on the target"),
+                 ("compile_base", "compile on the base"), ("smoke_import", "smoke import"))
+
+
+def _run_checks(receipt) -> str | None:
+    """The run's self-check, by step: each step in effect keeps the checks of the invocation
+    that applied or recorded it, while the receipt's ``self_check`` is only the latest
+    invocation's (after `apply --step mech-1` then `apply --step env-1`, env-1's "no file
+    changed" is not the run's). None when no step in effect records its checks."""
+    steps_of = getattr(receipt, "steps_of", None)
+    if steps_of is None:
+        return None
+    steps = {sid: st for sid, st in steps_of(receipt.run_id).items()
+             if st.in_effect and st.checks}
+    if not steps:
+        return None
+    # A step that changed no Python file (a manifest pin) has nothing to compile or import: its
+    # checks are the invocation's, not its own.
+    code = {sid: st for sid, st in steps.items() if any(f.endswith(".py") for f in st.files)}
+    parts = []
+    for key, label in _CHECK_LABELS:
+        by: dict[str, list[str]] = {}
+        for sid, st in code.items():
+            value = st.checks.get(key) or ""
+            if not value or value == "not checked: no base claim":
+                continue
+            state = ("ok" if value == "ok" else "failed" if value.startswith("failed")
+                     else "not checked")
+            by.setdefault(state, []).append(sid)
+        if by:
+            parts.append(f"{label} " + ", ".join(
+                f"{state} ({', '.join(by[state])})" for state in ("failed", "ok", "not checked")
+                if state in by))
+    rest = [sid for sid in steps if sid not in code]
+    if rest:
+        parts.append(f"no Python file to check ({', '.join(rest)})")
+    return "; ".join(parts) or None
 
 
 def _plan_phase(project_path: Path, assess: PhaseState, receipt) -> PhaseState:
@@ -508,12 +656,14 @@ def _capture_precedes(captured_at: str, applied_at: str) -> bool:
         return True
 
 
-def build_status(project_dir: str | Path, *, check_environments: bool = False) -> FunnelStatus:
+def build_status(project_dir: str | Path, *, check_environments: bool = False,
+                 shown: str = ".") -> FunnelStatus:
     """Read the project's funnel state. Opens files, writes none.
 
     ``check_environments`` also reports whether the configured environments exist
     (``docker inspect`` for a container). Off by default: the ``next →`` line every
-    command prints must stay cheap.
+    command prints must stay cheap. ``shown``: how the commands it names spell the project
+    dir (``shown_dir``); ``.`` by default, the form a file read from the project uses.
 
     Never raises on a damaged or newer state file: each is read as missing and reported
     (``problems``, and the phase it belongs to), with no next command.
@@ -524,7 +674,8 @@ def build_status(project_dir: str | Path, *, check_environments: bool = False) -
     for _ in range(len(_STATE_FILE_PHASES) + 8):   # a file the scan missed: once more
         try:
             with ignoring(found):
-                status = _build_status(project_dir, check_environments=check_environments)
+                status = _build_status(project_dir, check_environments=check_environments,
+                                       shown=shown)
         except StateFileError as exc:
             if exc.path.resolve() in found:
                 raise
@@ -643,8 +794,8 @@ def _report_problems(status: FunnelStatus, problems: list) -> None:
     status.next_reason = rows[0]["remedy"]
 
 
-def _build_status(project_dir: str | Path, *, check_environments: bool = False
-                  ) -> FunnelStatus:
+def _build_status(project_dir: str | Path, *, check_environments: bool = False,
+                  shown: str = ".") -> FunnelStatus:
     from pymolt.ingestion.config import EnvConfig
     from pymolt.ingestion.detect import detect_sources
     from pymolt.migration_state import MigrationReceipt
@@ -753,26 +904,28 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
             phase="post-migration", state=STALE,
             detail=f"{post.detail} — no recorded migration precedes this capture",
         )
-    elif not hand and post_slot is not None and receipt is not None and post.state == DONE:
+    elif post_slot is not None and post.state == DONE:
         # Stale when a file the capture recorded no longer has the recorded text, whatever
-        # changed it (a later step, a rollback, a re-record, a hand edit).
+        # changed it (a later step, a rollback, a re-record, a hand edit), after `apply` or by
+        # hand: `verify` holds the same rule (``service._stamp_source_staleness``).
         from pymolt.workorder.anchor_cache import changed_since
 
         moved = changed_since(project_path, post_slot.sources_path)
-        if moved is None and _capture_precedes(post_slot.captured_at, receipt.applied_at):
+        if (not hand and moved is None
+                and _capture_precedes(post_slot.captured_at, receipt.applied_at)):
             post = PhaseState(
                 phase="post-migration", state=STALE,
                 detail=f"{post.detail} — captured before migration run {receipt.run_id[:8]}",
             )
         elif moved:
-            shown = ", ".join(moved[:3]) + (f" and {len(moved) - 3} more" if len(moved) > 3
-                                            else "")
+            listed = ", ".join(moved[:3]) + (f" and {len(moved) - 3} more" if len(moved) > 3
+                                             else "")
             post = PhaseState(
                 phase="post-migration", state=STALE,
-                detail=f"{post.detail} — {shown} changed since it was captured",
+                detail=f"{post.detail} — {listed} changed since it was captured",
             )
     status.phases.extend([baseline, plan, *([steps] if steps else []), migration, post])
-    _plan_identity(status, project_path)
+    _plan_identity(status, project_path, shown)
 
     if baseline.state == TODO and post.state == TODO:
         report = PhaseState(
@@ -808,8 +961,11 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
         judged = verification.contract
         coverage = ""
         if judged.coverage is not None:
-            coverage = (f"; coverage {round(judged.coverage * 100)}%"
-                        + (f", recall {round(judged.recall * 100)}%"
+            bounded = getattr(judged, "coverage_bounded", False)
+            coverage = (f"; coverage {'at most ' if bounded else ''}"
+                        f"{round(judged.coverage * 100)}%"
+                        + (f", recall {'at least ' if bounded else ''}"
+                           f"{round(judged.recall * 100)}%"
                            if judged.recall is not None else "")
                         + f" (granularity {judged.coverage_granularity})")
         kind = verification.inconclusive_kind
@@ -820,14 +976,22 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
             detail=f"verdict: {verification.verdict.value}"
                    + (f" ({_KIND_LABEL[kind.value]})" if kind is not None else "") + coverage,
         )
+    if report.state == DONE and post.state == STALE:
+        # The saved verdict judged a capture that no longer describes the project: it stands
+        # as history, not as the verdict on the code on disk.
+        report = report.model_copy(update={
+            "state": STALE,
+            "detail": f"{report.detail} — on a post-migration capture that is stale now: "
+                      "capture post-migration again, then verify"})
     status.phases.append(report)
 
     if check_environments:
-        status.checks = environment_checks(project_path, config)
+        status.checks = environment_checks(project_path, config, shown)
     workload = detect_workload_command(project_path)
     _decide_next(
         status, config, baseline, plan, migration, post, report,
-        receipt, verification, workload, by_hand=by_hand, projection=projection,
+        receipt, verification, workload, by_hand=by_hand, projection=projection, shown=shown,
+        post_capture=post_capture_command(project_path, config, baseline_slot, shown),
         has_replicate=usable_replicate(project_path, contract)[0] is not None,
         can_replicate=lambda: baseline_slot is not None and fingerprint is not None
         and fingerprint == baseline_slot.env_fingerprint
@@ -836,19 +1000,25 @@ def _build_status(project_dir: str | Path, *, check_environments: bool = False
     return status
 
 
-LEGACY_NOTE = ("this plan is in the 0.2 layout (.pymolt/migration_plan.json); the next "
-               "`pymolt plan .` moves it into .pymolt/plans/")
-LEGACY_BESIDE_NOTE = ("a plan in the 0.2 layout (.pymolt/migration_plan.json) is there beside the "
-                      "current plan; the next `pymolt plan .` moves it into .pymolt/plans/")
+def legacy_note(shown: str = ".", *, beside: bool = False) -> str:
+    """The note on a plan in the 0.2 layout (``beside``: there beside the current plan);
+    ``shown``: the project dir as its command names it (``shown_dir``)."""
+    what = ("a plan in the 0.2 layout (.pymolt/migration_plan.json) is there beside the current "
+            "plan" if beside else "this plan is in the 0.2 layout (.pymolt/migration_plan.json)")
+    return f"{what}; the next `{command(shown, 'plan')}` moves it into .pymolt/plans/"
 
 
-def _plan_identity(status: FunnelStatus, project_path: Path) -> None:
+LEGACY_NOTE = legacy_note()
+LEGACY_BESIDE_NOTE = legacy_note(beside=True)
+
+
+def _plan_identity(status: FunnelStatus, project_path: Path, shown: str = ".") -> None:
     """The current plan's identity (``status.plan``), the note when a plan is in the 0.2
     layout, and the branch-drift advisory (``status.drift``): the commit the current plan was
     made at (the pointer's ``checked_commit`` when an unchanged re-plan confirmed it since, else
     the plan's ``source``) is known and is not ``HEAD``'s. Never a phase state or a next
     command; silent when either commit is unknown. Reads one git commit, only for a plan made
-    in a repository."""
+    in a repository. ``shown``: the project dir as the notes' commands name it."""
     from pymolt.migration_plan import MigrationPlan
     from pymolt.plan_store import legacy_plan_file, load_pointer
     from pymolt.workorder.render import identity_line
@@ -856,7 +1026,7 @@ def _plan_identity(status: FunnelStatus, project_path: Path) -> None:
     plan = MigrationPlan.load(project_path)
     pointer = load_pointer(project_path)
     if legacy_plan_file(project_path).exists():
-        status.notes.append(LEGACY_NOTE if pointer is None else LEGACY_BESIDE_NOTE)
+        status.notes.append(legacy_note(shown, beside=pointer is not None))
     if plan is None:
         return
     source = plan.source
@@ -883,8 +1053,8 @@ def _plan_identity(status: FunnelStatus, project_path: Path) -> None:
         and source.git_dirty else ""
     status.drift = {"plan_commit": made, "head": head}
     status.notes.append(f"the current plan was made at commit {made[:7]}{dirty}; HEAD is "
-                        f"{head[:7]}: re-plan (`pymolt plan .`) if the code it plans for "
-                        "changed")
+                        f"{head[:7]}: re-plan (`{command(shown, 'plan')}`) if the code it "
+                        "plans for changed")
 
 
 def _projection(project_path: Path, receipt, post_slot):
@@ -945,15 +1115,17 @@ def _noise_settles(verification) -> bool:
 
 
 def _replicate_rule(status: FunnelStatus, *, by_hand: bool, can_replicate,
-                    step: str | None = None) -> None:
+                    step: str | None = None, shown: str = ".") -> None:
     """Measure run-to-run noise with a baseline replicate: it must run the baseline's code in
     its environment, so after a migration it means putting that back first."""
     lead = (f"Step {step} needs evidence: differences at its sites may be run-to-run noise."
             if step else
             "The verdict is INCONCLUSIVE on differences that may be run-to-run noise.")
     status.next_step = step
+    replicate = capture_command(shown, "baseline", "--replicate")
+    runs = capture_command(shown, "baseline", "--runs 2")
     if can_replicate():
-        status.next_command = "pymolt capture baseline --replicate"
+        status.next_command = replicate
         status.next_reason = (
             f"{lead} Run the baseline's command again (same code, same environment) so verify "
             "can measure that noise, then verify again.")
@@ -961,15 +1133,15 @@ def _replicate_rule(status: FunnelStatus, *, by_hand: bool, can_replicate,
         status.next_command = None
         status.next_reason = (
             f"{lead} A baseline replicate measures it but must run the baseline's code in its "
-            "environment: put that back, `pymolt capture baseline --replicate`, redo the "
-            "migration, verify. (`pymolt capture baseline --runs 2` records both before "
+            f"environment: put that back, `{replicate}`, redo the "
+            f"migration, verify. (`{runs}` records both before "
             "migrating.)")
     else:
-        status.next_command = "pymolt rollback ."
+        status.next_command = command(shown, "rollback")
         status.next_reason = (
             f"{lead} A baseline replicate measures it but must run the baseline's code in its "
-            "environment: roll back, `pymolt capture baseline --replicate`, apply again, "
-            "verify. (`pymolt capture baseline --runs 2` records both before migrating.)")
+            f"environment: roll back, `{replicate}`, apply again, "
+            f"verify. (`{runs}` records both before migrating.)")
 
 
 def _decide_next(
@@ -988,9 +1160,12 @@ def _decide_next(
     has_replicate: bool = False,
     can_replicate=lambda: False,
     projection=None,
+    shown: str = ".",
+    post_capture: str | None = None,
 ) -> None:
     """The single next command. One, not a menu: the point is to remove the choice. After the
-    baseline, the steps decide (design 6) while a plan of steps exists."""
+    baseline, the steps decide (design 6) while a plan of steps exists. ``shown``: the project
+    dir as the commands name it (``shown_dir``)."""
     scan = status.phase("scan")
     assess = status.phase("assess")
 
@@ -1001,55 +1176,61 @@ def _decide_next(
         )
         return
     if config is None:
-        status.next_command = "pymolt setup ."
+        status.next_command = command(shown, "setup")
         status.next_reason = "Choose the manifest, tool and Python versions."
         return
     if assess and assess.state == TODO:
         target = config.target_python or "<X.Y>"
-        status.next_command = f"pymolt assess . --target-python {target}"
+        status.next_command = command(shown, "assess", "--target-python", target)
         status.next_reason = "Resolve the target dependencies and write the target manifest."
         return
     workload_text = " ".join(workload) if workload else "<command that exercises the app>"
     migrated_without_baseline = receipt is not None and receipt.allow_no_baseline
     if baseline.state == TODO and not migrated_without_baseline:
-        status.next_command = (
-            f"pymolt capture baseline --mode tests -- {workload_text}"
-        )
+        status.next_command = capture_command(
+            shown, "baseline", "--mode", "tests", "--", workload_text)
         status.next_reason = (
             "Record the calls your code makes before any code change. This cannot be "
             "done later."
         )
         return
     if baseline.state == STALE and not migrated_without_baseline:
-        status.next_command = (
-            f"pymolt capture baseline --mode tests -- {workload_text}"
-        )
+        status.next_command = capture_command(
+            shown, "baseline", "--mode", "tests", "--", workload_text)
         status.next_reason = (
             "The baseline does not match the project. Capture it again before comparing."
         )
         return
     if migration.state != DONE and plan.state in {TODO, STALE}:
-        status.next_command = "pymolt plan ."
+        status.next_command = command(shown, "plan")
         status.next_reason = (
             "Save the code changes as a plan and review the diff."
         )
         return
-    if projection is not None and _decide_steps(status, projection, receipt, post, by_hand):
+    if projection is not None and _decide_steps(status, projection, receipt, post, by_hand,
+                                                shown=shown):
         return
     if migration.state in {TODO, STALE}:
-        status.next_command = "pymolt apply ."
+        status.next_command = command(shown, "apply")
         status.next_reason = (
             "Apply the saved plan. The original files are kept for rollback."
         )
         return
     if post.state in {TODO, STALE}:
-        status.next_command = (
-            f"pymolt capture post-migration --mode tests -- {workload_text}"
-        )
+        status.next_command = post_capture or capture_command(
+            shown, "post-migration", "--mode", "tests", "--", workload_text)
         status.next_reason = "Record the same calls after the migration, in the target environment."
+        if post_capture is not None:
+            status.next_reason = (
+                "Record the same calls after the migration: the baseline's workload, in the "
+                "target environment, so verify compares like with like.")
+        if post_capture is not None and TARGET_PYTHON in post_capture:
+            status.next_reason += (
+                f" Replace {TARGET_PYTHON} with the target environment's interpreter (or name "
+                f"the environment with `{command(shown, 'setup', '--target-env', 'PATH')}`).")
         return
     if report.state != DONE:
-        status.next_command = "pymolt verify ."
+        status.next_command = command(shown, "verify")
         status.next_reason = "Both captures exist. Compare them."
         return
     def replicate(step: str | None = None) -> bool:
@@ -1057,20 +1238,32 @@ def _decide_next(
         # one) and the baseline it repeats is current.
         if has_replicate or baseline.state != DONE:
             return False
-        _replicate_rule(status, by_hand=by_hand, can_replicate=can_replicate, step=step)
+        _replicate_rule(status, by_hand=by_hand, can_replicate=can_replicate, step=step,
+                        shown=shown)
         return True
 
-    if projection is not None and _decide_judged(status, projection, verification, replicate):
+    if projection is not None and _decide_judged(status, projection, verification, replicate,
+                                                 shown=shown):
         return
     if verification is not None and verification.verdict.value == "fail":
-        if by_hand:
-            status.next_command = None
-            status.next_reason = (
-                "The verdict is FAIL. No apply run made this migration, so there is nothing to "
-                "roll back: fix the changes, then capture post-migration again.")
-            return
-        status.next_command = "pymolt rollback ."
-        status.next_reason = "The verdict is FAIL. Rollback restores the files apply changed."
+        # Not a whole-run rollback: it also undoes the steps verify verified. What follows a
+        # FAIL is a person's call: fix the code (bring back a rolled-back step whose sites
+        # failed), or accept an intended change. A pymolt step in effect that failed was
+        # handled above (``_decide_judged``: its own rollback).
+        steps = list(getattr(verification, "failing_steps", None) or ())
+        current = {s.id: s.status for s in projection.steps} if projection is not None else {}
+        named = ", ".join(f"{s['id']} ({current.get(s['id'], s['status'])})" for s in steps)
+        back = [s["id"] for s in steps if current.get(s["id"], s["status"]) == "rolled_back"]
+        status.next_command = None
+        status.next_reason = (
+            "The verdict is FAIL" + (f" at the sites of plan step(s) {named}" if named else "")
+            + (". No apply run made this migration, so there is nothing to roll back"
+               if by_hand else "")
+            + ". A person decides: fix the code"
+            + (f" (`{command(shown, 'apply', '--step', back[0])}` brings the rolled-back step back)"
+               if back else "")
+            + ", then capture post-migration again and verify; or accept an intended change "
+              f"with `{command(shown, 'verify', '--accept', 'ID')}` on a terminal.")
         return
     if _noise_settles(verification) and replicate():
         return
@@ -1094,20 +1287,20 @@ def _verdict_reason(verification) -> str:
 
 
 def _decide_steps(status: FunnelStatus, projection, receipt, post: PhaseState,
-                  by_hand: bool) -> bool:
+                  by_hand: bool, *, shown: str = ".") -> bool:
     """Design 6, rules 2 to 6 (rule 1 is the plan rule before it). Rules 4 to 6 apply while a
     receipt exists or no post-migration capture newer than the plan exists: a migration made by
     hand goes straight to the capture and the verdict."""
     pending = [s for s in projection.steps if s.status not in ("applied", "recorded")
                and s.status not in ("rolled_back", "skipped")]
     if projection.run_stale and pending:
-        status.next_command = "pymolt plan ."
+        status.next_command = command(shown, "plan")
         status.next_reason = ("The plan is stale (" + projection.run_stale[0] + "): its steps "
                               "not in effect no longer describe the project. Plan again.")
         return True
     busy = projection.first("in_progress")
     if busy is not None:
-        status.next_command = f"pymolt apply --step {busy.id} --record --done"
+        status.next_command = command(shown, "apply", "--step", busy.id, "--record", "--done")
         status.next_step = busy.id
         status.next_reason = f"Step {busy.id} is being recorded: finish (or abort) it."
         return True
@@ -1118,35 +1311,37 @@ def _decide_steps(status: FunnelStatus, projection, receipt, post: PhaseState,
     # Rule 4 before rule 5, except that `apply .` refuses while one of its steps is stale: then
     # the stale step comes first.
     if ready and stale is None:
-        status.next_command = "pymolt apply ."
+        status.next_command = command(shown, "apply")
         status.next_reason = ("Apply the plan's pymolt steps " + ", ".join(ready[:6])
                               + (" and more" if len(ready) > 6 else "")
                               + ". The original files are kept for rollback.")
         return True
     if stale is not None:
-        status.next_command = f"pymolt apply --step {stale.id} --dry-run"
+        status.next_command = command(shown, "apply", "--step", stale.id, "--dry-run")
         status.next_step = stale.id
         why = stale.reasons[0] if stale.reasons else "its statements moved"
         status.next_reason = (f"Step {stale.id} is stale ({why}). The dry run shows the "
-                              "statement it lost; then `pymolt plan .` plans what is left "
-                              "again.")
+                              f"statement it lost; then `{command(shown, 'plan')}` plans what "
+                              "is left again.")
         return True
     manual = next((s for s in projection.steps if s.executor != "pymolt"
                    and s.status == "planned" and s.type != "target-env"), None)
     if manual is not None:
         who = "an agent" if manual.executor == "agent" else "a person"
-        status.next_command = f"pymolt apply --step {manual.id} --record"
+        status.next_command = command(shown, "apply", "--step", manual.id, "--record")
         status.next_step = manual.id
+        brief = command(shown, "apply", "--step", manual.id, "--brief")
+        skip = command(shown, "apply", "--step", manual.id, "--skip", "--reason", "TEXT")
         status.next_reason = (
-            f"Step {manual.id} is for {who}: `pymolt apply --step {manual.id} --brief` says "
+            f"Step {manual.id} is for {who}: `{brief}` says "
             "what to do. Start its record, make the change, then `--record --done` (or "
-            "`pymolt apply --step ID --skip --reason TEXT` declines it).")
+            f"`{skip}` declines it).")
         return True
     return False
 
 
 def _decide_judged(status: FunnelStatus, projection, verification=None,
-                   replicate=lambda step=None: False) -> bool:
+                   replicate=lambda step=None: False, *, shown: str = ".") -> bool:
     """Design 6, rules 9 to 11: a step verify judged for its current epoch. Rule 11 says what
     settles the step's evidence: the replicate rule for noise (``replicate``, which reports
     whether it applies), else its judgement's ``settle`` (a test that reaches its sites by
@@ -1155,11 +1350,11 @@ def _decide_judged(status: FunnelStatus, projection, verification=None,
     if failed is not None:
         status.next_step = failed.id
         if failed.executor == "pymolt":
-            status.next_command = f"pymolt rollback --step {failed.id}"
+            status.next_command = command(shown, "rollback", "--step", failed.id)
             status.next_reason = (f"Step {failed.id} failed verify: an outcome at its sites "
                                   "changed. Rolling it back restores the text before it.")
         else:
-            status.next_command = f"pymolt apply --step {failed.id} --record"
+            status.next_command = command(shown, "apply", "--step", failed.id, "--record")
             status.next_reason = (f"Step {failed.id} failed verify: fix it under a new record "
                                   "(`--record`, the fix, `--record --done`), then capture "
                                   "post-migration again.")
@@ -1167,10 +1362,11 @@ def _decide_judged(status: FunnelStatus, projection, verification=None,
     review = projection.first("needs_review")
     if review is not None:
         status.next_step = review.id
-        status.next_command = f"pymolt verify . --step {review.id}"
+        status.next_command = command(shown, "verify", "--step", review.id)
         status.next_reason = (f"Step {review.id} needs a person's review of what changed at "
                               "its sites: the report names each finding's id, and a person "
-                              "accepts an intended one with `pymolt verify . --accept ID`.")
+                              "accepts an intended one with "
+                              f"`{command(shown, 'verify', '--accept', 'ID')}`.")
         return True
     evidence = projection.first("needs_evidence")
     if evidence is not None:

@@ -178,6 +178,32 @@ class TestProgression:
         assert status.next_command is None
         assert "PASS" in status.next_reason
 
+    def test_a_saved_verdict_on_a_capture_whose_code_changed_since_is_stale(self, tmp_path):
+        """QA V1: a PASS saved on a post-migration capture stands as history once a file the
+        capture recorded changed (here: reverted by hand), not as the verdict on the code."""
+        _manifest(tmp_path)
+        _configure(tmp_path)
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        baseline = _capture(tmp_path, "baseline")
+        receipt = _receipt(tmp_path, baseline)
+        _capture(tmp_path, "post_migration")
+        build_unified_verification(
+            ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS),
+            run_id=receipt.run_id,
+        ).save(tmp_path)
+        assert _state(build_status(tmp_path), "report") == "done"
+
+        (tmp_path / "post_migration.py").write_text("import json\njson.loads('[]')\n",
+                                                    encoding="utf-8")
+        status = build_status(tmp_path)
+
+        assert _state(status, "post-migration") == "stale"
+        report = status.phase("report")
+        assert report.state == "stale"
+        assert report.detail.startswith("verdict: pass")
+        assert "stale now: capture post-migration again, then verify" in report.detail
+        assert "capture post-migration" in status.next_command
+
     def test_a_verdict_on_another_post_migration_recording_is_not_the_migrations(self,
                                                                                  tmp_path):
         """`verify --post-migration OTHER` saves its verdict, naming what it compared; status
@@ -309,7 +335,11 @@ class TestManualMigration:
         assert _state(status, "migration") == "done"
         assert "1 file(s) changed since the baseline" in status.phase("migration").detail
         assert "optional" in status.phase("plan").detail
-        assert status.next_command.startswith("pymolt capture post-migration")
+        # The baseline's mode and workload (its script), by the target Python (QA H2).
+        assert status.next_command == (
+            "pymolt capture post-migration --mode command --target json -- <target-python> "
+            f"{tmp_path / 'baseline.py'}")
+        assert "Replace <target-python>" in status.next_reason
 
     def test_pins_bumped_with_no_code_change_are_a_migration_too(self, tmp_path):
         self._hand_project(tmp_path)
@@ -355,6 +385,25 @@ class TestManualMigration:
         failed = verdict(VerificationVerdict.FAIL)
         assert failed.next_command is None             # no apply run to roll back
         assert "nothing to roll back" in failed.next_reason
+
+    def test_a_hand_edit_after_the_post_capture_makes_it_stale(self, tmp_path):
+        """By hand as after `apply`: the capture is stale once a file it recorded changed."""
+        self._hand_project(tmp_path)
+        (tmp_path / "app.py").write_text("import json  # migrated\n", encoding="utf-8")
+        _capture(tmp_path, "post_migration")
+        build_unified_verification(
+            ContractReport(root=str(tmp_path), verdict=VerificationVerdict.PASS), run_id=None,
+        ).save(tmp_path)
+        (tmp_path / "post_migration.py").write_text("import json\njson.loads('[]')\n",
+                                                    encoding="utf-8")
+
+        status = build_status(tmp_path)
+
+        assert _state(status, "post-migration") == "stale"
+        assert "post_migration.py changed since it was captured" in \
+            status.phase("post-migration").detail
+        assert _state(status, "report") == "stale"
+        assert "capture post-migration" in status.next_command
 
     def test_an_inconclusive_verdict_says_who_settles_it(self, tmp_path):
         """Decision 7: the next reason, the report phase and the agent view say whether the
@@ -479,11 +528,25 @@ class TestStatusCommand:
         ]
         assert payload["next_command"].startswith("pymolt assess")
 
-    def test_human_render_shows_the_next_command(self, tmp_path):
+    def test_human_render_shows_the_next_command(self, tmp_path, monkeypatch):
         _manifest(tmp_path)
-        result = runner.invoke(app, ["status", str(tmp_path)])
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["status", "."])
         assert result.exit_code == 0
         assert "pymolt setup ." in result.stdout
+
+    def test_the_next_command_names_the_dir_the_user_gave(self, tmp_path, monkeypatch):
+        """Run from another directory, `.` would point at the wrong project (QA H1)."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        _manifest(project)
+        monkeypatch.chdir(tmp_path)
+        human = runner.invoke(app, ["status", "proj"])
+        assert "pymolt setup proj" in human.stdout
+        for flag in ("--json", "--agent"):
+            payload = json.loads(runner.invoke(app, ["status", "proj", flag]).stdout)
+            data = payload.get("data", payload)
+            assert data["next_command"] == "pymolt setup proj", flag
 
     def test_writes_nothing(self, tmp_path):
         """status is a projection: it must never create the state it reports on."""
@@ -540,3 +603,69 @@ class TestEnvironmentChecks:
         assert result.exit_code == 0
         assert "target environment" in result.stdout
 
+
+
+def test_the_report_phase_labels_coverage_and_recall_as_bounds(tmp_path):
+    """QA V6: a verdict whose coverage counts contacts as ran only by their function or file
+    shows coverage as an upper and recall as a lower bound."""
+    _manifest(tmp_path)
+    _configure(tmp_path)
+    (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+    baseline = _capture(tmp_path, "baseline")
+    receipt = _receipt(tmp_path, baseline)
+    _capture(tmp_path, "post_migration")
+    build_unified_verification(
+        ContractReport(root=str(tmp_path), verdict=VerificationVerdict.INCONCLUSIVE,
+                       coverage=0.66, recall=0.77, coverage_granularity="function",
+                       coverage_bounded=True),
+        run_id=receipt.run_id,
+    ).save(tmp_path)
+    detail = build_status(tmp_path).phase("report").detail
+    assert "coverage at most 66%, recall at least 77% (granularity function)" in detail
+
+
+class TestShownDir:
+    """Every printed command names the project dir the way the user can run it (QA H1)."""
+
+    def test_as_given_or_relative_to_the_current_dir(self, tmp_path):
+        from pymolt.status import shown_dir
+
+        inside = tmp_path / "a" / "b"
+        assert shown_dir("tests/artifacts/flasgger/", cwd=tmp_path) == "tests/artifacts/flasgger"
+        assert shown_dir("../other", cwd=tmp_path) == "../other"
+        assert shown_dir(".", cwd=tmp_path) == "."
+        assert shown_dir(tmp_path, cwd=tmp_path) == "."
+        assert shown_dir(inside, cwd=tmp_path) == "a/b"
+        assert shown_dir("/home/user/proj", cwd=tmp_path) == "/home/user/proj"
+        assert shown_dir("/home/user/my proj", cwd=tmp_path) == "'/home/user/my proj'"
+
+    def test_every_command_names_it(self, tmp_path):
+        from pymolt.status import capture_command, command
+
+        assert command("proj", "apply", "--step", "env-1") == "pymolt apply proj --step env-1"
+        assert capture_command("proj", "baseline", "--replicate") == \
+            "pymolt capture baseline --project-dir proj --replicate"
+        assert capture_command(".", "baseline", "--replicate") == \
+            "pymolt capture baseline --replicate"
+
+    def test_status_renders_its_commands_for_the_shown_dir(self, tmp_path):
+        _manifest(tmp_path)
+        assert build_status(tmp_path, shown="proj").next_command == "pymolt setup proj"
+        _configure(tmp_path)
+        assert build_status(tmp_path, shown="proj").next_command == \
+            "pymolt assess proj --target-python 3.12"
+        (tmp_path / "requirements-target.txt").write_text("flask==3.0.0\n", encoding="utf-8")
+        status = build_status(tmp_path, shown="proj")
+        assert status.next_command.startswith(
+            "pymolt capture baseline --project-dir proj --mode tests -- ")
+        assert build_status(tmp_path).next_command.startswith(
+            "pymolt capture baseline --mode tests -- ")
+
+    def test_a_command_hint_after_a_phase_names_the_dir(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        project.mkdir()
+        _manifest(project)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["scan", "proj"])
+        assert result.exit_code == 0
+        assert "pymolt setup proj" in result.stderr

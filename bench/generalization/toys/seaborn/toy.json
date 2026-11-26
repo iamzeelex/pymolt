@@ -1,0 +1,227 @@
+{
+  "name": "seaborn",
+  "ecosystem": "statistical plotting",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "seaborn==0.11.2",
+      "matplotlib==3.6.3",
+      "pandas==1.5.3",
+      "numpy==1.26.4",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "seaborn==0.13.2",
+      "matplotlib==3.10.9",
+      "pandas==2.3.3",
+      "numpy==2.3.5",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "seaborn",
+    "matplotlib",
+    "pandas",
+    "numpy"
+  ],
+  "target_manifest": [
+    "seaborn==0.13.2",
+    "matplotlib==3.10.9",
+    "pandas==2.3.3",
+    "numpy==2.3.5"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/dashboard.py": "\"\"\"Weekly sales dashboard figures drawn with seaborn (Agg backend).\"\"\"\nimport matplotlib\n\nmatplotlib.use(\"Agg\")\nimport matplotlib.pyplot as plt  # noqa: E402\nimport pandas as pd  # noqa: E402\nimport seaborn as sns  # noqa: E402\n\n\ndef frame(rows):\n    return pd.DataFrame(rows)\n\n\ndef visits_vs_sales(df):\n    \"\"\"Number of points on the visits/sales scatter.\"\"\"\n    fig, ax = plt.subplots()\n    sns.scatterplot(df[\"visits\"], df[\"sales\"], ax=ax)\n    n = len(ax.collections[0].get_offsets())\n    plt.close(fig)\n    return n\n\n\ndef daily_means(df):\n    fig, ax = plt.subplots()\n    sns.barplot(x=\"day\", y=\"sales\", data=df, ci=None, ax=ax)\n    heights = [round(bar.get_height(), 2) for bar in ax.patches]\n    plt.close(fig)\n    return heights\n\n\ndef sales_histogram(df):\n    fig, ax = plt.subplots()\n    sns.distplot(df[\"sales\"], kde=False, bins=4, ax=ax)\n    counts = [int(bar.get_height()) for bar in ax.patches]\n    plt.close(fig)\n    return counts\n\n\ndef density_filled(df):\n    \"\"\"Whether the density curve is drawn as a filled area.\"\"\"\n    fig, ax = plt.subplots()\n    sns.kdeplot(df[\"sales\"], shade=True, ax=ax)\n    filled = len(ax.collections) > 0\n    plt.close(fig)\n    return filled\n",
+    "app/grids.py": "\"\"\"Per-shop small multiples (figure-level seaborn functions).\"\"\"\nimport matplotlib\n\nmatplotlib.use(\"Agg\")\nimport matplotlib.pyplot as plt  # noqa: E402\nimport seaborn as sns  # noqa: E402\n\n\ndef trend_panels(df):\n    \"\"\"One regression panel per shop; returns the panel titles.\"\"\"\n    grid = sns.lmplot(x=\"visits\", y=\"sales\", col=\"shop\", data=df, size=3)\n    titles = [ax.get_title() for ax in grid.axes.flat]\n    plt.close(grid.fig)\n    return titles\n\n\ndef shop_counts(df):\n    \"\"\"Rows per shop, read back from a count plot.\"\"\"\n    grid = sns.factorplot(x=\"shop\", data=df, kind=\"count\")\n    counts = [int(bar.get_height()) for bar in grid.ax.patches]\n    plt.close(grid.fig)\n    return counts\n",
+    "tests/conftest.py": "import numpy as np\nimport pytest\n\nfrom app.dashboard import frame\n\n\n@pytest.fixture\ndef df():\n    rng = np.random.RandomState(0)\n    return frame({\"day\": [\"Mon\", \"Tue\", \"Wed\", \"Thu\"] * 6,\n                  \"shop\": ([\"A\"] * 4 + [\"B\"] * 4) * 3,\n                  \"sales\": rng.randint(10, 50, 24).astype(float),\n                  \"visits\": rng.randint(50, 200, 24)})\n",
+    "tests/test_dashboard.py": "from app import dashboard\n\n\ndef test_visits_vs_sales(df):\n    assert dashboard.visits_vs_sales(df) == 24\n\n\ndef test_daily_means(df):\n    assert dashboard.daily_means(df) == [25.33, 21.0, 28.5, 40.67]\n\n\ndef test_sales_histogram(df):\n    assert dashboard.sales_histogram(df) == [8, 4, 7, 5]\n\n\ndef test_density_filled(df):\n    assert dashboard.density_filled(df) is True\n",
+    "tests/test_grids.py": "from app import grids\n\n\ndef test_trend_panels(df):\n    assert grids.trend_panels(df) == [\"shop = A\", \"shop = B\"]\n\n\ndef test_shop_counts(df):\n    assert grids.shop_counts(df) == [12, 12]\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/dashboard.py",
+      "old": "sns.scatterplot(df[\"visits\"], df[\"sales\"], ax=ax)",
+      "new": "sns.scatterplot(x=df[\"visits\"], y=df[\"sales\"], ax=ax)"
+    },
+    {
+      "file": "app/dashboard.py",
+      "old": "ci=None",
+      "new": "errorbar=None"
+    },
+    {
+      "file": "app/dashboard.py",
+      "old": "sns.distplot(df[\"sales\"], kde=False, bins=4, ax=ax)",
+      "new": "sns.histplot(df[\"sales\"], bins=4, ax=ax)"
+    },
+    {
+      "file": "app/dashboard.py",
+      "old": "shade=True",
+      "new": "fill=True"
+    },
+    {
+      "file": "app/grids.py",
+      "old": "size=3)",
+      "new": "height=3)"
+    },
+    {
+      "file": "app/grids.py",
+      "old": "sns.factorplot(",
+      "new": "sns.catplot("
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/dashboard.py",
+          "append": "\n\ndef daily_spread(df):\n    \"\"\"Length of each day's standard-deviation error bar.\"\"\"\n    fig, ax = plt.subplots()\n    sns.barplot(x=\"day\", y=\"sales\", data=df, ci=\"sd\", ax=ax)\n    spans = []\n    for line in ax.lines:\n        low, high = line.get_ydata()\n        spans.append(round(float(high - low), 3))\n    plt.close(fig)\n    return spans\n"
+        },
+        {
+          "file": "tests/test_dashboard.py",
+          "append": "\n\ndef test_daily_spread(df):\n    # Only checks that every day has an error bar.\n    assert len(dashboard.daily_spread(df)) == 4\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "matplotlib.lines.Line2D.get_ydata"
+      ],
+      "behaviour": "barplot(ci='sd') draws mean +/- the population std (ddof=0) in 0.11.2 and mean +/- the sample std (ddof=1, pandas' default) from 0.12 (errorbar='sd'), so the error bars are about 9.5% longer on 0.13.2 (Mon: 18.209 -> 19.947); seaborn returns the Axes, so the new values only surface through matplotlib's Line2D.get_ydata"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "seaborn.scatterplot",
+      "kind": "SIGNATURE",
+      "param": "x, y (positional)",
+      "site": "app/dashboard.py:17",
+      "breaks": "TypeError: scatterplot() takes from 0 to 1 positional arguments but 2 positional arguments (and 1 keyword-only argument) were given",
+      "successor": null,
+      "fixable": "manual",
+      "source": "seaborn 0.12 made the data variables keyword-only",
+      "verified": {
+        "old": "0.11.2: scatterplot(x, y) works with FutureWarning 'Pass the following variables as keyword args: x, y. From version 0.12, the only valid positional argument will be `data`...'",
+        "new": "0.13.2: TypeError; scatterplot(x=..., y=...) works on both"
+      }
+    },
+    {
+      "symbol": "seaborn.barplot",
+      "kind": "DEPRECATED",
+      "param": "ci",
+      "site": "app/dashboard.py:25",
+      "breaks": "no break on 0.13.2: FutureWarning 'The `ci` parameter is deprecated. Use `errorbar=None` for the same effect.'",
+      "successor": "errorbar",
+      "fixable": "auto",
+      "source": "seaborn 0.12 replaced ci= with errorbar=",
+      "verified": {
+        "old": "0.11.2: ci=None works, no warning; errorbar= is not accepted (AttributeError from Rectangle.set)",
+        "new": "0.13.2: ci=None works and warns; errorbar=None gives the same bars"
+      }
+    },
+    {
+      "symbol": "seaborn.distplot",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/dashboard.py:33",
+      "breaks": "no break on 0.13.2: UserWarning '`distplot` is a deprecated function and will be removed in seaborn v0.14.0. Please adapt your code to use either `displot` (a figure-level function ...) or `histplot` (an axes-level function for histograms).'",
+      "successor": "seaborn.histplot",
+      "fixable": "manual",
+      "source": "seaborn 0.11 deprecated distplot",
+      "verified": {
+        "old": "0.11.2: works with FutureWarning naming displot/histplot",
+        "new": "0.13.2: works with UserWarning; histplot(bins=4) gives the same counts [8, 4, 7, 5]"
+      }
+    },
+    {
+      "symbol": "seaborn.kdeplot",
+      "kind": "DEPRECATED",
+      "param": "shade",
+      "site": "app/dashboard.py:42",
+      "breaks": "no break on 0.13.2: FutureWarning '`shade` is now deprecated in favor of `fill`; setting `fill=True`. This will become an error in seaborn v0.14.0; please update your code.'",
+      "successor": "fill",
+      "fixable": "auto",
+      "source": "seaborn 0.11 renamed shade= to fill= (warning from 0.12)",
+      "verified": {
+        "old": "0.11.2: shade=True works, no warning; fill=True also works",
+        "new": "0.13.2: shade=True works and warns"
+      }
+    },
+    {
+      "symbol": "seaborn.lmplot",
+      "kind": "SIGNATURE",
+      "param": "size",
+      "site": "app/grids.py:11",
+      "breaks": "TypeError: lmplot() got an unexpected keyword argument 'size'",
+      "successor": "height",
+      "fixable": "auto",
+      "source": "seaborn 0.9 renamed size= to height=; removed in 0.12",
+      "verified": {
+        "old": "0.11.2: size=3 works with UserWarning 'The `size` parameter has been renamed to `height`; please update your code.'",
+        "new": "0.13.2: TypeError; height=3 works on both"
+      }
+    },
+    {
+      "symbol": "seaborn.factorplot",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/grids.py:19",
+      "breaks": "AttributeError: module 'seaborn' has no attribute 'factorplot'. Did you mean: 'scatterplot'?",
+      "successor": "seaborn.catplot",
+      "fixable": "auto",
+      "source": "seaborn 0.9 renamed factorplot to catplot; removed in 0.12",
+      "verified": {
+        "old": "0.11.2: works with UserWarning 'The `factorplot` function has been renamed to `catplot`... the default `kind` in `factorplot` (`point`) has changed `strip` in `catplot`.'; factorplot is catplot -> False (a wrapper)",
+        "new": "0.13.2: AttributeError; catplot(kind='count') gives [12, 12]"
+      }
+    },
+    {
+      "symbol": "seaborn.barplot",
+      "kind": "BEHAVIOR",
+      "param": "ci",
+      "site": "app/dashboard.py:51",
+      "scenario": "change",
+      "breaks": "no raise: the 'sd' error bars use ddof=1 (sample std) instead of ddof=0",
+      "successor": null,
+      "fixable": "manual",
+      "source": "seaborn 0.12 errorbar API (EstimateAggregator uses pandas' std)",
+      "verified": {
+        "old": "0.11.2: barplot(ci='sd') Mon bar spans 16.229..34.438",
+        "new": "0.13.2: 15.36..35.307 (ci='sd' and errorbar='sd' alike)"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "seaborn.scatterplot",
+      "category": "FutureWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "seaborn.distplot",
+      "category": "FutureWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "seaborn.lmplot",
+      "category": "UserWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "seaborn.factorplot",
+      "category": "UserWarning",
+      "from_c": false,
+      "side": "old"
+    }
+  ],
+  "notes": "Old: seaborn 0.11.2 with matplotlib 3.6.3, pandas 1.5.3, numpy 1.26.4 on Python 3.11. New: seaborn 0.13.2 (the current release) with matplotlib 3.10.9, pandas 2.3.3, numpy 2.3.5 on Python 3.12: a real seaborn upgrade moves its companions too, and the toy only uses their stable APIs (DataFrame construction, subplots, artist getters). Seaborn functions return Axes/FacetGrid objects, so every value the tests read comes back through matplotlib getters (Rectangle.get_height, Line2D.get_ydata, Axes.get_title): the change scenario's ddof change is visible only at matplotlib.lines.Line2D.get_ydata, never at a seaborn symbol. Palettes, plotting_context and axes_style were compared between the two versions and are identical, so no seaborn call returns a changed value directly. kdeplot(shade=) gives no warning on 0.11.2 (FutureWarning only from 0.12). Not covered: violinplot(scale=), pointplot(join=), FacetGrid(size=), the 0.13 categorical rewrite's artist counts (barplot with hue adds legend patches to ax.patches). kdeplot runs scipy.stats.gaussian_kde on the old side (scipy is a seaborn 0.11 requirement; the new env has no scipy and seaborn 0.13 falls back to its own KDE): scipy's gaussian_kernel_estimate is a fused Cython function that is indexed (gaussian_kernel_estimate[spec]), so a capture that replaces compiled functions with plain wrappers breaks it (TypeError: 'function' object is not subscriptable, seen with pymolt 0.2 on 3.11 and 3.12)."
+}

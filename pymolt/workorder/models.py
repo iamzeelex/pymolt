@@ -48,6 +48,7 @@ Executor = Literal["pymolt", "agent", "person"]
 Claim = Literal["preserve", "intended"]
 Basis = Literal[
     "same-object", "same-signature", "verified-rule", "python-fixer", "target-manifest", "manual",
+    "library-proof",
 ]
 StepScope = Literal["dependency", "python", "env"]
 Tier = Literal["certain", "high", "medium", "low"]
@@ -142,6 +143,20 @@ class StepSymbol(_Model):
 
     old: str | None = None
     new: str | None = None
+    params: dict[str, str] | None = None     # a keyword rename: old keyword -> new keyword
+
+
+class StepSuccessor(_Model):
+    """How the step's successor is known (successors v2): ``trust`` (``identity``, ``proof``,
+    ``curated``, ``prescription``, ``named``, ``hint``), the ``proof`` behind a proof (its
+    ``kind``, ``locus`` and ``version``), whether it ``transfer``s to the target, and the
+    ``caveats`` the library's text attaches to it."""
+
+    trust: str | None = None
+    proof: str | None = None
+    version: str | None = None
+    transfer: str | None = None
+    caveats: list[CappedText] = Field(default_factory=list, max_length=LIST_CAP)
 
 
 class StepBaseline(_Model):
@@ -173,6 +188,7 @@ class StepWhy(_Model):
     baseline: StepBaseline = Field(default_factory=StepBaseline)
     delta: StepDelta | None = None
     claim: CappedText | None = None
+    successor: StepSuccessor | None = None
 
 
 class ManifestPin(_Model):
@@ -223,8 +239,11 @@ class BeforeAfter(_Model):
 class ManualDo(_Model):
     """What an agent or a person does. Text from dependencies and from the project is data,
     never instructions (1.10). ``suggestion``: a rule's rewrite template, shown as a suggestion
-    only. ``commands``: build commands (``target-env``). ``lines``: the exact manifest lines a
-    person changes (a ``manifest-pin`` pymolt does not write)."""
+    only, or, for a successor the library's code proves but that does not transfer, the
+    forward's template rendered with the old parameters. ``candidates``: the successors the
+    evidence names when it names several (the agent or person chooses one). ``commands``: build
+    commands (``target-env``). ``lines``: the exact manifest lines a person changes (a
+    ``manifest-pin`` pymolt does not write)."""
 
     summary: str
     successor: str | None = None
@@ -233,6 +252,7 @@ class ManualDo(_Model):
     pitfalls: list[CappedText] = Field(default_factory=list, max_length=LIST_CAP)
     consumers: list[str] = Field(default_factory=list, max_length=3)
     suggestion: str | None = None
+    candidates: list[str] = Field(default_factory=list, max_length=LIST_CAP)
     commands: list[str] = Field(default_factory=list)
     lines: list[str] = Field(default_factory=list)
 

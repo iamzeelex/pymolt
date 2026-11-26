@@ -27,6 +27,8 @@ from pymolt.verify.predict import (
 
 ROOT = "/proj"
 CORE = ROOT + "/toyapp/core.py"
+FRAME = "pandas.core.frame.DataFrame"
+SERIES = "pandas.core.series.Series"
 MEAN = "pandas.core.frame.DataFrame.mean"
 APPEND = "pandas.core.series.Series.append"
 TO_DICT = "pandas.core.series.Series.to_dict"
@@ -38,9 +40,12 @@ APPEND_WARNING = {"category": "FutureWarning",
 
 
 def _ev(sym, line, func, *, bound=None, defaulted=(), result=1, raised=None, warnings=None,
-        file=CORE):
+        file=CORE, recv=None):
+    """One call event; ``recv``: the receiver's class (a pandas frame records as a
+    ``__structure__``), else an opaque receiver of no dependency class."""
+    receiver = {"__structure__": recv} if recv else {"__opaque__": "x"}
     ev = {"v": 2, "t": "raise" if raised else "return", "q": sym, "sym": sym,
-          "in": {"bound": {"self": {"__opaque__": "x"}, **(bound or {})},
+          "in": {"bound": {"self": receiver, **(bound or {})},
                  "defaulted": list(defaulted)},
           "where": {"file": file, "line": line, "func": func}}
     if raised:
@@ -61,12 +66,14 @@ def _baseline(*extra, warnings_capture="on"):
     """The pandas toy's baseline, shaped as pandas 1.5.3 records it."""
     fs = fold_facts([
         _ev(APPEND, 13, "combine", bound={"to_append": [3], "ignore_index": True},
-            defaulted=["verify_integrity"], result=[1, 2, 3], warnings=[APPEND_WARNING]),
+            defaulted=["verify_integrity"], result=[1, 2, 3], warnings=[APPEND_WARNING],
+            recv=SERIES),
         _ev("pandas.core.frame.DataFrame.groupby", 18, "summarize", bound={"by": "k"},
-            defaulted=["as_index", "axis", "squeeze"], result={"__opaque__": "g"}),
+            defaulted=["as_index", "axis", "squeeze"], result={"__opaque__": "g"},
+            recv=FRAME),
         _ev(MEAN, 24, "average", defaulted=["axis", "level", "numeric_only", "skipna"],
-            result={"v": 2.0}, warnings=[MEAN_WARNING]),
-        _ev(TO_DICT, 24, "average", defaulted=["into"], result={"v": 2.0}),
+            result={"v": 2.0}, warnings=[MEAN_WARNING], recv=FRAME),
+        _ev(TO_DICT, 24, "average", defaulted=["into"], result={"v": 2.0}, recv=SERIES),
         *extra,
     ], root=ROOT, site_text=SITE_TEXT, source="baseline.jsonl")
     fs.warnings_capture = warnings_capture
@@ -84,7 +91,9 @@ DEFAULT_MEAN = {"symbol": MEAN, "aliases": ["pandas.DataFrame.mean"], "kind": "D
                 "deprecated_in_old": True, "successor": None,
                 "evidence": ["signature", "warning:FutureWarning: The default value ..."]}
 REMOVED_APPEND = {"symbol": APPEND, "aliases": ["pandas.Series.append"], "kind": "REMOVED",
-                  "successor": "pandas.concat", "evidence": ["existence"]}
+                  "successor": "pandas.concat", "evidence": ["existence"],
+                  # Series is still there: only its append went.
+                  "vanished_at": {APPEND: APPEND, "pandas.Series.append": "pandas.Series.append"}}
 CHANGES = [{"path": "toyapp/core.py",
             "old_source": "\n" * 12 + "    return s1.append(s2, ignore_index=True)\n",
             "new_source": "\n" * 12 + "    return pd.concat([s1, s2], ignore_index=True)\n",
@@ -144,15 +153,28 @@ def _one_site(**kw):
     return fold_facts([_ev("lib.mod.f", 5, "use", **kw)], root=ROOT)
 
 
-def _tier(baseline, *facts):
-    report = predict_risks(baseline, [_delta(*facts, package="lib")])
+def _writes(target, line=5):
+    """The static contact of a statement at ``toyapp/core.py:line`` that writes ``target``."""
+    return {"caller": "toyapp.core.use", "target": target, "dep": target.split(".")[0],
+            "file": "toyapp/core.py", "line": line, "spans": [[line, line, line]]}
+
+
+def _tier(baseline, *facts, writes=("lib.mod.f",)):
+    report = predict_risks(baseline, [_delta(*facts, package="lib")],
+                           static_contacts=[_writes(t) for t in writes], root=ROOT)
     return report.risks[0].tier if report.risks else None
 
 
-def test_removed_is_certain_and_moved_is_low():
+def test_a_removed_or_moved_name_the_site_writes_is_certain():
+    moved = {"symbol": "lib.mod.f", "kind": "MOVED", "successor": "lib.new.f"}
     assert _tier(_one_site(), {"symbol": "lib.mod.f", "kind": "REMOVED"}) is RiskTier.CERTAIN
-    assert _tier(_one_site(), {"symbol": "lib.mod.f", "kind": "MOVED",
-                               "successor": "lib.new.f"}) is RiskTier.LOW
+    # The spelling the statement writes vanished: the call fails as written.
+    assert _tier(_one_site(), moved) is RiskTier.CERTAIN
+    # A name the statement does not write moved: what it writes was not probed.
+    report = predict_risks(_one_site(), [_delta(moved, package="lib")],
+                           static_contacts=[_writes("lib.f")], root=ROOT)
+    (risk,) = report.risks
+    assert risk.tier is RiskTier.LOW and risk.unverified
 
 
 def test_default_change_counts_only_where_the_site_relied_on_the_default():
@@ -193,7 +215,9 @@ def test_constructor_and_enclosing_matches():
     sig = {"symbol": "lib.mod.Cls", "kind": "SIGNATURE", "param": "x", "old": "x", "new": None}
     assert _tier(ctor, sig) is RiskTier.MEDIUM
     method = fold_facts([_ev("lib.mod.Cls.run", 5, "use")], root=ROOT)
-    assert _tier(method, {"symbol": "lib.mod.Cls", "kind": "REMOVED"}) is RiskTier.CERTAIN
+    # The statement writes ``Cls.run``: the class it reads it through is gone.
+    assert _tier(method, {"symbol": "lib.mod.Cls", "kind": "REMOVED"},
+                 writes=["lib.mod.Cls.run"]) is RiskTier.CERTAIN
     # A parameter fact on the class is not a fact about every method.
     assert _tier(method, sig) is None
 
@@ -671,7 +695,8 @@ def test_merging_keeps_dependency_risks_and_adds_python_ones_even_with_no_baseli
 
 def test_dependency_risks_default_to_the_dependency_scope():
     report = predict_risks(_one_site(), [_delta({"symbol": "lib.mod.f", "kind": "REMOVED"},
-                                                package="lib")])
+                                                package="lib")],
+                           static_contacts=[_writes("lib.mod.f")], root=ROOT)
     (risk,) = report.risks
     assert risk.scope == "dependency"
 
@@ -729,8 +754,11 @@ def _io_baseline():
 
 
 def test_an_import_move_fixes_the_sites_that_read_the_rebound_name():
+    # ``serve``'s statement (lines 5-6) writes the imported name; ``other`` reads a parameter.
+    writes = [{"caller": "toyapp.io.serve", "target": SAFE_JOIN, "dep": "flask",
+               "file": "toyapp/io.py", "line": 5, "spans": [[5, 5, 6]]}]
     report = predict_risks(_io_baseline(), [_delta(MOVED_SAFE_JOIN, package="flask")],
-                           changes=IO_CHANGES, root=ROOT)
+                           changes=IO_CHANGES, root=ROOT, static_contacts=writes)
 
     served = _risk(report, SAFE_JOIN, 6)      # the call spans lines 5-6; it reads the import
     assert served.fixed_by_plan

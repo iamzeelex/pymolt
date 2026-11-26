@@ -22,6 +22,7 @@ from pymolt.ingestion.detect import (
     detect_project_python_version,
     detect_sources,
     detect_system_tools,
+    pick_default_source,
 )
 from pymolt.ingestion.fallback_compiler import list_project_containers
 from pymolt.setup.pythons import (
@@ -122,70 +123,13 @@ class SetupChoices(BaseModel):
     target_env_path: str | None = None
 
 
-#: Manifest stems that describe a *variant* of the project rather than the
-#: project: a docs build, a test extra, one row of a CI matrix. Picking one of
-#: these as the source of truth answers the wrong question — which is what
-#: taking whatever sorted first used to do (six manifests, `requirements-310.txt`
-#: wins on the alphabet, and the whole assess runs on the Python-3.10 row).
-_VARIANT_MARKERS = ("dev", "test", "tests", "doc", "docs", "rtd", "ci", "lint",
-                    "typing", "build", "bench", "example", "examples", "optional")
-
-
-#: Names that state the project's dependencies outright.
-_CANONICAL_MANIFESTS = {"requirements.txt", "requirements.in", "pyproject.toml",
-                        "pipfile", "environment.yml", "environment.yaml"}
-#: Packaging metadata: its dependencies are only partly readable (computed
-#: values are not executed) — a last resort, never the assumed source of truth.
-_UNCLASSIFIED_MANIFESTS = {"setup.py", "setup.cfg"}
-
-
-def _manifest_rank(source) -> tuple:
-    """Sort key for "which of these is the project's real dependency set?".
-
-    Lower sorts first, in tiers: a lock (the exact world that was installed),
-    then a canonical manifest, then a decorated one, then a variant — a docs
-    build, a test extra, one row of a Python matrix — and finally setup.py,
-    whose edges pymolt does not parse yet. Taking whatever sorted first
-    alphabetically is how a six-manifest project got assessed on the
-    Python-3.10 row of its CI matrix.
-    """
-    name = source.path.name
-    lowered = name.lower()
-    stem = lowered.rsplit(".", 1)[0]
-    tail = stem.replace("requirements", "").strip("-_.")
-    words = [w for w in tail.replace("_", "-").split("-") if w]
-    variant = any(w in _VARIANT_MARKERS for w in words)
-    # "310" / "39" / "py38" — a per-interpreter row, not the project.
-    version_specific = any(w.replace("py", "").replace(".", "").isdigit() for w in words)
-
-    if source.subroot:
-        # A part of the repo, not the project at its top: never assumed.
-        tier = 5
-    elif source.is_lock:
-        tier = 0
-    elif lowered in _UNCLASSIFIED_MANIFESTS:
-        tier = 4
-    elif variant or version_specific:
-        tier = 3
-    elif lowered in _CANONICAL_MANIFESTS:
-        tier = 1
-    else:
-        tier = 2
-    return (tier, len(name), lowered)
-
-
-def _pick_default_manifest(sources):
-    """The manifest to assume when the engineer does not choose one."""
-    return min(sources, key=_manifest_rank) if sources else None
-
-
 def gather_setup_options(project_dir: str | Path) -> SetupOptions:
     """Detect manifests, tools, containers and candidate Pythons for setup."""
     project_path = Path(project_dir)
     notes: list[str] = []
 
     sources = detect_sources(project_path, include_subroots=True)
-    default_source = _pick_default_manifest(sources)
+    default_source = pick_default_source(sources)
     manifests = [
         ManifestOption(
             name=src.ref(project_path),

@@ -57,13 +57,21 @@ from pymolt.adapters.python_runner import to_host
 from pymolt.adapters.subprocess_runner import run_command
 from pymolt.core.stdlib import is_stdlib
 from pymolt.ingestion.config import EnvConfig
-from pymolt.state_io import atomic_write_bytes, atomic_write_json, state_lock
+from pymolt.state_io import (
+    atomic_write_bytes,
+    atomic_write_json,
+    project_state_path,
+    state_lock,
+)
 from pymolt.verify.export_watcher import export_watcher
 from pymolt.verify.facts import (
+    ATTR_UNRENDERED,
+    AWAITED_UNRECORDED,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
     CONTENT_UNSEEN,
+    CROSS_PACKAGE_REVIEW,
     ENVIRONMENT_DIFFERS,
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
@@ -78,7 +86,9 @@ from pymolt.verify.facts import (
     project_snapshot,
     read_snapshot_header,
     record_site_text,
+    recorded_root,
     snapshot_path,
+    sources_snapshot_path,
 )
 from pymolt.verify.inconclusive import (
     NEEDS_EVIDENCE,
@@ -86,10 +96,14 @@ from pymolt.verify.inconclusive import (
     SETTLE_ENVIRONMENT,
     SETTLE_NO_EQUAL,
     SETTLE_NOISE,
+    SETTLE_NOISE_RECORDING,
     SETTLE_NOT_EXERCISED,
     SETTLE_REVIEW,
     SETTLE_UNCOMPARABLE,
+    blind_blocks_pass,
+    blind_kind,
     cause,
+    coarse_ran,
     entry_cause,
     settle_uncomparable,
 )
@@ -409,6 +423,16 @@ def _changed_lines(old: str, new: str) -> set[int]:
     return changed
 
 
+def _project_relative(file: str, *roots: str | None) -> str | None:
+    """An absolute ``file`` relative to the first of ``roots`` it lies under; None if none."""
+    for root in roots:
+        if root:
+            rel = os.path.relpath(file, root)
+            if not rel.startswith(".."):
+                return Path(rel).as_posix()
+    return None
+
+
 def _read_project_text(root: Path, rel: str) -> str | None:
     try:
         return (root / rel).read_text(encoding="utf-8")
@@ -446,12 +470,15 @@ def _edited_stdlib_modules(project_dir: str | Path) -> set[str]:
     if baseline is None:
         return found
     wanted: dict[str, set[int]] = {}
+    # The site text names files as the capture recorded them: relative to the root it was
+    # taken in (a checkout elsewhere), else to this one.
+    taken_in = recorded_root(baseline.trace_path)
     for key, text in load_site_text(baseline.trace_path).items():
         file, _, line = key.rpartition(":")
         if not line.isdigit():
             continue
-        rel = os.path.relpath(file, root) if os.path.isabs(file) else file
-        if rel in covered or rel.startswith(".."):
+        rel = _project_relative(file, taken_in, str(root)) if os.path.isabs(file) else file
+        if rel is None or rel in covered:
             continue
         current = _read_project_text(root, rel)
         if current is None:
@@ -1038,6 +1065,14 @@ def _read_trace_metadata(trace_path: str | Path) -> dict:
 
 
 def _aggregate_runtime_metadata(produced: list[str]) -> dict:
+    """The per-process sidecars of the traces a capture produced, summed."""
+    return _aggregate_process_metadata([_read_trace_metadata(path) for path in produced])
+
+
+def _aggregate_process_metadata(metadatas: list[dict]) -> dict:
+    """Processes' own sidecars (the watcher's ``<trace>.meta.json``, ``{}`` for a process that
+    left none) summed: counters, backpressure, backends, skipped instrumentation, and whether
+    every process reported complete counters (``metadata_complete``)."""
     counters = {
         "events_seen": 0,
         "events_written": 0,
@@ -1054,8 +1089,7 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
     backends: list[str] = []
     skipped: list[dict[str, str]] = []
     metadata_complete = True
-    for trace_path in produced:
-        metadata = _read_trace_metadata(trace_path)
+    for metadata in metadatas:
         if not metadata:
             metadata_complete = False
             continue
@@ -1087,7 +1121,7 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
                 backpressure[key] += value
                 backpressure["reported"] = True
         metadata_complete = metadata_complete and process_counters_complete
-    if len(processes) != len(produced):
+    if len(processes) != len(metadatas):
         metadata_complete = False
     counters["dropped_events"] = sum(counters[name] for name in _DROP_COUNTERS)
     return {
@@ -1098,6 +1132,46 @@ def _aggregate_runtime_metadata(produced: list[str]) -> dict:
         "backends": backends,
         "instrumentation_skipped": skipped,
     }
+
+
+class RecordingLoss(BaseModel):
+    """What a recording's metadata sidecar says about what it may have missed: a recording
+    named on the command line (``verify --baseline/--post-migration``) has no capture slot to
+    carry it, so ``_stamp_verdict`` reads it from the file next to the recording."""
+
+    dropped_events: int | None = None   # None: no complete event-loss counters
+    instrumentation_skipped: list[dict] = Field(default_factory=list)
+    activation_failures: list[dict] = Field(default_factory=list)
+
+
+def recording_loss(trace_path: str | Path) -> RecordingLoss:
+    """The event-loss evidence of a recording, from its ``<trace>.meta.json``: the merged
+    sidecar ``pymolt capture`` writes, or the watcher's own, one process's or several gathered
+    under ``processes``. A facts snapshot reads the sidecar of the trace it stands in for. No
+    sidecar, or one without complete counters for every process: ``dropped_events`` None."""
+    from pymolt.verify.facts import is_facts_snapshot, snapshot_trace_path
+
+    base = snapshot_trace_path(trace_path) if is_facts_snapshot(trace_path) else trace_path
+    meta = _read_trace_metadata(base)
+    if not meta:
+        return RecordingLoss()
+    if "runtime_metadata_complete" in meta:     # a pymolt capture's merged sidecar
+        counters = meta.get("counters")
+        dropped = counters.get("dropped_events") if isinstance(counters, dict) else None
+        return RecordingLoss(
+            dropped_events=dropped if meta["runtime_metadata_complete"] is True
+            and isinstance(dropped, int) and not isinstance(dropped, bool) else None,
+            instrumentation_skipped=[i for i in meta.get("instrumentation_skipped") or ()
+                                     if isinstance(i, dict)],
+            activation_failures=[i for i in meta.get("activation_failures") or ()
+                                 if isinstance(i, dict)])
+    processes = [p for p in meta.get("processes") or () if isinstance(p, dict)] \
+        if isinstance(meta.get("processes"), list) else [meta]
+    runtime = _aggregate_process_metadata(processes or [{}])
+    return RecordingLoss(
+        dropped_events=runtime["counters"]["dropped_events"] if runtime["metadata_complete"]
+        else None,
+        instrumentation_skipped=runtime["instrumentation_skipped"])
 
 
 def _backpressure_wait_seconds(backpressure: dict) -> float | None:
@@ -1357,11 +1431,14 @@ def slot_path(project_dir: str | Path, value: str | None) -> str | None:
 
 
 def same_slot_path(project_dir: str | Path, a: str | None, b: str | None) -> bool:
-    """Two stored paths name the same file (one may be absolute, the other relative)."""
+    """Two stored paths name the same file (one may be absolute, the other relative). A plan
+    or receipt pymolt 0.2 wrote stores its baseline's path absolute: written in another
+    checkout of the project, that path is read in this one (``state_io.project_state_path``),
+    so the binding survives a move. Callers bind the capture's ``captured_at`` too."""
     if not a or not b:
         return a == b
-    return os.path.realpath(slot_path(project_dir, a)) == os.path.realpath(
-        slot_path(project_dir, b))
+    return os.path.realpath(project_state_path(project_dir, a)) == os.path.realpath(
+        project_state_path(project_dir, b))
 
 
 def trace_sha256(path: str | Path | None) -> str | None:
@@ -1652,6 +1729,55 @@ def failed_tests(command_log: str | Path | None, limit: int = 3) -> tuple[list[s
         return [], 0
     found = [m.group(1) for m in map(_FAILED_TEST.match, lines) if m]
     return found[:limit], len(found)
+
+
+_COLLECTION_ERRORS = re.compile(r"(\d+) errors? during collection")
+_USAGE_LINE = re.compile(r"^(?:ERROR: )?usage: ", re.IGNORECASE)
+_USAGE_ERROR = re.compile(r"^(?:\S+: error: |ERROR: )(.+)$")
+_NOT_FOUND = re.compile(r"^ERROR: (file or directory not found: .+|not found: .+)$")
+_NO_TESTS = re.compile(r"\bno tests ran\b")
+_TESTS_RAN = re.compile(r"\b\d+ (?:failed|passed)\b")
+
+
+class CommandFailure(BaseModel):
+    """Why a test command stopped before its tests could fail (``command_failure``)."""
+
+    kind: str               # "collection" | "usage" | "no-tests"
+    count: int | None = None    # collection errors
+    detail: str | None = None   # the runner's own words for a usage error
+
+
+def command_failure(command_log: str | Path | None,
+                    returncode: int | None) -> CommandFailure | None:
+    """A failed run that is not failing tests, read from its command log: pytest stopped on
+    collection errors (``Interrupted: N errors during collection``, exit 2), the runner
+    rejected its command line (argparse's or pytest's ``usage:`` and its error line, a path
+    that does not exist), or it selected no test (pytest exit 5). None otherwise, when the
+    log is missing, or when tests ran (a ``N failed`` / ``N passed`` summary: a ``usage:``
+    line is then a test's own output)."""
+    if returncode in (None, 0) or not command_log:
+        return None
+    try:
+        text = Path(command_log).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if _TESTS_RAN.search(text):
+        return None
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if _USAGE_LINE.match(line):
+            detail = next((m.group(1).strip() for m in map(_USAGE_ERROR.match, lines[i + 1:])
+                           if m), None)
+            return CommandFailure(kind="usage", detail=detail)
+        found = _NOT_FOUND.match(line)
+        if found:
+            return CommandFailure(kind="usage", detail=found.group(1).strip())
+    collection = _COLLECTION_ERRORS.findall(text)
+    if collection:
+        return CommandFailure(kind="collection", count=int(collection[-1]))
+    if returncode == 5 and _NO_TESTS.search(text):
+        return CommandFailure(kind="no-tests")
+    return None
 
 
 def static_contact_count(project_dir: str | Path) -> int | None:
@@ -2357,7 +2483,7 @@ def _existing(path: Path) -> str | None:
 
 def sources_path(trace_path: str | Path) -> Path:
     """Where a capture keeps its source snapshot: ``<trace>.sources.json.gz``."""
-    return Path(str(trace_path) + ".sources.json.gz")
+    return sources_snapshot_path(trace_path)
 
 
 def _move_sources(source: str | Path, destination: str | Path) -> None:
@@ -2712,6 +2838,7 @@ def build_contract_report_from_state(
     comparator_profile: str = "exact",
     custom_comparator=None,
     strict: bool = False,
+    float_ulps: int | None = None,
 ) -> ContractReport:
     """The unified report, sourcing trace/against from the persisted state when
     not explicitly overridden. ``strict``: every ACCEPTED change is a review item.
@@ -2780,6 +2907,11 @@ def build_contract_report_from_state(
         used_slots.append(("baseline", state.baseline))
 
     noise_profile, replicate_note = None, None
+    # A replicate repeats the baseline capture: it can measure the noise of a diff whose "before"
+    # side is that capture's recording, and no other (QA V2-3: verify suggested one against a
+    # recording named with --baseline, where it cannot apply, or with no baseline captured).
+    replicate_applies = bool(against and state.baseline is not None and same_slot_path(
+        project_dir, against, state.baseline.trace_path))
     # The replicate measures the BASELINE's noise: it applies whenever the "before" side is the
     # baseline slot's recording, whether verify took it from the slot or was handed its path
     # (``--post-migration PATH`` alone fills ``--baseline`` from the slot), whatever the
@@ -2807,8 +2939,8 @@ def build_contract_report_from_state(
             predictions = {"risks": [], "source": "baseline", "plan_id": None,
                            "notes": [f"predicted risks unavailable: {exc}"]}
 
-    diff_context = build_diff_context(project_dir, trace, against, strict=strict) \
-        if trace and against else None
+    diff_context = build_diff_context(project_dir, trace, against, strict=strict,
+                                      float_ulps=float_ulps) if trace and against else None
     report = build_contract_report(
         project_dir,
         trace=trace,
@@ -2820,6 +2952,7 @@ def build_contract_report_from_state(
         predictions=predictions,
         diff_context=diff_context,
         noise_profile=noise_profile,
+        replicate_applies=replicate_applies,
     )
     if replicate_note:
         report.notes.append(replicate_note)
@@ -2832,8 +2965,16 @@ def build_contract_report_from_state(
             "reads that run's plan")
     report.compared = _compared_recordings(project_dir, state, trace, against)
     _stamp_staleness(project_dir, report, used_slots, before_side=bool(trace and against))
+    _stamp_source_staleness(project_dir, report, state)
+    # The recordings no capture slot stands for (``--baseline``/``--post-migration`` naming
+    # another file): their own sidecars carry their event-loss evidence (QA V2-1).
+    slot_traces = [slot.trace_path for _, slot in used_slots if getattr(slot, "trace_path", None)]
+    recordings = [(side, path) for side, path in (("post-migration", trace), ("baseline", against))
+                  if path and not any(same_slot_path(project_dir, path, captured)
+                                      for captured in slot_traces)]
     _stamp_verdict(report, trace, against, used_slots,
-                   set_aside=set_aside_capture(state) if trace_override is None else None)
+                   set_aside=set_aside_capture(state) if trace_override is None else None,
+                   recordings=recordings)
     return report
 
 
@@ -2861,7 +3002,7 @@ def _compared_recordings(project_dir: str | Path, state: ContractState, trace: s
 
 
 def build_diff_context(project_dir: str | Path, trace: str | Path, against: str | Path, *,
-                       strict: bool = False):
+                       strict: bool = False, float_ulps: int | None = None):
     """What the fact diff needs to judge an edit by its provenance (``facts.DiffContext``).
 
     Snapshots come from the two captures' ``.sources.json`` (None for an older capture: the
@@ -2879,6 +3020,8 @@ def build_diff_context(project_dir: str | Path, trace: str | Path, against: str 
 
     root = Path(os.path.abspath(project_dir))
     ctx = DiffContext()
+    ctx.strict = strict
+    ctx.float_ulps = float_ulps
     ctx.old_sources = load_sources(sources_path(against))
     ctx.new_sources = load_sources(sources_path(trace))
     receipt = MigrationReceipt.load(root)
@@ -3080,14 +3223,16 @@ def _missing_side_reason(trace: str | None, used_slots: list[tuple[str, object]]
     return "no baseline trace is available for a version diff"
 
 
-def _missing_side_settle(used_slots: list[tuple[str, object]]) -> str:
-    """What settles ``_missing_side_reason``: capturing the side that is missing."""
+def _missing_side_settle(used_slots: list[tuple[str, object]], trace: str | None = None) -> str:
+    """What settles ``_missing_side_reason``: capturing the side that is missing. ``trace``: the
+    post-migration recording given by hand, which is a side that exists (no slot stands for it),
+    so only the baseline is missing."""
     names = {name for name, _ in used_slots}
     if names == {"baseline"}:
         return "capture post-migration"
-    if names == {"post-migration"}:
+    if names == {"post-migration"} or (not names and trace is not None):
         return "capture baseline (it records the code before the migration)"
-    return "capture baseline, then post-migration"
+    return "capture the baseline, then post-migration"
 
 
 def _stamp_verdict(
@@ -3097,6 +3242,7 @@ def _stamp_verdict(
     used_slots: list[tuple[str, object]],
     *,
     set_aside: ContractSlot | None = None,
+    recordings: Iterable[tuple[str, str]] = (),
 ) -> None:
     """Fold evidence into PASS/FAIL/INCONCLUSIVE without averaging uncertainty.
 
@@ -3105,7 +3251,9 @@ def _stamp_verdict(
     unmeasured noise need evidence; review items need a person.
 
     ``set_aside``: the post-migration capture a rollback set aside (see
-    ``_missing_side_reason``)."""
+    ``_missing_side_reason``). ``recordings``: ``(side, path)`` of the compared recordings no
+    capture slot stands for; their sidecars answer what a slot answers for a capture (lost
+    events, skipped instrumentation, untraced processes)."""
     # The verdict reads the WHOLE surface: an impact filter (an applied plan's paths) is a focus
     # for the report, not a limit on what can fail it or on what PASS must cover. FAIL takes
     # the whole diff (``all_*``), or a change nobody predicted could never be found; coverage
@@ -3123,11 +3271,20 @@ def _stamp_verdict(
                 report.notes.append(str(warning))
     # A comparability reason is settled by capturing again (needs evidence), never by a person.
     comparability: dict[str, InconclusiveCause] = {}
+    # The reasons a ``--probe-python`` replay does not depend on: the side that is missing,
+    # and events a recording may have lost. A replay compares each call it replays with that
+    # call's own recorded outcome, so neither touches what a CHANGED replay shows.
+    replay_safe: set[str] = set()
 
-    def unlike(reason: str, settle: str) -> None:
+    def unlike(reason: str, settle: str, *, replay: bool = False) -> None:
         comparability.setdefault(reason, cause(reason, NEEDS_EVIDENCE, "capture", settle))
+        if replay:
+            replay_safe.add(reason)
 
-    if trace is None:
+    if trace is None and against is None:
+        # Nothing recorded at all: one reason, and it starts with the baseline (QA V7).
+        unlike("no captures", "capture the baseline, then post-migration")
+    elif trace is None:
         unlike("no current trace is available", "capture post-migration")
     else:
         quality = inspect_trace_artifact(trace)
@@ -3136,7 +3293,7 @@ def _stamp_verdict(
                    "capture that side again")
     if against is None:
         unlike(_missing_side_reason(trace, used_slots, set_aside),
-               _missing_side_settle(used_slots))
+               _missing_side_settle(used_slots, trace), replay=True)
     else:
         quality = inspect_trace_artifact(against)
         if quality.validity is not CaptureValidity.VALID:
@@ -3159,9 +3316,10 @@ def _stamp_verdict(
         dropped = getattr(slot, "dropped_events", None)
         if dropped is None:
             unlike(f"{name} capture has no event-loss counters",
-                   f"capture {name} again with this pymolt")
+                   f"capture {name} again with this pymolt", replay=True)
         elif dropped:
-            unlike(f"{name} capture dropped {dropped} event(s)", f"capture {name} again")
+            unlike(f"{name} capture dropped {dropped} event(s)", f"capture {name} again",
+                   replay=True)
         skipped = getattr(slot, "instrumentation_skipped", [])
         if skipped:
             unlike(f"{name} capture skipped {len(skipped)} instrumentation target(s)",
@@ -3172,15 +3330,41 @@ def _stamp_verdict(
             unlike(f"{name} capture: the watcher failed to activate in {len(failed)} "
                    "process(es), which ran untraced",
                    f"capture {name} again with the watcher active in every process")
+    # A recording named on the command line answers the same questions from its own sidecar:
+    # without one (a hand-written trace, JSONL merged with `cat`) nothing says it lost no
+    # event, so it can neither PASS nor FAIL a version diff (docs/verify.md, QA V2-1).
+    for side, path in recordings:
+        loss = recording_loss(path)
+        what = f"the {side} recording {Path(path).name}"
+        if loss.dropped_events is None:
+            unlike(f"{what} has no event-loss counters",
+                   f"record the {side} side with `pymolt capture`, or keep the watcher's "
+                   f"`.meta.json` sidecar next to {Path(path).name} (for JSONL merged from "
+                   "several processes, their sidecars gathered as `{\"processes\": [...]}`)",
+                   replay=True)
+        elif loss.dropped_events:
+            unlike(f"{what} dropped {loss.dropped_events} event(s)",
+                   f"record the {side} side again", replay=True)
+        if loss.instrumentation_skipped:
+            unlike(f"{what} skipped {len(loss.instrumentation_skipped)} instrumentation "
+                   "target(s)",
+                   f"record the {side} side again once those targets can be instrumented "
+                   "(its sidecar lists them)")
+        if loss.activation_failures:
+            unlike(f"{what}: the watcher failed to activate in "
+                   f"{len(loss.activation_failures)} process(es), which ran untraced",
+                   f"record the {side} side again with the watcher active in every process")
     baseline = slots.get("baseline")
     post = slots.get("post-migration")
     if baseline is not None and post is not None:
         def _workload(command: list[str]) -> list[str]:
+            # The interpreter is what a migration changes (``python3.11`` -> the target
+            # env's ``python``): the workload is what it runs.
             if not command:
                 return []
             executable = Path(command[0]).name
-            if executable.lower().startswith("python") and command[1:2] == ["-m"]:
-                return command[2:]
+            if executable.lower().startswith("python"):
+                return command[2:] if command[1:2] == ["-m"] else ["python", *command[1:]]
             return [executable, *command[1:]]
 
         for differs, reason, what in (
@@ -3196,7 +3380,9 @@ def _stamp_verdict(
                 (baseline.sample_rate != post.sample_rate,
                  "baseline and post-migration used different sample rates", "sample rate")):
             if differs:
-                unlike(reason, f"capture post-migration again with the baseline's {what}")
+                unlike(reason, f"capture post-migration again with the baseline's {what}" + (
+                    f" (`{shlex.join(baseline.command)}`, in the target environment; "
+                    "`pymolt status` prints the command)" if what == "command" else ""))
         if (baseline.sample_rate < 1 or post.sample_rate < 1) and not _tallies_complete(
                 whole_diff):
             unlike("sampled captures cannot prove that unmatched interactions disappeared",
@@ -3207,11 +3393,31 @@ def _stamp_verdict(
     elif used_slots and report.baseline_stale is None:
         unlike("capture freshness could not be established",
                "capture again: the capture records no environment to check it against")
+    # The current-side capture recorded code no longer on disk (``_stamp_source_staleness``).
+    for name, files in report.stale_sources.items():
+        unlike(*_stale_sources_cause(name, files))
+    for name in report.sources_unchecked:
+        unlike(f"the {name} capture keeps no source snapshot: whether its code is still on disk "
+               "cannot be checked",
+               f"capture {name} again with this pymolt (it records the source it ran)")
 
     # A negative oracle is authoritative only over a valid, comparable pair.
     # Changed output from stale or mismatched workloads is evidence to inspect,
     # but it cannot honestly describe the current migration.
     if comparability:
+        if report.probe_changed and trace is not None and replay_safe >= set(comparability):
+            # The capture is otherwise sound, and a probe compares its replay under the target
+            # with that capture's own recording, not with the missing side nor with calls it
+            # may have lost: a CHANGED replay is a behaviour change on its own (docs/verify.md:
+            # a replay failure FAILs).
+            report.verdict = VerificationVerdict.FAIL
+            report.verdict_reasons = ["sandbox replay changed behavior"]
+            report.notes.append(
+                "; ".join(comparability)
+                + (": no version diff ran" if against is None
+                   else ": the version diff is not counted")
+                + ", so this FAIL rests on the probe replay alone")
+            return
         report.verdict = VerificationVerdict.INCONCLUSIVE
         report.verdict_reasons = list(comparability)
         report.inconclusive_causes = list(comparability.values())
@@ -3239,6 +3445,8 @@ def _stamp_verdict(
         causes.append(_opaque_cause(whole_diff))
     causes.extend(_fact_diff_causes(whole_diff))
     causes.extend(_blind_causes(report))
+    _held, waived = _blind_held(report)
+    report.unobservable_uses = sorted(s.target for s in waived)
     if report.dynamic_only:
         unverified = _unverified_dynamic_only(report)
         if unverified:
@@ -3302,13 +3510,24 @@ def _blind_split(symbols: list, report: ContractReport) -> str:
     return "; ".join(parts)
 
 
-def _blind_settle(symbols: list) -> str:
-    """What settles these BLIND symbols: a test reaches those the workload did not run; those
-    that ran but were not recorded, or that no trace can observe, are a watcher limit."""
+def _blind_settle(symbols: list, report: ContractReport) -> str:
+    """What settles these BLIND symbols, which a capture can still settle (``blind_kind``): a
+    test that reaches them. Those that "ran" only by their function or file may not have run at
+    all: the text says so."""
     if not symbols or any(s.blind_reason in ("not-run", None) for s in symbols):
         return SETTLE_NOT_EXERCISED
-    return ("no new test settles them: they ran but the watcher did not record them, or no "
-            "trace can observe them")
+    targets = {s.target for s in symbols}
+    coarse = coarse_ran(c for c in report.contacts if c.target in targets)
+    if not coarse:
+        return SETTLE_NOT_EXERCISED
+    which = " or ".join(sorted(coarse))
+    return ("add a test that reaches those statements, then capture post-migration again: at "
+            f"{which} granularity only their {which} is known to have run, not the statement")
+
+
+def _blind_review_settle(names: str) -> str:
+    """What settles BLIND symbols no capture can record (``blind_kind`` needs_review)."""
+    return f"no capture can record them: a person reviews each use of {names}"
 
 
 def _blind_reasons(report: ContractReport) -> list[str]:
@@ -3316,29 +3535,60 @@ def _blind_reasons(report: ContractReport) -> list[str]:
     return [c.reason for c in _blind_causes(report)]
 
 
+def _blind_held(report: ContractReport) -> tuple[list, list]:
+    """The BLIND symbols that keep the verdict from PASS, and those that do not
+    (``inconclusive.blind_blocks_pass``: the owner's decision that a symbol no capture can record
+    does not), judged from each symbol's own contacts."""
+    by_target: dict[str, list] = {}
+    for c in report.contacts:
+        by_target.setdefault(c.target, []).append(c)
+    blind = [s for s in report.symbols if s.status == "blind"]
+    held = [s for s in blind if blind_blocks_pass(s, by_target.get(s.target, ()))]
+    return held, [s for s in blind if s not in held]
+
+
 def _blind_causes(report: ContractReport) -> list[InconclusiveCause]:
-    """Why BLIND symbols block PASS, split by why each is BLIND. After ``apply`` the reasons
-    name those inside the plan's predicted impacts apart from those outside them; both block.
-    An unobservable symbol blocks too (the owner's open decision). BLIND needs evidence."""
+    """Why BLIND symbols block PASS, split by who settles them (``inconclusive.blind_kind``): a
+    test that reaches them (needs evidence: the reason gives why each is BLIND), or a person who
+    reviews uses no capture can record (needs review: the reason and what settles it name them).
+    After ``apply`` the reasons name those inside the plan's predicted impacts apart from those
+    outside them; both block. Whether an unobservable symbol blocks at all is the owner's open
+    decision (``inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS``)."""
     if not report.blind:
         return []
-    blind = [s for s in report.symbols if s.status == "blind"]
-    if not report.impact_filter_active or not blind:
-        split = _blind_split(blind, report)
-        return [cause(f"{report.blind} static dependency symbol(s) were not exercised"
-                      + (f" ({split})" if split else ""),
-                      NEEDS_EVIDENCE, "not-exercised", _blind_settle(blind))]
+    held, _waived = _blind_held(report)
+    by_target: dict[str, list] = {}
+    for c in report.contacts:
+        by_target.setdefault(c.target, []).append(c)
+    review = [s for s in held if blind_kind(s, by_target.get(s.target, ())) is NEEDS_REVIEW]
+    evidence = [s for s in held if s not in review]
+    if report.impact_filter_active:
+        groups = [(" inside the plan's predicted impacts", [s for s in evidence if s.impacted],
+                   [s for s in review if s.impacted]),
+                  (" outside the plan's predicted impacts",
+                   [s for s in evidence if not s.impacted],
+                   [s for s in review if not s.impacted])]
+    else:
+        groups = [("", evidence, review)]
+
+    def named(members: list) -> str:
+        targets = sorted(s.target for s in members)
+        return ", ".join(targets[:5]) + (", …" if len(targets) > 5 else "")
+
     causes = []
-    for where, members in (("inside", [s for s in blind if s.impacted]),
-                           ("outside", [s for s in blind if not s.impacted])):
-        if members:
-            targets = sorted(s.target for s in members)
-            names = ", ".join(targets[:5]) + (", …" if len(targets) > 5 else "")
-            causes.append(cause(f"{len(members)} static dependency symbol(s) {where} the "
-                                f"plan's predicted impacts were not exercised "
-                                f"({_blind_split(members, report)}): "
-                                f"{names}",
-                                NEEDS_EVIDENCE, "not-exercised", _blind_settle(members)))
+    for where, needs_evidence, needs_review in groups:
+        if needs_evidence:
+            text = (f"{len(needs_evidence)} static dependency symbol(s){where} were not "
+                    f"exercised ({_blind_split(needs_evidence, report)})")
+            if where:
+                text += f": {named(needs_evidence)}"
+            causes.append(cause(text, NEEDS_EVIDENCE, "not-exercised",
+                                _blind_settle(needs_evidence, report)))
+        if needs_review:
+            causes.append(cause(
+                f"{len(needs_review)} static dependency symbol(s){where} no capture can record "
+                f"({_blind_split(needs_review, report)}): {named(needs_review)}",
+                NEEDS_REVIEW, "unobservable", _blind_review_settle(named(needs_review))))
     return causes
 
 
@@ -3371,6 +3621,7 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
     entries = all_entries = fact_diff.get("entries") or []
     counts = fact_diff.get("counts") or {}
     measured = bool(fact_diff.get("noise_measured"))
+    replicable = fact_diff.get("replicate_applies") is not False
     causes: list[InconclusiveCause] = []
     for side, label in (("old", "baseline"), ("new", "post-migration")):
         summary = fact_diff.get(side) or {}
@@ -3408,17 +3659,23 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
     )
     settle = ("the baseline replicate did not settle them (they vary there in another way, or "
               "it did not reach them)" if fact_diff.get("noise_measured")
-              else "a baseline replicate would tell run noise from a real change")
+              else "a baseline replicate would tell run noise from a real change" if replicable
+              else "a second run of the before side would tell run noise from a real change")
     order_settle = ("the baseline replicate could not tell (too few keys compared, or a pinned "
                     "hash seed)" if fact_diff.get("noise_measured")
                     else "a baseline replicate with random hash seeds would tell a hash-seeded "
-                         "order from a deterministic one")
+                         "order from a deterministic one" if replicable
+                    else "a second run of the before side with random hash seeds would tell a "
+                         "hash-seeded order from a deterministic one")
+    # What settles them: a replicate of the baseline capture, or, when the before side is
+    # another recording, a second run of that side compared with the first.
+    noise_settle = SETTLE_NOISE if replicable else SETTLE_NOISE_RECORDING
     for prefix, text in classes:
         hit = [e for e in reviews if str(e.get("review")).startswith(prefix)]
         reviews = [e for e in reviews if not str(e.get("review")).startswith(prefix)]
         if hit:
             names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
-            causes.append(review_cause(f"{len(hit)} {text} ({names}); {settle}", SETTLE_NOISE))
+            causes.append(review_cause(f"{len(hit)} {text} ({names}); {settle}", noise_settle))
     for prefix, text in (
             (ORDER_CHANGED, "returned dict(s) whose key order changed (same keys and values)"),
             (INPUT_ORDER_CHANGED, "call(s) whose output changed as the dict key order of "
@@ -3430,7 +3687,16 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
             causes.append(review_cause(
                 f"{len(hit)} {text} ({names}); {order_settle}",
                 "capture a baseline replicate with random hash seeds (`pymolt capture "
-                "baseline --replicate`), then verify again"))
+                "baseline --replicate`), then verify again" if replicable
+                else noise_settle))
+    hit = [e for e in reviews if str(e.get("review")).startswith(CROSS_PACKAGE_REVIEW)]
+    reviews = [e for e in reviews if not str(e.get("review")).startswith(CROSS_PACKAGE_REVIEW)]
+    if hit:
+        names = ", ".join(sorted({str(e.get("symbol")) for e in hit})[:5])
+        causes.append(cause(
+            f"{len(hit)} call(s) returned a class of another package that the project never "
+            f"checks ({names}); the relation is unknown until Stage 2 MRO tables",
+            NEEDS_REVIEW, "review", SETTLE_REVIEW))
     hit = [e for e in reviews if str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     reviews = [e for e in reviews if not str(e.get("review")).startswith(ENVIRONMENT_DIFFERS)]
     if hit:
@@ -3457,9 +3723,17 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
         causes.append(uncomparable(
             f"{unseen} edited call(s) whose attested expectation cannot be checked: only the "
             "types of their outcomes are visible, not the values", "content-unseen"))
+
+    def unrendered_of(e: dict) -> list[str]:
+        return [str(n)[len(ATTR_UNRENDERED) + 2:] for n in e.get("notes") or ()
+                if str(n).startswith(ATTR_UNRENDERED)]
+
+    unrendered = [e for e in entries if e.get("comparison") == "uncomparable"
+                  and unrendered_of(e)]
     unpaired = sum(
         1 for e in entries
         if e.get("category") == "rewritten" and e.get("comparison") in ("missing", "uncomparable")
+        and not unrendered_of(e)
     ) - unseen
     if unpaired:
         causes.append(uncomparable(
@@ -3483,8 +3757,22 @@ def _fact_diff_causes(fact_diff: dict | None) -> list[InconclusiveCause]:
         if any(str(n).startswith(CALL_SHAPE) for n in e.get("notes") or ())
         and not any(str(n).startswith(C_SITE_CAPPED) for n in e.get("notes") or ())
     )
+    awaited = sum(1 for e in entries if e.get("category") == "uncomparable"
+                  and AWAITED_UNRECORDED in (e.get("notes") or ()))
     lost = sum(1 for e in entries if e.get("category") == "uncomparable") \
-        - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries
+        - evicted_entries - dropped_entries - unobservable - capped_entries - shape_entries \
+        - awaited - sum(1 for e in unrendered if e.get("category") == "uncomparable")
+    if unrendered:
+        attrs = sorted({a for e in unrendered for a in unrendered_of(e)})
+        causes.append(uncomparable(
+            f"{len(unrendered)} call(s) return an object whose attribute your code reads is not "
+            f"in one side's recording (a property, or a cached or class attribute): "
+            f"{', '.join(attrs[:5])}", "attribute-unrendered"))
+    if awaited:
+        causes.append(uncomparable(
+            f"{awaited} coroutine call(s) whose awaited result is not recorded (this pymolt "
+            "records a coroutine call when it starts), so they cannot be compared",
+            "awaited-unrecorded"))
     if unobservable:
         causes.append(uncomparable(
             f"{unobservable} compiled call(s) raise on the side whose backend can observe them; "
@@ -3573,6 +3861,68 @@ def _applied_migration(project_dir: str | Path):
     if receipt is None or not receipt.in_effect:
         return None
     return receipt
+
+
+def _stamp_source_staleness(project_dir: str | Path, report: ContractReport,
+                            state: ContractState) -> None:
+    """Mark the report when the current-side capture recorded code that is no longer on disk.
+
+    The current side is the post-migration capture (from its slot, or its own file passed as
+    ``--post-migration``), or a lone baseline. It is stale when a file of its source snapshot
+    no longer has the recorded text (``sources_changed``), whatever changed it: a hand edit, a
+    later step, a revert. Its verdict would describe the code it recorded, not the code on
+    disk, so the files land in ``report.stale_sources`` and ``_stamp_verdict`` makes them a
+    reason. The "before" side of a diff is never judged this way: the migration moves the code
+    away from the baseline by design. A post-migration capture with no snapshot cannot be
+    checked (``report.sources_unchecked``): unknown, never fresh."""
+    compared = report.compared
+    name = compared.after_capture if compared is not None else None
+    if name == "post-migration":
+        slot = state.post_migration
+    elif name == "baseline" and compared is not None and compared.before is None:
+        slot = state.baseline
+    else:
+        return
+    if slot is None:
+        return
+    changed = sources_changed(project_dir, slot.sources_path)
+    if changed is None:
+        if name == "post-migration":
+            report.sources_unchecked.append(name)
+            report.notes.append(
+                "source freshness unknown for the post-migration capture: it keeps no source "
+                "snapshot (taken before pymolt recorded one, or the snapshot could not be "
+                "written), so whether its code is still on disk cannot be checked.")
+        return
+    if not changed:
+        return
+    report.stale_sources[name] = changed
+    if name == "post-migration":
+        report.notes.append(
+            f"STALE EVIDENCE: the post-migration capture recorded code that has changed since "
+            f"({_files_shown(changed)}): this verdict would describe the code it recorded, not "
+            "the code on disk now. Capture post-migration again to judge the current code.")
+    else:
+        report.notes.append(
+            f"the baseline capture recorded code that has changed since ({_files_shown(changed)}):"
+            " its coverage describes the code before those changes.")
+
+
+def _files_shown(files: list[str], limit: int = 3) -> str:
+    shown = ", ".join(files[:limit])
+    return shown + (f" and {len(files) - limit} more" if len(files) > limit else "")
+
+
+def _stale_sources_cause(name: str, files: list[str]) -> tuple[str, str]:
+    """The reason and what settles it, for a current-side capture whose recorded code changed
+    (``report.stale_sources``)."""
+    if name == "post-migration":
+        return (f"the post-migration capture is stale: {_files_shown(files)} changed since it "
+                "was captured",
+                "capture post-migration again: it recorded code that is no longer on disk")
+    return (f"the baseline capture recorded code that changed since: {_files_shown(files)}",
+            "capture post-migration to record the code on disk now (capture the baseline again "
+            "first if those changes are not the migration)")
 
 
 def _stamp_staleness(project_dir: str | Path, report: ContractReport, used_slots, *,

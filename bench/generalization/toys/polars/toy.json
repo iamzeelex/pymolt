@@ -1,0 +1,283 @@
+{
+  "name": "polars",
+  "ecosystem": "dataframes (Rust extension)",
+  "old": {
+    "python": "3.11",
+    "requirements": [
+      "polars==0.19.19",
+      "pytest"
+    ]
+  },
+  "new": {
+    "python": "3.12",
+    "requirements": [
+      "polars==1.44.2",
+      "pytest"
+    ]
+  },
+  "manifest": [
+    "polars"
+  ],
+  "target_manifest": [
+    "polars==1.44.2"
+  ],
+  "files": {
+    "app/__init__.py": "",
+    "app/checks.py": "\"\"\"Reconciliation checks between two sales extracts.\"\"\"\nimport polars as pl\n\n\ndef same_extract(a, b):\n    return a.frame_equal(b)\n\n\ndef row_count(df):\n    return df.select(pl.count()).item()\n\n\ndef against_targets(totals, targets):\n    \"\"\"Every store in either frame, with its total and its target.\"\"\"\n    merged = totals.join(targets, on=\"store\", how=\"outer\")\n    return merged.sort(\"store\").to_dicts()\n",
+    "app/sales.py": "\"\"\"Store sales reporting on polars: totals, running sums and lookups.\"\"\"\nimport polars as pl\n\nREGIONS = {\"n1\": \"north\", \"n2\": \"north\", \"s1\": \"south\"}\n\n\ndef load(rows):\n    return pl.DataFrame(rows)\n\n\ndef totals_by_store(df):\n    out = df.groupby(\"store\").agg(pl.col(\"amount\").sum().alias(\"total\"))\n    return out.sort(\"store\").to_dicts()\n\n\ndef numbered(df):\n    \"\"\"The rows with a 0-based id column in front.\"\"\"\n    return df.with_row_count(\"row_id\").to_dicts()\n\n\ndef running_total(df):\n    return df.select(pl.col(\"amount\").cumsum()).to_series().to_list()\n\n\ndef previous_amount(df):\n    return df.select(pl.col(\"amount\").shift(periods=1)).to_series().to_list()\n\n\ndef with_tax(df, rate=0.2):\n    return df.select(pl.col(\"amount\").apply(lambda v: round(v * (1 + rate), 2))).to_series().to_list()\n\n\ndef region_of(df):\n    \"\"\"Region per row; stores without a region get None.\"\"\"\n    return df.select(pl.col(\"store\").map_dict(REGIONS)).to_series().to_list()\n",
+    "tests/test_checks.py": "import polars as pl\n\nfrom app import checks\n\n\ndef test_same_extract():\n    a = pl.DataFrame({\"store\": [\"n1\"], \"amount\": [1]})\n    assert checks.same_extract(a, a.clone())\n    assert not checks.same_extract(a, pl.DataFrame({\"store\": [\"n1\"], \"amount\": [2]}))\n\n\ndef test_row_count():\n    assert checks.row_count(pl.DataFrame({\"store\": [\"a\", \"b\", \"c\"]})) == 3\n\n\ndef test_against_targets():\n    totals = pl.DataFrame({\"store\": [\"n1\", \"s1\"], \"total\": [17, 5]})\n    targets = pl.DataFrame({\"store\": [\"s1\", \"w1\"], \"target\": [6, 2]})\n    merged = checks.against_targets(totals, targets)\n    assert [r[\"store\"] for r in merged] == [\"n1\", \"s1\", \"w1\"]\n    assert merged[2] == {\"store\": \"w1\", \"total\": None, \"target\": 2}\n",
+    "tests/test_sales.py": "import pytest\n\nfrom app import sales\n\nROWS = {\"store\": [\"n1\", \"s1\", \"n1\", \"w1\", \"n2\"], \"amount\": [10, 5, 7, 3, 4]}\n\n\n@pytest.fixture\ndef df():\n    return sales.load(ROWS)\n\n\ndef test_totals_by_store(df):\n    assert sales.totals_by_store(df) == [\n        {\"store\": \"n1\", \"total\": 17}, {\"store\": \"n2\", \"total\": 4},\n        {\"store\": \"s1\", \"total\": 5}, {\"store\": \"w1\", \"total\": 3}]\n\n\ndef test_numbered(df):\n    rows = sales.numbered(df)\n    assert [r[\"row_id\"] for r in rows] == [0, 1, 2, 3, 4]\n    assert rows[3][\"store\"] == \"w1\"\n\n\ndef test_running_total(df):\n    assert sales.running_total(df) == [10, 15, 22, 25, 29]\n\n\ndef test_previous_amount(df):\n    assert sales.previous_amount(df) == [None, 10, 5, 7, 3]\n\n\ndef test_with_tax(df):\n    assert sales.with_tax(df) == [12.0, 6.0, 8.4, 3.6, 4.8]\n\n\ndef test_region_of(df):\n    assert sales.region_of(df) == [\"north\", \"south\", \"north\", None, \"north\"]\n"
+  },
+  "manual_migration": [
+    {
+      "file": "app/sales.py",
+      "old": "df.groupby(\"store\")",
+      "new": "df.group_by(\"store\")"
+    },
+    {
+      "file": "app/sales.py",
+      "old": "df.with_row_count(\"row_id\")",
+      "new": "df.with_row_index(\"row_id\")"
+    },
+    {
+      "file": "app/sales.py",
+      "old": ".cumsum()",
+      "new": ".cum_sum()"
+    },
+    {
+      "file": "app/sales.py",
+      "old": "shift(periods=1)",
+      "new": "shift(n=1)"
+    },
+    {
+      "file": "app/sales.py",
+      "old": ".apply(lambda v: round(v * (1 + rate), 2))",
+      "new": ".map_elements(lambda v: round(v * (1 + rate), 2), return_dtype=pl.Float64)"
+    },
+    {
+      "file": "app/sales.py",
+      "old": ".map_dict(REGIONS)",
+      "new": ".replace_strict(REGIONS, default=None)"
+    },
+    {
+      "file": "app/checks.py",
+      "old": "a.frame_equal(b)",
+      "new": "a.equals(b)"
+    },
+    {
+      "file": "app/checks.py",
+      "old": "pl.count()",
+      "new": "pl.len()"
+    },
+    {
+      "file": "app/checks.py",
+      "old": "how=\"outer\")",
+      "new": "how=\"full\", coalesce=True)"
+    }
+  ],
+  "scenarios": {
+    "equiv": {
+      "edits": [],
+      "expected_verdict": "pass"
+    },
+    "change": {
+      "edits": [
+        {
+          "file": "app/checks.py",
+          "append": "\n\ndef readings_in(df, column=\"amount\"):\n    \"\"\"How many readings a column holds.\"\"\"\n    return df.select(pl.col(column).count()).item()\n"
+        },
+        {
+          "file": "tests/test_checks.py",
+          "append": "\n\ndef test_readings_in():\n    # A weak test, as real suites often are: it only checks a count came back.\n    assert checks.readings_in(pl.DataFrame({\"amount\": [1, None, 3]})) >= 2\n"
+        }
+      ],
+      "expected_verdict": "fail",
+      "expected_changed": [
+        "polars.dataframe.frame.DataFrame.item"
+      ],
+      "behaviour": "Expr.count() counted nulls in 0.19.19 (3 for [1, None, 3]) and counts only non-null values from 0.20 on (2 on 1.44.2); the value comes out of DataFrame.item(), the expression itself returns a lazy Expr on both"
+    }
+  },
+  "ground_truth": [
+    {
+      "symbol": "polars.DataFrame.groupby",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/sales.py:12",
+      "breaks": "AttributeError: 'DataFrame' object has no attribute 'groupby'",
+      "successor": "polars.DataFrame.group_by",
+      "fixable": "auto",
+      "source": "polars 0.19.0 renamed groupby to group_by; removed in 1.0",
+      "verified": {
+        "old": "0.19.19: works with DeprecationWarning '`groupby` is deprecated. It has been renamed to `group_by`.'; DataFrame.groupby is DataFrame.group_by -> False (a deprecated wrapper)",
+        "new": "1.44.2: AttributeError; group_by gives the same rows"
+      }
+    },
+    {
+      "symbol": "polars.DataFrame.with_row_count",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/sales.py:18",
+      "breaks": "no break on 1.44.2: DeprecationWarning '`DataFrame.with_row_count` is deprecated; use `with_row_index` instead. Note that the default column name has changed from 'row_nr' to 'index'.'",
+      "successor": "polars.DataFrame.with_row_index",
+      "fixable": "auto",
+      "source": "polars 0.20.4 deprecated with_row_count",
+      "verified": {
+        "old": "0.19.19: works, no warning; with_row_index does not exist",
+        "new": "1.44.2: works and warns; with_row_index('row_id') gives the same rows"
+      }
+    },
+    {
+      "symbol": "polars.Expr.cumsum",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/sales.py:22",
+      "breaks": "AttributeError: 'Expr' object has no attribute 'cumsum'",
+      "successor": "polars.Expr.cum_sum",
+      "fixable": "auto",
+      "source": "polars 0.19.14 renamed cumsum to cum_sum; removed in 1.0",
+      "verified": {
+        "old": "0.19.19: works with DeprecationWarning '`cumsum` is deprecated. It has been renamed to `cum_sum`.'",
+        "new": "1.44.2: AttributeError"
+      }
+    },
+    {
+      "symbol": "polars.Expr.shift",
+      "kind": "SIGNATURE",
+      "param": "periods",
+      "site": "app/sales.py:26",
+      "breaks": "TypeError: Expr.shift() got an unexpected keyword argument 'periods'",
+      "successor": "n",
+      "fixable": "auto",
+      "source": "polars 0.19.11 renamed shift(periods=) to n=; removed in 1.0",
+      "verified": {
+        "old": "0.19.19: inspect.signature is (self, n=1, *, fill_value=None) (a decorator maps periods= to n= with a DeprecationWarning)",
+        "new": "1.44.2: TypeError on periods="
+      }
+    },
+    {
+      "symbol": "polars.Expr.apply",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/sales.py:30",
+      "breaks": "AttributeError: 'Expr' object has no attribute 'apply'",
+      "successor": "polars.Expr.map_elements",
+      "fixable": "auto",
+      "source": "polars 0.19.0 renamed Expr.apply to map_elements; removed in 1.0",
+      "verified": {
+        "old": "0.19.19: works with DeprecationWarning '`apply` is deprecated. It has been renamed to `map_elements`.'",
+        "new": "1.44.2: AttributeError; map_elements(..., return_dtype=pl.Float64) gives the same list"
+      }
+    },
+    {
+      "symbol": "polars.Expr.map_dict",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/sales.py:35",
+      "breaks": "AttributeError: 'Expr' object has no attribute 'map_dict'",
+      "successor": "polars.Expr.replace_strict",
+      "fixable": "manual",
+      "source": "polars 0.19.16 deprecated map_dict for replace; 1.0 split replace (keeps unmatched values) and replace_strict",
+      "verified": {
+        "old": "0.19.19: works with DeprecationWarning '`map_dict` is deprecated. It has been renamed to `replace`. The default behavior has changed to keep any values not present in the mapping unchanged...'; unmatched 'w1' -> None",
+        "new": "1.44.2: AttributeError; replace(REGIONS) keeps 'w1' (the test fails), replace_strict(REGIONS, default=None) gives None as before"
+      }
+    },
+    {
+      "symbol": "polars.DataFrame.frame_equal",
+      "kind": "REMOVED",
+      "param": null,
+      "site": "app/checks.py:6",
+      "breaks": "AttributeError: 'DataFrame' object has no attribute 'frame_equal'",
+      "successor": "polars.DataFrame.equals",
+      "fixable": "auto",
+      "source": "polars 0.19.16 renamed frame_equal to equals; removed in 1.0",
+      "verified": {
+        "old": "0.19.19: works with DeprecationWarning '`frame_equal` is deprecated. It has been renamed to `equals`.'",
+        "new": "1.44.2: AttributeError"
+      }
+    },
+    {
+      "symbol": "polars.count",
+      "kind": "DEPRECATED",
+      "param": null,
+      "site": "app/checks.py:10",
+      "breaks": "no break on 1.44.2: DeprecationWarning '`pl.count()` is deprecated. Please use `pl.len()` instead. (Deprecated in version 0.20.5)'",
+      "successor": "polars.len",
+      "fixable": "auto",
+      "source": "polars 0.20.5 deprecated pl.count() for pl.len()",
+      "verified": {
+        "old": "0.19.19: works, no warning; pl.len does not exist",
+        "new": "1.44.2: works and warns; pl.len() gives 3"
+      }
+    },
+    {
+      "symbol": "polars.DataFrame.join",
+      "kind": "BEHAVIOR",
+      "param": "how",
+      "site": "app/checks.py:15",
+      "breaks": "the test fails: how='outer' no longer coalesces the key (a 'store_right' column appears, the right-only row has store None); DeprecationWarning \"use of `how='outer'` should be replaced with `how='full'`\"",
+      "successor": "how='full', coalesce=True",
+      "fixable": "manual",
+      "source": "polars 0.20.29 made outer joins non-coalescing and renamed outer to full",
+      "verified": {
+        "old": "0.19.19: join(how='outer') coalesces: keys n1, s1, w1 with no store_right column",
+        "new": "1.44.2: same call returns store None for w1 plus store_right; how='full', coalesce=True gives the old rows"
+      }
+    },
+    {
+      "symbol": "polars.Expr.count",
+      "kind": "BEHAVIOR",
+      "param": null,
+      "site": "app/checks.py:21",
+      "scenario": "change",
+      "breaks": "no raise: counts non-null values only (2 instead of 3 for [1, None, 3])",
+      "successor": null,
+      "fixable": "manual",
+      "source": "polars 0.20.0 changelog (count excludes nulls; use len for the row count)",
+      "verified": {
+        "old": "0.19.19: pl.col('amount').count() on [1, None, 3] -> 3",
+        "new": "1.44.2: -> 2"
+      }
+    }
+  ],
+  "expected_warnings": [
+    {
+      "symbol": "polars.DataFrame.groupby",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "polars.Expr.cumsum",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "polars.Expr.shift",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "polars.Expr.apply",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "polars.Expr.map_dict",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    },
+    {
+      "symbol": "polars.DataFrame.frame_equal",
+      "category": "DeprecationWarning",
+      "from_c": false,
+      "side": "old"
+    }
+  ],
+  "notes": "Old: polars 0.19.19 on Python 3.11 (many projects pinned 0.19 before the 0.20/1.0 renames). New: 1.44.2 on Python 3.12, the newest 1.x (2.x exists but the migration people face is 0.19/0.20 -> 1.x). 0.19.19 rather than 0.20.31 because 0.20.29 already made how='outer' non-coalescing and 0.20 already counts without nulls: from 0.19 both are real behaviour changes. Every 0.19 rename is a deprecated wrapper, not the same object (groupby is not group_by), so they are REMOVED with a successor. Expr.shift(periods=) is hidden from inspect.signature on the old side (a decorator maps periods= to n=). map_dict's deprecation prose names replace, but replace keeps unmatched values in 1.x: the equivalent is replace_strict(..., default=None), and the test checks the unmatched store. The polars objects are Rust-backed (PyO3): DataFrame/Expr returns carry no Python-visible values, so the toy ends every chain in to_dicts()/to_list()/item(), where the values live. Not covered: melt/pivot(columns=)/str.concat (deprecated in 1.x), value_counts' 'counts' -> 'count' column, describe's first column name."
+}

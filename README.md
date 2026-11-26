@@ -78,11 +78,11 @@ Every option is in [docs/commands.md](docs/commands.md).
 | Verdict | Meaning | Exit code |
 |---|---|---|
 | `FAIL` | A recorded call now has a different outcome (CHANGED), no longer happens (DISAPPEARED), or is new (APPEARED). | 1 |
-| `PASS` | Every recorded call has the same outcome, and the runs exercised every dependency symbol your code uses. | 0 |
+| `PASS` | Every recorded call has the same outcome, and the runs exercised every dependency symbol your code uses that a capture can record. Uses no capture can observe, such as a constant or an attribute read, are listed with the verdict. | 0 |
 | `INCONCLUSIVE` | pymolt cannot decide on its own. The captures, or some recorded values, cannot be compared (different command, dropped events, stale environment); the runs left a dependency symbol unexercised (BLIND); or a difference needs a person's review. The report names what is missing and what settles each review item. | 4 |
 
 - A call on an edited line (REWRITTEN) is compared with the call that replaced it. If `pymolt apply` made the edit, any different outcome fails. If you made it, a different value is a review item (INCONCLUSIVE), and only a new exception fails.
-- DRIFT (a parameter the call leaves at its default was added or removed) is reported and does not fail.
+- DRIFT is reported and does not fail: a parameter the call leaves at its default was added or removed, floats differ only within rounding (1024 ulps, `verify --float-ulps`), or a library object differs only in state your code does not read. `verify --strict` compares them in full.
 - Other exit codes: 1 from `capture` means the captured command failed, 2 an invalid invocation, 3 an environment or service failure.
 
 The rules are in [docs/verify.md](docs/verify.md).
@@ -91,6 +91,26 @@ The rules are in [docs/verify.md](docs/verify.md).
 
 - **PyMolt:** 3.12.
 - **The project you migrate:** 3.6 and later. On 3.12+ the tracer uses `sys.monitoring`. On 3.6–3.11 it uses `sys.setprofile`. Python 2.7 is not supported.
+
+## Tested libraries
+
+The benchmark in `bench/generalization` has one small project for each of these, upgraded across
+one major version: numpy, pandas, Polars, Matplotlib, seaborn, Plotly, scikit-learn, FastAPI,
+Django, Django REST framework, Flask, Requests, httpx, aiohttp, Streamlit, Starlette, asyncio,
+SQLAlchemy, pydantic, Jinja2, NetworkX, Click, PyYAML, urllib3 and the standard library. Each
+project is migrated twice: once keeping its behaviour, once with one real change. Over the 25:
+
+| | |
+|---|---|
+| API changes `plan` finds | 146 of 167 |
+| Replacements it names correctly | 77 of 147 (1 wrong) |
+| Call sites `apply` rewrote | 40, none wrong |
+| Behaviour-keeping migrations | 12 PASS, 12 INCONCLUSIVE, 1 FAIL |
+| Real changes `verify` fails on, at the changed call | 22 of 25 |
+
+The projects are small and written for the benchmark, so this shows how pymolt behaves on each
+library, not that it covers the library's whole API. Per library:
+[docs/limits.md](docs/limits.md#libraries).
 
 ## Limits
 

@@ -11,6 +11,7 @@ import json
 import pytest
 
 from pymolt.verify import service
+from pymolt.verify.inconclusive import NEEDS_EVIDENCE
 from pymolt.verify.report import build_contract_report
 
 CORE = '''import fakedep
@@ -182,6 +183,30 @@ def test_function_granularity_counts_a_contact_in_a_function_that_started(projec
     assert rep.coverage_granularity == "function"
 
 
+def test_ran_only_by_a_function_makes_coverage_an_upper_and_recall_a_lower_bound(
+        project, tmp_path):
+    """QA V6: at function granularity a branch not taken counts as ran, so coverage may be too
+    high and recall too low; the report, `--agent` and `status` label them as bounds."""
+    from pymolt.interfaces.views import coverage_lines
+
+    core = str(project / "app" / "core.py")
+    tables = MODULE_LINES | TESTED_RAN | _lines(CORE, ["branch", "reads-ran"])
+    rep = _report(project, _trace(project, tmp_path, executed=_record(
+        "function", {core: {"functions": ",".join(map(str, sorted(tables)))}})))
+    assert rep.coverage_bounded is True
+    assert coverage_lines(rep)[0].startswith("Coverage: at most ")
+    assert "   Recall: at least " in coverage_lines(rep)[0]
+    assert any(n.startswith("2 contact(s) count as ran only because their function or file "
+                            "ran (2 by their function)") and "recall a lower bound" in n
+               for n in rep.notes)
+
+    ran = sorted(MODULE_LINES | TESTED_RAN)
+    exact = _report(project, _trace(project, tmp_path, executed=_record(
+        "line", {core: {"lines": ",".join(map(str, ran))}})))
+    assert exact.coverage_bounded is False
+    assert coverage_lines(exact)[0].startswith("Coverage: 44% (")
+
+
 def test_file_granularity_without_an_executed_record(project, tmp_path):
     rep = _report(project, _trace(project, tmp_path))
     got = _status(rep)
@@ -201,6 +226,9 @@ def test_symbol_granularity_when_the_trace_has_no_call_sites(project, tmp_path):
     assert (by[_core("load")].status, by[_core("load")].matched_by) == ("recorded", "symbol")
     assert (by[_core("dump")].status, by[_core("dump")].granularity) == ("not-run", "symbol")
     assert rep.coverage_granularity == "symbol" and rep.recall == 1.0
+    # one granularity in the notes too: no file rule where no file was recorded (QA V3)
+    said = [n for n in rep.notes if "(granularity " in n]
+    assert len(said) == 1 and said[0].endswith("(granularity symbol)")
 
 
 def test_a_process_without_a_record_falls_back_to_the_file_rule(project, tmp_path):
@@ -258,14 +286,74 @@ def test_an_unobserved_symbols_existence_contact_stays_out_even_when_its_line_ra
     assert rep.recall == pytest.approx(4 / 5)
 
 
-def test_the_inconclusive_reason_names_the_blind_split(project, tmp_path):
+def test_blind_symbols_no_capture_can_record_are_listed_not_held(project, tmp_path):
+    """QA V2b: dump ran at its line unrecorded and SETTING is unobservable: capturing again
+    records the same, so no evidence settles them. Neither keeps the verdict from PASS (the
+    owner's decisions of 2026-11-24 and 2026-11-25): the verdict lists both instead
+    (``unobservable_uses``)."""
     core = str(project / "app" / "core.py")
     ran = sorted(MODULE_LINES | TESTED_RAN)
     rep = _report(project, _trace(project, tmp_path, executed=_record(
         "line", {core: {"lines": ",".join(map(str, ran))}})))
-    (reason,) = service._blind_reasons(rep)
-    assert reason == ("2 static dependency symbol(s) were not exercised "
-                      "(1 ran but not recorded; 1 unobservable)")
+    assert service._blind_causes(rep) == []
+    held, listed = service._blind_held(rep)
+    assert held == []
+    assert sorted(s.target for s in listed) == ["fakedep.SETTING", "fakedep.dump"]
+
+
+def test_ran_only_by_its_function_is_still_a_test_gap(project, tmp_path):
+    """At function granularity "ran" means its function started: the statement may not have
+    run (a branch not taken), so a test that reaches it is evidence that settles it."""
+    core = str(project / "app" / "core.py")
+    tables = MODULE_LINES | TESTED_RAN | _lines(CORE, ["branch"])   # tested() started
+    rep = _report(project, _trace(project, tmp_path, executed=_record(
+        "function", {core: {"functions": ",".join(map(str, sorted(tables)))}})))
+    assert {(c.target, c.status, c.granularity) for c in rep.contacts
+            if c.target == "fakedep.dump"} == {("fakedep.dump", "ran-not-recorded", "function")}
+    (evidence,) = service._blind_causes(rep)
+    assert evidence.reason == ("1 static dependency symbol(s) were not exercised "
+                               "(1 ran but not recorded at function granularity)")
+    assert evidence.kind is NEEDS_EVIDENCE
+    assert evidence.settle.startswith("add a test that reaches those statements")
+    assert "only their function is known to have run" in evidence.settle
+    # The unobservable SETTING is no reason: the verdict lists it (the owner's decision).
+    assert [s.target for s in service._blind_held(rep)[1]] == ["fakedep.SETTING"]
+
+
+def test_whether_unobservable_blind_blocks_pass_is_one_switch(project, tmp_path, monkeypatch):
+    """The owner's decisions live in one constant, off: a BLIND symbol no capture can record (an
+    unobservable one, or one whose line ran unrecorded) is listed by the verdict, never a reason.
+    On, both would be a reason a person reviews."""
+    from pymolt.verify import inconclusive
+
+    core = str(project / "app" / "core.py")
+    ran = sorted(MODULE_LINES | TESTED_RAN)
+    rep = _report(project, _trace(project, tmp_path, executed=_record(
+        "line", {core: {"lines": ",".join(map(str, ran))}})))
+    assert inconclusive.UNOBSERVABLE_BLIND_BLOCKS_PASS is False
+    assert service._blind_causes(rep) == []
+    monkeypatch.setattr(inconclusive, "UNOBSERVABLE_BLIND_BLOCKS_PASS", True)
+    (why,) = service._blind_causes(rep)
+    assert why.reason.endswith("(1 ran but not recorded; 1 unobservable): fakedep.SETTING, "
+                               "fakedep.dump")
+
+
+def test_a_pass_lists_the_uses_no_capture_can_observe(project, tmp_path):
+    """The owner's decision (QA V2): uses no capture can observe do not keep a verdict from
+    PASS, and the verdict says it did not see them: the human panel and ``--agent`` name them."""
+    from types import SimpleNamespace
+
+    from pymolt.interfaces.cli.verify_cmd import _unobservable_note
+    from pymolt.interfaces.views import unobservable_line
+
+    rep = SimpleNamespace(unobservable_uses=[f"dep.C{i}" for i in range(7)])
+    line = unobservable_line(rep)
+    assert line == ("7 dependency use(s) cannot be observed by a capture, so this verdict does "
+                    "not cover them; a person may glance at: dep.C0, dep.C1, dep.C2, dep.C3, "
+                    "dep.C4, … (2 more)")
+    assert "cannot be observed by a capture" in _unobservable_note(rep)
+    assert unobservable_line(SimpleNamespace(unobservable_uses=[])) is None
+    assert _unobservable_note(SimpleNamespace(unobservable_uses=[])) == ""
 
 
 def test_no_trace_every_observable_contact_is_not_run(project):

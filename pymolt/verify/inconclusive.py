@@ -13,6 +13,11 @@ kinds (``InconclusiveKind``):
   noise a baseline replicate would measure, a difference of the two captures' environments, a
   diff in which no fact compared equal (every entry noise or explained away).
 
+A BLIND symbol no capture can record (``blind_kind``: every contact of it unobservable, or ran
+at its line without a record) is ``needs_review``: no evidence settles it, a person reviews
+those uses. Whether it keeps the verdict from PASS at all is ``UNOBSERVABLE_BLIND_BLOCKS_PASS``
+(the owner's choice: it does not; the verdict lists it).
+
 Each reason carries its kind with it (``InconclusiveCause``), set where the reason is made and
 never parsed back from its text. The verdict's kind is ``needs_review`` when any reason needs a
 person, else ``needs_evidence``: the precedence of the step statuses (failed > needs_review >
@@ -25,6 +30,8 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pymolt.verify.facts import (
+    ATTR_UNRENDERED,
+    AWAITED_UNRECORDED,
     BACKEND_UNOBSERVABLE,
     C_SITE_CAPPED,
     CALL_SHAPE,
@@ -33,6 +40,7 @@ from pymolt.verify.facts import (
     INPUT_CHANGED,
     INPUT_ORDER_CHANGED,
     ORDER_CHANGED,
+    SITE_UNPLACED,
     UNMEASURED_NOISE,
     UNPAIRED_SITE,
 )
@@ -51,6 +59,13 @@ SETTLE_REVIEW = ("a person reviews each finding (`pymolt verify .` names its id)
                  "intended change with `pymolt verify . --accept ID`, or fix the code")
 SETTLE_NOISE = ("capture a baseline replicate (`pymolt capture baseline --replicate`), then "
                 "verify again")
+#: What settles possible run-to-run noise when the before side is not the baseline capture (a
+#: recording named with ``verify --baseline``): a replicate measures the baseline capture's noise
+#: only, so it cannot apply there; a second run of that side, compared with the first, can.
+SETTLE_NOISE_RECORDING = ("record the before side a second time and verify the two runs against "
+                          "each other (`pymolt verify . --baseline RUN1 --post-migration RUN2`): "
+                          "what differs there is run-to-run noise. A baseline replicate measures "
+                          "the baseline capture's noise only, not another recording's")
 SETTLE_ENVIRONMENT = ("capture post-migration again in the baseline's environment (its "
                       "container or host, with the target Python)")
 SETTLE_NOT_EXERCISED = "add a test that reaches those sites, then capture post-migration again"
@@ -58,12 +73,15 @@ SETTLE_NO_EQUAL = ("add a test that exercises these dependency calls with stable
                    "inputs and outcomes on every run), then capture both sides again")
 
 #: Why a fact could not be compared (``uncomparable_mechanism``) -> what settles it. Only the
-#: first four are settled by capturing again; the cap, the backends and a lost distribution are
+#: first five are settled by capturing again; the cap, the backends and a lost distribution are
 #: properties of the watcher, so the same capture comes out the same.
 SETTLE_UNCOMPARABLE = {
     "evicted": ("capture the side that evicted facts again with a higher "
                 "`PYMOLT_TRACE_MAX_FACTS`"),
     "dropped": "capture the side that dropped events again",
+    "site-unplaced": ("capture again in this checkout the side taken in another one: it records "
+                      "no project root (it keeps no source snapshot), so its call sites cannot "
+                      "be placed in this checkout"),
     "unpaired": ("add a test that runs the edited statements, then capture post-migration "
                  "again"),
     "content-unseen": ("capture both sides again with `--privacy values`: the attested "
@@ -78,7 +96,65 @@ SETTLE_UNCOMPARABLE = {
                              "record these compiled calls"),
     "distribution-lost": ("capturing again does not settle it: the capture kept only part of "
                           "these calls' outcomes (too many distinct ones for one input)"),
+    "awaited-unrecorded": ("capturing again with this pymolt does not settle it: a coroutine "
+                           "call is recorded when it starts, not what its await returned or "
+                           "raised; a test that checks the awaited value, or a person's review "
+                           "of these calls, does"),
+    "attribute-unrendered": ("capturing again does not settle it: an object is recorded by its "
+                             "instance state, so an attribute your code reads that is a property, "
+                             "or a cached or class attribute, is not in it; a test that asserts "
+                             "on that attribute, or a person's review, does"),
 }
+
+
+#: OWNER DECISIONS (QA V2, 2026-11-24 and 2026-11-25: False): whether a BLIND symbol that no capture
+#: can record keeps the verdict from PASS. Such a symbol is ``needs_review`` by ``blind_kind``: each
+#: of its contacts is unobservable (an attribute read, base class or constant of a symbol never
+#: observed, ``Loader=yaml.SafeLoader``; a chain through a return value; a dependency not installed
+#: where the capture ran; interpreter code), or its statement ran at line granularity and the
+#: watcher recorded no call there (a numpy ufunc, ``polars.col``, an implicit ``__float__``), which
+#: capturing again repeats. True, the rule before: it blocks PASS, as a review item. False, the
+#: owner's choice (2026-11-24 for unobservable contacts, 2026-11-25 for statements that ran
+#: unrecorded): it stays BLIND in the counts and tables, it is no reason, so it cannot keep a
+#: verdict from PASS, and the verdict lists it (``ContractReport.unobservable_uses``) for a person
+#: to glance at. A BLIND symbol a capture can still record (a contact not run, or "ran" only by its
+#: function or file) always blocks. This constant is the one place the rule lives: everything that
+#: asks goes through ``blind_blocks_pass``.
+UNOBSERVABLE_BLIND_BLOCKS_PASS = False
+
+
+def blind_blocks_pass(symbol: Any, contacts: Iterable[Any] | None = None) -> bool:
+    """Whether this BLIND symbol is a reason the verdict cannot PASS: always while a capture can
+    still record it (``blind_kind`` needs_evidence); one no capture can record only under
+    ``UNOBSERVABLE_BLIND_BLOCKS_PASS``. ``contacts`` are the symbol's own contacts; without them
+    only an all-unobservable symbol (``blind_reason``) counts as one no capture can record."""
+    if UNOBSERVABLE_BLIND_BLOCKS_PASS:
+        return True
+    if contacts is None:
+        return _get(symbol, "blind_reason") != "unobservable"
+    return blind_kind(symbol, contacts) is not NEEDS_REVIEW
+
+
+def coarse_ran(contacts: Iterable[Any]) -> set[str]:
+    """The granularities coarser than line at which these contacts read "ran, not recorded":
+    there only their function or file is known to have run, not the statement."""
+    return {str(_get(c, "granularity")) for c in contacts
+            if _get(c, "status") == "ran-not-recorded"
+            and _get(c, "granularity") not in ("line", None)}
+
+
+def blind_kind(symbol: Any, contacts: Iterable[Any]) -> InconclusiveKind:
+    """Who settles a BLIND symbol, from its contacts (``ContactStatus``): ``needs_evidence``
+    while a test could still get one of them recorded (one was not run, or "ran" only by its
+    function or file, so the statement may not have); ``needs_review`` when none can (each is
+    unobservable, or its statement ran and the watcher did not record a call there, which
+    capturing again repeats): a person reviews those uses."""
+    mine = list(contacts)
+    if not mine:
+        return NEEDS_REVIEW if _get(symbol, "blind_reason") == "unobservable" else NEEDS_EVIDENCE
+    if any(_get(c, "status") == "not-run" for c in mine) or coarse_ran(mine):
+        return NEEDS_EVIDENCE
+    return NEEDS_REVIEW
 
 
 def _get(e: Any, key: str, default: Any = None) -> Any:
@@ -129,6 +205,8 @@ def uncomparable_mechanism(e: Any) -> str:
         return "evicted"
     if has("possibly-dropped"):
         return "dropped"
+    if has(SITE_UNPLACED):
+        return "site-unplaced"
     if BACKEND_UNOBSERVABLE in notes:
         return "backend-unobservable"
     if has(C_SITE_CAPPED):
@@ -137,6 +215,10 @@ def uncomparable_mechanism(e: Any) -> str:
         return "call-shape"
     if has(CONTENT_UNSEEN):
         return "content-unseen"
+    if AWAITED_UNRECORDED in notes:
+        return "awaited-unrecorded"
+    if has(ATTR_UNRENDERED):
+        return "attribute-unrendered"
     if _value(_get(e, "category")) == "rewritten":
         return "unpaired"
     return "distribution-lost"
@@ -173,7 +255,9 @@ def first_settle(causes: Iterable[InconclusiveCause], kind: InconclusiveKind | N
 
 __all__ = [
     "NEEDS_EVIDENCE", "NEEDS_REVIEW", "REPLICATE_REVIEWS", "SETTLE_ENVIRONMENT",
-    "SETTLE_NO_EQUAL", "SETTLE_NOISE", "SETTLE_NOT_EXERCISED", "SETTLE_REVIEW",
-    "SETTLE_UNCOMPARABLE", "cause", "entry_cause", "first_settle", "is_inconclusive", "kind_of",
+    "SETTLE_NO_EQUAL", "SETTLE_NOISE", "SETTLE_NOISE_RECORDING", "SETTLE_NOT_EXERCISED",
+    "SETTLE_REVIEW",
+    "SETTLE_UNCOMPARABLE", "UNOBSERVABLE_BLIND_BLOCKS_PASS", "blind_blocks_pass", "blind_kind",
+    "cause", "coarse_ran", "entry_cause", "first_settle", "is_inconclusive", "kind_of",
     "settle_uncomparable", "uncomparable_mechanism",
 ]

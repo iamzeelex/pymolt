@@ -11,7 +11,13 @@ the project wrote (``G.node[n]`` is recorded as ``Graph.nodes``; ``self.assertEq
   dependency base);
 * :func:`inherited_spellings`: a static scan of the project's classes: ``self.x`` /
   ``cls.x`` / ``Project.x`` where ``x`` is defined by no project class in the hierarchy becomes
-  ``<first dependency base>.x``.
+  ``<first dependency base>.x``;
+* :func:`receiver_spellings`: for a baseline call on a receiver, the spelling the call reaches
+  through it, ``<receiver's class>.<attribute>``, plus the same attribute under each public
+  spelling the class may have (``pandas.core.frame.DataFrame.groupby`` and
+  ``pandas.DataFrame.groupby`` for ``df.groupby``, which the old version recorded as
+  ``NDFrame.groupby``, the class that defined it). Where the call resolves in the new version
+  depends on the receiver's class, not on where the old version defined the method.
 
 Pure functions over parsed data; nothing here imports a dependency or runs project code.
 """
@@ -27,8 +33,13 @@ from typing import Any
 from pymolt.core.stdlib import is_stdlib as _stdlib_top
 
 _ATTR = re.compile(r"\.([A-Za-z_]\w*)")
-_MARKERS = ("__object__", "__type__", "__opaque__")
+# Value markers that name the value's type (``_normalize``): an object, a class (a ``cls``
+# receiver), a value kept by type only, a structure (a pandas frame), a value shown by its shape,
+# a dataclass, a cycle broken here.
+_MARKERS = ("__object__", "__type__", "__opaque__", "__structure__", "__shape__",
+            "__dataclass__", "__cycle__")
 _SELF_KEYS = ("self", "cls", "obj")
+MAX_RECEIVER_SPELLINGS = 3000
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox", ".nox",
               "build", "dist", ".pymolt", ".pymolt_cache"}
 _MAX_FILES = 4000
@@ -226,6 +237,9 @@ def _project_target(name: str, module: str, names: dict[str, str],
 
 
 def _receiver_type(fact: Any) -> str | None:
+    """The class of the call's receiver as the baseline recorded it: ``self`` or ``cls``; for a
+    call recorded under a decorator's generic wrapper (``...<locals>.wrapper(*args,
+    **kwargs)``, whose own signature binds nothing), the first positional argument it got."""
     inp = getattr(fact, "input", None)
     bound = (inp or {}).get("bound") if isinstance(inp, dict) else None
     if not isinstance(bound, dict):
@@ -236,7 +250,72 @@ def _receiver_type(fact: Any) -> str | None:
             for marker in _MARKERS:
                 if isinstance(val.get(marker), str) and "." in val[marker]:
                     return val[marker]
+    symbol = getattr(fact, "symbol", None) or ""
+    if not bound and "<locals>" in symbol and isinstance(inp.get("varargs"), dict):
+        first = (inp["varargs"].get("__tuple__") or [None])[0]
+        if isinstance(first, dict):
+            for marker in _MARKERS:
+                if isinstance(first.get(marker), str) and "." in first[marker]:
+                    return first[marker]
     return None
+
+
+def public_candidates(name: str) -> list[str]:
+    """The spellings that may name the class or function ``name`` (``module.Qual``): itself,
+    then each enclosing package's export of the same leaf, nearest first, the top-level
+    package last (``pandas.core.frame.DataFrame``, ``pandas.core.DataFrame``,
+    ``pandas.DataFrame``). Which of them really names it is for the old interpreter to say."""
+    parts = name.split(".")
+    out = [name]
+    for i in range(len(parts) - 2, 0, -1):
+        out.append(".".join(parts[:i]) + "." + parts[-1])
+    return out
+
+
+def receiver_class(fact: Any, root: Path | None = None,
+                   classes: dict[str, _ProjectClass] | None = None) -> str | None:
+    """The dependency class a call's receiver had: ``type(self)`` (or ``cls``) as the baseline
+    recorded it, a project class resolved to its first dependency base (``classes``:
+    ``project_classes(root)``). None when the call has no recorded receiver."""
+    recv = _receiver_type(fact)
+    if recv is None:
+        return None
+    if classes is not None and recv in classes:
+        bases = dependency_bases(recv, classes)
+        return bases[0] if bases else None
+    return recv
+
+
+def receiver_spellings(facts: Iterable[Any], root: Path | None = None) -> dict[str, str]:
+    """``{spelling: receiver class}``: for every baseline call on a receiver of a dependency
+    class, the attribute it called under that class and under each of its public candidates
+    (:func:`public_candidates`). A generated or nested name (``<locals>``, ``<lambda>``) is no
+    attribute anyone spells and is skipped; so are standard-library classes (the dependency
+    delta does not cover them). Bounded by ``MAX_RECEIVER_SPELLINGS``."""
+    classes: dict[str, _ProjectClass] | None = None
+    if root is not None:
+        try:
+            classes, _ = project_classes(Path(root))
+        except OSError:
+            classes = None
+    out: dict[str, str] = {}
+    seen: set[tuple[str, str]] = set()
+    for f in facts:
+        symbol = getattr(f, "symbol", None)
+        if not isinstance(symbol, str) or "." not in symbol or "<" in symbol:
+            continue
+        cls = receiver_class(f, root, classes)
+        if cls is None or "<" in cls or is_stdlib(cls):
+            continue
+        leaf = symbol.rsplit(".", 1)[1]
+        if (cls, leaf) in seen:
+            continue
+        seen.add((cls, leaf))
+        for cand in public_candidates(cls):
+            out.setdefault(f"{cand}.{leaf}", cls)
+        if len(out) >= MAX_RECEIVER_SPELLINGS:
+            break
+    return out
 
 
 def alias_spellings(facts: Iterable[Any], root: Path | None = None) -> set[str]:

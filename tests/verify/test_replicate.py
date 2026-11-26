@@ -514,7 +514,8 @@ def test_calls_that_moved_between_inputs_in_the_replicate_are_input_variation():
     # in the other: what reaches the call depends on the run (timing), although every value
     # recurs and each pair is equal.
     profile = build_noise_profile(_logged(u4=6, u5=3, u6=5, u8=8), _logged(u4=2, u5=6, u6=6, u8=8))
-    assert profile["varying"] == {}
+    # only call counts vary (a count class), no value or input
+    assert all(set(v) <= {"count"} for v in profile["varying"].values())
     (leaves,) = profile["input_shifts"].values()
     assert leaves == ['obj/"U"']
 
@@ -534,7 +535,8 @@ def test_more_calls_of_the_same_input_in_one_run_is_no_input_variation():
     # call. An input change at that site stays strict.
     base, rep = _logged(u0=5, u3=1), _logged(u0=6, u3=1)
     profile = build_noise_profile(base, rep)
-    assert profile["varying"] == {} and profile["input_shifts"] == {}
+    assert all(set(v) <= {"count"} for v in profile["varying"].values())
+    assert profile["input_shifts"] == {}
     d, _, by = judged(base, rep, _logged(u0=5, u2=1))
     assert any(e.fails for e in d.entries)
 

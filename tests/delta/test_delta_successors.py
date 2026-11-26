@@ -125,8 +125,6 @@ def test_engine_never_prefers_an_internal_reexport_when_a_public_one_is_live():
     ("Import 'markupsafe.Markup' instead.", "markupsafe.Markup"),
     ("pandas.util.testing is deprecated. Instead access pandas.testing directly",
      "pandas.testing"),
-    ("if your data is JSON, use `model_validate_json`, otherwise use `model_validate` instead.",
-     "model_validate_json"),
     ("Pydantic V1 style `@validator` validators are deprecated. You should migrate to "
      "Pydantic V2 style `@field_validator` validators", "field_validator"),
 ])
@@ -145,6 +143,17 @@ def test_successor_prose_patterns(message, expected):
     "This will be removed in a future version.",
 ])
 def test_stopwords_and_the_dispatcher_denylist_give_no_successor(message):
+    assert fetch_mod.successor_from([message]) is None
+
+
+@pytest.mark.parametrize("message", [
+    "if your data is JSON, use `model_validate_json`, otherwise use `model_validate` instead.",
+    "Please use one of Streamlit's new caching commands, `st.cache_data` or `st.cache_resource`.",
+    "Please adapt your code to use either `displot` (a figure-level function with similar "
+    "flexibility) or `histplot` (an axes-level function for histograms).",
+])
+def test_a_text_that_offers_a_choice_names_no_single_successor(message):
+    # Choosing among several candidates is an agent's or a person's job (owner's rule).
     assert fetch_mod.successor_from([message]) is None
 
 
@@ -167,10 +176,10 @@ def test_new_side_deprecation_prose_names_a_rename_that_exists():
     assert (fact.kind, fact.successor) == ("DEPRECATED", "pkg.new_name")
     assert fact.detail["successor_exists"] is True
     assert fact.detail["successor_same_signature"] is True
-    pattern = _pattern(fact)
-    assert pattern is not None
-    assert (pattern.kind, pattern.confidence) == ("rename-call", "medium")
-    assert (pattern.old_qualname, pattern.new_qualname) == ("pkg.old_name", "pkg.new_name")
+    # named by prose only: an equal signature proves nothing about behaviour (successors v2:
+    # only a proof from the library's own code rewrites). An agent step carries it.
+    assert _pattern(fact) is None
+    assert fact.succession["trust"] == "named"
 
 
 def test_new_side_rename_with_another_signature_is_flagged_incompatible():
@@ -262,13 +271,12 @@ def _rename_world(new_shape):
     return old, new, extra
 
 
-def test_compatible_rename_becomes_a_medium_confidence_rename_call():
+def test_a_named_rename_with_an_equal_signature_is_no_rewrite():
+    """urllib3's ``get_host(url)`` -> ``parse_url(url)``: the same signature, another result (a
+    tuple, then a ``Url``). A text names the successor; only a proof may rewrite."""
     (fact,) = _diff(*_rename_world(shape(("a", POK, None))))
     assert (fact.kind, fact.successor) == ("REMOVED", "pkg.new_fn")
-    pattern = _pattern(fact)
-    assert pattern is not None
-    assert (pattern.kind, pattern.confidence) == ("rename-call", "medium")
-    assert (pattern.old_qualname, pattern.new_qualname) == ("pkg.old_fn", "pkg.new_fn")
+    assert _pattern(fact) is None
 
 
 def test_incompatible_rename_is_never_auto_applied_but_keeps_the_hint():
@@ -333,7 +341,7 @@ def test_online_successor_is_resolved_and_signature_checked_on_the_new_side():
     verify(ok, check_for(shp))
     assert ok.successor == "pkg.enc.force_str"
     assert ok.detail["successor_same_signature"] is True and ok.detail["successor_importable"]
-    assert _pattern(ok) is not None
+    assert _pattern(ok) is None          # an intermediate release's prose names, never rewrites
 
     other = fact("force_str")
     verify(other, check_for(shape(("s", POK, None), ("e", POK, None))))

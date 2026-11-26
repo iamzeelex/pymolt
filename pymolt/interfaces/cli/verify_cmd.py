@@ -24,7 +24,10 @@ from pymolt.interfaces.cli.output import (
     next_step,
     require_project_dir,
 )
+from pymolt.status import capture_command, shown_dir
+from pymolt.status import command as pymolt_command  # `command` is capture's CMD argument
 from pymolt.verify import service
+from pymolt.verify.inconclusive import NEEDS_REVIEW, blind_blocks_pass, blind_kind, coarse_ran
 from pymolt.verify.models import (
     CaptureMode,
     CaptureValidity,
@@ -150,6 +153,7 @@ def capture_cmd(
     """
     machine = json_output or agent
     require_project_dir(project_dir, json_output=machine)
+    shown = shown_dir(project_dir)
     if agent:
         from pathlib import Path
 
@@ -188,8 +192,8 @@ def capture_cmd(
         # tell whether it still describes the project, and `apply` rejects it.
         fail(
             "pymolt is not configured for this project",
-            hint="Run `pymolt setup .` first. A capture records the environment it was "
-                 "taken in.",
+            hint=f"Run `{pymolt_command(shown, 'setup')}` first. A capture records the "
+                 "environment it was taken in.",
             json_output=machine,
         )
 
@@ -198,7 +202,7 @@ def capture_cmd(
         if not out_path.is_file():
             fail(
                 f"no pending attach capture at {out_path}",
-                hint=f"Start one first: pymolt capture {when} --mode attach",
+                hint=f"Start one first: {capture_command(shown, when, '--mode', 'attach')}",
                 json_output=machine,
             )
         slot = service.finalize_attached_capture(
@@ -243,10 +247,9 @@ def capture_cmd(
             project_dir, when_key, target=target, backend=backend,
             privacy=effective_privacy, sample_rate=sample_rate,
         )
-        collect_cmd = (
-            f"pymolt capture {when} --mode attach --collect --privacy {effective_privacy}"
-            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}"
-        )
+        collect_cmd = capture_command(
+            shown, when, "--mode", "attach", "--collect", "--privacy", effective_privacy,
+            *(("--sample-rate", str(sample_rate)) if sample_rate is not None else ()))
         if machine:
             from pymolt.interfaces import views
 
@@ -255,9 +258,7 @@ def capture_cmd(
             return
         console.print(Panel(
             f"Run this yourself, then finalize with:\n"
-            f"  [white]pymolt capture {when} --mode attach --collect "
-            f"--privacy {effective_privacy}"
-            f"{f' --sample-rate {sample_rate}' if sample_rate is not None else ''}[/white]\n\n"
+            f"  [white]{escape(collect_cmd)}[/white]\n\n"
             f"  [white]{instr.command_hint}[/white]",
             title="capture (attach)", expand=False, border_style="cyan",
         ))
@@ -294,7 +295,8 @@ def capture_cmd(
             f"{slot.validity_reason or slot.validity.value}\n"
             f"diagnostic artifact: {slot.trace_path}\n"
             + escape(views.capture_refusal_hint(
-                slot, service.static_contact_count(project_dir) if slot.events == 0 else None))
+                slot, service.static_contact_count(project_dir) if slot.events == 0 else None,
+                when))
         )
         code = (
             EXIT_FINDING
@@ -357,9 +359,12 @@ def _capture_replicate(project_dir: str, command: list[str] | None, *, force: bo
                       invalid_code=EXIT_INCONCLUSIVE)
         return
     if slot.validity is not CaptureValidity.VALID:
+        from pymolt.interfaces import views
+
         err.print(f"[bold yellow]replicate not accepted[/bold yellow]: "
                   f"{slot.validity_reason or slot.validity.value}\n"
-                  f"diagnostic artifact: {slot.trace_path}")
+                  f"diagnostic artifact: {slot.trace_path}\n"
+                  + escape(views.capture_refusal_hint(slot, None, "baseline-replicate")))
         raise typer.Exit(code=EXIT_INCONCLUSIVE)
     err.print(f"[green]captured[/green] baseline replicate"
               f"{' ' + escape(slot.capture_id) if slot.capture_id else ''}: "
@@ -374,6 +379,21 @@ _BLIND_WHY = {
     "ran-not-recorded": "[bold]ran, not recorded[/bold]",
     "unobservable": "[dim]unobservable[/dim]",
 }
+
+def _blind_caption(symbol, contacts, coarse: set[str]) -> str:
+    """What settles one BLIND row, for the table caption (the verdict's causes say the same)."""
+    if blind_kind(symbol, contacts) is NEEDS_REVIEW:
+        text = ("unobservable" if symbol.blind_reason == "unobservable"
+                else "ran, not recorded") + (": no capture can record them, a person reviews "
+                                             "each use")
+        if not blind_blocks_pass(symbol, contacts):
+            text += " (they do not keep the verdict from PASS)"
+        return text
+    if coarse:
+        return (f"ran by their {' or '.join(sorted(coarse))}: maybe not run, a test that reaches "
+                "them settles them")
+    return "not run: a test that reaches them settles them"
+
 
 _IDENTITY_TIER_LABELS = {
     "exact": "exact-join",
@@ -535,6 +555,25 @@ def _inconclusive_note(unified) -> str:
     return f"\n{escape(line)}" if line else ""
 
 
+def _unobservable_note(rep) -> str:
+    """The Verdict panel's line naming the dependency uses no capture can observe: they do not
+    keep the verdict from PASS, so the panel says the verdict does not cover them."""
+    from pymolt.interfaces.views import semantics_lines, unobservable_line
+
+    lines = [x for x in (unobservable_line(rep), *semantics_lines(rep)) if x]
+    return "".join(f"\n[dim]{escape(line)}[/dim]" for line in lines)
+
+
+def _fail_note(unified, project_dir: str = ".") -> str:
+    """The Verdict panel's lines for a FAIL: the plan steps whose sites failed, when known, and
+    a person's two options (empty for PASS and INCONCLUSIVE)."""
+    from pymolt.interfaces.views import fail_lines
+
+    if unified.verdict is not VerificationVerdict.FAIL:
+        return ""
+    return "".join(f"\n{escape(line)}" for line in fail_lines(unified, shown_dir(project_dir)))
+
+
 def _step_lines(judged: dict) -> list[str]:
     """``verify --step``'s panel: the judgement, its entries by why, and what settles its
     evidence."""
@@ -566,6 +605,17 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
             "must describe — the project on disk now, or, for the baseline of a before/after "
             "diff, the one the migration started from. The notes below say which.\n"
             "[dim]Re-capture (pymolt capture) to judge the current code.[/dim]",
+            title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
+        ))
+        border = "yellow"
+    post_moved = (getattr(rep, "stale_sources", None) or {}).get("post-migration")
+    if post_moved:
+        shown = ", ".join(post_moved[:3]) + (f" and {len(post_moved) - 3} more"
+                                             if len(post_moved) > 3 else "")
+        console.print(Panel(
+            "[bold yellow]The evidence below does not describe the code on disk.[/bold yellow]\n"
+            f"The post-migration capture recorded code that has changed since: {escape(shown)}.\n"
+            "[dim]Capture post-migration again to judge the current code.[/dim]",
             title="⚠ stale evidence", title_align="left", border_style="yellow", expand=False,
         ))
         border = "yellow"
@@ -661,10 +711,21 @@ def _render_contract_report(rep, *, verbose: bool = False) -> None:
         t.add_column("Why", overflow="fold", ratio=1)
         t.add_column("Called from (your code)", overflow="fold", ratio=2)
         t.add_column("File", style="dim", overflow="fold", ratio=1)
+        by_target: dict[str, list] = {}
+        for c in rep.contacts:
+            by_target.setdefault(c.target, []).append(c)
+        settled: dict[str, None] = {}
         for s in blind:
-            t.add_row(s.target, _BLIND_WHY.get(s.blind_reason or "", "—"),
-                      ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
-        t.caption = "a test that reaches them, or `--probe-python`, would settle them"
+            mine = by_target.get(s.target, ())
+            why = _BLIND_WHY.get(s.blind_reason or "", "—")
+            coarse = coarse_ran(mine) if s.blind_reason == "ran-not-recorded" else set()
+            if coarse:
+                why += f" (by its {' or '.join(sorted(coarse))})"
+            t.add_row(s.target, why, ", ".join(s.callers) or "—", ", ".join(s.files) or "—")
+            settled[_blind_caption(s, mine, coarse)] = None
+        # What settles each kind of row, in the words of the verdict's causes (``blind_kind``):
+        # a probe replays recorded calls, so it never settles a BLIND symbol.
+        t.caption = "; ".join(settled)
         console.print(t)
 
     dyn = [s for s in visible_symbols if s.status == "dynamic-only"]

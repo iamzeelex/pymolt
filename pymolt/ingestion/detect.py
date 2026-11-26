@@ -61,6 +61,22 @@ def _spec_is_pinned(spec: str) -> bool | None:
     return operators <= {"==", "==="}
 
 
+def pinned_version(spec: str) -> str | None:
+    """The one version ``spec`` pins exactly (``name==1.2.3``, ``===``), else None.
+
+    A floor (``>=0.10``), a compatible release (``~=1.4``), a wildcard (``==1.*``) or no
+    version at all says what may be installed, not what is: no version can be read from it.
+    """
+    try:
+        specifier = Requirement(spec).specifier
+    except InvalidRequirement:
+        return None
+    specs = list(specifier)
+    if len(specs) != 1 or specs[0].operator not in ("==", "===") or "*" in specs[0].version:
+        return None
+    return specs[0].version
+
+
 def _classify_specs(specs: Iterable[str]) -> SourceFixation:
     """Aggregate per-spec pin classification into a source-level fixation tier."""
     total = 0
@@ -122,6 +138,14 @@ def _classify_pyproject_fixation(path: Path) -> SourceFixation:
 # file). The predicate lives in pymolt.core.generated, shared with discovery.
 
 
+def _setup_cfg_declares(path: Path) -> bool:
+    """Whether a setup.cfg declares dependencies (read or computed), i.e. is a manifest."""
+    from pymolt.ingestion.setup_reqs import parse_setup_cfg
+
+    deps = parse_setup_cfg(path)
+    return bool(deps.requirements) or any(n.startswith("computed") for n in deps.notes)
+
+
 def _classify_manifest(path: Path) -> DiscoveredSource | None:
     name = path.name.lower()
     if name == "conda-lock.yml":
@@ -134,6 +158,8 @@ def _classify_manifest(path: Path) -> DiscoveredSource | None:
         return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=_classify_pyproject_fixation(path))
     if name == "pipfile":
         return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=SourceFixation.INTENT)
+    if name == "setup.cfg" and not _setup_cfg_declares(path):
+        return None  # a [flake8]/[tool:pytest] file: no dependencies to offer
     if name in ("setup.py", "setup.cfg"):
         return DiscoveredSource(path=path, mode=Mode.PYPI, is_lock=False, fixation=SourceFixation.INTENT)
     if (name.startswith("requirements") and (name.endswith(".txt") or name.endswith(".in"))) or name == "pip-packages.txt":
@@ -152,6 +178,73 @@ def _source_priority(s: DiscoveredSource) -> tuple[int, int, str]:
     if name == "setup.cfg":
         return (1, 2, name)
     return (1, 3, name)
+
+
+#: Manifest stems that describe a *variant* of the project rather than the
+#: project: a docs build, a test extra, one row of a CI matrix. Picking one of
+#: these as the source of truth answers the wrong question — which is what
+#: taking whatever sorted first used to do (six manifests, `requirements-310.txt`
+#: wins on the alphabet, and the whole assess runs on the Python-3.10 row).
+_VARIANT_MARKERS = ("dev", "test", "tests", "doc", "docs", "rtd", "ci", "lint",
+                    "typing", "build", "bench", "example", "examples", "optional")
+
+
+#: Names that state the project's dependencies outright.
+_CANONICAL_MANIFESTS = {"requirements.txt", "requirements.in", "pyproject.toml",
+                        "pipfile", "environment.yml", "environment.yaml"}
+#: Packaging metadata: its dependencies are only partly readable (computed
+#: values are not executed) — a last resort, never the assumed source of truth.
+_UNCLASSIFIED_MANIFESTS = {"setup.py", "setup.cfg"}
+
+
+def _manifest_rank(source) -> tuple:
+    """Sort key for "which of these is the project's real dependency set?".
+
+    Lower sorts first, in tiers: a lock (the exact world that was installed),
+    then a canonical manifest, then a decorated one, then a variant — a docs
+    build, a test extra, one row of a Python matrix — and finally setup.py,
+    whose edges pymolt does not parse yet. Taking whatever sorted first
+    alphabetically is how a six-manifest project got assessed on the
+    Python-3.10 row of its CI matrix.
+    """
+    name = source.path.name
+    lowered = name.lower()
+    stem = lowered.rsplit(".", 1)[0]
+    tail = stem.replace("requirements", "").strip("-_.")
+    words = [w for w in tail.replace("_", "-").split("-") if w]
+    variant = any(w in _VARIANT_MARKERS for w in words)
+    # "310" / "39" / "py38" — a per-interpreter row, not the project.
+    version_specific = any(w.replace("py", "").replace(".", "").isdigit() for w in words)
+
+    if source.subroot:
+        # A part of the repo, not the project at its top: never assumed.
+        tier = 5
+    elif source.is_lock:
+        tier = 0
+    elif lowered in _UNCLASSIFIED_MANIFESTS:
+        tier = 4
+    elif variant or version_specific:
+        tier = 3
+    elif lowered in _CANONICAL_MANIFESTS:
+        tier = 1
+    else:
+        tier = 2
+    return (tier, len(name), lowered)
+
+
+def pick_default_source(sources):
+    """The manifest to assume when the engineer does not choose one: the one rule setup,
+    assess, plan, ingestion and scan's ``chosen_manifest`` share (by :func:`_manifest_rank`)."""
+    return min(sources, key=_manifest_rank) if sources else None
+
+
+def pick_default_name(folder: str | Path, names: Iterable[str]) -> str | None:
+    """Of the manifest file ``names`` in ``folder``, the one :func:`pick_default_source`
+    picks (scan's ``chosen_manifest``); None when none of them is a supported manifest."""
+    classified = [(name, _classify_manifest(Path(folder) / name)) for name in names]
+    classified = [(name, src) for name, src in classified if src is not None]
+    best = pick_default_source([src for _, src in classified])
+    return next((name for name, src in classified if src is best), None)
 
 
 def _subroot_sources(project_path: Path, include_generated: bool) -> list[DiscoveredSource]:
@@ -417,6 +510,67 @@ def normalize_pkg_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _with_marker(raw: str, marker: str | None) -> str:
+    """``raw`` with the marker of the ``extras_require`` key that gates it, if any."""
+    if not marker:
+        return raw
+    head, sep, own = raw.partition(";")
+    return f"{head.strip()}; ({own.strip()}) and ({marker})" if sep else f"{raw}; {marker}"
+
+
+_INLINE_COMMENT = re.compile(r"\s+#")
+_VIA = re.compile(r"^\s*#\s*via\b(.*)$")
+_VIA_ITEM = re.compile(r"^\s*#\s{2,}(\S.*)$")
+
+
+def compiled_transitive(manifest_path: Path) -> set[str]:
+    """The packages a pip-compile / ``uv pip compile`` output lists only ``# via`` other
+    packages: transitive, not declared by the project (``certifi==2018.8.24  # via
+    requests``). Entries ``# via -r``/``-c`` a project file, and every entry of a file
+    with no ``# via`` comments at all, stay direct. Normalised names."""
+    try:
+        lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    vias: dict[str, list[str]] = {}
+    current: str | None = None
+    in_block = False
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            spec, _, comment = raw.partition(" #")
+            spec = spec.strip()
+            if spec.startswith("--hash"):
+                continue                    # a continuation line of the current entry
+            current, in_block = None, False
+            if spec.startswith("-") and "#egg=" not in spec:
+                continue
+            name = re.match(r"^([A-Za-z0-9][\w.\-]*)", spec.split("#egg=")[-1])
+            if name is None:
+                continue
+            current = normalize_pkg_name(name.group(1))
+            via = _VIA.match("#" + comment) if comment else None
+            if via is not None:
+                vias.setdefault(current, []).extend(
+                    v.strip() for v in via.group(1).split(",") if v.strip())
+            continue
+        if current is None:
+            continue
+        via = _VIA.match(raw)
+        if via is not None:
+            in_block = True
+            vias.setdefault(current, []).extend(
+                v.strip() for v in via.group(1).split(",") if v.strip())
+            continue
+        item = _VIA_ITEM.match(raw)
+        if in_block and item is not None:
+            vias.setdefault(current, []).append(item.group(1).strip())
+    return {name for name, sources in vias.items()
+            if sources and not any(s.startswith(("-r", "-c")) for s in sources)}
+
+
 def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
     """Parse direct dependency requirements/constraints from the source manifest."""
     from packaging.requirements import Requirement
@@ -431,7 +585,9 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
         try:
             lines = manifest_path.read_text(encoding="utf-8").splitlines()
             for line in lines:
-                line = line.strip()
+                # An inline comment (pip-compile's `# via -r etc/requirements.in`) is not
+                # part of the requirement; pip's grammar needs whitespace before the `#`.
+                line = _INLINE_COMMENT.split(line, 1)[0].strip()
                 if not line or line.startswith("#") or line.startswith("-"):
                     continue
                 try:
@@ -472,6 +628,9 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
         for req in parse_setup_file(manifest_path).requirements:
             if req.group != MAIN_GROUP:
                 continue  # extras are not part of the base dependency set
+            # ``':python_full_version < "2.7.9"': [...]`` gates these: keep the gate, or a
+            # PyPy/2.7-only dependency reads as unconditional (and then "removed").
+            spec = _with_marker(req.raw, req.marker)
             try:
                 key = normalize_pkg_name(Requirement(req.raw).name)
             except Exception:
@@ -479,7 +638,7 @@ def extract_declared_requirements(manifest_path: Path) -> dict[str, str]:
                 if not pkg_match:
                     continue
                 key = normalize_pkg_name(pkg_match.group(1))
-            requirements[key] = req.raw
+            requirements[key] = spec
 
     if not requirements and name == "setup.cfg" and (manifest_path.parent / "setup.py").is_file():
         return extract_declared_requirements(manifest_path.parent / "setup.py")

@@ -366,6 +366,51 @@ def _module_file(module):
     return getattr(mod, "__file__", "") or ""
 
 
+_MODULE_DICT = types.ModuleType.__dict__["__dict__"]
+
+
+def _namespace(module, frame):
+    """The namespace a decision about ``module`` is about: the frame's globals, else the
+    namespace of ``sys.modules[module]`` (None if there is none)."""
+    ns = getattr(frame, "f_globals", None) if frame is not None else None
+    if ns is not None:
+        return ns
+    mod = sys.modules.get(module)
+    if mod is None:
+        return None
+    try:
+        return _MODULE_DICT.__get__(mod, types.ModuleType)
+    except TypeError:
+        return None                     # not a module object (a lazy stand-in in sys.modules)
+
+
+def _namespace_file(ns):
+    """``__file__`` of a module namespace, read from the namespace itself ("" if none).
+
+    A module name does not identify one namespace for the whole run: ``python -m pytest``
+    runs pytest's ``__main__`` (in site-packages), and Streamlit then executes the app's script
+    in a fresh module it also names ``__main__`` (``__file__`` = the script). So a decision is
+    made from the namespace the code runs in, and cached for that namespace only
+    (``_decided``), never for the name: under sys.monitoring the first ``__main__`` asked
+    about was pytest's, and the app's script inherited "not our code"."""
+    value = ns.get("__file__") if type(ns) is dict else None
+    return value if type(value) is str else ""
+
+
+# Module names of namespaces that hold the user's own code when they have no ``__file__``:
+# ``python -c`` / ``<stdin>`` / the REPL / a notebook run in ``__main__``; ``code.interact``
+# runs in ``__console__``.
+_INTERACTIVE_NAMESPACES = frozenset(("__main__", "__console__"))
+
+
+def _decided(cache, module, ns):
+    """The cached decision for ``module`` when it was made for the namespace ``ns``, else None."""
+    ent = cache.get(module)
+    if ent is not None and ent[0] == id(ns):
+        return ent[1]
+    return None
+
+
 class SitePackagesMatcher(object):
     """Match ANY installed dependency: module whose source file is under site-packages.
 
@@ -391,18 +436,21 @@ class SitePackagesMatcher(object):
             return True   # a stdlib module this capture asked to record (PYMOLT_TRACE_STDLIB)
         if not self._roots or top in _BUILTIN_MODULES:
             return False  # C builtins (builtins, posix, ...) are never a dependency
-        cached = self._cache.get(module)
+        ns = _namespace(module, frame)
+        cached = _decided(self._cache, module, ns)
         if cached is not None:
             return cached
-        # The decision is cached per MODULE, so it is made from the module's own file: the
-        # first frame seen may run generated code (dataclass / namedtuple methods are exec'd in
-        # the module's globals with ``co_filename == "<string>"``), and deciding from it marked
-        # whole dependency modules (pydantic.fields, sqlalchemy.orm.attributes) as not ones.
-        filename = _module_file(module)
-        if not filename and frame is not None:
-            filename = frame.f_code.co_filename
+        # The decision is cached per module namespace, so it is made from the module's own
+        # file: the first frame seen may run generated code (dataclass / namedtuple methods are
+        # exec'd in the module's globals with ``co_filename == "<string>"``), and deciding from
+        # it marked whole dependency modules (pydantic.fields, sqlalchemy.orm.attributes) as not
+        # ones. A namespace with no ``__file__`` (a C module's callable: ``_module_file``) is
+        # placed by its module object, else by the frame's file.
+        filename = _namespace_file(ns) if ns is not None else ""
+        if not filename:
+            filename = _module_file(module) if frame is None else frame.f_code.co_filename
         ok = bool(filename) and filename.startswith(self._roots)
-        self._cache[module] = ok
+        self._cache[module] = (id(ns), ok)
         return ok
 
 
@@ -459,7 +507,8 @@ class AppMatcher(object):
             return False
         if frame is None:
             return False
-        cached = self._cache.get(module)
+        ns = _namespace(module, frame)
+        cached = _decided(self._cache, module, ns)
         if cached is not None:
             return cached
         # "our code" = a real file that is NOT under site-packages or the stdlib.
@@ -471,12 +520,38 @@ class AppMatcher(object):
         if frame_file.startswith("<frozen "):
             ok = False
         else:
-            # Per-module decision from the module's own file (see SitePackagesMatcher): a
-            # dependency's generated code (``"<string>"``) must not make it "our code".
-            filename = _module_file(module) or frame_file
-            ok = bool(filename) and not filename.startswith(self._dep_roots)
-        self._cache[module] = ok
+            # Per-namespace decision from the module's own file (see SitePackagesMatcher): a
+            # dependency's generated code (``"<string>"``) must not make it "our code", and a
+            # script run as ``__main__`` is ours even after pytest's ``__main__`` was not.
+            filename = _namespace_file(ns) if ns is not None else ""
+            if not filename and frame_file.startswith("<"):
+                ok = self._generated_is_ours(module)
+            else:
+                filename = filename or frame_file
+                ok = bool(filename) and not filename.startswith(self._dep_roots)
+        self._cache[module] = (id(ns), ok)
         return ok
+
+    def _generated_is_ours(self, module):
+        """Code with no file of its own (``"<string>"``, ``"<stdin>"``) run in a namespace with
+        no ``__file__``: the code a program made with ``exec``.
+
+        Its pseudo-file says nothing about whose it is, so it is decided by the module the
+        namespace names. SQLAlchemy 2.0 builds a mapped class's ``__init__`` and its decorated
+        methods with ``exec`` in a fresh dict whose only module mark is ``__name__`` (its own
+        module, or the decorated function's); taken for the project's, every call that code
+        made inside SQLAlchemy became a contact (71 APPEARED entries in an equivalent
+        1.3 -> 2.0 migration). The namespace of ``__main__`` (``python -c``, ``<stdin>``, the
+        REPL, a notebook cell, a doctest text file) and of ``code.interact`` is the user's.
+        Any other is decided as the module registered under its name would be: by that
+        module's file (by elimination when it has none), and it is not ours when no module
+        has the name (``collections.namedtuple``'s ``namedtuple_<name>``)."""
+        if module in _INTERACTIVE_NAMESPACES:
+            return True
+        owner = _namespace(module, None)
+        if owner is None:
+            return False
+        return not _namespace_file(owner).startswith(self._dep_roots)
 
 
 
@@ -1437,11 +1512,12 @@ class FrameBackend(TraceBackend):
         self._dedupe_until = 0.0
         self._last_start = {}       # tid -> frame of the last recorded start
         self._ccache = {}           # id(callable) -> (held(callable), sym | None): compiled
-        self._cmeth = {}            # (id(owner class), name) -> (owner, sym | None): bound builtins
+        self._cmeth = {}            # (id(owner class), name) -> (held(owner), sym | None): bound
         self._reset_c_cap()         # _ccount: cap key -> compiled calls recorded there
         self._cstack = {}           # tid -> [(callable, caller frame, info)] compiled in flight
         self._bind_kw = sink_binding(sink)
-        self._inh = {}              # (id(callable | code), id(receiver class)) -> (obj, cls, sym)
+        # (id(callable | code), id(receiver class)) -> (obj, held(receiver class), sym)
+        self._inh = {}
         self._inh_codes = {}        # id(code) -> code: stdlib code armed for inherited-method calls
         # Executed project code (``executed_metadata``): id(code) -> code of ours that started
         # (held: its id cannot be reused). Off without a near side (nothing is "ours").
@@ -1689,7 +1765,7 @@ class FrameBackend(TraceBackend):
         t = recv if isinstance(recv, type) else type(recv)
         key = (id(code), id(t))
         ent = self._inh.get(key)
-        if ent is not None and ent[0] is code and ent[1] is t:
+        if ent is not None and ent[0] is code and is_held(ent[1], t):
             return ent[2]
         sym = None
         try:
@@ -1706,7 +1782,7 @@ class FrameBackend(TraceBackend):
             sym = None
         if len(self._inh) >= _CODE_CACHE_MAX:
             self._inh.clear()
-        self._inh[key] = (code, t, sym)
+        self._inh[key] = (code, held(t), sym)   # a class only weakly: it may be made at run time
         return sym
 
     def _inherited_descriptor_sym(self, desc, recv):
@@ -1715,7 +1791,7 @@ class FrameBackend(TraceBackend):
         t = type(recv)
         key = (id(desc), id(t))
         ent = self._inh.get(key)
-        if ent is not None and ent[0] is desc and ent[1] is t:
+        if ent is not None and ent[0] is desc and is_held(ent[1], t):
             return ent[2]
         sym = None
         try:
@@ -1728,7 +1804,7 @@ class FrameBackend(TraceBackend):
             sym = None
         if len(self._inh) >= _CODE_CACHE_MAX:
             self._inh.clear()
-        self._inh[key] = (desc, t, sym)
+        self._inh[key] = (desc, held(t), sym)
         return sym
 
     # ── compiled calls ─────────────────────────────────────────────────────────
@@ -1746,12 +1822,12 @@ class FrameBackend(TraceBackend):
         if owner is not None:
             key = (id(owner), getattr(obj, "__name__", None))
             ment = self._cmeth.get(key)
-            if ment is not None and ment[0] is owner:
+            if ment is not None and is_held(ment[0], owner):
                 return ment[1]
             sym = self._c_decide(obj)
             if len(self._cmeth) >= _CODE_CACHE_MAX:
                 self._cmeth.clear()
-            self._cmeth[key] = (owner, sym)
+            self._cmeth[key] = (held(owner), sym)   # the class only weakly (``held``)
             return sym
         sym = self._c_decide(obj)
         ref = held(obj)         # never the callable itself unless its module or class holds it

@@ -85,6 +85,7 @@ type level on both sides.
 import ast
 import datetime as _dt
 import difflib
+import gzip
 import io
 import json
 import logging
@@ -108,6 +109,8 @@ from pymolt.core.stdlib import is_stdlib
 from pymolt.state_io import atomic_write_json
 from pymolt.verify import dict_order as _order
 from pymolt.verify import environment as _env
+from pymolt.verify import source_uses as _uses
+from pymolt.verify import successor_inputs
 from pymolt.verify._sinks import (
     MAX_OTHER_TYPES,
     MAX_OUTCOMES,
@@ -172,6 +175,12 @@ class DiffContext:
     not_in_capture: list[str] = field(default_factory=list)
     # The accepts verify honours, and ``--strict`` (``verify.accepts.AcceptContext``).
     accepts: Any = None
+    # ``verify --strict``: a dependency object is compared by its full public state, not by
+    # what the project reads of it (``_Semantics``); numeric drift is a review item.
+    strict: bool = False
+    # ``verify --float-ulps N``: two floats are equal within N units in the last place at their
+    # own precision (0: exact). None: the default, ``FLOAT_ULPS``.
+    float_ulps: int | None = None
 
 
 class DiffProfile(StrEnum):
@@ -198,6 +207,8 @@ class Comparison(StrEnum):
 
 class ComparisonLevel(StrEnum):
     EXACT = "exact"
+    # exact, but floats equal only within floating-point rounding (``float_ulps``)
+    NUMERIC = "numeric"
     MASKED = "masked"  # exact once volatile positions (environment, clock, source, input) masked
     TYPE = "type"
     KIND = "kind"   # from tallies: which outcome kinds (return / raise types) occurred
@@ -269,6 +280,9 @@ class Fact(BaseModel):
     # outcomes ("environment", "clock", "source"), and the fact as recorded.
     _masks: frozenset = PrivateAttr(default=frozenset())
     _raw: Any = PrivateAttr(default=None)
+    # Set by ``_record_inputs``: a digest of the input before its dependency records were
+    # reduced to their type (the calls on one record pair with each other within the fact).
+    _rdigest: str | None = PrivateAttr(default=None)
     # When its calls ran (epoch seconds: the earliest start, the latest end), from the events'
     # ``ts``/``dur``; None for a facts-snapshot capture, whose facts carry no call time.
     ts_min: float | None = None
@@ -290,7 +304,11 @@ class FactSet(BaseModel):
     """All facts of one trace, plus what the trace could and could not tell us."""
 
     source: str | None = None
-    root: str | None = None
+    root: str | None = None          # the project as checked out where verify runs
+    # The project root the capture was taken in (its source snapshot's ``root``): call sites
+    # are made relative to it first, so a capture compares across checkout paths (a copy, a
+    # second worktree, a CI workspace). None: the capture records none (an older capture).
+    capture_root: str | None = Field(default=None, exclude=True)
     aggregated: bool = False         # MemorySink JSON: no distribution, no call order
     events: int = 0                  # events (or aggregated records) folded
     invalid_lines: int = 0
@@ -336,6 +354,9 @@ class FactSet(BaseModel):
     python_versions: list[str] = Field(default_factory=list, exclude=True)
     run_windows: list[tuple[float, float]] = Field(default_factory=list, exclude=True)
     env_roots: list[str] = Field(default_factory=list, exclude=True)
+    # The interpreter prefixes the capture's processes ran (a venv's root, from ``executable``
+    # or ``prefix``/``base_prefix``): paths under them are masked like the project root.
+    env_prefixes: list[str] = Field(default_factory=list, exclude=True)
     host_capture: bool = Field(default=True, exclude=True)
     dropped_events: int | None = None
     # ``{normalized distribution name: version}`` the capture's processes loaded (one version
@@ -490,6 +511,11 @@ class FactEntry(BaseModel):
     # ``input-substitution``, ``attribution``, ``backend``, ``possibly-dropped``, ...). Reporting
     # groups by the mechanism; it never changes the verdict by itself.
     explained: str | None = None
+    # The relaxations that made this entry equal where the full comparison would not have
+    # (``handle-state``, ...): every run counts what each one absorbed (``FactDiff.absorbed``).
+    absorbed: list[str] = Field(default_factory=list)
+    # Floats equal within rounding at this entry: ``{"values", "max_ulps", "max_relative"}``.
+    numeric: dict[str, Any] | None = None
     # Run-to-run noise measured by a replicate capture: the difference is real but the baseline
     # itself varies there the same way. Neither failing nor inconclusive.
     noise: str | None = None
@@ -560,10 +586,47 @@ class FactDiff(BaseModel):
     no_ledger: bool = False  # edits were judged as hand edits: no apply ledger was available
     # Run-to-run noise measured by a baseline replicate: what it covered (None: not measured).
     noise_measured: dict[str, Any] | None = None
+    # Whether a baseline replicate could measure this diff's noise: its "before" side is the
+    # baseline capture's recording. False for another recording (``verify --baseline``).
+    replicate_applies: bool = True
     # Whether dict key order was compared, and why not (``"compared"`` | ``"not recorded
     # (old)"`` ...); the two captures' runtime environments compared (``environment.stamp``).
     dict_order: str | None = Field(default=None, exclude=True)
     environment: Any = Field(default=None, exclude=True)
+    # The places the project reads attributes by a computed name (``getattr(x, var)``,
+    # ``vars(x)``, ``x.__dict__``, ``asdict(x)``), listed when a dependency object's unread state
+    # differed: what they read is not compared (``--strict`` compares the full state).
+    dynamic_reads: list[str] = Field(default_factory=list)
+    # How dependency objects were compared: ``projected`` (by what the project reads of them),
+    # ``full`` (``--strict``) or ``full: no source snapshot``.
+    handle_comparison: str | None = None
+
+    float_ulps: int = 1024    # the numeric layer's bound this diff used (0: exact)
+    via: int = 0              # facts made by compiled code during another call, not compared
+    # Symbols every fact of which was such a call (``_drop_via``): no call the project made.
+    via_symbols: list[str] = Field(default_factory=list)
+
+    @property
+    def numeric_drift(self) -> dict[str, Any] | None:
+        """Floats equal only within floating-point rounding: how many values at how many
+        entries, the largest distance in ulps and relatively, and the bound. None: none."""
+        hits = [e.numeric for e in self.entries if e.numeric]
+        if not hits:
+            return None
+        return {"entries": len(hits), "values": sum(h["values"] for h in hits),
+                "max_ulps": max(h["max_ulps"] for h in hits),
+                "max_relative": max(h["max_relative"] for h in hits),
+                "bound_ulps": self.float_ulps}
+
+    @property
+    def absorbed(self) -> dict[str, int]:
+        """Entries each relaxation made equal where the full comparison would not have."""
+        out: Counter = Counter()
+        for e in self.entries:
+            out.update(set(e.absorbed or ()))
+        if self.via:
+            out[VIA] += self.via
+        return dict(sorted(out.items()))
 
     def edited_sites(self) -> dict[str, int]:
         """Edited sites by outcome: equal / representation-only / need review / unverified
@@ -660,6 +723,11 @@ class FactDiff(BaseModel):
             "old": self.old_summary.model_dump(mode="json"),
             "new": self.new_summary.model_dump(mode="json"),
             "noise_measured": self.noise_measured,
+            "replicate_applies": self.replicate_applies,
+            "absorbed": self.absorbed,
+            "numeric_drift": self.numeric_drift,
+            "handle_comparison": self.handle_comparison,
+            "dynamic_reads": list(self.dynamic_reads),
             "entries": entries,
         }
 
@@ -703,10 +771,16 @@ class FactDiff(BaseModel):
                     reason = "c-site-capped"
                 elif any(n.startswith(CALL_SHAPE) for n in e.notes):
                     reason = "call-shape"
+                elif any(n.startswith(SITE_UNPLACED) for n in e.notes):
+                    reason = "site-unplaced"
                 elif e.comparison is Comparison.MISSING:
                     reason = "rewritten-unpaired"
                 elif any(n.startswith(CONTENT_UNSEEN) for n in e.notes):
                     reason = "content-unseen"
+                elif AWAITED_UNRECORDED in e.notes:
+                    reason = "awaited-unrecorded"
+                elif any(n.startswith(ATTR_UNRENDERED) for n in e.notes):
+                    reason = "attribute-unrendered"
                 else:
                     reason = "nondeterministic-unrecorded"
                 out.skipped_opaque.append({**_legacy_record(e, old_side=e.old is not None),
@@ -791,6 +865,38 @@ _LINE_ORDER = "\x00order"
 
 def metadata_path(trace_path: str | Path) -> Path:
     return Path(str(trace_path) + ".meta.json")
+
+
+def sources_snapshot_path(trace_path: str | Path) -> Path:
+    """Where a capture keeps its source snapshot (``verify.service.record_sources``):
+    ``<trace>.sources.json.gz``."""
+    return Path(str(trace_path) + ".sources.json.gz")
+
+
+_ROOT_HEAD = 1 << 16   # the snapshot's ``root`` is written second, after its ``schema``
+
+
+def recorded_root(trace_path: str | Path) -> str | None:
+    """The project root a capture was taken in: its source snapshot's ``root``, the real path
+    of the project directory when the capture ran (host side; a container capture's too). None
+    when the capture keeps no snapshot (one older than snapshots, or one that could not be
+    written) or the snapshot names none: then nothing says where the project was. Reads the
+    head of the snapshot only; never raises."""
+    try:
+        with gzip.open(sources_snapshot_path(trace_path), "rt", encoding="utf-8") as fh:
+            head = fh.read(_ROOT_HEAD)
+            found = re.search(r'"root"\s*:\s*', head)
+            if found is not None:
+                try:
+                    value = json.JSONDecoder().raw_decode(head, found.end())[0]
+                except ValueError:
+                    value = None
+            else:
+                data = json.loads(head + fh.read())
+                value = data.get("root") if isinstance(data, dict) else None
+    except (OSError, EOFError, ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, str) and os.path.isabs(value) else None
 
 
 # ── facts snapshots ───────────────────────────────────────────────────────────────────────
@@ -1440,18 +1546,22 @@ def fold_facts(
     source: str | None = None,
     runner: RunnerSpec | None = None,
     runner_source: str | None = None,
+    capture_root: str | None = None,
 ) -> FactSet:
     """Fold v1/v2 JSONL events and/or aggregated MemorySink records into a FactSet.
 
     Facts are kept at line granularity (file, func, line, input); ``FactSet.keyed()`` and
-    ``diff_facts`` merge lines that share a line text.
+    ``diff_facts`` merge lines that share a line text. A call site is made relative to
+    ``capture_root`` (the root the capture was taken in, ``recorded_root``), else to ``root``
+    (the project as checked out now).
     """
     root_s = os.path.abspath(str(root)) if root is not None else None
     site_text = site_text or {}
     rel_cache: dict[str, str] = {}
     acc: dict[tuple, _Acc] = {}
     fs = FactSet(source=source, root=root_s, site_text_entries=len(site_text),
-                 runner=runner, path_map_source=runner_source if runner else None)
+                 runner=runner, path_map_source=runner_source if runner else None,
+                 capture_root=capture_root)
     versions: set[int] = set()
     # Identical inputs / outcomes / call sites recur across facts (one result shared by many
     # inputs, one input at many sites): keep ONE object per canonical form. Decoded JSON is
@@ -1579,7 +1689,8 @@ def load_facts(
     if runner == "auto":
         runner, runner_source = runner_for_trace(base, root)
     fs = fold_facts(records, root=root, site_text=site_text, source=str(trace_path),
-                    runner=runner, runner_source=runner_source)
+                    runner=runner, runner_source=runner_source,
+                    capture_root=recorded_root(base))
     fs.invalid_lines = stats.invalid_lines
     fs.aggregated = fs.aggregated or stats.aggregated
     meta = _read_json(metadata_path(base))
@@ -1612,13 +1723,24 @@ def annotate_capture_meta(fs: FactSet, meta: Mapping[str, Any]) -> FactSet:
         if isinstance(start, int | float) and isinstance(end, int | float) and end >= start:
             windows.append((float(start), float(end)))
     fs.run_windows = windows
-    roots = [fs.root] if fs.root else []
-    if fs.runner is not None and fs.root:
-        seen = to_container(fs.runner, fs.root)
-        if seen:
-            roots.append(seen)
+    roots = []
+    for root in dict.fromkeys(r for r in (fs.root, fs.capture_root) if r):
+        roots.append(root)     # the project as checked out now, and where the capture ran
+        if fs.runner is not None:
+            seen = to_container(fs.runner, root)
+            if seen:
+                roots.append(seen)
     fs.env_roots = sorted({r.rstrip("/") for r in roots if r and r.rstrip("/")},
                           key=lambda r: -len(r))
+    prefixes = set()
+    for p in procs:
+        for key in ("prefix", "base_prefix"):
+            if isinstance(p.get(key), str) and len(p[key]) > 1:
+                prefixes.add(p[key].rstrip("/"))
+        exe = p.get("executable")
+        if isinstance(exe, str) and "/bin/" in exe and exe.startswith("/"):
+            prefixes.add(exe.rsplit("/bin/", 1)[0])
+    fs.env_prefixes = sorted((x for x in prefixes if x.count("/") >= 2), key=lambda r: -len(r))
     fs.host_capture = not fs.paths_mapped
     dropped = None
     for counters in [p.get("counters") for p in procs] or [meta.get("counters")]:
@@ -1911,6 +2033,112 @@ def _module_getattr_name(symbol: str, inputs: Any) -> str | None:
     return name if owner and not owner[-1][:1].isupper() else None
 
 
+def _record_inputs(f: Fact) -> Fact:
+    """A fact whose input carries a dependency's record (a library-declared dataclass, anywhere)
+    or a record as its receiver, keyed by the record's type: like a library object
+    (``_objects_to_opaque``), its state is output evidence, and as an input key it made every
+    call a new fact (streamlit's element tree)."""
+    new = _record_markers(f.input, top=True)
+    if new is f.input:
+        return f
+    g = f.model_copy(update={"input": new})
+    g.__pydantic_private__["_rdigest"] = _canon(f.input)
+    return g
+
+
+RECORD_INPUT = "record-input"
+
+
+def _view_key(f: Fact, modes: dict[str, str]) -> tuple:
+    sv = f.text if modes.get(f.file) == "text" else f.line
+    return (f.symbol, f.file, f.func, sv, _canon(f.input), f.binding)
+
+
+def _record_digests(facts: list[Fact], modes: dict[str, str]
+                    ) -> dict[tuple, dict[str, list[Outcome]]]:
+    """For each view keyed by a record's type: the outcomes of its calls per original input."""
+    out: dict[tuple, dict[str, list[Outcome]]] = defaultdict(dict)
+    for f in facts:
+        digest = f.__pydantic_private__.get("_rdigest") if f.__pydantic_private__ else None
+        if digest is not None:
+            out[_view_key(f, modes)].setdefault(digest, []).extend(f.outcomes)
+    return out
+
+
+def _judge_record_inputs(pending: list[tuple["_V", "_V", FactEntry]],
+                         calls: tuple[dict, dict], modes: dict[str, str]) -> None:
+    """Calls whose dependency-record inputs were keyed by the record's type, merged into one
+    fact: the merge must not hide results that moved between records. When both sides hold
+    the same records, each record's calls compare with the other side's for that record (a
+    result that moved is CHANGED); when the records differ between the captures, a fact with
+    several outcomes cannot be paired call by call and is a review item. Every merge that
+    erased a record difference is counted (``record-input``)."""
+    for o, n, e in pending:
+        a = calls[0].get(_view_key(o.fact, modes))
+        b = calls[1].get(_view_key(n.fact, modes))
+        if not a or not b or e.comparison is not Comparison.EQUAL:
+            continue
+        if a.keys() == b.keys():
+            moved = [d for d in a if compare_outcomes(
+                _merge_outcomes(a[d]), _merge_outcomes(b[d])).comparison is not Comparison.EQUAL]
+            if moved:
+                e.category, e.comparison = FactCategory.CHANGED, Comparison.CHANGED
+                e.level = ComparisonLevel.EXACT
+                e.notes.append(f"results moved between record inputs ({len(moved)} record(s))")
+            continue
+        e.absorbed = sorted({*e.absorbed, RECORD_INPUT})
+        e.notes.append(f"{RECORD_INPUT}: {len(a)} old / {len(b)} new record input(s) differ, "
+                       "keyed by their type")
+        if len(e.old or ()) > 1 or len(e.new or ()) > 1:
+            e.review = (f"{RECORD_INPUT}: calls on dependency records that differ between the "
+                        "captures returned several results; which record got which cannot be "
+                        "paired, so a result that moved between them is not ruled out: review")
+        elif e.category is FactCategory.EQUAL:
+            e.category, e.drift = FactCategory.DRIFT, True
+            e.explained = e.explained or (
+                f"{RECORD_INPUT}: the call's dependency-record input differs between the "
+                "captures and is keyed by its type")
+
+
+def _merge_outcomes(outcomes: list[Outcome]) -> list[Outcome]:
+    merged: dict[str, Outcome] = {}
+    for o in outcomes:
+        k = _canon([o.kind, o.value])
+        if k in merged:
+            merged[k] = merged[k].model_copy(update={"count": merged[k].count + o.count})
+        else:
+            merged[k] = o
+    return list(merged.values())
+
+
+def _record_markers(value: Any, *, top: bool = False) -> Any:
+    if isinstance(value, dict):
+        name = value.get("__dataclass__")
+        if isinstance(name, str) and not _project_type(name):
+            return {"__opaque__": name}
+        out: dict[str, Any] = {}
+        changed = False
+        for k, v in value.items():
+            if top and k == "bound" and isinstance(v, dict):
+                nv = {}
+                for n, x in v.items():
+                    if n in ("self", "cls") and isinstance(x, dict) \
+                            and isinstance(x.get("__dataclass__"), str):
+                        nv[n] = {"__opaque__": x["__dataclass__"]}
+                    else:
+                        nv[n] = _record_markers(x)
+                    changed = changed or nv[n] is not x
+                out[k] = nv if any(nv[n] is not v[n] for n in v) else v
+            else:
+                out[k] = _record_markers(v)
+                changed = changed or out[k] is not v
+        return out if changed else value
+    if isinstance(value, list):
+        items = [_record_markers(v) for v in value]
+        return items if any(a is not b for a, b in zip(items, value)) else value
+    return value
+
+
 def _objects_to_opaque(value: Any) -> Any:
     """``{"__object__": T, ...}`` -> ``{"__opaque__": T}`` anywhere in an input: a structural
     object is output evidence; keyed as an input it would make every call a new fact."""
@@ -2183,6 +2411,12 @@ def value_type(value: Any) -> Any:
         return {"set": _type_union(value["__set__"])}
     if "__tuple__" in value:
         return {"tuple": [value_type(e) for e in value["__tuple__"]]}
+    if "__seq__" in value:     # a consumer projection: the elements, container type erased
+        return {"tuple": [value_type(e) for e in value["__seq__"]]}
+    if "__lazy__" in value:
+        return {"lazy": value["__lazy__"]}
+    if "__projected__" in value:
+        return "projected"
     if "__dict__" in value:
         return {"dict": {_key_label(k): value_type(v) for k, v in _pairs(value["__dict__"])}}
     if "__dataclass__" in value:
@@ -2233,6 +2467,17 @@ def types_match(a: Any, b: Any) -> bool:
         return True
     if isinstance(b, dict) and ("nondeterministic" in b or "ambiguous" in b):
         return True
+    ca, cb = _callable_name(a, tree=True), _callable_name(b, tree=True)
+    if ca and cb and ("callable" not in a or "callable" not in b):
+        return _dependency_callables(ca, cb)
+    la, lb = _handle_tree_label(a), _handle_tree_label(b)
+    if la and lb:
+        if _handle_type_tree(a) and _handle_type_tree(b):
+            return _handle_types_match(a, b)
+        if not _handle_types_relate(la, lb):
+            return False
+        sa, sb = a.get("status_code"), b.get("status_code")
+        return sa is None or sb is None or sa == sb
     if isinstance(a, dict) and ("opaque" in a or "cycle" in a):
         return _named_match(a, b)
     if isinstance(b, dict) and ("opaque" in b or "cycle" in b):
@@ -2252,7 +2497,11 @@ def types_match(a: Any, b: Any) -> bool:
     if "type" in a and "type" in b:
         return _same_type_name(a["type"], b["type"])
     if "callable" in a and "callable" in b:
-        return _same_closure(a["callable"], b["callable"])
+        return (_same_closure(a["callable"], b["callable"])
+                or _wrapper_naming(a["callable"], b["callable"])
+                or _dependency_callables(a["callable"], b["callable"]))
+    if _handle_type_tree(a) and _handle_type_tree(b):
+        return _handle_types_match(a, b)
     if "object" in a and "object" in b:
         if not _same_type_name(a["object"], b["object"]):
             return False
@@ -2263,6 +2512,11 @@ def types_match(a: Any, b: Any) -> bool:
         # attributes present on both sides; one-sided attributes are additive, not a change
         return all(types_match(a["attrs"][k], b["attrs"][k])
                    for k in a["attrs"].keys() & b["attrs"].keys())
+    if "structure" in a and "structure" in b:
+        rest_a = {k: v for k, v in a.items() if k != "structure"}
+        rest_b = {k: v for k, v in b.items() if k != "structure"}
+        return _same_type_name(a["structure"], b["structure"]) and _canon(rest_a) == _canon(
+            rest_b)
     if "dataclass" in a and "dataclass" in b:
         fa, fb = a.get("fields", {}), b.get("fields", {})
         return (a["dataclass"] == b["dataclass"] and fa.keys() == fb.keys()
@@ -2301,6 +2555,26 @@ class _Evidence:
     drift: list[str] = field(default_factory=list)   # additive / absent-vs-empty attribute notes
     type_only: bool = False                         # something compared by type name only
     closures: list[tuple[str, str]] = field(default_factory=list)
+    # What a relaxation absorbed (mechanism -> details): differences the full comparison would
+    # have counted and the projected one did not (``_Semantics``).
+    absorbed: dict[str, list[str]] = field(default_factory=dict)
+    numeric: list[tuple[float, float]] = field(default_factory=list)   # (ulps, relative)
+    # Attributes the project reads that one side's rendering does not hold, though it may have
+    # them (``Type.attr (side)``): the pair cannot be compared (``ATTR_UNRENDERED``).
+    unrendered: list[str] = field(default_factory=list)
+
+    def absorb(self, mechanism: str, *details: str) -> None:
+        self.absorbed.setdefault(mechanism, []).extend(details)
+
+    def merge(self, other: "_Evidence") -> None:
+        self.relocated.extend(x for x in other.relocated if x not in self.relocated)
+        self.drift.extend(other.drift)
+        self.type_only = self.type_only or other.type_only
+        self.closures.extend(other.closures)
+        for k, v in other.absorbed.items():
+            self.absorb(k, *v)
+        self.numeric.extend(other.numeric)
+        self.unrendered.extend(x for x in other.unrendered if x not in self.unrendered)
 
 
 _EVIDENCE: ContextVar[_Evidence | None] = ContextVar("pymolt_evidence", default=None)
@@ -2311,6 +2585,456 @@ UNOBSERVABLE_NOTE = "the replacement on this line was not observable"
 HANDLE_NOTE = "state of a handle differs; calls on it compare separately"
 _SENTINEL_RE = re.compile(
     r"unset|missing|not_?set|no_?default|undefined|nothing|sentinel|no_?value|not_?given")
+
+
+@dataclass
+class _Semantics:
+    """What the project can observe of the dependency objects it holds, for one diff (built from
+    both captures' source snapshots, ``source_uses``). A dependency object (a *handle*: a library
+    ``__object__`` or a library-declared record) is compared by its type and the attributes the
+    project reads by name; its other state is counted, not compared. Values (builtins,
+    containers, structures, records the project declares) compare by content as before. None
+    (no source snapshot): every object compares by its full state, as before."""
+
+    old: _uses.SourceUses
+    new: _uses.SourceUses
+    project: frozenset[str]
+    renames: dict[str, str] = field(default_factory=dict)  # old attribute -> new (plan's leaf)
+    strict: bool = False
+
+
+_SEM: ContextVar[_Semantics | None] = ContextVar("pymolt_semantics", default=None)
+HANDLE_STATE = "handle-state"
+
+
+def _semantics_for(context: DiffContext | None, root: str | None = None
+                   ) -> tuple[_Semantics | None, str | None]:
+    """The semantics of one diff, and why there are none when snapshots exist (a project file
+    that does not parse: its reads are unknown, so every object compares in full)."""
+    if context is None or not context.old_sources or not context.new_sources:
+        return None, None
+    new_sources = _whole_tree(context.new_sources, context.old_sources, root)
+    old, new = _uses.source_uses(context.old_sources), _uses.source_uses(new_sources)
+    if old is None or new is None or not (old.files and new.files):
+        return None, None
+    unparsed = sorted({*old.unparsed_files, *new.unparsed_files})
+    if unparsed:
+        shown = ", ".join(unparsed[:3]) + (f" (+{len(unparsed) - 3})" if len(unparsed) > 3
+                                           else "")
+        return None, f"full: {len(unparsed)} project file(s) do not parse here ({shown})"
+    renames: dict[str, str] = {}
+    for a, b in (context.successors or {}).items():
+        la, lb = str(a).rsplit(".", 1)[-1], str(b).rsplit(".", 1)[-1]
+        if la != lb and la.isidentifier() and lb.isidentifier():
+            renames.setdefault(la, lb)
+    return _Semantics(old=old, new=new,
+                      project=_uses.project_modules(context.old_sources, new_sources),
+                      renames=renames, strict=bool(context.strict)), None
+
+
+_TREE_FILES_MAX = 5000
+
+
+def _whole_tree(new_sources: Mapping[str, str], old_sources: Mapping[str, str] | None,
+                root: str | None) -> dict[str, str]:
+    """The post-migration side's project files for its read set: its snapshot keeps only the
+    files with facts, so a file it lacks is read from the checkout (the code the capture ran,
+    as far as staleness checks tell), else from the baseline snapshot. Reads only add names to
+    compare, so a fuller tree errs on the strict side."""
+    out = dict(new_sources)
+    if root and os.path.isdir(root):
+        from pymolt.verify.contact_map import prune_walk_dirs
+
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = prune_walk_dirs(dirpath, dirnames)
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                seen += 1
+                if seen > _TREE_FILES_MAX:
+                    break
+                rel = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+                if rel not in out:
+                    try:
+                        out[rel] = Path(dirpath, name).read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        pass
+    for rel, text in (old_sources or {}).items():
+        out.setdefault(rel, text)
+    return out
+
+
+def _project_type(name: Any) -> bool:
+    sem = _SEM.get()
+    return sem is not None and isinstance(name, str) and name.split(".")[0] in sem.project
+
+
+def _handle_name(v: Any) -> str | None:
+    """The type name of a dependency object compared by projection (a library ``__object__`` or
+    ``__dataclass__``); None for a value, without source snapshots, or under ``--strict``."""
+    sem = _SEM.get()
+    if sem is None or sem.strict or not isinstance(v, dict):
+        return None
+    for tag in ("__object__", "__dataclass__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            return None if _project_type(name) else name
+    return None
+
+
+# Opaque renderings that stand for values, not handles: a type change of one is behaviour.
+_VALUE_OPAQUE_PREFIXES = ("ambiguous", "unobserved:", "float-nonfinite")
+_NUMPY_SCALAR = re.compile(
+    r"^numpy\.(?:(?:float|int|uint|complex)\d*|longdouble|clongdouble|longlong|ulonglong|"
+    r"intc|uintc|intp|uintp|short|ushort|byte|ubyte|half|single|double|csingle|cdouble|"
+    r"bool_?|str_|bytes_|void|datetime64|timedelta64|generic|number)$")
+_VALUE_TYPES = frozenset({"decimal.Decimal", "fractions.Fraction",
+                          "pandas._libs.tslibs.timestamps.Timestamp",
+                          "pandas._libs.tslibs.timedeltas.Timedelta",
+                          "pandas._libs.tslibs.nattype.NaTType", "pandas._libs.missing.NAType"})
+
+
+# Packages whose objects are data (arrays, frames, tensors, dates, paths, numbers): an opaque
+# rendering of one (past the depth cap, a type the renderer has no structure for) is a value.
+_VALUE_PACKAGES = frozenset({
+    "numpy", "pandas", "polars", "pyarrow", "torch", "jax", "jaxlib", "tensorflow", "xarray",
+    "datetime", "pathlib", "decimal", "fractions", "uuid", "ipaddress", "array", "collections",
+    "zoneinfo", "numbers", "cmath"})
+
+
+def _value_type_name(name: str) -> bool:
+    """A type-only rendering of a value (a builtin; a type of a data package: a numpy array or
+    scalar, a pandas frame, a tensor, a date, a path, a decimal): its type is compared
+    strictly."""
+    return ("." not in name or name.startswith(_VALUE_OPAQUE_PREFIXES)
+            or bool(_NUMPY_SCALAR.match(name)) or name in _VALUE_TYPES
+            or name.split(".")[0] in _VALUE_PACKAGES or name.startswith("scipy.sparse."))
+
+
+def _handle_label(v: Any) -> str | None:
+    """The type name of any rendering of a dependency object, for the type ladder: a library
+    ``__object__``/``__dataclass__``, an ``__opaque__``/``__cycle__`` of a library type that is
+    no value type, a response-like ``__structure__`` (``status_code``, no values). None for a
+    value, without source snapshots, or under ``--strict``."""
+    sem = _SEM.get()
+    if sem is None or sem.strict or not isinstance(v, dict):
+        return None
+    for tag in ("__object__", "__dataclass__", "__opaque__", "__cycle__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            if _project_type(name) or (tag in ("__opaque__", "__cycle__")
+                                       and _value_type_name(name)):
+                return None
+            return name
+    name = v.get("__structure__")
+    if isinstance(name, str) and "values" not in v and "status_code" in v:
+        return name
+    return None
+
+
+def _unnameable(name: str) -> bool:
+    leaf = name.rsplit(".", 1)[-1]
+    return leaf.startswith("_") or "<locals>" in name
+
+
+def _introspected(*names: str) -> bool:
+    """The project may check one of these classes: it names one (or an alias of one) in an
+    ``isinstance``/``issubclass``/``except``/``match``/``type(x) is C``/singledispatch check,
+    it checks some class of one's top-level package (with no MRO recorded, that one may be a
+    base of these), or it reads a type's name."""
+    sem = _SEM.get()
+    if sem is None:
+        return False
+    if sem.old.type_names_read or sem.new.type_names_read:
+        return True
+    leaves = {n.rsplit(".", 1)[-1] for n in names}
+    packages = {n.split(".")[0] for n in names}
+    return bool(leaves & (sem.old.introspected | sem.new.introspected)
+                or packages & (sem.old.introspected_packages | sem.new.introspected_packages))
+
+
+def _handle_types_relate(ta: str, tb: str) -> bool:
+    """The type ladder for two dependency objects (§2, without the MRO step): the same type or
+    a relocation (same package, same class name); else, while the class relation is unknown
+    (no MRO is recorded), drift when the project never introspects either class
+    (``isinstance``, ``issubclass``, ``except``, ``match``, ``type(x) is C``, singledispatch,
+    or reading a type's name): the program can only observe such an object through the calls
+    it makes on it (facts of their own) and the attributes it reads. Introspected: strict."""
+    if _same_type_name(ta, tb):
+        return True
+    sem = _SEM.get()
+    if sem is None or _EDITED.get() or not (isinstance(ta, str) and isinstance(tb, str)):
+        return False   # on an edited line the edit's claim judges a new class (``_judge_pairs``)
+    if _introspected(ta, tb):
+        return False
+    ev = _EVIDENCE.get()
+    if ta.split(".")[0] != tb.split(".")[0]:
+        # another package's class (werkzeug's Response -> flask's): whether it matters is
+        # unknown without the MRO tables; the pair is a review item (``_pair_entry``), its
+        # read attributes still compared
+        if ev is not None:
+            ev.absorb(CROSS_PACKAGE, f"{ta} -> {tb}")
+        return True
+    same_module = ta.rsplit(".", 1)[0] == tb.rsplit(".", 1)[0]
+    rule = ("private-same-module" if same_module and _unnameable(ta) and _unnameable(tb)
+            else "unintrospected")
+    if ev is not None:
+        ev.absorb(f"type-drift:{rule}", f"{ta} -> {tb}")
+    return True
+
+
+CROSS_PACKAGE = "type-drift:cross-package"
+CROSS_PACKAGE_REVIEW = "class changed across packages"
+
+
+# Set by ``_pair_entry`` for a pair on an edited line: the edit made any new class, so the
+# type ladder's relation-unknown drift does not apply (relocation still does).
+_EDITED: ContextVar[bool] = ContextVar("pymolt_edited", default=False)
+
+
+# Set by ``_pair_entry``: the pair's input passes a project callable (a decorator call).
+_WRAPS: ContextVar[frozenset] = ContextVar("pymolt_wraps", default=frozenset())
+_NAME_READS = ("__name__", "__qualname__")
+
+
+def _wrapper_naming(a: Any, b: Any) -> bool:
+    """Two callables of the project's modules, returned by a call that was passed a project
+    callable (a decorator applied to the same function on both sides): the library wraps it
+    under another name (DRF's ``WrappedAPIView`` -> ``View.as_view.<locals>.view``). Drift,
+    unless the project reads a callable's name (``__name__``, ``__qualname__``)."""
+    sem = _SEM.get()
+    wrapped = _WRAPS.get()
+    if (sem is None or sem.strict or _EDITED.get() or not wrapped
+            or not (_project_type(a) and _project_type(b))):
+        return False
+    if any(n in sem.old.read or n in sem.new.read for n in _NAME_READS):
+        return False
+    defined = sem.old.defined | sem.new.defined
+
+    def wraps_it(label: str) -> bool:
+        # the decorated function itself, a closure, or a name the project defines nowhere (a
+        # class the library made for it): never another function of the project's own
+        return (label in wrapped or "<locals>" in label
+                or label.rsplit(".", 1)[-1] not in defined)
+
+    if not (wraps_it(a) and wraps_it(b)):
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        ev.absorb("type-drift:wrapper", f"{a} -> {b}")
+    return True
+
+
+# Opaque renderings of a callable (a C or Cython function, a bound method): a callable too.
+_CALLABLE_OPAQUES = ("cython_function_or_method", "fused_cython_function",
+                     "builtin_function_or_method", "method_descriptor", "method-wrapper",
+                     "function", "method", "functools.partial")
+CALLABLE_DRIFT = "type-drift:callable"
+
+
+def _callable_name(v: Any, tree: bool = False) -> str | None:
+    """The label of a callable's rendering (``__callable__``, or an opaque callable type), or
+    of its ``value_type`` tree (``tree``)."""
+    if not isinstance(v, dict):
+        return None
+    name = v.get("callable" if tree else "__callable__")
+    if isinstance(name, str):
+        return name
+    name = v.get("opaque" if tree else "__opaque__")
+    if isinstance(name, str) and (name.rsplit(".", 1)[-1] in _CALLABLE_OPAQUES
+                                  or name in _CALLABLE_OPAQUES):
+        return name
+    return None
+
+
+def _dependency_callables(a: str | None, b: str | None) -> bool:
+    """Two callables a dependency returned (neither a function of the project's own): a
+    handle whose behaviour shows in the calls that apply it (facts of their own), so on any
+    line, edited or not, two of them are equal as callables (``type-drift:callable``,
+    counted), unless the project reads a callable's name (``__name__``, ``__qualname__``). A
+    project callable keeps its identity (``lookup('save')`` returning another of the project's
+    functions fails)."""
+    sem = _SEM.get()
+    if (sem is None or sem.strict or not a or not b or a == b
+            or _project_type(a) or _project_type(b)
+            or any(n in sem.old.read or n in sem.new.read for n in _NAME_READS)):
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        ev.absorb(CALLABLE_DRIFT, f"{a} -> {b}")
+    return True
+
+
+def _project_callables(value: Any, out: set[str] | None = None) -> set[str]:
+    """The project's callables an input passes (their labels)."""
+    out = set() if out is None else out
+    if isinstance(value, dict):
+        name = value.get("__callable__")
+        if isinstance(name, str) and _project_type(name):
+            out.add(name)
+        for v in value.values():
+            _project_callables(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _project_callables(v, out)
+    return out
+
+
+def _handle_state(v: Mapping[str, Any]) -> dict[str, Any]:
+    if "__object__" in v:
+        return dict(_attr_items(v))
+    return {str(n): x for n, x in _pairs(v.get("fields"))}
+
+
+def _dunder(name: str) -> bool:
+    return name.startswith("__") and name.endswith("__")
+
+
+def _read_pairs(xs: Mapping[str, Any], ys: Mapping[str, Any]
+                ) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """``(old name, new name)`` pairs of a handle's attributes the project reads (on either side,
+    a planned rename mapped), the read names present on one side only, and the names not read.
+    A private name is compared when the project reads it by name (``p._cursor``)."""
+    sem = _SEM.get()
+    assert sem is not None
+    paired: list[tuple[str, str]] = []
+    one_sided: list[str] = []
+    unread: list[str] = []
+    seen_new: set[str] = set()
+    for name in sorted(xs):
+        new_name = sem.renames.get(name, name) if sem.renames.get(name) in ys else name
+        read = not _dunder(name) and (name in sem.old.read or new_name in sem.new.read)
+        if new_name in ys:
+            seen_new.add(new_name)
+            (paired.append((name, new_name)) if read else unread.append(name))
+        else:
+            (one_sided.append(name) if read else unread.append(name))
+    for name in sorted(ys.keys() - seen_new):
+        read = not _dunder(name) and (name in sem.new.read or name in sem.old.read)
+        (one_sided.append(name) if read else unread.append(name))
+    return paired, one_sided, unread
+
+
+def _handles_match(a: Mapping[str, Any], b: Mapping[str, Any], ta: str, tb: str) -> bool:
+    """Two dependency objects (``a`` old, ``b`` new): the same type (relocation allowed) and the
+    attributes the project reads equal. An attribute the code of the side lacking it reads is
+    a change when that side's rendering is complete (a dataclass record: absence is real);
+    otherwise it is not rendered there (an ``__object__`` holds instance state only: a property,
+    a cached or class attribute is not in it, nor in a truncated rendering), and the pair cannot
+    be compared (``ATTR_UNRENDERED``). Unread state that differs, or exists on one side only, is
+    absorbed (``handle-state``), never compared."""
+    sem = _SEM.get()
+    assert sem is not None
+    if not _handle_types_relate(ta, tb):
+        return False
+    xs, ys = _handle_state(a), _handle_state(b)
+    paired, one_sided, unread = _read_pairs(xs, ys)
+    ev = _EVIDENCE.get()
+    if a.get("__truncated__") or b.get("__truncated__"):
+        if ev is not None:
+            ev.type_only = True
+    moved_reads: list[str] = []
+    for name in one_sided:
+        # the side whose object lacks it: does that side's code read it?
+        lacking, lacking_reads, side = ((b, sem.new.read, "post-migration") if name in xs
+                                        else (a, sem.old.read, "baseline"))
+        if name not in lacking_reads:
+            # only the side that has it reads it (an edit moved the code to another name,
+            # ``legendHandles`` -> ``legend_handles``): not compared, counted
+            moved_reads.append(name)
+        elif _rendering_complete(lacking):
+            return False     # a record rendered whole lacks what the code reads: a change
+        elif ev is not None:
+            # not in that side's rendering, which may not hold it (``Table.c``: a property in
+            # SQLAlchemy 1.3, cached in the instance in 2.0): unknown, not a change
+            ev.unrendered.append(f"{(tb if name in xs else ta).rsplit('.', 1)[-1]}.{name} "
+                                 f"({side})")
+    if moved_reads and ev is not None:
+        ev.absorb(HANDLE_STATE, f"{ta.rsplit('.', 1)[-1]}: read on one side only: "
+                  + ", ".join(moved_reads[:4]))
+    for x_name, y_name in paired:
+        if not _read_value_match(sem, x_name, y_name, xs[x_name], ys[y_name], unread):
+            return False
+    differs = [n for n in unread
+               if n.endswith("[other keys]") or n not in xs or n not in ys
+               or _canon(xs[n]) != _canon(ys[n])]
+    if differs and ev is not None:
+        shown = ", ".join(differs[:4]) + (f" (+{len(differs) - 4})" if len(differs) > 4 else "")
+        ev.absorb(HANDLE_STATE, f"{ta.rsplit('.', 1)[-1]}: {shown}")
+    return True
+
+
+def _rendering_complete(v: Mapping[str, Any]) -> bool:
+    """Whether a handle's rendering holds every attribute it has: a dataclass record whole (its
+    fields). An ``__object__`` holds instance state only (no property, no class attribute, no
+    private name), and a truncated rendering was cut."""
+    return "__dataclass__" in v and not v.get("__truncated__")
+
+
+def _read_value_match(sem: _Semantics, x_name: str, y_name: str, x: Any, y: Any,
+                      unread: list[str]) -> bool:
+    """A read attribute's values: whole, or, for a dict the project only indexes by literal
+    keys (``app.config["SEED"]``), the entries under those keys (one present on one side only
+    is a change: the project's lookup would fail on the other)."""
+    whole = x_name in sem.old.whole or y_name in sem.new.whole
+    keys = (sem.old.keys.get(x_name, set()) | sem.new.keys.get(y_name, set()))
+    if whole or not keys or not (isinstance(x, dict) and isinstance(y, dict)
+                                 and "__dict__" in x and "__dict__" in y):
+        return _attr_value_match(x_name, x, y)
+    dx = {k: v for k, v in _pairs(x["__dict__"]) if isinstance(k, str)}
+    dy = {k: v for k, v in _pairs(y["__dict__"]) if isinstance(k, str)}
+    for k in sorted(keys):
+        if (k in dx) != (k in dy):
+            return False
+        if k in dx and not _attr_value_match(f"{x_name}[{k!r}]", dx[k], dy[k]):
+            return False
+    if _canon(x) != _canon(y):
+        unread.append(f"{x_name}[other keys]")
+    return True
+
+
+def _handle_types_match(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """``types_match`` for two dependency objects' ``value_type`` trees: their type, and the
+    types of the attributes the project reads."""
+    ta = a.get("object", a.get("dataclass"))
+    tb = b.get("object", b.get("dataclass"))
+    if not _handle_types_relate(ta, tb):
+        return False
+    xs = a.get("attrs", a.get("fields"))
+    ys = b.get("attrs", b.get("fields"))
+    if not isinstance(xs, dict) or not isinstance(ys, dict):
+        return True
+    paired, _one, _unread = _read_pairs(xs, ys)
+    return all(types_match(xs[x], ys[y]) for x, y in paired)
+
+
+def _handle_type_tree(t: Any) -> bool:
+    if not isinstance(t, dict):
+        return False
+    name = t.get("object", t.get("dataclass"))
+    sem = _SEM.get()
+    return (isinstance(name, str) and sem is not None and not sem.strict
+            and not _project_type(name) and ("object" in t or "dataclass" in t))
+
+
+def _handle_tree_label(t: Any) -> str | None:
+    """The type name of a ``value_type`` tree standing for a dependency object (an object or
+    record tree, an opaque or cycle of a library type, a response-like structure)."""
+    sem = _SEM.get()
+    if sem is None or sem.strict or not isinstance(t, dict):
+        return None
+    if _handle_type_tree(t):
+        return t.get("object", t.get("dataclass"))
+    for k in ("opaque", "cycle"):
+        name = t.get(k)
+        if isinstance(name, str):
+            return None if _project_type(name) or _value_type_name(name) else name
+    name = t.get("structure")
+    if isinstance(name, str) and "status_code" in t and "values" not in t and not any(
+            k in t for k in ("shape", "dtype", "dtypes", "columns")):
+        return name
+    return None
 
 
 def _type_key(name: Any) -> tuple[str, str] | None:
@@ -2431,6 +3155,9 @@ def _attr_value_match(name: str, x: Any, y: Any) -> bool:
     if isinstance(x, list) and isinstance(y, list):
         return len(x) == len(y) and all(_attr_value_match(name, p, q) for p, q in zip(x, y))
     if isinstance(x, dict) and isinstance(y, dict):
+        hx, hy = _handle_name(x), _handle_name(y)
+        if hx and hy:
+            return _handles_match(x, y, hx, hy)
         if "__object__" in x and "__object__" in y:
             if ev is not None:
                 ev.type_only = True
@@ -2513,22 +3240,252 @@ class OutcomeComparison:
     old_types: list[Any] | None = None
     new_types: list[Any] | None = None
     drift: bool = False  # equal, but an attribute was added/removed or went absent <-> empty
+    absorbed: list[str] = field(default_factory=list)  # relaxations that made it equal
+    numeric: dict[str, Any] | None = None   # floats equal within rounding (``FactEntry.numeric``)
 
 
 def compare_outcomes(
     old: list[Outcome], new: list[Outcome], profile: DiffProfile | str = DiffProfile.EXACT,
 ) -> OutcomeComparison:
-    """Compare two outcome distributions (the support, not the counts). Equal only because a
-    class moved within its package is equal at type level, with a ``relocated`` note."""
+    """Compare two outcome distributions. Equal only because a class moved within its package
+    is equal at type level, with a ``relocated`` note. Under a consumer projection (set per
+    pair, ``_CONSUMER``), both sides' results are first reduced to what the consuming statement
+    observes; a pair equal only once projected is DRIFT (``projected:<consumer>``)."""
+    consumer = _CONSUMER.get()
+    if consumer:
+        po, pn = _project_outcomes(old, consumer), _project_outcomes(new, consumer)
+        if po is not None and pn is not None:
+            cmp = _compare_plain(po, pn, profile)
+            if cmp.comparison is Comparison.EQUAL:
+                token = _CONSUMER.set(None)
+                try:
+                    raw = _compare_plain(old, new, profile)
+                finally:
+                    _CONSUMER.reset(token)
+                if raw.comparison is not Comparison.EQUAL:
+                    cmp.drift = True
+                    cmp.absorbed = sorted({*cmp.absorbed, f"{PROJECTED}:{consumer}"})
+                    cmp.notes.append(_projected_note(consumer, old, new))
+                    cmp.old_types, cmp.new_types = _distinct_types(old), _distinct_types(new)
+                    if cmp.level is ComparisonLevel.EXACT and raw.level is not None:
+                        cmp.level = raw.level if raw.level is ComparisonLevel.TYPE else cmp.level
+            return cmp
+    return _compare_plain(old, new, profile)
+
+
+PROJECTED = "projected"
+# Set by ``_pair_entry``: how the project consumes the pair's result, the same on both sides
+# (``source_uses.consumer_at``).
+_CONSUMER: ContextVar[str | None] = ContextVar("pymolt_consumer", default=None)
+_PROJECTION_WORDS = {
+    "discarded": "the result is discarded (an expression statement): outcome kind and raise "
+                 "type compared, a lazy result by its type",
+    "unpacked": "the result is unpacked: elements and arity compared, not the container type",
+    "iterated": "the result is iterated: elements compared, not the container type",
+    "int": "the result is passed to int(): compared as int() makes it",
+    "float": "the result is passed to float(): compared as float() makes it",
+    "bool": "the result is passed to bool(): compared by truthiness",
+    "len": "the result is passed to len(): compared by length",
+    "truth": "the result is a truth test: compared by truthiness",
+}
+_LAZY = ("coroutine", "generator", "async_generator")
+_LAZY_SUFFIXES = ("Future", "Task", "iterator", "Iterator", "ContextManager")
+
+
+def _projected_note(consumer: str, old: list[Outcome], new: list[Outcome]) -> str:
+    def types(outs: list[Outcome]) -> str:
+        return ", ".join(sorted({_type_label(t.get("return", t.get("raise"))) or "?"
+                                 for t in map(outcome_type, outs)}))[:80]
+    return (f"projected ({consumer}): {_PROJECTION_WORDS.get(consumer, consumer)}; "
+            f"old {types(old)}, new {types(new)}")
+
+
+def _lazy_label(v: Any) -> str | None:
+    """The type of a lazy result (a coroutine, generator, iterator, Future or Task, context
+    manager): discarding one means its work did not run, so it is compared by type."""
+    if not isinstance(v, dict):
+        return None
+    for tag in ("__opaque__", "__object__", "__cycle__"):
+        name = v.get(tag)
+        if isinstance(name, str):
+            leaf = name.rsplit(".", 1)[-1]
+            if name in _LAZY or leaf.endswith(_LAZY_SUFFIXES) or leaf in (
+                    "map", "filter", "zip", "enumerate", "reversed"):
+                return name
+    return None
+
+
+_NO_PROJECTION = object()
+
+
+def _items_of(v: Any) -> list | None:
+    """The elements an unpacking or a loop reads: a list's or tuple's items, or an object's
+    attributes in their rendered order (a library namedtuple, ``t, p = stats.ttest_ind(...)``:
+    the renderer keeps its fields in order; any other object iterated is compared by all its
+    state, never by a projection of it)."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, dict) and not v.get("__truncated__"):
+        for tag in ("__list__", "__tuple__"):
+            if isinstance(v.get(tag), list):
+                return v[tag]
+        if isinstance(v.get("__object__"), str) and isinstance(v.get("attrs"), dict):
+            return list(v["attrs"].values())
+    return None
+
+
+def _length(v: Any) -> Any:
+    if isinstance(v, str):
+        return len(v)
+    if isinstance(v, dict) and not v.get("__truncated__"):
+        for tag in ("__list__", "__tuple__", "__set__", "__dict__"):
+            if isinstance(v.get(tag), list):
+                return len(v[tag])
+        if isinstance(v.get("__bytes__"), str):
+            return len(v["__bytes__"]) // 2
+        shape = v.get("shape")
+        if "__structure__" in v and isinstance(shape, list) and shape:
+            return shape[0]
+    return _NO_PROJECTION
+
+
+def _truth(v: Any) -> Any:
+    if v is None or isinstance(v, bool | int | float | str):
+        return bool(v)
+    n = _length(v)
+    return bool(n) if isinstance(n, int) else _NO_PROJECTION
+
+
+def _number(v: Any, kind: str) -> Any:
+    if isinstance(v, bool):
+        return int(v) if kind == "int" else float(v)
+    if isinstance(v, int | float) and (kind == "float" or math.isfinite(v)):
+        return int(v) if kind == "int" else float(v)
+    if isinstance(v, dict) and isinstance(v.get("__decimal__"), str):
+        try:
+            from decimal import Decimal
+            d = Decimal(v["__decimal__"])
+            return int(d) if kind == "int" else float(d)
+        except (ArithmeticError, ValueError):
+            return _NO_PROJECTION
+    if isinstance(v, dict) and isinstance(v.get("__opaque__"), str) \
+            and _NUMPY_SCALAR.match(v["__opaque__"]):
+        return {"__opaque__": kind}      # a numpy scalar: its value is not recorded (format 1)
+    return _NO_PROJECTION
+
+
+def _input_type_keys(inputs: Any) -> set[tuple[str, str]]:
+    """The (package, class name) keys of the objects a call was handed: its receiver and its
+    arguments (top level). A discarded result of one of these types is handed back, not new."""
+    out: set[tuple[str, str]] = set()
+    for _name, v in _argument_values(inputs):
+        k = _type_key(_object_label(v))
+        if k:
+            out.add(k)
+    return out
+
+
+# Set by ``_pair_entry``: the (package, class name) keys of the pair's input object types.
+_RECEIVERS: ContextVar[frozenset] = ContextVar("pymolt_receivers", default=frozenset())
+
+
+def _object_label(v: Any) -> str | None:
+    """The type of an object rendering (not a value): a library or project object, record,
+    opaque, cycle or response-like structure."""
+    if not isinstance(v, dict):
+        return None
+    for tag in ("__object__", "__dataclass__", "__opaque__", "__cycle__"):
+        if isinstance(v.get(tag), str):
+            return v[tag]
+    if isinstance(v.get("__structure__"), str) and "values" not in v:
+        return v["__structure__"]
+    return None
+
+
+def _project_value(v: Any, consumer: str) -> Any:
+    if consumer == "discarded":
+        lazy = _lazy_label(v)
+        if lazy:
+            return {"__lazy__": lazy}
+        label = _object_label(v)
+        if label is None or _type_key(label) in _RECEIVERS.get():
+            # a value, or an object the call was handed (a fluent ``return self``, seaborn
+            # handing back the ``ax=`` it drew on): not observed
+            return {"__projected__": "discarded"}
+        # an object of another kind: one that may stand for deferred work (an AsyncResult, a
+        # Deferred, a QuerySet), so it compares by its type, through the ladder
+        return {"__opaque__": label}
+    if consumer in ("unpacked", "iterated"):
+        items = _items_of(v)
+        return {"__seq__": items} if items is not None else _NO_PROJECTION
+    if consumer in ("int", "float"):
+        return _number(v, consumer)
+    if consumer in ("bool", "truth"):
+        r = _truth(v)
+        if r is _NO_PROJECTION and isinstance(v, dict) and (
+                "__opaque__" in v or "__object__" in v):
+            return {"__opaque__": "bool"}
+        return r
+    if consumer == "len":
+        r = _length(v)
+        return {"__opaque__": "int"} if r is _NO_PROJECTION and _type_only(v) else r
+    return _NO_PROJECTION
+
+
+def _project_outcomes(outcomes: list[Outcome], consumer: str) -> list[Outcome] | None:
+    """The outcomes as the consuming statement sees them (raises unchanged), merged where they
+    became equal; None when a result cannot be projected (it is then compared in full)."""
+    merged: dict[str, Outcome] = {}
+    for o in outcomes:
+        if o.kind == "return" and not _is_unrecorded(o):
+            value = _project_value(o.value, consumer)
+            if value is _NO_PROJECTION:
+                return None
+        else:
+            value = o.value
+        key = _canon([o.kind, value])
+        if key in merged:
+            merged[key] = merged[key].model_copy(update={"count": merged[key].count + o.count})
+        else:
+            merged[key] = Outcome(kind=o.kind, value=value, count=o.count)
+    return list(merged.values())
+
+
+def _compare_plain(
+    old: list[Outcome], new: list[Outcome], profile: DiffProfile | str = DiffProfile.EXACT,
+) -> OutcomeComparison:
     ev = _Evidence()
     token = _EVIDENCE.set(ev)
     try:
         cmp = _compare_outcomes(old, new, DiffProfile(profile))
     finally:
         _EVIDENCE.reset(token)
+    if cmp.comparison is Comparison.EQUAL and ev.unrendered:
+        shown = ", ".join(ev.unrendered[:4]) + (
+            f" (+{len(ev.unrendered) - 4})" if len(ev.unrendered) > 4 else "")
+        return OutcomeComparison(Comparison.UNCOMPARABLE, None,
+                                 [*cmp.notes, f"{ATTR_UNRENDERED}: {shown}"])
     if cmp.comparison is Comparison.EQUAL and ev.drift:
         cmp.drift = True
         cmp.notes.extend(dict.fromkeys(ev.drift))
+    if cmp.comparison is Comparison.EQUAL and ev.relocated:
+        ev.absorb("type-drift:relocated", *(f"{a} -> {b}" for a, b in ev.relocated))
+    if cmp.comparison is Comparison.EQUAL and ev.numeric:
+        u = max(x for x, _ in ev.numeric)
+        r = max(y for _, y in ev.numeric)
+        cmp.numeric = {"values": len(ev.numeric), "max_ulps": round(u, 1),
+                       "max_relative": float(f"{r:.3g}")}
+        ev.absorb(NUMERIC, f"{len(ev.numeric)} value(s), max {u:.0f} ulps, relative {r:.1e}")
+        if cmp.level is ComparisonLevel.EXACT:
+            cmp.level = ComparisonLevel.NUMERIC
+    if cmp.comparison is Comparison.EQUAL and ev.absorbed:
+        cmp.absorbed = sorted(ev.absorbed)
+        # a relocation keeps its own note and stays EQUAL at type level, as before; it is only
+        # counted (``absorbed``). Every other relaxation is DRIFT, with its note.
+        shown = {m: d for m, d in ev.absorbed.items() if m != "type-drift:relocated"}
+        if shown:
+            cmp.drift = True
+            cmp.notes.extend(_absorbed_note(m, d) for m, d in sorted(shown.items()))
     if (ev.relocated or ev.type_only) and cmp.comparison is Comparison.EQUAL:
         cmp.notes.extend(f"relocated: {a} -> {b}" for a, b in ev.relocated)
         cmp.notes.extend(f"closure: {a} -> {b}" for a, b in ev.closures)
@@ -2543,6 +3500,8 @@ def _compare_outcomes(
 ) -> OutcomeComparison:
     if any(_is_unrecorded(o) for o in (*old, *new)):
         return OutcomeComparison(Comparison.UNCOMPARABLE, None, ["nondeterministic-unrecorded"])
+    if _awaited_unrecorded(old, new):
+        return OutcomeComparison(Comparison.UNCOMPARABLE, None, [AWAITED_UNRECORDED])
     o_keys = {_canon([o.kind, o.value]) for o in old}
     n_keys = {_canon([o.kind, o.value]) for o in new}
     nondet = len(o_keys) > 1 or len(n_keys) > 1
@@ -2556,6 +3515,10 @@ def _compare_outcomes(
     if untyped:
         notes.append("exception type unknown on one side")
     markers = untyped or any(_partial(o) for o in (*old, *new))
+    if profile is DiffProfile.EXACT and _COUNTED.get() and (
+            nondet or sum(o.count for o in old) != sum(o.count for o in new)):
+        # every call counted: a call more or fewer is a change, one outcome or several
+        return _compare_counted(old, new, notes, markers)
     if profile is DiffProfile.EXACT:
         if o_keys == n_keys or (nondet and _clock_sets_match(old, new)):
             level = ComparisonLevel.TYPE if markers else ComparisonLevel.EXACT
@@ -2573,6 +3536,223 @@ def _compare_outcomes(
             or _cover(old_t, new_t, _outcome_types_match))
     return _with_types(Comparison.EQUAL if same else Comparison.CHANGED, ComparisonLevel.TYPE,
                        notes, old, new)
+
+
+# Set by ``_pair_entry`` for one pair: both facts carry every call's outcome with its count
+# (not aggregated, not sampled, no outcome past a cap), so outcomes match with their counts.
+_COUNTED: ContextVar[bool] = ContextVar("pymolt_counted", default=False)
+_COUNTED_DIFF: ContextVar[bool] = ContextVar("pymolt_counted_diff", default=False)
+COUNT_CHANGED = "call-count-changed"
+EDITED_COUNT = "edited-count-changed"
+EDITED_COUNT_REVIEW = "call count changed at an edited statement"
+KINDS_MOVED = "outcome-kinds-moved"
+_MATCH_FULL_MAX = 4096   # outcome pairs a full matching is tried over (else: strict)
+
+
+def _absorbed_note(mechanism: str, details: list[str]) -> str:
+    shown = "; ".join(dict.fromkeys(details))
+    shown = shown if len(shown) <= 200 else shown[:199] + "…"
+    if mechanism == HANDLE_STATE:
+        return f"handle state not observed: unread attributes differ ({shown})"
+    if mechanism == NUMERIC:
+        return (f"numeric drift: floats equal within floating-point rounding "
+                f"(<= {_ULPS.get()} ulps): {shown}")
+    if mechanism == CALLABLE_DRIFT:
+        return ("type drift (a callable a dependency returned, applied in calls of its own): "
+                f"{shown}")
+    if mechanism == CROSS_PACKAGE:
+        return f"type drift (a class of another package, relation unknown): {shown}"
+    if mechanism.startswith("type-drift:"):
+        why = {"relocated": "the class moved within its package",
+               "unintrospected": "a dependency object's class changed and the project never "
+                                 "checks it (no MRO recorded: relation unknown)",
+               "private-same-module": "two private classes of one module",
+               "wrapper": "a decorator's wrapper of the same project function, named "
+                          "differently",
+               "carried": "a type an edited line produced"}.get(mechanism[11:], mechanism)
+        return f"type drift ({why}): {shown}"
+    return f"{mechanism}: {shown}"
+
+
+def _compare_counted(old: list[Outcome], new: list[Outcome], notes: list[str],
+                     markers: bool) -> OutcomeComparison:
+    """Several outcomes on a side, every call counted: the calls match one-to-one under the
+    comparison's own equivalence (``_outcomes_match``: handles projected, relocations, ...), so
+    a change in one of N calls in a loop, or counts moving between outcomes, is a change. A
+    total that moved is a presence change (``call-count-changed``); counts that moved between
+    outcome kinds (raise x2 -> x1) are ``outcome-kinds-moved``. Both fail whatever the noise
+    gate; a value moving between calls at an input-hidden fact goes through it."""
+    level = ComparisonLevel.TYPE if markers else ComparisonLevel.EXACT
+    oc: Counter = Counter()
+    nc: Counter = Counter()
+    for o in old:
+        oc[_canon([o.kind, o.value])] += o.count
+    for o in new:
+        nc[_canon([o.kind, o.value])] += o.count
+    total_o, total_n = sum(oc.values()), sum(nc.values())
+    if total_o != total_n:
+        if _EDITED.get() and _cover(old, new, _outcomes_match):
+            # an edited statement: the code changed, so its call count may; every value is
+            # one the other side returns too, so a person reviews it (``_pair_entry``)
+            return _with_types(Comparison.EQUAL, level,
+                               [*notes, EDITED_COUNT, f"calls: {total_o} -> {total_n}"], old, new)
+        return _with_types(Comparison.CHANGED, ComparisonLevel.EXACT,
+                           [*notes, COUNT_CHANGED, f"calls: {total_o} -> {total_n}"], old, new)
+    if oc == nc:
+        return _with_types(Comparison.EQUAL, level, notes, old, new)
+    clocked = any(o.kind == "return" and _clock_parts(o.value) for o in (*old, *new))
+    if clocked and _clock_sets_match(old, new) and _template_counts(old) == _template_counts(new):
+        return _with_types(Comparison.EQUAL, level, notes, old, new)
+    if _multiset_match(old, new):
+        return _with_types(Comparison.EQUAL, level, notes, old, new)
+    moved = Counter()
+    for o in old:
+        moved[_kind_label(o)] += o.count
+    for o in new:
+        moved[_kind_label(o)] -= o.count
+    extra = [KINDS_MOVED] if any(moved.values()) else ["counts-moved"]
+    return _with_types(Comparison.CHANGED, ComparisonLevel.EXACT, [*notes, *extra], old, new)
+
+
+def _template_counts(outcomes: list[Outcome]) -> Counter:
+    """Calls per outcome with clock readings reduced to their template: the counts a clock
+    comparison must keep (8 calls moving from a static value to a clock reading is a change)."""
+    out: Counter = Counter()
+    for o in outcomes:
+        parts = _clock_parts(o.value) if o.kind == "return" else None
+        out[_canon([o.kind, parts[0] if parts else o.value])] += o.count
+    return out
+
+
+def _kind_label(o: Outcome) -> str:
+    return "return" if o.kind == "return" else f"raise:{_raise_name(o.value)}"
+
+
+def _multiset_match(old: list[Outcome], new: list[Outcome]) -> bool:
+    """Every call on one side matched to one on the other (counts as capacities, a maximum
+    flow over the ``_outcomes_match`` pairs). The evidence of the pairs used is kept."""
+    edges: dict[tuple[int, int], _Evidence] = {}
+    if _all_floats(old) and _all_floats(new):
+        return _sorted_float_match(old, new)
+    if len(old) * len(new) > _MATCH_FULL_MAX:
+        return False     # too many distinct outcomes to match: strict
+    for i, x in enumerate(old):
+        for j, y in enumerate(new):
+            sub = _Evidence()
+            token = _EVIDENCE.set(sub)
+            try:
+                ok = _outcomes_match(x, y)
+            finally:
+                _EVIDENCE.reset(token)
+            if ok:
+                edges[(i, j)] = sub
+    total = sum(o.count for o in old)
+    flow = _max_flow([o.count for o in old], [o.count for o in new], list(edges))
+    if sum(flow.values()) != total:
+        return False
+    ev = _EVIDENCE.get()
+    if ev is not None:
+        for key, units in flow.items():
+            if units:
+                ev.merge(edges[key])
+    return True
+
+
+_SORTED_MATCH_MAX = 200_000   # calls a sorted float matching expands
+
+
+def _all_floats(outcomes: list[Outcome]) -> bool:
+    return all(o.kind == "return" and isinstance(o.value, float) for o in outcomes)
+
+
+def _sorted_float_match(old: list[Outcome], new: list[Outcome]) -> bool:
+    """Scalar float results matched with their counts: both sides' calls sorted and paired in
+    order, each pair within rounding (``_values_match``). The tolerance grows with magnitude
+    and is symmetric, so when any one-to-one matching exists the sorted one does: exact, and
+    no cap on the number of distinct values (a loop of 65 differently rounded values)."""
+    xs = sorted(v for o in old for v in [o.value] * o.count)
+    ys = sorted(v for o in new for v in [o.value] * o.count)
+    if len(xs) != len(ys) or len(xs) > _SORTED_MATCH_MAX:
+        return False
+    return all(x == y or _values_match(x, y) for x, y in zip(xs, ys))
+
+
+def _max_flow(supply: list[int], demand: list[int], edges: list[tuple[int, int]]
+              ) -> dict[tuple[int, int], int]:
+    """A maximum flow from ``supply`` (old outcomes' counts) to ``demand`` (new ones') over the
+    allowed edges (Edmonds-Karp; the graphs are a few dozen nodes)."""
+    n, m = len(supply), len(demand)
+    src, sink = n + m, n + m + 1
+    cap: dict[tuple[int, int], int] = defaultdict(int)
+    adj: dict[int, set[int]] = defaultdict(set)
+
+    def add(u: int, v: int, c: int) -> None:
+        cap[(u, v)] += c
+        adj[u].add(v)
+        adj[v].add(u)
+
+    big = sum(supply) + 1
+    for i, c in enumerate(supply):
+        add(src, i, c)
+    for j, c in enumerate(demand):
+        add(n + j, sink, c)
+    for i, j in edges:
+        add(i, n + j, big)
+    while True:
+        prev = {src: src}
+        queue = [src]
+        while queue and sink not in prev:
+            u = queue.pop(0)
+            for v in adj[u]:
+                if v not in prev and cap[(u, v)] > 0:
+                    prev[v] = u
+                    queue.append(v)
+        if sink not in prev:
+            break
+        bottleneck, v = big, sink
+        while v != src:
+            bottleneck = min(bottleneck, cap[(prev[v], v)])
+            v = prev[v]
+        v = sink
+        while v != src:
+            cap[(prev[v], v)] -= bottleneck
+            cap[(v, prev[v])] += bottleneck
+            v = prev[v]
+    return {(i, j): cap[(n + j, i)] for i, j in edges}
+
+
+#: A coroutine call is recorded when it starts, with a marker for its result (``_backend``'s
+#: ``COROUTINE_RESULT``): what it returned or raised once awaited is not recorded (value
+#: format 1). Two markers say nothing about what the awaits produced.
+AWAITED_UNRECORDED = "awaited result not recorded"
+# A read attribute one side's rendering does not hold (``_handles_match``): not rendered there.
+ATTR_UNRENDERED = "read attribute not rendered"
+_COROUTINE_MARKER = "coroutine"
+
+
+def _is_coroutine_marker(v: Any) -> bool:
+    return isinstance(v, dict) and len(v) == 1 and v.get("__opaque__") == _COROUTINE_MARKER
+
+
+def _awaitable_like(v: Any) -> bool:
+    """A rendering that may stand for an awaitable: a library object or a type-only marker
+    (a Future, a Task, a request context manager). A plain value (None, a number, a string, a
+    container, a structure with its values) or a record (a dataclass) is never awaited, so
+    against a coroutine it is a change of type, compared as such."""
+    return isinstance(v, dict) and any(k in v for k in ("__opaque__", "__object__", "__cycle__"))
+
+
+def _awaited_unrecorded(old: list[Outcome], new: list[Outcome]) -> bool:
+    """A coroutine marker on either side, against a marker or an awaitable-looking result on the
+    other, with the same outcome kinds: what each side's awaits produced is not recorded, so the
+    pair is UNCOMPARABLE (needs evidence), never equal by its markers. A new raise, or a plain
+    value against a coroutine, still compares (and fails)."""
+    rets = [o.value for o in (*old, *new) if o.kind == "return"]
+    if not any(_is_coroutine_marker(v) for v in rets):
+        return False
+    if _kinds(old) != _kinds(new):
+        return False
+    return all(_is_coroutine_marker(v) or _awaitable_like(v) for v in rets)
 
 
 def _with_types(comparison: Comparison, level: ComparisonLevel, notes: list[str],
@@ -2618,7 +3798,8 @@ def _raises_match(a: Any, b: Any) -> bool:
     """Same exception type; an untyped raise matches any raise (raise vs return still
     differs, and two different known types still differ)."""
     a, b = _raise_name(a), _raise_name(b)
-    return a == b or UNTYPED_RAISE in (a, b) or _reloc_equiv(a, b)
+    return a == b or UNTYPED_RAISE in (a, b) or _reloc_equiv(a, b) or (
+        "." in a and "." in b and _same_type_name(a, b))
 
 
 def _is_untyped_raise(o: Outcome) -> bool:
@@ -2644,13 +3825,87 @@ def _is_ambiguous(o: Outcome) -> bool:
             and str(o.value.get("__opaque__", "")).startswith("ambiguous"))
 
 
+FLOAT_ULPS = 1024     # owner decision (2026-11-24): the numeric layer's default bound
+NUMERIC = "numeric"
+_ULPS: ContextVar[int] = ContextVar("pymolt_ulps", default=FLOAT_ULPS)
+_STRICT: ContextVar[bool] = ContextVar("pymolt_strict", default=False)
+# The mantissa bits of the float array whose values are being compared (its dtype's
+# precision); None: a Python float (float64).
+_NUM_SCALE: ContextVar[int | None] = ContextVar("pymolt_num_scale", default=None)
+# Whatever the ulps bound, two floats further apart than this relatively are never "within
+# rounding" (float16's 1024 ulps would be 100%): 2**-10.
+_NUM_REL_CAP = 2.0 ** -10
+_MANTISSA = {"float64": 52, "float32": 23, "float16": 10, "float": 52, "double": 52,
+             "single": 23, "half": 10}
+
+
+def _ulp(scale: float, bits: int) -> float:
+    return math.ulp(scale) * 2.0 ** (52 - bits)
+
+
+def _floats_close(a: float, b: float) -> float | None:
+    """The distance of two different floats in units in the last place, when within the bound
+    (``_ULPS``) at their own precision; None otherwise. Each value scales by its own pair's
+    larger magnitude (an array element too, never by the array's largest), at the array's dtype
+    precision; zero against non-zero is never close, nor are two floats further apart than
+    2**-10 relatively, nor non-finite values; a bound of 0 is exact."""
+    bound = _ULPS.get()
+    if bound <= 0 or not (math.isfinite(a) and math.isfinite(b)):
+        return None
+    if a == b:
+        return 0.0                       # +0.0 and -0.0
+    if a == 0.0 or b == 0.0:
+        return None                      # zero against non-zero: no rounding makes that
+    bits = _NUM_SCALE.get() or 52
+    scale = max(abs(a), abs(b))
+    if abs(a - b) / scale > _NUM_REL_CAP:
+        return None
+    distance = abs(a - b) / _ulp(scale, bits)
+    return distance if distance <= bound else None
+
+
+def _numeric_scope(a: Mapping[str, Any], b: Mapping[str, Any]) -> int | None:
+    """The precision (mantissa bits) of one float array's values, both sides of one dtype."""
+    bits = _MANTISSA.get(str(a.get("dtype")))
+    if bits is None or a.get("dtype") != b.get("dtype"):
+        return None
+    return bits
+
+
 def _values_match(a: Any, b: Any) -> bool:
     """Exact equality (type-strict: ``1 != 1.0 != True``), falling back to type equality only
     where either side holds a type-only rendering."""
     if _canon(a) == _canon(b):
         return True
+    if isinstance(a, float) and isinstance(b, float):
+        distance = _floats_close(a, b)
+        if distance is None:
+            return False
+        ev = _EVIDENCE.get()
+        if ev is not None:
+            top = max(abs(a), abs(b))
+            ev.numeric.append((distance, abs(a - b) / top if top else 0.0))
+        return True
     if isinstance(a, str) and isinstance(b, str) and "⟨clock:" in a:
         return clock_values_match(a, b)
+    ha, hb = _handle_name(a), _handle_name(b)
+    if ha and hb:
+        return _handles_match(a, b, ha, hb)
+    ca, cb = _callable_name(a), _callable_name(b)
+    if ca and cb and ("__callable__" not in a or "__callable__" not in b):
+        # a callable rendered opaque (a Cython function) against one rendered by name
+        return _dependency_callables(ca, cb)
+    la, lb = _handle_label(a), _handle_label(b)
+    if la and lb:
+        if not _handle_types_relate(la, lb):
+            return False
+        if a.get("status_code") != b.get("status_code"):
+            return False
+        if _type_only(a) or _type_only(b) or a.get("__truncated__") or b.get("__truncated__"):
+            ev = _EVIDENCE.get()
+            if ev is not None:
+                ev.type_only = True
+        return True
     if _type_only(a) or _type_only(b):
         return types_match(value_type(a), value_type(b))
     if not (isinstance(a, dict) and isinstance(b, dict)):
@@ -2658,7 +3913,9 @@ def _values_match(a: Any, b: Any) -> bool:
     if "__type__" in a and "__type__" in b:
         return _same_type_name(a["__type__"], b["__type__"])
     if "__callable__" in a and "__callable__" in b:
-        return _same_closure(a["__callable__"], b["__callable__"])
+        return (_same_closure(a["__callable__"], b["__callable__"])
+                or _wrapper_naming(a["__callable__"], b["__callable__"])
+                or _dependency_callables(a["__callable__"], b["__callable__"]))
     if "__object__" in a and "__object__" in b:
         if a.get("__truncated__") or b.get("__truncated__"):  # truncated object: type level
             return types_match(value_type(a), value_type(b))
@@ -2673,7 +3930,7 @@ def _values_match(a: Any, b: Any) -> bool:
                 ev.drift.append(HANDLE_NOTE)
             return True
         return False
-    for tag in ("__list__", "__tuple__", "__set__"):
+    for tag in ("__list__", "__tuple__", "__set__", "__seq__"):
         if tag in a and tag in b:
             xs, ys = a[tag], b[tag]
             if not (isinstance(xs, list) and isinstance(ys, list)):
@@ -2694,9 +3951,18 @@ def _values_match(a: Any, b: Any) -> bool:
                         for (na, va), (nb, vb) in zip(xs, ys)))
     if "__structure__" in a and "__structure__" in b:
         if "values" in a and "values" in b:
-            rest_a = {k: v for k, v in a.items() if k != "values"}
-            rest_b = {k: v for k, v in b.items() if k != "values"}
-            return _canon(rest_a) == _canon(rest_b) and _values_match(a["values"], b["values"])
+            # the label relocates like any type name (``numpy.ma.core.MaskedArray`` is
+            # ``numpy.ma.MaskedArray``); the rest (dtype, shape, columns) compares as is
+            rest_a = {k: v for k, v in a.items() if k not in ("values", "__structure__")}
+            rest_b = {k: v for k, v in b.items() if k not in ("values", "__structure__")}
+            if not (_same_type_name(a["__structure__"], b["__structure__"])
+                    and _canon(rest_a) == _canon(rest_b)):
+                return False
+            token = _NUM_SCALE.set(_numeric_scope(a, b))
+            try:
+                return _values_match(a["values"], b["values"])
+            finally:
+                _NUM_SCALE.reset(token)
         return types_match(value_type(a), value_type(b))
     return False
 
@@ -2739,7 +4005,8 @@ def _cover(xs: Iterable, ys: Iterable, match: Callable[[Any, Any], bool]) -> boo
 
 # ── Round 3: edit provenance (line-mapped diff, ledger, anchors, representation) ───────────
 
-_TYPE_RELOC: ContextVar[Mapping[str, str]] = ContextVar("pymolt_type_reloc", default={})
+# old -> new type names (a mapping, or a list of pairs once edits carried types).
+_TYPE_RELOC: ContextVar[Any] = ContextVar("pymolt_type_reloc", default={})
 _NOISE_PREFIXES = ("importlib._bootstrap",)
 _CLASS_HOOKS = ("__init_subclass__", "__set_name__", "__prepare__")
 _APPEAR_HOOKS = ("__getattribute__",)  # a new implicit protocol hook is not a call anyone made
@@ -2801,7 +4068,8 @@ def _entry_lines(entry: Mapping, side: int) -> Iterable[int]:
 def _reloc_equiv(a: str, b: str) -> bool:
     """``a`` and ``b`` are an old/new spelling pair from the plan's type relocations (full
     names or their last segments)."""
-    for old_t, new_t in _TYPE_RELOC.get().items():
+    rel = _TYPE_RELOC.get()
+    for old_t, new_t in (rel.items() if isinstance(rel, Mapping) else rel):
         names = {old_t, new_t, old_t.rsplit(".", 1)[-1], new_t.rsplit(".", 1)[-1]}
         if a != b and a in names and b in names:
             return True
@@ -2838,6 +4106,8 @@ class _Provenance:
         self.no_ledger = self.ledger_known and ctx is not None and ctx.edits is None
         self._stmts: dict[tuple[int, str], dict[int, tuple] | None] = {}
         self._cover: dict[tuple[str, int], dict[int, Mapping]] | None = None
+        # (file, function) where an old-side call on an edited line raised (``_diff_facts``)
+        self.old_edit_raises: set[tuple[str, str]] = set()
 
     def status(self, file: str, line: int | None, side: int) -> str | None:
         """``same`` / ``edited`` / ``gone`` (deleted or inserted) / None (no line map)."""
@@ -3078,6 +4348,69 @@ class _Provenance:
                      for ln in range(named.lineno, (named.end_lineno or named.lineno) + 1))
         return "edited" if edited else "same"
 
+    def edited_literals(self, side: int, file: str) -> dict[Any, int]:
+        """The string literals on the side's edited lines of ``file`` -> a line."""
+        key = (side + 12, file)
+        if key not in self._stmts:
+            out: dict[Any, int] = {}
+            text = self.sources[side].get(file)
+            m = self.maps.get(file)
+            tree = None
+            if text is not None and m is not None:
+                try:
+                    tree = _parse_source(text)
+                except (SyntaxError, ValueError):
+                    tree = None
+            for node in ast.walk(tree) if tree is not None else ():
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and m[side].get(node.lineno, ("gone", None))[0] != "same"):
+                    out.setdefault(node.value, node.lineno)
+            self._stmts[key] = out  # type: ignore[assignment]
+        return self._stmts[key]  # type: ignore[return-value]
+
+    def binding_edited(self, side: int, file: str, line: int | None, symbol: str) -> bool:
+        """The call on an unedited line resolves through a name an *edited* import binds
+        (``from werkzeug.utils import safe_join`` replacing Flask's): the edit chose the
+        callee, so the call is the edit's site. The call is the one whose name is the callee's
+        leaf, or, when the line does not name the leaf, the line's only call through a name an
+        edited import binds (``_("...")`` after ``ugettext_lazy as _`` became
+        ``gettext_lazy as _``)."""
+        text = self.sources[side].get(file)
+        other = self.sources[1 - side].get(file)
+        if text is None or other is None or line is None or file not in self.maps:
+            return False
+        try:
+            tree = _parse_source(text)
+            other_tree = _parse_source(other)
+        except (SyntaxError, ValueError):
+            return False
+        mine, theirs = _import_bindings(tree), _import_bindings(other_tree)
+        # a name whose import names another object on the other side (another module, or
+        # another name behind an ``as``): the edit rebound it
+        edited_names = {n for n, src in mine.items() if theirs.get(n, src) != src}
+        if not edited_names:
+            return False
+        span = self.stmt_span(side, file, line) or (line, line)
+        leaf = _symbol_leaf(symbol)
+        roots_by_leaf: list[str] = []
+        roots_edited: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and span[0] <= node.lineno <= span[1]:
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                while isinstance(fn, ast.Attribute):
+                    fn = fn.value
+                root = fn.id if isinstance(fn, ast.Name) else None
+                if root is None:
+                    continue
+                if name == leaf:
+                    roots_by_leaf.append(root)
+                if root in edited_names:
+                    roots_edited.add(root)
+        if roots_by_leaf:
+            return all(r in edited_names for r in roots_by_leaf)
+        return len(roots_edited) == 1
+
     def attribute_read_evidence(self, side: int, file: str, line: int | None,
                                 symbol: str) -> bool:
         """The statement's AST shows the leaf is read, not called, or called with arguments the
@@ -3214,10 +4547,27 @@ class _Provenance:
         return self._stmts[key]
 
 
+def _import_bindings(tree: ast.AST) -> dict[str, tuple[str, str]]:
+    """Module-level import bindings: local name -> (module, imported name)."""
+    out: dict[str, tuple[str, str]] = {}
+    for node in getattr(tree, "body", ()):
+        if isinstance(node, ast.ImportFrom) and not node.level:
+            for a in node.names:
+                out[a.asname or a.name] = (node.module or "", a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                out[(a.asname or a.name).split(".")[0]] = (a.name if a.asname else
+                                                           a.name.split(".")[0], "")
+    return out
+
+
 def _parse_source(text: str) -> ast.AST:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        return ast.parse(text)
+        try:
+            return ast.parse(text)
+        except (RecursionError, MemoryError) as exc:   # too deep: no tree, like a bad file
+            raise SyntaxError(f"cannot parse: {type(exc).__name__}") from exc
 
 
 def _names_leaf(node: ast.AST, leaf: str) -> bool:
@@ -3674,7 +5024,13 @@ class _Masker:
     # aspects that differ between the two captures' recorded environments
     env_tokens: dict[str, str] = field(default_factory=dict)
 
+    prefixes: list[str] = field(default_factory=list)   # interpreter prefixes (venv roots)
+
     def __post_init__(self) -> None:
+        # a site-packages path first (its ``pythonX.Y`` is the interpreter's), then the prefix
+        self._prefixes = re.compile("|".join(
+            rf"(?<![\w.\-/]){re.escape(r)}(?:/lib/python\d+\.\d+/site-packages)?(?![\w.\-])"
+            for r in self.prefixes)) if self.prefixes else None
         self._roots = re.compile("|".join(
             rf"(?<![\w.\-/]){re.escape(r)}(?![\w.\-])" for r in self.roots)) if self.roots else None
         pys = [re.escape(v) for v in self.pythons]
@@ -3755,6 +5111,10 @@ class _Masker:
             s = self._mask_tokens(s)
         if self.window is not None:
             s = self._mask_clock(s)
+        if self._prefixes is not None and self._prefixes.search(s):
+            self._note("environment", self._prefixes.search(s).group())
+            s = self._prefixes.sub(lambda m: "⟨site-packages⟩" if m.group().endswith(
+                "site-packages") else "⟨prefix⟩", s)
         if self._roots is not None and self._roots.search(s):
             self._note("environment", self._roots.search(s).group())
             s = self._roots.sub("⟨root⟩", s)
@@ -4022,6 +5382,7 @@ def _masker_for(fs: FactSet, facts: list[Fact], stable: frozenset = frozenset(),
             for n in nums:
                 numbers.setdefault(n, "⟨src:number⟩")
     return _Masker(roots=list(fs.env_roots), pythons=list(fs.python_versions),
+                   prefixes=list(fs.env_prefixes),
                    host_capture=fs.host_capture, tokens=tokens, numbers=numbers, stable=stable,
                    versions=versions or {}, env_tokens=env_tokens or {})
 
@@ -4218,15 +5579,42 @@ def diff_facts(
 
     ``order_causes``: known causes of dict key order changes (``OrderCause``); an order finding
     that matches one exactly is cited, and from 5 keys on the citation proves determinism."""
-    token = _HANDLES.set(_handle_types(old.facts, new.facts))
+    sem, no_sem = _semantics_for(context, new.root)
+    # Without source snapshots a receiver of operation-like calls is a handle whose state is
+    # not compared (``_HANDLES``); with them, what the project reads of it decides
+    # (``_Semantics``); under ``--strict``, its full state.
+    strict = bool(context is not None and context.strict)
+    token = _HANDLES.set(_handle_types(old.facts, new.facts) if sem is None and not strict
+                         else frozenset())
+    sem_token = _SEM.set(sem)
+    counted = _COUNTED_DIFF.set(_every_call_counted(old) and _every_call_counted(new))
     reloc = _TYPE_RELOC.set((context.type_relocations if context else None) or {})
+    ulps = (context.float_ulps if context is not None and context.float_ulps is not None
+            else FLOAT_ULPS)
+    ulps_token = _ULPS.set(max(0, int(ulps)))
+    strict_token = _STRICT.set(strict)
     noise = _NOISE.set(_NoiseState())
     try:
-        return _diff_facts(old, new, DiffProfile(profile), context, tuple(order_causes))
+        diff = _diff_facts(old, new, DiffProfile(profile), context, tuple(order_causes))
+        diff.float_ulps = _ULPS.get()
     finally:
         _NOISE.reset(noise)
+        _STRICT.reset(strict_token)
+        _ULPS.reset(ulps_token)
         _TYPE_RELOC.reset(reloc)
+        _COUNTED_DIFF.reset(counted)
+        _SEM.reset(sem_token)
         _HANDLES.reset(token)
+    diff.handle_comparison = ("full" if strict else "projected" if sem is not None
+                              else no_sem or "full: no source snapshot")
+    if no_sem:
+        diff.warnings.append(
+            f"objects-compared-in-full: {no_sem[6:]}: what the project reads of a dependency "
+            "object is unknown, so every object, result and class compares in full")
+    if sem is not None and HANDLE_STATE in diff.absorbed:
+        diff.dynamic_reads = sorted({f"{f}:{line} {what}" for uses in (sem.old, sem.new)
+                                     for f, line, what in uses.dynamic})
+    return diff
 
 
 def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
@@ -4257,6 +5645,12 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         if (k := source_kind(f.symbol)) is not None and not (k[1] and seeded))
     old_facts = _canonicalise(old_facts, noise.old)
     new_facts = _canonicalise(new_facts, noise.new)
+    # a successor rewrite's renamed keywords and written-out defaults, read back in the old
+    # call's terms before anything is keyed (``verify.successor_inputs``)
+    new_facts = successor_inputs.normalize(new_facts, context.edits if context else None)
+    if _SEM.get() is not None and not _SEM.get().strict:
+        old_facts = [_record_inputs(f) for f in old_facts]
+        new_facts = [_record_inputs(f) for f in new_facts]
     old_facts, new_facts = _collapse_widened(old_facts, new_facts)
     if prof is DiffProfile.SHAPE:
         old_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})
@@ -4264,10 +5658,15 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
         new_facts = [f.model_copy(update={"input": input_type(f.input), "input_order": None})
                      for f in new_facts]
 
-    old_facts, new_facts = _normalize_scopes(old_facts), _normalize_scopes(new_facts)
+    old_facts = _normalize_scopes(old_facts, context.old_sources if context else None)
+    new_facts = _normalize_scopes(new_facts, context.new_sources if context else None)
+    kept_symbols = {f.symbol for f in (*old_facts, *new_facts)}
+    old_facts, new_facts, via = _drop_via(old_facts, new_facts, context)
+    via_symbols = sorted(kept_symbols - {f.symbol for f in (*old_facts, *new_facts)})
     modes = _site_modes(old_facts, new_facts, old.site_tallies, new.site_tallies)
     ov = _views(old_facts, modes)
     nv = _views(new_facts, modes)
+    record_calls = (_record_digests(old_facts, modes), _record_digests(new_facts, modes))
 
     defaulted_names: dict[str, set[str]] = defaultdict(set)
     for v in (*ov, *nv):
@@ -4286,6 +5685,9 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
                 if st == "same" and prov.naming_status(
                         side, v.fact.file, v.fact.line, v.fact.symbol) == "edited":
                     v.rewritten_site = True  # the statement that names the callee was edited
+                if st == "same" and prov.binding_edited(side, v.fact.file, v.fact.line,
+                                                        v.fact.symbol):
+                    v.rewritten_site = True  # its name was rebound by an edited import
             span = prov.stmt_span(side, v.fact.file, v.fact.line)
             if span:  # key on the statement, in the new side's numbering
                 start = span[0] if side == 1 else prov.mapped_line(v.fact.file, span[0], 0)
@@ -4366,6 +5768,22 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             lambda v: (site(v), v.fact.symbol.split(".")[0], v.fact.symbol.rsplit(".", 1)[-1]))
         pair_pass(pairs, input_changed=True)
 
+    # 5d Same site, a callee of the same name that moved to another module, the same argument
+    # values however it binds or names them (werkzeug's ``abort(status=403)`` -> Flask's
+    # ``abort(code=403)``): pass 4 with the binding ignored, one-to-one, different symbols only
+    # (a symbol on both sides is pass 5b's).
+    if not sampled:
+        pairs, old_left, new_left = _pair_groups(
+            old_left, new_left, lambda v: (site(v), _symbol_leaf(v.fact.symbol),
+                                           _unbound_key(v.fact.input)))
+        same = [(o, n) for o, n in pairs if o.fact.symbol == n.fact.symbol]
+        if same:
+            back = {id(v) for pair in same for v in pair}
+            old_left = old_left + [o for o, _ in same]
+            new_left = new_left + [n for _, n in same]
+            pairs = [(o, n) for o, n in pairs if id(o) not in back]
+        pair_pass(pairs, input_changed=True)
+
     # 6 Anchored pairing on edited lines (same symbol, ledger / plan symbol, one-statement
     # edit); never positional across different symbols.
     paired: set[int] = set()
@@ -4433,14 +5851,18 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             (bool(old.dropped_events), bool(new.dropped_events)))
         entries.extend(groups)
 
+    _judge_record_inputs(pending, record_calls, modes)
     _mark_unobservable(old_left, new)
     _mark_vanished(old_left, new_facts, prov, ov)
+    prov.old_edit_raises = {(v.fact.file, v.fact.func) for v in ov if v.rewritten_site
+                            and any(o.kind == "raise" for o in v.fact.outcomes)}
     for v in old_left:
         entries.append(_single_entry(v, old_side=True, prov=prov))
     for v in new_left:
         entries.append(_single_entry(v, old_side=False, prov=prov))
     _lift_namespace_edits(pending, prov)
     _judge_pairs(pending, old_left, new_left, prov)
+    _carry_edit_types(pending, prov, ov, nv)
     _apply_noise(entries, prov, {f.symbol.split('.')[0] for f in old_facts})
     backend_only = _soften_backend(entries, old, new)
     if sampled:
@@ -4456,7 +5878,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
                         if len(tok) >= 8:
                             idx[tok[:8]].append(tok)
                     gstats.seed_index[side] = idx
-        changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats)
+        changed_inputs = _judge_input_changes(pending, old_left, new_left, gstats, prov)
     order_stats = _judge_order(pending, old, new, prof, order_causes)
     protected = _protected_symbols(context)
     env_readings = _explain_env_readings(pending, envcmp, protected)
@@ -4467,6 +5889,7 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
     _soften_dropped(entries, old, new)
     _soften_evicted(entries, old, new)
     _soften_capped(entries, old, new, ov, nv, modes)
+    _soften_unplaced(entries, old, new)
     if not sampled:
         _judge_input_variants(entries, ov, nv, modes)
     _review_masked_input(entries)
@@ -4534,13 +5957,167 @@ def _diff_facts(old: FactSet, new: FactSet, prof: DiffProfile,
             f"({', '.join(envcmp.differs)}); {env_reviews} difference(s) at calls that read a "
             f"differing aspect are reviews, {env_readings} value(s) are each side's own "
             "reading")
-    return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger,
+    if via:
+        warnings.append(
+            f"via:{via}: fact(s) made by compiled code while another call on the project's "
+            "line ran (a callback with no Python frame of its own, a numpy dispatcher), not "
+            "calls the project made: not compared")
+    return FactDiff(profile=prof, entries=entries, no_ledger=prov.no_ledger, via=via,
+                    via_symbols=via_symbols,
                     old_summary=old.summary(),
                     new_summary=new.summary(), warnings=warnings, unsampled=unsampled,
                     dict_order=_order_status(old, new),
                     environment=_env.stamp(envcmp, old.environment, new.environment,
                                            reviews=env_reviews, explained=env_readings,
                                            inferred=_env_inference(old, new)))
+
+
+VIA = "via"
+_DISPATCHER = re.compile(r"^_\w*_dispatcher$")
+
+
+def _statement_text(f: Fact, sources: Mapping[str, str] | None,
+                    cache: dict[str, Any]) -> str | None:
+    """The text of the statement a fact's line is in (the snapshot's simple statement spanning
+    it), else the recorded line text."""
+    text = (sources or {}).get(f.file)
+    if text is not None and f.line is not None:
+        if f.file not in cache:
+            spans: dict[int, tuple[int, int]] = {}
+            try:
+                tree = _parse_source(text)
+            except (SyntaxError, ValueError):
+                tree = None
+            for node in ast.walk(tree) if tree is not None else ():
+                if isinstance(node, ast.stmt) and not _COMPOUND(node):
+                    for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+                        spans[ln] = (node.lineno, node.end_lineno or node.lineno)
+            cache[f.file] = (text.splitlines(), spans)
+        lines, spans = cache[f.file]
+        first, last = spans.get(f.line, (f.line, f.line))
+        return "\n".join(lines[first - 1:last])
+    return f.text
+
+
+def _names(name: str, text: str) -> bool:
+    return re.search(rf"(?<![\w.]){re.escape(name)}\b|\.{re.escape(name)}\b", text) is not None
+
+
+def _file_aliases(text: str | None) -> tuple[dict[str, set[str]], set[str]]:
+    """A file's names that may stand for a callable of another name: ``{name: {leaves}}``
+    from its imports (``from dep.metrics import mean_squared_error as mse``) and plain
+    assignments (``f = np.concatenate``, ``g = functools.partial(dep.f, 1)``); and the names it
+    binds to something else (a parameter, a call's result, a loop variable): a call through
+    one of those may be any callable."""
+    if not text:
+        return {}, set()
+    try:
+        tree = _parse_source(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}, set()
+    aliases: dict[str, set[str]] = defaultdict(set)
+    for name, full in _uses.import_bindings(tree).items():
+        aliases[name].add(full.rsplit(".", 1)[-1])
+    defined: set[str] = set()
+    bound: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            defined.add(n.name)
+        elif isinstance(n, ast.arg):
+            bound.add(n.arg)
+        elif isinstance(n, ast.Assign) and len(n.targets) == 1 \
+                and isinstance(n.targets[0], ast.Name):
+            v = n.value
+            if isinstance(v, ast.Call) and _uses._leaf(v.func) == "partial" and v.args:
+                v = v.args[0]
+            if isinstance(v, ast.Name | ast.Attribute):
+                leaf = v.id if isinstance(v, ast.Name) else v.attr
+                aliases[n.targets[0].id].add(leaf)
+                aliases[n.targets[0].id] |= aliases.get(leaf, set())
+            else:
+                bound.add(n.targets[0].id)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            bound.add(n.id)
+    unknown = {b for b in bound if b not in aliases and b not in defined}
+    return dict(aliases), unknown
+
+
+def _drop_via(old_facts: list[Fact], new_facts: list[Fact], context: DiffContext | None
+              ) -> tuple[list[Fact], list[Fact], int]:
+    """Calls the project's line did not make (the design's ``via``; host fallback until the
+    watcher marks them): a fact whose callee its statement never names, while a compiled call
+    the statement does name ran there on the same side (a C function or type calling back into
+    Python with no frame of its own: RandomState(0) -> concatenate, markupsafe's C escape ->
+    Markup.__new__), or a numpy dispatcher (``_round_dispatcher``, called by numpy's C
+    dispatch). "Names" goes through the file's import and assignment aliases
+    (``mse(y, p)`` names ``mean_squared_error``), and a statement that calls through a name
+    bound to anything else (a parameter, a variable) may make any call: nothing is dropped
+    there. A dunder is an implicit protocol, judged elsewhere. Never under ``--strict``.
+    Decided per (file, line text, callee name) on either side and applied to both (by line
+    number for a side that recorded no line text), so the two sides stay symmetric. Returns
+    the kept facts and how many were dropped."""
+    if context is not None and context.strict:
+        return old_facts, new_facts, 0
+    keys: set[tuple] = set()
+    for facts, sources in ((old_facts, context.old_sources if context else None),
+                           (new_facts, context.new_sources if context else None)):
+        cache: dict[str, Any] = {}
+        aliases_of: dict[str, tuple[dict[str, set[str]], set[str]]] = {}
+        by_stmt: dict[tuple, list[Fact]] = defaultdict(list)
+        texts: dict[tuple, str | None] = {}
+        for f in facts:
+            stmt = _statement_text(f, sources, cache)
+            k = (f.file, stmt)
+            by_stmt[k].append(f)
+            texts[k] = stmt
+        for (file, _s), group in by_stmt.items():
+            stmt = texts[(file, _s)]
+            if file not in aliases_of:
+                aliases_of[file] = _file_aliases((sources or {}).get(file))
+            aliases, unknown = aliases_of[file]
+
+            def named(leaf: str, stmt: str = stmt or "") -> bool:
+                return _names(leaf, stmt) or any(
+                    leaf in targets and _names(a, stmt) for a, targets in aliases.items())
+
+            called = set(re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", stmt or ""))
+            if called & unknown:
+                continue     # a call through a variable or parameter: it may be any callable
+            compiled = any(
+                isinstance(g.input, dict) and g.input.get("__c_call__") is True and stmt
+                and named(_symbol_leaf(g.symbol)) for g in group)
+            for f in group:
+                leaf = _symbol_leaf(f.symbol)
+                if leaf.startswith("__") and leaf.endswith("__"):
+                    continue
+                dispatcher = (f.symbol.split(".")[0] == "numpy"
+                              and bool(_DISPATCHER.match(f.symbol.rsplit(".", 1)[-1])))
+                if dispatcher or (compiled and stmt and not named(leaf)
+                                  and not (isinstance(f.input, dict)
+                                           and f.input.get("__c_call__") is True)):
+                    keys.add((f.file, "text", f.text, leaf) if f.text is not None
+                             else (f.file, "line", f.line, leaf))
+                    keys.add((f.file, "line", f.line, leaf))
+    if not keys:
+        return old_facts, new_facts, 0
+
+    def keep(f: Fact) -> bool:
+        leaf = _symbol_leaf(f.symbol)
+        if f.text is not None:
+            return (f.file, "text", f.text, leaf) not in keys
+        return (f.file, "line", f.line, leaf) not in keys
+
+    old_kept = [f for f in old_facts if keep(f)]
+    new_kept = [f for f in new_facts if keep(f)]
+    dropped = len(old_facts) - len(old_kept) + len(new_facts) - len(new_kept)
+    return old_kept, new_kept, dropped
+
+
+def _unbound_key(inputs: Any) -> str:
+    """A call's argument values, receiver aside, as one sorted multiset: the input whatever
+    the parameters' names or binding (an empty ``*args``/``**kwargs`` is no argument)."""
+    values = [_canon(v) for name, v in _argument_values(inputs) if name not in ("self", "cls")]
+    return _canon(sorted(values))
 
 
 def _site_key(symbol: str, file: str, func: str, line: int | None, text: str | None,
@@ -4791,18 +6368,94 @@ def _soften_evicted(entries: list[FactEntry], old: FactSet, new: FactSet) -> Non
             e.notes.append(f"possibly-evicted:{side}")
 
 
+#: Note on an entry whose call site one capture cannot place in the project (``_soften_unplaced``).
+SITE_UNPLACED = "site-unplaced"
+
+
+def _unplaced_files(fs: FactSet, other: FactSet) -> set[str]:
+    """Call-site files ``fs`` cannot place in the project: absolute and outside the project as
+    checked out, on a capture that records no root (``FactSet.capture_root``), and named by no
+    fact of the other capture (a file both captures name by one absolute path lies where it
+    lies, and is compared as recorded)."""
+    if fs.root is None or fs.capture_root is not None:
+        return set()
+    theirs = {f.file for f in other.facts}
+    return {f.file for f in fs.facts if os.path.isabs(f.file) and f.file not in theirs}
+
+
+def _soften_unplaced(entries: list[FactEntry], old: FactSet, new: FactSet) -> None:
+    """A capture that records no root (an older one, without a source snapshot) and was taken
+    in another checkout names its project files by paths this checkout does not have: its calls
+    cannot be placed in the project (no edit provenance, no contact map), and the values that
+    carry its project root cannot be masked. A failing entry it leaves is UNCOMPARABLE
+    (inconclusive: capture that side again), never a FAIL: a call present on one side only at
+    an unplaced file or at a project file an unplaced path may be (it ends in it), and a paired
+    call that differs where one side's site is unplaced. Entries the unplaced files cannot
+    explain keep their category."""
+    unplaced = (_unplaced_files(old, new), _unplaced_files(new, old))
+    if not (unplaced[0] or unplaced[1]):
+        return
+    names = ("old", "new")
+
+    def placed_by(side: int, file: str) -> int | None:
+        if file in unplaced[side]:
+            return side
+        if not os.path.isabs(file) and any(
+                u.replace("\\", "/").endswith("/" + file) for u in unplaced[1 - side]):
+            return 1 - side
+        return None
+
+    for e in entries:
+        if not e.fails:
+            continue
+        by = None
+        if e.category is FactCategory.DISAPPEARED and e.old_site is not None:
+            by = placed_by(0, e.old_site.file)
+        elif e.category is FactCategory.APPEARED and e.new_site is not None:
+            by = placed_by(1, e.new_site.file)
+        else:
+            for side, site in enumerate((e.old_site, e.new_site)):
+                if site is not None and site.file in unplaced[side]:
+                    by = side
+                    break
+            if by is not None:
+                e.comparison = Comparison.UNCOMPARABLE
+        if by is None:
+            continue
+        e.category = FactCategory.UNCOMPARABLE
+        e.notes.append(f"{SITE_UNPLACED}:{names[by]}")
+
+
 _PSEUDO_SCOPES = ("<listcomp>", "<dictcomp>", "<setcomp>", "<genexpr>", "<lambda>")
 
 
-def _normalize_scopes(facts: list[Fact]) -> list[Fact]:
+def _normalize_scopes(facts: list[Fact], sources: Mapping[str, str] | None = None
+                      ) -> list[Fact]:
     """Comprehension, generator and lambda frames belong to the function that contains them
     (3.12 inlines list/dict/set comprehensions, so the same code is ``<listcomp>`` on one side
     and the enclosing function on the other). A qualname ``f.<listcomp>`` becomes ``f``; a bare
-    pseudo-scope takes the real function recorded at the same (file, line) on its own side."""
+    pseudo-scope takes the real function recorded at the same (file, line) on its own side, or,
+    when none is, the function that contains its line in the side's source snapshot (the name
+    the interpreter records, ``co_name``; ``<module>`` at module level)."""
     real: dict[tuple[str, int], str] = {}
     for f in facts:
         if f.line is not None and not f.func.startswith("<") and "<" not in f.func:
             real.setdefault((f.file, f.line), f.func)
+    trees: dict[str, ast.AST | None] = {}
+
+    def from_source(file: str, line: int) -> str | None:
+        if file not in trees:
+            text = (sources or {}).get(file)
+            try:
+                trees[file] = _parse_source(text) if text is not None else None
+            except (SyntaxError, ValueError):
+                trees[file] = None
+        tree = trees[file]
+        if tree is None:
+            return None
+        fn = _enclosing_function(tree, line)
+        return fn.name if fn is not None else "<module>"
+
     out = []
     for f in facts:
         func = f.func
@@ -4810,7 +6463,7 @@ def _normalize_scopes(facts: list[Fact]) -> list[Fact]:
             if f".{marker}" in func:
                 func = func.split(f".{marker}")[0]
         if func in _PSEUDO_SCOPES and f.line is not None:
-            func = real.get((f.file, f.line), func)
+            func = real.get((f.file, f.line)) or from_source(f.file, f.line) or func
         out.append(f if func == f.func else f.model_copy(update={"func": func}))
     return out
 
@@ -5291,6 +6944,22 @@ def _gate_unmeasured(entries: list[FactEntry], variation: str) -> int:
             continue  # inputs differ: the input-change and masked-input rules judge those
         if _order_proved(e):
             continue  # a dict key order shown deterministic (_judge_order): not run noise
+        if KINDS_MOVED in e.notes:
+            continue  # calls moved between outcome kinds: strict whatever the noise
+        if (COUNT_CHANGED in e.notes and e.category is FactCategory.CHANGED and not e.review
+                and not e.noise and e.provenance in (None, "unedited")
+                and _kinds_match(e.old, e.new)):
+            # as many calls more or fewer, in a workload whose values vary between runs (a poll
+            # that ran once more): what a replicate settles, not a failure
+            e.review = (f"{UNMEASURED_NOISE}: the call ran {e.old_count} time(s) before and "
+                        f"{e.new_count} after, in a workload whose values vary between runs "
+                        f"({variation}); capture a baseline replicate to settle")
+            e.notes.append("unmeasured-noise")
+            e.explained = "unmeasured-noise: the call count changed in a varying workload"
+            count += 1
+            continue
+        if COUNT_CHANGED in e.notes:
+            continue
         if (e.category is not FactCategory.CHANGED or e.comparison is not Comparison.CHANGED
                 or e.review or e.noise or e.unverified or e.provenance not in (None, "unedited")
                 or e.level not in (ComparisonLevel.EXACT, ComparisonLevel.MASKED)
@@ -5315,7 +6984,8 @@ _NOT_INPUT_CHANGE = ("wrapper-naming", "attribution-moved")
 
 
 def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
-                         new_left: list[_V], stats: "_GroupStats") -> int:
+                         new_left: list[_V], stats: "_GroupStats",
+                         prov: "_Provenance | None" = None) -> int:
     """A pair matched modulo input on an unedited line is the same call given another input.
     When every leaf where the inputs differ is volatile on both sides (masked, a seed, a
     propagated value) the run explains it. Otherwise the input itself changed for no visible
@@ -5338,6 +7008,12 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
             continue  # a compiled call's arguments were never recorded: nothing to compare
         if _input_labels(n.fact.input) & fresh_new or _input_labels(o.fact.input) & fresh_old:
             continue  # downstream of an edit
+        if _numeric_input(o, n, e):
+            continue  # the same input within floating-point rounding: not an input change
+        if _added_none_default(o, n, e):
+            continue
+        if prov is not None and _edited_literal_input(o, n, e, prov):
+            continue
         changed, drift = _unexplained_input_leaves(o, n, stats)
         if changed is None:
             # the same argument values: only how the new version binds or names them drifted
@@ -5367,6 +7043,132 @@ def _judge_input_changes(pending: list[tuple[_V, _V, FactEntry]], old_left: list
                         f"visible cause ({shown}); {_REPLICATE_HINT}")
         count += 1
     return count
+
+
+def _added_none_default(o: _V, n: _V, e: FactEntry) -> bool:
+    """A parameter bound on one side only, to None (numpy 2's ``linspace(device=None)``): the
+    new version added a parameter defaulting to None that the capture did not report as
+    defaulted. Drift, not an input change, when it is the only difference."""
+    def strip(inputs: Any, other: Any) -> Any:
+        if not (isinstance(inputs, dict) and isinstance(inputs.get("bound"), dict)
+                and isinstance(other, dict) and isinstance(other.get("bound"), dict)):
+            return inputs
+        bound = {k: v for k, v in inputs["bound"].items()
+                 if not (v is None and k not in other["bound"])}
+        return {**inputs, "bound": bound}
+
+    a, b = o.fact.input, n.fact.input
+    if _canon(strip(a, b)) != _canon(strip(b, a)):
+        return False
+    added = sorted(set((a or {}).get("bound", {})) ^ set((b or {}).get("bound", {})))
+    e.notes.append(ADDED_NONE)
+    e.absorbed = sorted({*e.absorbed, ADDED_NONE})
+    e.explained = e.explained or (
+        f"binding: a parameter bound on one side only, to None ({', '.join(added)}): an added "
+        "default, not an input change")
+    if e.comparison is Comparison.EQUAL and e.category is FactCategory.EQUAL:
+        e.category, e.drift = FactCategory.DRIFT, True
+    if _STRICT.get() and not e.review:
+        e.review = (f"{ADDED_NONE}: a parameter bound on one side only, to None "
+                    f"({', '.join(added)}); --strict reviews it")
+    return True
+
+
+ADDED_NONE = "added-default-none"
+
+
+def _edited_literal_input(o: _V, n: _V, e: FactEntry, prov: "_Provenance") -> bool:
+    """An input on an unedited line whose every differing value is a literal of an edited line
+    in the same file, the old value on the old side and the new on the new
+    (``def line_chart(style="seaborn-v0_8-whitegrid")`` edited from ``"seaborn-whitegrid"``):
+    downstream of that hand edit, judged as one (equal: equal; a value change: a review; a new
+    raise still fails), not as an input change with no visible cause."""
+    if not prov.maps:
+        return False
+    old_leaves, new_leaves = _leaf_map(o.fact.input), _leaf_map(n.fact.input)
+    keys = old_leaves.keys() | new_leaves.keys()
+    olds = {old_leaves[k] for k in keys if k in old_leaves
+            and old_leaves.get(k) != new_leaves.get(k, _UNKNOWN)}
+    news = {new_leaves[k] for k in keys if k in new_leaves
+            and new_leaves.get(k) != old_leaves.get(k, _UNKNOWN)}
+    # strings only: a small number matches some edited line too easily
+    if not olds or not news or not all(isinstance(x, str) and len(x) >= 2 for x in olds | news):
+        return False
+    edited = [prov.edited_literals(0, o.fact.file), prov.edited_literals(1, n.fact.file)]
+    if not (olds <= edited[0].keys() and news <= edited[1].keys()):
+        return False
+    where = sorted(edited[1][v] for v in news)[0]
+    e.provenance = "hand"
+    e.notes.append(f"input from a hand-edited literal at {n.fact.file}:{where}")
+    e.explained = e.explained or (
+        f"input-substitution: the input comes from a hand-edited literal at "
+        f"{n.fact.file}:{where}")
+    if e.comparison is Comparison.EQUAL:
+        e.category = FactCategory.REWRITTEN
+    elif _kinds_match(e.old, e.new):
+        e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
+        e.review = "the value differs on a hand-edited line: review"
+        e.notes.append(e.review)
+    else:
+        e.category = FactCategory.REWRITTEN     # a new raise: stays CHANGED, fails
+    return True
+
+
+def _numeric_equal(a: Any, b: Any) -> bool:
+    """Two inputs equal except for floats within floating-point rounding (``_values_match``'s
+    numeric layer, an array's floats by the array's scale)."""
+    if _canon(a) == _canon(b):
+        return True
+    if isinstance(a, float) and isinstance(b, float):
+        return _values_match(a, b)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_numeric_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False
+        if "__structure__" in a:
+            return _values_match(a, b)
+        return all(_numeric_equal(a[k], b[k]) for k in a)
+    return False
+
+
+def _numeric_input(o: _V, n: _V, e: FactEntry) -> bool:
+    """A pair whose inputs differ only by floats within rounding (sklearn's ``X`` at 1-2 ulps):
+    the same call given the same input (``matched-modulo-numeric``). Its outcome comparison
+    stands as is: equal is numeric drift, a different outcome fails."""
+    def bare(inputs: Any) -> Any:   # an empty ``*args``/``**kwargs`` binds nothing
+        if not isinstance(inputs, dict):
+            return inputs
+        return {k: v for k, v in inputs.items()
+                if not (k in ("args", "varargs", "kwargs")
+                        and v in (None, [], {}, {"__tuple__": []}, {"__dict__": []}))}
+
+    ev = _Evidence()
+    token = _EVIDENCE.set(ev)
+    try:
+        close = _numeric_equal(bare(o.fact.input), bare(n.fact.input))
+    finally:
+        _EVIDENCE.reset(token)
+    if not (close and ev.numeric):
+        return False
+    u = max(x for x, _ in ev.numeric)
+    r = max(y for _, y in ev.numeric)
+    prior = e.numeric or {"values": 0, "max_ulps": 0.0, "max_relative": 0.0}
+    e.numeric = {"values": prior["values"] + len(ev.numeric),
+                 "max_ulps": max(prior["max_ulps"], round(u, 1)),
+                 "max_relative": max(prior["max_relative"], float(f"{r:.3g}"))}
+    e.notes.append("matched-modulo-numeric")
+    if e.comparison is Comparison.EQUAL:
+        e.absorbed = sorted({*e.absorbed, NUMERIC})
+        if e.category is FactCategory.EQUAL:
+            e.category, e.drift = FactCategory.DRIFT, True
+        e.explained = e.explained or (
+            f"{NUMERIC}: the input differs only within floating-point rounding "
+            f"({len(ev.numeric)} value(s), max {u:.0f} ulps)")
+        if _STRICT.get():
+            e.review = (f"numeric drift: the input differs only within floating-point rounding "
+                        f"(max {u:.0f} ulps); --strict reviews it")
+    return True
 
 
 INPUT_VARIANT = "input-variant"
@@ -6078,7 +7880,10 @@ def _qualname_equivalent(a: str, b: str) -> bool:
         return False
     ps, ls = short.rsplit(".", 1)
     pl, ll = long_.rsplit(".", 1)
-    return ls == ll and (pl == ps or pl.startswith(ps + "."))
+    # relocation-aware: the module may have moved within its package
+    # (``flask.scaffold.decorator`` -> ``flask.sansio.scaffold.Scaffold.route.<locals>.decorator``)
+    return ls == ll and (pl == ps or pl.startswith(ps + ".")
+                         or pl.split(".")[0] == ps.split(".")[0])
 
 
 _DEF_LINE = re.compile(r"^\s*(?:@|def\s|async\s+def\s|class\s)")
@@ -6483,16 +8288,38 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
     """Classify one old/new pair. ``rewritten`` is ``"same-call"`` / ``"positional"`` for a
     REWRITTEN pair (outcomes compared, symbol and input free to differ), else None."""
     of, nf = o.fact, n.fact
-    cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
-    explained = None
-    if cmp.comparison is not Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
-        raw = _raw_equal(of, nf, profile)  # raw first: equal recorded outcomes are equal
-        if raw is not None:
-            cmp = raw
-    if cmp.comparison is Comparison.CHANGED:
-        cmp, explained = _explain_change(o, n, cmp, profile)
-    elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
-        explained = _explain_masked(of, nf, cmp, profile)
+    counted = _COUNTED.set(_COUNTED_DIFF.get() and _counts_complete(of) and _counts_complete(nf)
+                           and not (_is_widened_input(of.input) or _is_widened_input(nf.input)))
+    edited = _EDITED.set(bool(o.rewritten_site or n.rewritten_site or rewritten))
+    wraps = _WRAPS.set(frozenset(_project_callables(of.input))
+                       if _SEM.get() is not None and _canon(of.input) == _canon(nf.input)
+                       else frozenset())
+    consumer = _CONSUMER.set(_pair_consumer(of, nf))
+    receivers = _RECEIVERS.set(frozenset(_input_type_keys(of.input) | _input_type_keys(nf.input)))
+    try:
+        cmp = compare_outcomes(of.outcomes, nf.outcomes, profile)
+        explained = None
+        if cmp.comparison is not Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
+            raw = _raw_equal(of, nf, profile)  # raw first: equal recorded outcomes are equal
+            if raw is not None:
+                cmp = raw
+        if cmp.comparison is Comparison.CHANGED:
+            cmp, explained = _explain_change(o, n, cmp, profile)
+        elif cmp.comparison is Comparison.EQUAL and (_masks_of(of) or _masks_of(nf)):
+            explained = _explain_masked(of, nf, cmp, profile)
+    finally:
+        _RECEIVERS.reset(receivers)
+        _CONSUMER.reset(consumer)
+        _WRAPS.reset(wraps)
+        _EDITED.reset(edited)
+        _COUNTED.reset(counted)
+    cmp = _unseen_reads(of, nf, cmp)
+    shown = [m for m in cmp.absorbed if m != "type-drift:relocated"]
+    if cmp.comparison is Comparison.EQUAL and shown and explained is None:
+        note = next((x for x in cmp.notes
+                     if x.startswith(("handle state", "type drift", "numeric", "projected"))),
+                    None)
+        explained = f"{shown[0]}: {note or ', '.join(shown)}"
     drift = (of.defaulted is not None and nf.defaulted is not None
              and of.defaulted != nf.defaulted) or cmp.drift
     if rewritten:
@@ -6528,7 +8355,7 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         notes.append(f"now raises {raised} while binding its arguments" if nf.binding
                      else f"no longer raises {raised} while binding its arguments")
     all_notes = [*notes, *cmp.notes]
-    return FactEntry.model_construct(  # trusted, typed values: no validation copies
+    entry = FactEntry.model_construct(  # trusted, typed values: no validation copies
         _ENTRY_FIELDS_SET, category=category, comparison=cmp.comparison, level=cmp.level,
         symbol=of.symbol, new_symbol=nf.symbol if nf.symbol != of.symbol else None,
         old_site=_site_ref(of), new_site=_site_ref(nf),
@@ -6539,9 +8366,107 @@ def _pair_entry(o: _V, n: _V, profile: DiffProfile, modes: dict[str, str], *,
         old_count=of.count, new_count=nf.count, notes=all_notes,
         old_where=of.where, new_where=nf.where,
         old_warnings=of.warnings or None, new_warnings=nf.warnings or None,
-        explained=explained,
+        explained=explained, absorbed=list(cmp.absorbed), numeric=cmp.numeric,
+        review=_numeric_review(cmp),
         **_raw_samples(of, nf),
     )
+    if cmp.comparison is Comparison.EQUAL and EDITED_COUNT in cmp.notes:
+        calls = next((x for x in cmp.notes if x.startswith("calls: ")), "")
+        entry.review = (f"{EDITED_COUNT_REVIEW} ({calls[7:]}), its values equal: the edit "
+                        "changed how often the call runs; review")
+    if cmp.comparison is Comparison.EQUAL and CROSS_PACKAGE in cmp.absorbed:
+        moved = next((x for x in cmp.notes if x.startswith("type drift (")), "")
+        entry.category, entry.comparison, entry.drift = (FactCategory.CHANGED,
+                                                         Comparison.CHANGED, False)
+        entry.review = (f"{CROSS_PACKAGE_REVIEW}; relation unknown until Stage 2 MRO tables "
+                        f"({moved.split(': ', 1)[-1][:160]}): the project never checks either "
+                        "class and the attributes it reads compare equal; review")
+    return entry
+
+
+_LADDER_RULES = ("type-drift:unintrospected", "type-drift:private-same-module", CROSS_PACKAGE)
+
+
+def _top_names(outcomes: list[Outcome]) -> set[str] | None:
+    """The attribute names rendered on the returned objects (a handle's state, a record's
+    fields; nothing for a type-only rendering); None when a result is a value."""
+    out: set[str] = set()
+    for o in outcomes:
+        if o.kind != "return":
+            continue
+        v = o.value
+        if not isinstance(v, dict):
+            return None
+        if "__object__" in v:
+            out |= set(v.get("attrs") or ())
+        elif "__dataclass__" in v:
+            out |= {str(p[0]) for p in _pairs(v.get("fields"))}
+        elif not any(k in v for k in ("__opaque__", "__cycle__", "__structure__")):
+            return None
+    return out
+
+
+def _unseen_reads(of: Fact, nf: Fact, cmp: OutcomeComparison) -> OutcomeComparison:
+    """A class change the ladder made drift, while the project reads or probes off the result
+    a name neither side's rendering holds (a class attribute, a property, a method probed
+    with ``hasattr``): what it reads there is unknown, so the class change stays a change."""
+    if cmp.comparison is not Comparison.EQUAL or not any(m in cmp.absorbed
+                                                          for m in _LADDER_RULES):
+        return cmp
+    sem = _SEM.get()
+    if sem is None:
+        return cmp
+    reads = (_uses.result_reads_at(sem.old, of.file, of.line, _symbol_leaf(of.symbol))
+             | _uses.result_reads_at(sem.new, nf.file, nf.line, _symbol_leaf(nf.symbol)))
+    names_o, names_n = _top_names(of.outcomes), _top_names(nf.outcomes)
+    if not reads or names_o is None or names_n is None:
+        return cmp
+    unseen = sorted(reads - names_o - names_n)
+    if not unseen:
+        return cmp
+    out = OutcomeComparison(Comparison.CHANGED, ComparisonLevel.TYPE,
+                            [x for x in cmp.notes if not x.startswith("type drift (")]
+                            + [f"class changed and the project reads {', '.join(unseen[:4])} "
+                               "off the result, which neither rendering holds"],
+                            _distinct_types(of.outcomes), _distinct_types(nf.outcomes))
+    return out
+
+
+def _numeric_review(cmp: OutcomeComparison) -> str | None:
+    """``--strict``: floats equal only within rounding are a review item, not drift."""
+    if not (_STRICT.get() and cmp.numeric and cmp.comparison is Comparison.EQUAL):
+        return None
+    return (f"numeric drift: {cmp.numeric['values']} value(s) equal only within floating-point "
+            f"rounding (max {cmp.numeric['max_ulps']:.0f} ulps); --strict reviews it")
+
+
+def _pair_consumer(of: Fact, nf: Fact) -> str | None:
+    """How both sides' statements consume the call's result, when it is the same projection on
+    both (``source_uses.consumer_at``); None for the full result, without source snapshots or
+    under ``--strict``."""
+    sem = _SEM.get()
+    if sem is None or sem.strict:
+        return None
+    co = _uses.consumer_at(sem.old, of.file, of.line, _symbol_leaf(of.symbol))
+    cn = _uses.consumer_at(sem.new, nf.file, nf.line, _symbol_leaf(nf.symbol))
+    return co if co is not None and co == cn and co in _PROJECTION_WORDS else None
+
+
+def _every_call_counted(fs: FactSet) -> bool:
+    """Every call of the capture is in its facts with its count: not aggregated, no outcome
+    past a cap, and, for a sampled capture (tallies), every call folded (none sampled out,
+    evicted or widened)."""
+    if fs.aggregated or fs.outcomes_other:
+        return False
+    if not fs.site_tallies:
+        return True
+    return (fs.calls is not None and fs.sampled == fs.calls and not fs.evicted
+            and not fs.widened)
+
+
+def _counts_complete(f: Fact) -> bool:
+    """Every call of the fact is in its outcomes, each with its count."""
+    return bool(f.outcomes) and sum(o.count for o in f.outcomes) == f.count
 
 
 def _raw_equal(of: Fact, nf: Fact, profile: DiffProfile) -> OutcomeComparison | None:
@@ -6814,6 +8739,13 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
         if entry is not None and entry.get("step_id"):
             e.step_id = str(entry["step_id"])
             e.step_run = str(entry.get("run_id") or "") or None
+        if (old_ed or new_ed) and n.fact.binding and not o.fact.binding:
+            # a call that no longer binds its arguments fails whatever the claim
+            e.category, e.comparison, e.review, e.accepted = (FactCategory.REWRITTEN,
+                                                             Comparison.CHANGED, None, None)
+            e.notes.append(f"now fails to bind its arguments on an edited line "
+                           f"({_binding_raise(n.fact)})")
+            continue
         if e.category in (FactCategory.EQUAL, FactCategory.CHANGED, FactCategory.REWRITTEN) \
                 and e.comparison is Comparison.EQUAL:
             e.category = FactCategory.REWRITTEN
@@ -6837,6 +8769,122 @@ def _judge_pairs(pending: list[tuple[_V, _V, FactEntry]], old_left: list[_V],
             e.category, e.comparison = FactCategory.REWRITTEN, Comparison.UNCOMPARABLE
             e.review = "the value differs on a hand-edited line: review"
             e.notes.append(e.review)
+
+
+_TYPE_TAGS = ("__type__", "__opaque__", "__object__", "__dataclass__", "__structure__",
+              "__cycle__")
+
+
+def _type_labels(value: Any, out: set[str]) -> set[str]:
+    if isinstance(value, dict):
+        for tag in _TYPE_TAGS:
+            name = value.get(tag)
+            if isinstance(name, str) and "." in name:
+                out.add(name)
+        for v in value.values():
+            _type_labels(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _type_labels(v, out)
+    return out
+
+
+def _edit_type_pairs(old: list[Outcome], new: list[Outcome]) -> list[tuple[str, str]]:
+    """The type names an edited line's outcomes hold on one side only, paired old -> new (each
+    old-only name with each new-only one, at most 4 of each)."""
+    a: set[str] = set()
+    b: set[str] = set()
+    for o in old:
+        if o.kind == "return":
+            _type_labels(o.value, a)
+    for o in new:
+        if o.kind == "return":
+            _type_labels(o.value, b)
+    only_a, only_b = sorted(a - b), sorted(b - a)
+    if not only_a or not only_b or len(only_a) > 4 or len(only_b) > 4:
+        return []
+    return [(x, y) for x in only_a for y in only_b]
+
+
+def _carry_edit_types(pending: list[tuple[_V, _V, FactEntry]], prov: _Provenance,
+                      ov: list[_V] = (), nv: list[_V] = ()) -> None:
+    """A type an edited line produced, reappearing downstream (plotly: the hand edit
+    ``go.Heatmapgl`` -> ``go.Heatmap``, then ``fig.data`` on an unedited test line returns a
+    Heatmap): the downstream change is judged with that edit, not on its own. When every
+    difference of an unedited CHANGED pair is one of those type pairs, it takes the edit's
+    judgement: a review when the edit is one, a failure when it fails, drift when the edit
+    compared equal (``type-drift:carried``). Only along the edit's data chain: the pair is on
+    the edit's own statement, or its input carries a value an edited line produced (``fig``,
+    the Figure the edited line built). Never from an edit equal only once projected (its
+    result is not used), and never onto a class the project introspects."""
+    if prov.ctx is None:
+        return
+    carried: dict[tuple[str, str], FactEntry] = {}
+    stmts: set[Any] = set()
+    for o, n, e in pending:
+        if o.rewritten_site or n.rewritten_site:
+            stmts.update(x for x in (o.stmt_key, n.stmt_key) if x)
+            if any(m.startswith(f"{PROJECTED}:") for m in e.absorbed):
+                continue          # its result is not used: no type of it reaches anything
+            for pair in _edit_type_pairs(o.fact.outcomes, n.fact.outcomes):
+                if not _introspected(*pair):
+                    carried.setdefault(pair, e)
+    if not carried:
+        return
+    produced: list[set[str]] = [set(), set()]   # labels edited lines returned, per side
+    for side, views in ((0, ov), (1, nv)):
+        for v in views:
+            if v.rewritten_site:
+                for out in v.fact.outcomes:
+                    if out.kind == "return":
+                        _type_labels(out.value, produced[side])
+
+    def on_chain(o: _V, n: _V) -> bool:
+        if o.stmt_key in stmts or n.stmt_key in stmts:
+            return True
+        return bool(_type_labels(o.fact.input, set()) & produced[0]
+                    or _type_labels(n.fact.input, set()) & produced[1])
+    rel = _TYPE_RELOC.get()
+    token = _TYPE_RELOC.set([*(rel.items() if isinstance(rel, Mapping) else rel), *carried])
+    strict_ladder = _EDITED.set(True)   # an edit made the class: no relation-unknown drift
+    try:
+        for o, n, e in pending:
+            drifted = e.category is FactCategory.DRIFT and any(
+                m in e.absorbed for m in _LADDER_DRIFT)
+            if (o.rewritten_site or n.rewritten_site
+                    or not (e.category is FactCategory.CHANGED or drifted)
+                    or e.review or e.noise or e.provenance not in (None, "unedited")
+                    or not on_chain(o, n)):
+                continue
+            cmp = compare_outcomes(o.fact.outcomes, n.fact.outcomes)
+            if cmp.comparison is not Comparison.EQUAL:
+                continue
+            used = [p for p in carried if f"relocated: {p[0]} -> {p[1]}" in cmp.notes]
+            if not used:
+                continue
+            src = carried[used[0]]
+            where = (src.new_site or src.old_site).label()
+            shown = ", ".join(f"{a} -> {b}" for a, b in used[:3])
+            if drifted:   # judged with the edit, not as a class the library changed
+                e.absorbed = [m for m in e.absorbed if m not in _LADDER_DRIFT]
+                e.notes = [x for x in e.notes if not x.startswith("type drift (")]
+                e.category, e.comparison = FactCategory.CHANGED, Comparison.CHANGED
+            e.absorbed = sorted({*e.absorbed, "type-drift:carried"})
+            e.notes.append(f"type carried from the edit at {where}: {shown}")
+            e.explained = f"type-drift:carried: from the edit at {where} ({shown})"
+            if src.fails:
+                continue                    # the edit itself fails: so does what it produced
+            if src.review:
+                e.review = (f"carried from the edit at {where}: the type it produced reaches "
+                            f"this call ({shown}); {src.review}")
+            else:
+                e.category, e.comparison, e.drift = FactCategory.DRIFT, Comparison.EQUAL, True
+    finally:
+        _EDITED.reset(strict_ladder)
+        _TYPE_RELOC.reset(token)
+
+
+_LADDER_DRIFT = ("type-drift:unintrospected", "type-drift:private-same-module")
 
 
 def _tier(entry: Mapping) -> str:
@@ -7076,8 +9124,42 @@ def _single_entry(v: _V, *, old_side: bool, prov: _Provenance | None = None) -> 
         if covering is not None and covering.get("step_id"):
             entry.step_id = str(covering["step_id"])
             entry.step_run = str(covering.get("run_id") or "") or None
-        entry.notes.append("unverified edited site")
+        why = None if old_side else _new_raise_unpaired(f, covering, prov)
+        if why:
+            # the table's "new raise -> FAIL", whether or not the call paired
+            entry.unverified, entry.comparison = False, Comparison.CHANGED
+            entry.notes.append(why)
+        else:
+            entry.notes.append("unverified edited site")
     return entry
+
+
+def _dunder_probe(f: Fact) -> bool:
+    """A ``__getattr__`` asked for a dunder name (the import system's ``__path__`` probe of a
+    module, ``copy``'s ``__deepcopy__``): the attribute protocol's probe, whose AttributeError
+    is its "absent" answer (``hasattr``, ``getattr`` with a default), not a raise."""
+    bound = f.input.get("bound") if isinstance(f.input, dict) else None
+    name = bound.get("name") if isinstance(bound, dict) else None
+    if not (f.attr_of or f.symbol.endswith(".__getattr__")) or not isinstance(name, str):
+        return False
+    return len(name) > 4 and name.startswith("__") and name.endswith("__")
+
+
+def _new_raise_unpaired(f: Fact, covering: Mapping | None, prov: _Provenance) -> str | None:
+    """An unpaired new-side call on an edited statement that raises: a call that fails to bind
+    fails whatever the claim; another raise fails when no call of the old statement's function
+    raised there, unless a person attested an expectation of that raise."""
+    if f.binding:
+        return f"now fails to bind its arguments on an edited line ({_binding_raise(f)})"
+    raised = sorted({_raise_name(o.value) for o in f.outcomes if o.kind == "raise"})
+    if (not raised or (f.file, f.func) in getattr(prov, "old_edit_raises", set())
+            or (raised == ["AttributeError"] and _dunder_probe(f))):
+        return None
+    expect = str((covering or {}).get("expect") or "")
+    if covering is not None and _attested(covering) and expect.startswith("raise:") \
+            and all(_leaf_type(r) == _leaf_type(expect[6:]) for r in raised):
+        return None
+    return f"now raises on an edited line ({', '.join(raised)}; the old statement raised nothing)"
 
 
 def _single_entry_base(v: _V, *, old_side: bool) -> FactEntry:
@@ -7218,22 +9300,30 @@ def _within(path: str, root: str) -> bool:
 
 
 def _site_path(fs: FactSet, file: str, *, count: bool = True) -> str:
-    """A call-site file as a project-relative path; a container path goes through the
-    runner's mounts first (``/work/p/a.py`` -> ``<host>/a.py``). ``count``: add the mapping to
+    """A call-site file as a project-relative path: relative to the root the capture was taken
+    in (``FactSet.capture_root``), else to the project as checked out now, so the same project
+    at another path is the same project. A container path goes through the runner's mounts
+    first (``/work/p/a.py`` -> ``<host>/a.py``). ``count``: add the mapping to
     ``paths_mapped`` (the call sites of facts, not those of a capture's accounts)."""
-    if fs.runner is not None and os.path.isabs(file) and not _under_root(file, fs.root):
+    roots = _site_roots(fs)
+    if fs.runner is not None and os.path.isabs(file) and not _under_root(file, *roots):
         host = to_host(fs.runner, file)
         if host is not None:
             if count:
                 fs.paths_mapped += 1
-            return _relativize(host, fs.root)
-    return _relativize(file, fs.root)
+            return _relativize(host, *roots)
+    return _relativize(file, *roots)
 
 
-def _under_root(file: str, root: str | None) -> bool:
-    if root is None:
-        return False
-    return any(_within(f, b) for b in dict.fromkeys((root, os.path.realpath(root)))
+def _site_roots(fs: FactSet) -> tuple[str, ...]:
+    """Where a capture's project files lie, in the order they are tried: the root the capture
+    was taken in, then the project as checked out now."""
+    return tuple(dict.fromkeys(r for r in (fs.capture_root, fs.root) if r))
+
+
+def _under_root(file: str, *roots: str | None) -> bool:
+    return any(_within(f, b) for root in roots if root
+               for b in dict.fromkeys((root, os.path.realpath(root)))
                for f in dict.fromkeys((file, os.path.realpath(file))))
 
 
@@ -7245,7 +9335,13 @@ def _note_foreign_paths(fs: FactSet) -> None:
     fs.paths_foreign = len(foreign)
     if not foreign:
         return
-    if fs.runner is None:
+    if fs.runner is None and fs.capture_root is None:
+        fs.notes.append(
+            f"container paths not mapped: {len(foreign)} call-site file(s) lie outside the "
+            "project root, and the capture records neither the root it was taken in (it keeps "
+            "no source snapshot) nor a container (re-capture, or set the container with "
+            "`pymolt setup`)")
+    elif fs.runner is None:
         fs.notes.append(
             f"container paths not mapped: {len(foreign)} call-site file(s) lie outside the "
             "project root and no runner is recorded for this capture (re-capture, or "
@@ -7303,16 +9399,19 @@ def _canon_path(path: str | Path, project: Path) -> str:
     return os.path.realpath(str(p))
 
 
-def _relativize(file: str, root: str | None) -> str:
-    if root is None:
-        return Path(file).as_posix()
+def _relativize(file: str, *roots: str | None) -> str:
+    """``file`` relative to the first of ``roots`` it lies under (each as given, then its real
+    path); as given when it lies under none."""
     candidates = [file]
     if os.path.isabs(file):
         candidates.append(os.path.realpath(file))
-    for base in dict.fromkeys((root, os.path.realpath(root))):
-        for f in candidates:
-            if os.path.isabs(f) and _within(f, base):
-                return Path(os.path.relpath(f, base)).as_posix()
+    for root in roots:
+        if not root:
+            continue
+        for base in dict.fromkeys((root, os.path.realpath(root))):
+            for f in candidates:
+                if os.path.isabs(f) and _within(f, base):
+                    return Path(os.path.relpath(f, base)).as_posix()
     return Path(file).as_posix()
 
 

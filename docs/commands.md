@@ -10,18 +10,22 @@ authoritative list of options.
 
 ### `pymolt status [dir]`
 Shows where the project stands, whether its environments exist, and the single next command. Run it
-at any time. Options: `--json`, `--agent`. With no apply run in effect, a migration made by hand is
+at any time. Options: `--json`, `--agent`. The next command, here and on the `next →` line other
+commands print, names the project directory as you gave it (relative to the current directory when
+it lies inside it), so it runs as printed. With no apply run in effect, a migration made by hand is
 recognised by a post-migration capture taken since the baseline, or, unless a valid plan waits for
 `apply`, by files or pins changed since the baseline. Its verdict completes it; a FAIL then has no
-rollback to point at.
+rollback to point at. After any FAIL that no single pymolt step in effect explains, `status` gives
+no command, never a whole-run rollback: it names the plan steps whose sites failed and a person's
+two options, fixing the code (and capturing again) or accepting an intended change.
 
 With a saved plan, a `steps` line counts the plan's steps by status: `planned`, `blocked` (a
 dependency not in effect), `stale` (a statement it rewrites is gone, or the plan itself is stale),
 `present` (its change is already there, made by hand), `applied`, `rolled_back`, `skipped`, and
 `not_in_capture` (applied or recorded again after the post-migration capture, which holds the code from before it or an earlier version of the step). `--json` and `--agent` list them
 under `steps`; `--agent` adds the brief of the step the next command is about. The next command
-follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply --step ID --dry-run`
-for a stale one, then `pymolt apply --step ID --record` for each agent or person step in plan
+follows the steps: `pymolt apply .` while pymolt steps wait, `pymolt apply . --step ID --dry-run`
+for a stale one, then `pymolt apply . --step ID --record` for each agent or person step in plan
 order (or `--skip` it), then the post-migration capture. A rolled-back step is not applied again by
 itself: after `rollback --step`, the next command is the post-migration capture (re-apply the step
 with `pymolt apply --step ID` if you want it back). The post-migration capture is stale when a
@@ -69,7 +73,10 @@ error.
 ### `pymolt assess [dir]`
 Resolves the dependencies for the target Python and writes the pinned target manifest
 (`requirements-target.txt`). It shows which versions move, which conflict, what needs manual work,
-and how to build the target environment.
+and how to build the target environment. When the project's own `setup.py` or `pyproject.toml`
+does not build on the target Python, assess says so: it resolves the dependencies it reads from
+that file without running it (`target_basis: static-read` in `--json`), or, when it reads none,
+names the way forward (fix the build, or `setup --manifest` a requirements file).
 
 | Option | Meaning |
 |---|---|
@@ -215,7 +222,8 @@ capture, before or after `apply` (see [plan.md](plan.md#when-to-bump-the-manifes
 
 ### `pymolt verify [dir]`
 Compares the baseline and post-migration captures and prints `PASS`, `FAIL` or `INCONCLUSIVE` with
-the evidence. Details are in [verify.md](verify.md).
+the evidence. Details are in [verify.md](verify.md). A FAIL names the plan steps whose sites
+failed, applied or not (`--agent`: `data.failing_steps`).
 
 | Option | Meaning |
 |---|---|
@@ -223,7 +231,8 @@ the evidence. Details are in [verify.md](verify.md).
 | `--profile`, `--comparator` | How values are compared: `exact`, `shape`, or `custom` with `module:callable` |
 | `--probe-python` | A target interpreter to replay the recorded calls in |
 | `--accept` | A failing or review finding's id, which the report prints: a person accepts the change as intended. Refused under `--agent` and `--json`, off a terminal, and on a line a `preserve` claim covers |
-| `--strict` | Review every accepted change instead of counting it equal |
+| `--strict` | Review every accepted change instead of counting it equal; compare a dependency object's full state and a result in full; make floats equal only within rounding review items |
+| `--float-ulps N` | Floats are equal within N units in the last place at their own precision (default 1024; 0: exact) |
 | `--verbose`, `-v` | Also show what was explained away: masked noise, replicate-explained differences |
 | `--step` | Also print that step's judgement and exit by it: 0 verified, 1 failed, 4 needs review, needs evidence or not in the capture, 2 an unknown step. The verdict still covers the whole surface |
 
