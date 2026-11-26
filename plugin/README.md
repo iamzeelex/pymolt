@@ -9,11 +9,10 @@ your code actually calls at runtime, before and after, and tell you what changed
 
 ## Prerequisite
 
-Install the CLI so the `pymolt` command is on your PATH. 0.2.0rc2 is a release candidate, so
-ask for pre-releases:
+Install the CLI so the `pymolt` command is on your PATH:
 
 ```bash
-uv tool install --python 3.12 --prerelease allow pymolt==0.2.0rc2   # or: pipx install --python python3.12 --pip-args=--pre pymolt==0.2.0rc2
+uv tool install --python 3.12 pymolt   # or: pipx install --python python3.12 pymolt
 ```
 
 ## Install the plugin
@@ -60,7 +59,7 @@ commands as MCP tools (nine tools). Each tool returns exactly what `pymolt <comm
 prints. The server is an optional extra:
 
 ```bash
-uv tool install --python 3.12 './pymolt[mcp]'   # or: pipx install --python python3.12 './pymolt[mcp]'
+uv tool install --python 3.12 'pymolt[mcp]'   # or: pipx install --python python3.12 'pymolt[mcp]'
 ```
 
 Register it as a stdio server whose command is `pymolt mcp`:
